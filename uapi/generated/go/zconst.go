@@ -387,6 +387,7 @@ const (
 	KACS_SE_SECURITY_PRIVILEGE                          = 256
 	KACS_SE_SHUTDOWN_PRIVILEGE                          = 524288
 	KACS_SE_SYSTEMTIME_PRIVILEGE                        = 4096
+	KACS_SE_SYSTEM_PROFILE_PRIVILEGE                    = 2048
 	KACS_SE_TCB_PRIVILEGE                               = 128
 	KACS_SFS_INIT                                       = 4
 	KACS_SFS_LOGON_SESSIONS_ACCESS_CHECK                = 2

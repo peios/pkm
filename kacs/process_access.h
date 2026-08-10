@@ -60,6 +60,7 @@ long pkm_kacs_check_process_perf_core(
 long pkm_kacs_proc_process_setinfo(struct task_struct *task);
 long pkm_kacs_sched_setaffinity(struct task_struct *task);
 long pkm_kacs_perf_event_open(struct task_struct *task);
+long pkm_kacs_perf_event_open_system_wide(void);
 int pkm_kacs_task_kill(struct task_struct *target,
 		       struct kernel_siginfo *info, int sig,
 		       const struct cred *cred);

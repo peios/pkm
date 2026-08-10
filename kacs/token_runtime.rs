@@ -8885,6 +8885,22 @@ pub extern "C" fn kacs_rust_token_has_enabled_privilege(
 }
 
 #[no_mangle]
+/// Returns the subset of `mask` that is both present and enabled on the token
+/// (present & enabled & mask). Zero means none of the masked privileges are
+/// held. Used for OR-mapped Linux capabilities where any one of several
+/// privileges suffices.
+pub extern "C" fn kacs_rust_token_enabled_privileges_in_mask(
+    token: *const c_void,
+    mask: u64,
+) -> u64 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return 0;
+    };
+    let privileges = token.privileges_snapshot();
+    privileges.present & privileges.enabled & mask
+}
+
+#[no_mangle]
 /// Returns whether the token has enabled, non-deny-only BUILTIN\Administrators
 /// membership.
 pub extern "C" fn kacs_rust_token_has_enabled_administrators(token: *const c_void) -> bool {

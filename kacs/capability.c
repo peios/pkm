@@ -213,7 +213,16 @@ static u64 pkm_kacs_cap_required_privilege(int cap)
 	case CAP_AUDIT_READ:
 		return KACS_SE_SECURITY_PRIVILEGE;
 	case CAP_PERFMON:
-		return KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE;
+		/*
+		 * CAP_PERFMON spans multiple Peios privilege tiers, so it
+		 * OR-maps: the perfmon_capable() ceiling is satisfied by any
+		 * one of these. The specific gate for the specific operation
+		 * (cross-task vs system-wide profiling) is enforced at the
+		 * perf_event_open syscall path.
+		 */
+		return KACS_SE_SYSTEM_PROFILE_PRIVILEGE |
+		       KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE |
+		       KACS_SE_LOAD_DRIVER_PRIVILEGE;
 	default:
 		return 0;
 	}
@@ -222,6 +231,7 @@ static u64 pkm_kacs_cap_required_privilege(int cap)
 long pkm_kacs_check_capability_for_token(const void *subject_token, int cap)
 {
 	u64 privilege;
+	u64 held;
 	int remote_shutdown_origin = 0;
 
 	if (!cap_valid(cap))
@@ -246,7 +256,15 @@ long pkm_kacs_check_capability_for_token(const void *subject_token, int cap)
 		if (remote_shutdown_origin < 0)
 			return -EPERM;
 	}
-	if (!kacs_rust_token_has_enabled_privilege(subject_token, privilege)) {
+	/*
+	 * `privilege` is the mask of privileges that satisfy this capability.
+	 * For most caps it is a single bit; OR-mapped caps (e.g. CAP_PERFMON)
+	 * carry several, any one of which suffices. `held` is the subset the
+	 * token actually has enabled, and is what gets marked used.
+	 */
+	held = kacs_rust_token_enabled_privileges_in_mask(subject_token,
+							  privilege);
+	if (held == 0) {
 		trace_kacs_capability(cap, privilege, KACS_CAP_PRIV_NOT_ENABLED,
 				      -EPERM);
 		return -EPERM;
@@ -260,10 +278,10 @@ long pkm_kacs_check_capability_for_token(const void *subject_token, int cap)
 					      KACS_CAP_PRIV_NOT_ENABLED, -EPERM);
 			return -EPERM;
 		}
-		privilege |= KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE;
+		held |= KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE;
 	}
-	if (!kacs_rust_token_mark_privileges_used(subject_token, privilege)) {
-		trace_kacs_capability(cap, privilege, KACS_CAP_USE_MARK_FAIL,
+	if (!kacs_rust_token_mark_privileges_used(subject_token, held)) {
+		trace_kacs_capability(cap, held, KACS_CAP_USE_MARK_FAIL,
 				      -EPERM);
 		return -EPERM;
 	}

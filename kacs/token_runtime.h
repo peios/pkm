@@ -641,6 +641,7 @@ u32 kacs_rust_token_lcs_private_layer_count(const void *token);
 int kacs_rust_token_lcs_private_layer(const void *token, u32 index,
 				      const char **name_out, u32 *len_out);
 bool kacs_rust_token_has_enabled_privilege(const void *token, u64 privilege);
+u64 kacs_rust_token_enabled_privileges_in_mask(const void *token, u64 mask);
 bool kacs_rust_token_has_enabled_administrators(const void *token);
 int kacs_rust_token_is_remote_shutdown_origin(const void *token);
 bool kacs_rust_token_has_new_process_min(const void *token);
@@ -988,6 +989,7 @@ long pkm_kacs_kunit_check_prlimit_for_subject(
 	const struct pkm_kacs_kunit_process_prlimit_check_args *args);
 long pkm_kacs_kunit_check_perf_event_for_subject(
 	const struct pkm_kacs_kunit_process_perf_check_args *args);
+long pkm_kacs_kunit_check_perf_system_wide_for_subject(const void *subject_token);
 long pkm_kacs_kunit_create_logon_session_for_subject(const void *subject_token,
 					       const u8 *spec, size_t spec_len,
 					       u64 *logon_session_id_out);

@@ -479,17 +479,45 @@ long pkm_kacs_check_process_perf_core(
 	if (!caller_state || !target_state)
 		return -EACCES;
 
+	/* Own-task profiling requires no privilege. */
+	if (self_target)
+		return 0;
+
+	/*
+	 * Cross-task profiling of a specific other process requires
+	 * SeProfileSingleProcessPrivilege and PIP dominance (it does not bypass
+	 * dominance).
+	 */
 	ret = pkm_kacs_require_enabled_privilege(
 		subject_token, KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE);
 	if (ret)
 		return ret;
-	if (self_target)
-		return 0;
 
 	return pkm_kacs_authorize_process_access_core(
 		subject_token, target_state, READ_ONCE(caller_state->pip_type),
 		READ_ONCE(caller_state->pip_trust),
 		KACS_PROCESS_QUERY_INFORMATION);
+}
+
+static long pkm_kacs_perf_system_wide_core(const void *subject_token)
+{
+	/*
+	 * System-wide profiling (perf_event_open with pid == -1) samples every
+	 * task on a CPU, including PIP-protected ones, so it is gated by the
+	 * operator-class SeSystemProfilePrivilege rather than the per-target
+	 * SeProfileSingleProcessPrivilege.
+	 */
+	if (!subject_token)
+		return -EACCES;
+
+	return pkm_kacs_require_enabled_privilege(
+		subject_token, KACS_SE_SYSTEM_PROFILE_PRIVILEGE);
+}
+
+long pkm_kacs_perf_event_open_system_wide(void)
+{
+	return pkm_kacs_perf_system_wide_core(
+		pkm_kacs_current_effective_token_ptr());
 }
 
 long pkm_kacs_sched_setaffinity(struct task_struct *task)
@@ -1003,5 +1031,10 @@ long pkm_kacs_kunit_check_perf_event_for_subject(
 						&caller_state,
 						&target_state,
 						args->self_target != 0);
+}
+
+long pkm_kacs_kunit_check_perf_system_wide_for_subject(const void *subject_token)
+{
+	return pkm_kacs_perf_system_wide_core(subject_token);
 }
 #endif /* CONFIG_SECURITY_PKM_KUNIT */

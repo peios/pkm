@@ -5707,6 +5707,100 @@ static void pkm_kunit_perf_event_null_args_fail_closed(struct kunit *test)
 }
 
 
+static void pkm_kunit_perf_event_own_task_needs_no_privilege(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_perf_check_args args = { };
+	const void *subject_token;
+
+	/* §7.2: own-task profiling requires no profiling privilege. */
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	args.subject_token = subject_token;
+	args.self_target = 1;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_perf_event_for_subject(&args),
+			0L);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+
+static void pkm_kunit_perf_event_system_wide_requires_system_profile(
+	struct kunit *test)
+{
+	const void *without_priv;
+	const void *with_priv;
+
+	/* §7.2: system-wide profiling requires SeSystemProfilePrivilege. */
+	without_priv = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, without_priv);
+	KUNIT_EXPECT_EQ(
+		test,
+		pkm_kacs_kunit_check_perf_system_wide_for_subject(without_priv),
+		(long)-EPERM);
+	kacs_rust_token_drop(without_priv);
+
+	with_priv = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_SYSTEM_PROFILE_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, with_priv);
+	KUNIT_EXPECT_EQ(
+		test,
+		pkm_kacs_kunit_check_perf_system_wide_for_subject(with_priv),
+		0L);
+	kacs_rust_token_drop(with_priv);
+}
+
+
+static void pkm_kunit_capability_perfmon_or_maps(struct kunit *test)
+{
+	static const u64 grants[] = {
+		PKM_KUNIT_SE_SYSTEM_PROFILE_PRIVILEGE,
+		PKM_KUNIT_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE,
+		PKM_KUNIT_SE_LOAD_DRIVER_PRIVILEGE,
+	};
+	const void *token;
+	u32 i;
+
+	/*
+	 * §12.2: CAP_PERFMON OR-maps — the caller is granted the capability if
+	 * it holds ANY ONE of the three profiling-tier privileges.
+	 */
+	for (i = 0; i < ARRAY_SIZE(grants); i++) {
+		token = kacs_rust_kunit_create_impersonation_variant_token(
+			PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+			KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+			grants[i]);
+		KUNIT_ASSERT_NOT_NULL(test, token);
+		KUNIT_EXPECT_EQ(test,
+				pkm_kacs_kunit_check_capability_for_subject(
+					token, CAP_PERFMON),
+				0L);
+		kacs_rust_token_drop(token);
+	}
+
+	/* Holding none of the three -> denied. */
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		PKM_KUNIT_SE_DEBUG_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_capability_for_subject(token,
+								    CAP_PERFMON),
+			(long)-EPERM);
+	kacs_rust_token_drop(token);
+}
+
+
 static void pkm_kunit_set_file_sd_cached_success(struct kunit *test)
 {
 	struct pkm_kacs_kunit_file_sd_set_args args = {
@@ -9812,6 +9906,9 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_perf_event_requires_profile_privilege),
 	KUNIT_CASE(pkm_kunit_perf_event_self_target_bypasses_boundary_gate),
 	KUNIT_CASE(pkm_kunit_perf_event_null_args_fail_closed),
+	KUNIT_CASE(pkm_kunit_perf_event_own_task_needs_no_privilege),
+	KUNIT_CASE(pkm_kunit_perf_event_system_wide_requires_system_profile),
+	KUNIT_CASE(pkm_kunit_capability_perfmon_or_maps),
 	KUNIT_CASE(pkm_kunit_set_file_sd_cached_success),
 	KUNIT_CASE(pkm_kunit_set_file_sd_write_failure_preserves_cache),
 	KUNIT_CASE(pkm_kunit_set_file_sd_cached_sacl_uses_cached_access),
