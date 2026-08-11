@@ -92,7 +92,7 @@ fi
 log "libperf"
 make -C tools/lib/perf -j"$jobs" \
 	prefix=/usr libdir=/usr/lib/$triplet \
-	DESTDIR="$dest" install_lib install_headers
+	DESTDIR="$dest" install_lib install_headers install_pkgconfig
 
 # --- bpftool: BPF program / map / tracing introspection ---
 # doc-install (RST man pages via rst2man/python3-docutils) is off per the
