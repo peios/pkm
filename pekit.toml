@@ -241,10 +241,12 @@ build-essentials = "*"
 bash = "*"
 binutils = "*"
 debugedit = "*"
+cpio = "*"
 
 [build.debuginfo.dependencies.apt]
 binutils = "*"
 debugedit = "*"
+cpio = "*"
 
 # In-tree userspace tooling (perf, bpftool, cpupower, turbostat, rtla, rv). These
 # are userspace ELF programs that live under tools/ in the kernel source, so they
