@@ -78,6 +78,8 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 [build.kunit.dependencies.peipkg]
 build-essentials = "*"
 bash = "*"
+gzip = "*"
+zstd = "*"
 rust = "*"
 bindgen = "*"
 gcc = "*"
@@ -134,6 +136,8 @@ python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 [build.kernel.dependencies.peipkg]
 build-essentials = "*"
 bash = "*"
+gzip = "*"
+zstd = "*"
 rust = "*"
 bindgen = "*"
 gcc = "*"
