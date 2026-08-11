@@ -4,6 +4,29 @@
 
 [package]
 description = "Peios Kernel — userspace API headers"
+# Overrides the GPL-2.0-only inherited from the shared base, which is right for
+# the kernel image but wrong for these headers. The syscall-note exception is
+# what permits non-GPL userspace to include the sanitized UAPI at all — it is
+# the entire point of headers_install output, and glibc and every proprietary
+# program that includes <linux/*.h> relies on it.
+license = "GPL-2.0-only WITH Linux-syscall-note"
+
+# The Linux version these headers describe, published as a versioned virtual
+# name so consumers can express "I need Linux UAPI >= X" without depending on
+# this package's own version.
+#
+# The two scales are deliberately independent: the package version is pkm's
+# SemVer, tracking the PKM UAPI / KACS ABI (see the shared base), while the
+# Linux base is provenance. A consumer that cares which Linux syscalls exist
+# wants the latter and would learn nothing from the former.
+#
+# MUST equal [env] KERNEL_VERSION in the recipe, without the leading "v".
+# pekit has no build-derived templating for `provides`, so this cannot be
+# generated from the staged tree; build.headers asserts the two agree instead,
+# and fails the build rather than shipping a provide that lies about which
+# kernel's UAPI is in the payload.
+[provides]
+linux-kernel-headers = "7.0.9"
 
 [files]
 "headers:usr/include/**" = "usr/include/"

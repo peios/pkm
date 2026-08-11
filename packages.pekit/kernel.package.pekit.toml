@@ -7,6 +7,17 @@
 [package]
 description = "Peios Kernel — bootable image (based on Linux 7.0.9)"
 
+# The Linux version this kernel is built from, as a versioned virtual name —
+# the same treatment kernel-headers gives its UAPI, and for the same reason:
+# the package version is pkm's SemVer against the PKM UAPI / KACS ABI, so it
+# cannot answer "which Linux is this?". Anything gated on a Linux feature or
+# syscall asks for linux-kernel instead.
+#
+# MUST equal [env] KERNEL_VERSION in the recipe, without the leading "v";
+# build.kernel asserts it.
+[provides]
+linux-kernel = "7.0.9"
+
 [files]
 "kernel:arch/x86/boot/bzImage" = "boot/vmlinuz-7.0.9-peios-{{version}}"
 "kernel:System.map"            = "boot/System.map-7.0.9-peios-{{version}}"
