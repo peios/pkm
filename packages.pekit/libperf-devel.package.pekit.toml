@@ -17,6 +17,4 @@ libperf = "{{version}}"
 "tools:usr/lib/x86_64-linux-peios/pkgconfig/libperf.pc" = "usr/lib/x86_64-linux-peios/pkgconfig/libperf.pc"
 "tools:usr/include/perf/**"      = "usr/include/perf/"
 "tools:usr/include/internal/**"  = "usr/include/internal/"
-"tools:usr/share/man/man3/libperf.3"  = "usr/share/man/man3/libperf.3"
-"tools:usr/share/man/man7/libperf*.7" = "usr/share/man/man7/"
-"tools:usr/share/doc/libperf/**"      = "usr/share/doc/libperf/"
+# man/doc set: off with the PEI-158 docs policy (asciidoc absent).
