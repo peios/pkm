@@ -70,10 +70,15 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 # package, so no clang-devel there), plus the classic kernel C build deps — bc,
 # bison, flex, libelf (CONFIG/objtool), openssl (cert/sig), dwarves/pahole (BTF),
 # cpio (initramfs), kmod, python3, perl.
-# The pinned rustup Rust toolchain (rustc + rust-src + bindgen + rustfmt) is NOT a
-# distro package; it is provided by the build env/wrap (the pkm-build container).
+# The Rust toolchain: on the apt side it is NOT a distro package — the
+# pkm-build container's rustup provides it via the env/wrap. On the peipkg
+# side rust (rustc+cargo+rustfmt+rust-src) and bindgen ARE pool packages,
+# declared below; the kernel enter wrapper points RUST_LIB_SRC at the
+# triplet-dir rustlib the rust package ships.
 [build.kunit.dependencies.peipkg]
 build-essentials = "*"
+rust = "*"
+bindgen = "*"
 gcc = "*"
 "gcc-c++" = "*"
 make = "*"
@@ -127,6 +132,8 @@ python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 # (already required). Rust toolchain comes from the build env/wrap, as above.
 [build.kernel.dependencies.peipkg]
 build-essentials = "*"
+rust = "*"
+bindgen = "*"
 gcc = "*"
 "gcc-c++" = "*"
 make = "*"
