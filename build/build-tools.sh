@@ -125,15 +125,19 @@ make -C tools/power/x86/turbostat -j"$jobs" \
 # Its `install` target hard-depends on doc_install (rst2man), and docs are
 # off per the PEI-158 policy — install the binary and the osnoise/hwnoise/
 # timerlat tool symlinks manually, mirroring Makefile.rtla's install rule.
+# CFLAGS=-fno-lto: rtla/rv hardcode -flto=auto for gcc builds, and the
+# pool's gcc is built without LTO support (lto1 absent). User CFLAGS
+# append after FOPTS, and -fno-lto wins last. Real fix on the ledger:
+# enable LTO at gcc's next rebuild, then drop these overrides.
 log "rtla"
-make -C tools/tracing/rtla -j"$jobs"
+make -C tools/tracing/rtla -j"$jobs" CFLAGS="-fno-lto"
 install -D -m755 tools/tracing/rtla/rtla "$dest/usr/bin/rtla"
 for t in osnoise hwnoise timerlat; do ln -sfn rtla "$dest/usr/bin/$t"; done
 
 # --- rv: runtime verification (in-kernel monitors' userspace front-end) ---
 # Same doc_install coupling as rtla — manual install, docs off.
 log "rv"
-make -C tools/verification/rv -j"$jobs"
+make -C tools/verification/rv -j"$jobs" CFLAGS="-fno-lto"
 install -D -m755 tools/verification/rv/rv "$dest/usr/bin/rv"
 
 # =========================================================================
