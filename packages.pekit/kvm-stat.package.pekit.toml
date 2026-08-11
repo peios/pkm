@@ -9,4 +9,4 @@ description = "kvm_stat — KVM event monitor (from Linux 7.0.9 tools/kvm/kvm_st
 
 [files]
 "tools:usr/bin/kvm_stat"                = "usr/bin/kvm_stat"
-"tools:usr/share/man/man1/kvm_stat.1"   = "usr/share/man/man1/kvm_stat.1"
+# man page: off with the PEI-158 docs policy (asciidoc absent).
