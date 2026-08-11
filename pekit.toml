@@ -77,6 +77,7 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 # triplet-dir rustlib the rust package ships.
 [build.kunit.dependencies.peipkg]
 build-essentials = "*"
+bash = "*"
 rust = "*"
 bindgen = "*"
 gcc = "*"
@@ -132,6 +133,7 @@ python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 # (already required). Rust toolchain comes from the build env/wrap, as above.
 [build.kernel.dependencies.peipkg]
 build-essentials = "*"
+bash = "*"
 rust = "*"
 bindgen = "*"
 gcc = "*"
@@ -218,6 +220,7 @@ command = """
 # Splits vmlinux debug info: debugedit + binutils (readelf/strip/objcopy).
 [build.debuginfo.dependencies.peipkg]
 build-essentials = "*"
+bash = "*"
 binutils = "*"
 debugedit = "*"
 
@@ -244,6 +247,7 @@ command = """
 # for the per-library rationale).
 [build.tools.dependencies.peipkg]
 build-essentials = "*"
+bash = "*"
 gcc = "*"
 "gcc-c++" = "*"
 make = "*"
