@@ -30,8 +30,14 @@ if [[ ! -f "$tree/Makefile" ]] || ! grep -q '^VERSION =' "$tree/Makefile"; then
 	exit 1
 fi
 
-# Versioned LLVM tools in /usr/bin are always on PATH (login-shell-proof).
-make=(make LLVM=-18)
+# PKM_LLVM selects kbuild's LLVM argument: "-18" (default — the container's
+# Debian-versioned tool names: clang-18, ld.lld-18, ...) or "1" (a composed
+# peipkg root, where upstream LLVM installs only the unversioned names).
+# PKM_HOSTCC overrides the host-tool compiler (kconfig etc.) where clang
+# can't drive userspace links — the peipkg root sets gcc until its clang
+# driver learns the /usr/lib/<triplet> layout.
+make=(make LLVM="${PKM_LLVM:--18}")
+[[ -n "${PKM_HOSTCC:-}" ]] && make+=(HOSTCC="$PKM_HOSTCC")
 
 cd "$tree"
 

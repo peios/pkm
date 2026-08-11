@@ -65,9 +65,11 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 ./build/compile-kernel.sh "$PEKIT_OUT"
 """
 
-# Full kernel build: the LLVM toolchain (clang/lld/llvm + libclang for bindgen),
-# plus the classic kernel C build deps — bc, bison, flex, libelf (CONFIG/objtool),
-# openssl (cert/sig), dwarves/pahole (BTF), cpio (initramfs), kmod, python3, perl.
+# Full kernel build: the LLVM toolchain (clang/lld/llvm + libclang for bindgen —
+# in the peipkg pool libclang.so and the resource headers ride inside the clang
+# package, so no clang-devel there), plus the classic kernel C build deps — bc,
+# bison, flex, libelf (CONFIG/objtool), openssl (cert/sig), dwarves/pahole (BTF),
+# cpio (initramfs), kmod, python3, perl.
 # The pinned rustup Rust toolchain (rustc + rust-src + bindgen + rustfmt) is NOT a
 # distro package; it is provided by the build env/wrap (the pkm-build container).
 [build.kunit.dependencies.peipkg]
@@ -77,14 +79,13 @@ make = "*"
 clang = "*"
 lld = "*"
 llvm = "*"
-clang-devel = "*"
 bc = "*"
 bison = "*"
 flex = "*"
-elfutils-libelf-devel = "*"
+"elfutils-devel" = "*"
 openssl-devel = "*"
 openssl = "*"
-dwarves = "*"
+pahole = "*"
 cpio = "*"
 kmod = "*"
 python3 = "*"
@@ -130,14 +131,13 @@ make = "*"
 clang = "*"
 lld = "*"
 llvm = "*"
-clang-devel = "*"
 bc = "*"
 bison = "*"
 flex = "*"
-elfutils-libelf-devel = "*"
+"elfutils-devel" = "*"
 openssl-devel = "*"
 openssl = "*"
-dwarves = "*"
+pahole = "*"
 cpio = "*"
 kmod = "*"
 python3 = "*"
@@ -171,11 +171,13 @@ perl = "*"
 [build.headers]
 needs = ["source"]
 command = """
-make -C "$PEKIT_SOURCE_OUT" O="$PEKIT_OUT" LLVM=-18 headers_install INSTALL_HDR_PATH="$PEKIT_OUT/usr"
+make -C "$PEKIT_SOURCE_OUT" O="$PEKIT_OUT" LLVM="${PKM_LLVM:--18}" ${PKM_HOSTCC:+HOSTCC="$PKM_HOSTCC"} headers_install INSTALL_HDR_PATH="$PEKIT_OUT/usr"
 """
 
-# headers_install builds the unifdef host tool with HOSTCC=clang-18 (LLVM=-18),
-# so it needs make + the clang toolchain (no kernel C libs).
+# headers_install builds the unifdef host tool with HOSTCC (defaults to
+# clang-18 via LLVM=-18 in the container; a composed peipkg root sets
+# PKM_LLVM=1 / PKM_HOSTCC=gcc — see build/compile-kernel.sh for the knob
+# rationale), so it needs make + the clang toolchain (no kernel C libs).
 [build.headers.dependencies.peipkg]
 gcc = "*"
 make = "*"

@@ -39,9 +39,19 @@ export KBUILD_BUILD_TIMESTAMP
 
 cd "$tree"
 
-# Versioned LLVM tools (/usr/bin) are always on PATH; ccache caches C across the
-# fresh per-build source copy. Rust/link are not cached but are the minority.
-make LLVM=-18 CC="ccache clang-18" -j"$(nproc)"
+# PKM_LLVM selects kbuild's LLVM argument: "-18" (default — the container's
+# Debian-versioned tool names) or "1" (a composed peipkg root: unversioned
+# names only). CC follows the same suffix; ccache wraps it only where it
+# exists (the container mounts a cache volume; a pristine root has none —
+# it caches C across the fresh per-build source copy, Rust/link are not
+# cached but are the minority). PKM_HOSTCC overrides the host-tool compiler
+# where clang can't drive userspace links (the peipkg root sets gcc).
+llvm=${PKM_LLVM:--18}
+if [[ "$llvm" == 1 ]]; then cc=clang; else cc="clang${llvm}"; fi
+command -v ccache >/dev/null 2>&1 && cc="ccache $cc"
+hostcc=()
+[[ -n "${PKM_HOSTCC:-}" ]] && hostcc=(HOSTCC="$PKM_HOSTCC")
+make LLVM="$llvm" CC="$cc" "${hostcc[@]}" -j"$(nproc)"
 
 echo ""
 echo "compile-kernel: built"
