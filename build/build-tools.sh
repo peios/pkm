@@ -87,10 +87,12 @@ fi
 
 # --- libperf: the perf sampling/eventing library + headers (shipped as libperf
 #     and libperf-devel) ---
+# install_lib + install_headers, NOT install: the umbrella target drags
+# install_doc (asciidoc), and docs are off per the PEI-158 policy.
 log "libperf"
 make -C tools/lib/perf -j"$jobs" \
 	prefix=/usr libdir=/usr/lib/$triplet \
-	DESTDIR="$dest" install install_headers
+	DESTDIR="$dest" install_lib install_headers
 
 # --- bpftool: BPF program / map / tracing introspection ---
 # doc-install (RST man pages via rst2man/python3-docutils) is off per the
