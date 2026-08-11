@@ -127,7 +127,7 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 	--pubkey-hex "$PEKIT_KEYRING_TCB_PUB" \
 	--out "$PEKIT_OUT/security/pkm/kacs/builtin_signing_keys.h"
-./build/configure-kernel.sh "$PEKIT_OUT" production "-peios-{{version}}"
+./build/configure-kernel.sh "$PEKIT_OUT" production "-peios-$PEKIT_VERSION"
 ./build/compile-kernel.sh "$PEKIT_OUT"
 """
 
