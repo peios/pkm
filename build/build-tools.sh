@@ -69,11 +69,12 @@ make -C tools/perf -f Makefile.perf -j"$jobs" \
 	prefix=/usr libdir=/usr/lib/$triplet sysconfdir=/etc \
 	perfexecdir=lib/$triplet/perf-core \
 	PYTHON=python3 BUILD_BPF_SKEL=1 WERROR=0 \
-	JDIR=/usr/lib/jvm/default-java \
+	NO_JVMTI=1 \
 	DESTDIR="$dest" install
-# JDIR points perf at the image's JDK so it builds the JVMTI agent
-# (libperf-jvmti.so → $libdir, i.e. usr/lib/$triplet); without it perf warns
-# "set JDIR=" and skips Java/JVM symbol support. Packaged by perf.package.pekit.
+# NO_JVMTI: the JVMTI agent (Java/JVM symbol support) is permanently off per
+# the PEI-158 feature policy — no JDK in the Peios pool. Doc builds
+# (asciidoc/xmlto) and the setup.py python module are likewise absent in
+# composed roots; perf feature-detection skips what it cannot find.
 
 # python3-perf: copy the perf.so the build already produced under the triplet
 # (Peios CPython uses platlibdir=<triplet>). The cpython-3xx ABI tag stays in the
@@ -92,10 +93,11 @@ make -C tools/lib/perf -j"$jobs" \
 	DESTDIR="$dest" install install_headers
 
 # --- bpftool: BPF program / map / tracing introspection ---
-# doc-install builds the man page from RST (rst2man / python3-docutils).
+# doc-install (RST man pages via rst2man/python3-docutils) is off per the
+# PEI-158 docs policy; it returns with the python-app packaging design.
 log "bpftool"
 make -C tools/bpf/bpftool -j"$jobs" \
-	prefix=/usr mandir=/usr/share/man DESTDIR="$dest" install doc-install
+	prefix=/usr mandir=/usr/share/man DESTDIR="$dest" install
 
 # --- cpupower (+ libcpupower): CPU frequency / idle control ---
 # libcpupower.so* lands under the triplet; skip the optional cpufreq-bench.
@@ -112,16 +114,19 @@ make -C tools/power/x86/turbostat -j"$jobs" \
 	DESTDIR="$dest" prefix=/usr install
 
 # --- rtla: real-time latency analysis (osnoise, timerlat, ...) ---
-# Its `install` target depends only on doc_install, not on the binary build, so
-# build the default target first, then install.
+# Its `install` target hard-depends on doc_install (rst2man), and docs are
+# off per the PEI-158 policy — install the binary and the osnoise/hwnoise/
+# timerlat tool symlinks manually, mirroring Makefile.rtla's install rule.
 log "rtla"
 make -C tools/tracing/rtla -j"$jobs"
-make -C tools/tracing/rtla DESTDIR="$dest" prefix=/usr install
+install -D -m755 tools/tracing/rtla/rtla "$dest/usr/bin/rtla"
+for t in osnoise hwnoise timerlat; do ln -sfn rtla "$dest/usr/bin/$t"; done
 
 # --- rv: runtime verification (in-kernel monitors' userspace front-end) ---
+# Same doc_install coupling as rtla — manual install, docs off.
 log "rv"
 make -C tools/verification/rv -j"$jobs"
-make -C tools/verification/rv DESTDIR="$dest" prefix=/usr install
+install -D -m755 tools/verification/rv/rv "$dest/usr/bin/rv"
 
 # =========================================================================
 # Phase 2 — power/x86 sibling tools
