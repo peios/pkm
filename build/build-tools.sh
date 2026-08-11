@@ -103,8 +103,14 @@ make -C tools/bpf/bpftool -j"$jobs" \
 
 # --- cpupower (+ libcpupower): CPU frequency / idle control ---
 # libcpupower.so* lands under the triplet; skip the optional cpufreq-bench.
+# Build first, install serially: cpupower's install-gmo does not depend on
+# the .gmo generation, so a combined parallel `install` races msgfmt.
 log "cpupower"
 make -C tools/power/cpupower -j"$jobs" \
+	prefix=/usr bindir=/usr/bin sbindir=/usr/sbin \
+	libdir=/usr/lib/$triplet mandir=/usr/share/man \
+	CPUFREQ_BENCH=false
+make -C tools/power/cpupower \
 	DESTDIR="$dest" prefix=/usr bindir=/usr/bin sbindir=/usr/sbin \
 	libdir=/usr/lib/$triplet mandir=/usr/share/man \
 	CPUFREQ_BENCH=false \
