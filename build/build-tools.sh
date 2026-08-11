@@ -245,11 +245,12 @@ sed -i "s#/usr/libexec/hypervkvpd/#/$hvdir/#" tools/hv/hv_kvp_daemon.c
 make -C tools/hv -j"$jobs"
 make -C tools/hv DESTDIR="$dest" prefix=/usr sbindir=/usr/bin libexecdir="/usr/lib/$triplet" install
 
-# kvm_stat — KVM event monitor (python). Uses INSTALL_ROOT/BINDIR/MAN1DIR.
-# (The bundled kvm_stat.service systemd unit is not installed/packaged.)
+# kvm_stat — KVM event monitor (python). Its install target hard-requires
+# asciidoc for the man page, and docs are off per the PEI-158 policy —
+# install the script manually. (The bundled kvm_stat.service systemd unit
+# is not installed/packaged.)
 log "kvm_stat"
-make -C tools/kvm/kvm_stat install \
-	INSTALL_ROOT="$dest" BINDIR=usr/bin MAN1DIR=usr/share/man/man1
+install -D -m755 tools/kvm/kvm_stat/kvm_stat "$dest/usr/bin/kvm_stat"
 
 # thermal stack: libthermal (public API) + libthermal_tools (private helper) +
 # thermal-engine (daemon) + thermometer (logger). Both libs install via DESTDIR;
