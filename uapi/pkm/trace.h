@@ -609,6 +609,7 @@
 #define KACS_MP_TCB_DENIED		6U  /* SeTcbPrivilege gate denied (EPERM) */
 #define KACS_MP_GET_OK			7U  /* policy snapshot returned */
 #define KACS_MP_GET_NO_SECURITY		8U  /* get: no s_security; magic-derived policy returned */
+#define KACS_MP_FIXED_POLICY		9U  /* filesystem fixes its policy class (EOPNOTSUPP) */
 
 /*
  * kacs_sd_syscall target_kind — which SD-bearing object a query/set record

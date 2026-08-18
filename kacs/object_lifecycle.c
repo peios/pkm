@@ -10,6 +10,7 @@
 
 #include "lsm_internal.h"
 #include "object_lifecycle.h"
+#include "copy_up.h"
 
 #include <trace/events/kacs.h>
 
@@ -45,8 +46,109 @@ int pkm_kacs_file_alloc_security(struct file *file)
 	sec = pkm_kacs_file(file);
 	sec->granted_access = 0;
 	sec->continuous_audit_mask = 0;
+	sec->copy_up_context = NULL;
+	sec->copy_up_phase_generation = 0;
 	sec->managed = 0;
 	sec->delete_on_close = 0;
+	return 0;
+}
+
+int pkm_kacs_backing_file_alloc(struct file *backing_file,
+				const struct file *user_file)
+{
+	struct pkm_kacs_backing_file_security *backing_sec;
+	const struct pkm_kacs_file_security *user_sec;
+
+	if (!backing_file || !user_file || !backing_file_security(backing_file))
+		return -EINVAL;
+
+	backing_sec = pkm_kacs_backing_file(backing_file);
+	backing_sec->granted_access = 0;
+	backing_sec->continuous_audit_mask = 0;
+	backing_sec->managed = 0;
+	backing_sec->inherited = 0;
+
+	/*
+	 * Copy-up backing files are authorized by their exact, phase-bound KACS
+	 * context and explicitly adopt the outer descriptor's snapshot after the
+	 * stage has been verified.  Generic backing-file inheritance here would
+	 * pre-populate the backing blob and make that fail-closed handoff
+	 * indistinguishable from an unrelated stackable-filesystem open.
+	 */
+	if (pkm_kacs_copy_up_active())
+		return 0;
+
+	if (!user_file->f_security || (user_file->f_mode & FMODE_PATH))
+		return 0;
+	user_sec = pkm_kacs_file(user_file);
+	if (!user_sec->managed || user_sec->copy_up_context)
+		return 0;
+
+	/*
+	 * A backing file is a kernel-private implementation detail of the
+	 * already-authorized user file.  Capture values only: retaining the
+	 * outer file would form a reference cycle.  The separate backing blob
+	 * is the unforgeable association used when security_file_open() later
+	 * runs on the provider path.
+	 */
+	backing_sec->granted_access = user_sec->granted_access;
+	backing_sec->continuous_audit_mask = user_sec->continuous_audit_mask;
+	backing_sec->managed = 1;
+	backing_sec->inherited = 1;
+	return 0;
+}
+
+bool pkm_kacs_backing_file_inherited(const struct file *backing_file)
+{
+	if (!backing_file || !(backing_file->f_mode & FMODE_BACKING) ||
+	    !backing_file_security(backing_file))
+		return false;
+
+	return pkm_kacs_backing_file(backing_file)->inherited;
+}
+
+int pkm_kacs_backing_file_apply(struct file *backing_file)
+{
+	struct pkm_kacs_backing_file_security *backing_sec;
+	struct pkm_kacs_file_security *file_sec;
+
+	if (!pkm_kacs_backing_file_inherited(backing_file))
+		return -ENOENT;
+	if (!backing_file->f_security)
+		return -EACCES;
+
+	backing_sec = pkm_kacs_backing_file(backing_file);
+	file_sec = pkm_kacs_file(backing_file);
+	file_sec->granted_access = backing_sec->granted_access;
+	file_sec->continuous_audit_mask = backing_sec->continuous_audit_mask;
+	file_sec->managed = backing_sec->managed;
+	return 0;
+}
+
+int pkm_kacs_mmap_backing_file(struct vm_area_struct *vma,
+			       struct file *backing_file,
+			       struct file *user_file)
+{
+	struct pkm_kacs_backing_file_security *backing_sec;
+	struct pkm_kacs_file_security *file_sec;
+	struct pkm_kacs_file_security *user_sec;
+
+	(void)vma;
+	if (!pkm_kacs_backing_file_inherited(backing_file) || !user_file ||
+	    !backing_file->f_security || !user_file->f_security)
+		return -EACCES;
+
+	backing_sec = pkm_kacs_backing_file(backing_file);
+	file_sec = pkm_kacs_file(backing_file);
+	user_sec = pkm_kacs_file(user_file);
+	if (!backing_sec->managed || !file_sec->managed || !user_sec->managed ||
+	    backing_sec->granted_access != file_sec->granted_access ||
+	    backing_sec->continuous_audit_mask !=
+		file_sec->continuous_audit_mask ||
+	    backing_sec->granted_access != user_sec->granted_access ||
+	    backing_sec->continuous_audit_mask !=
+		user_sec->continuous_audit_mask)
+		return -EACCES;
 	return 0;
 }
 
@@ -61,6 +163,7 @@ void pkm_kacs_file_release(struct file *file)
 		return;
 
 	file_sec = pkm_kacs_file(file);
+	pkm_kacs_copy_up_file_release(file);
 	if (!file_sec->delete_on_close)
 		return;
 
@@ -88,7 +191,9 @@ int pkm_kacs_file_receive(struct file *file)
 	 * cached grant on the file security blob rather than re-authorizing the
 	 * receiver as a fresh open.
 	 */
-	(void)file;
+	if (file && file->f_security &&
+	    pkm_kacs_file(file)->copy_up_context)
+		return -EACCES;
 	return 0;
 }
 

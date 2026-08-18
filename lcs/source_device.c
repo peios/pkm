@@ -272,6 +272,7 @@ long pkm_lcs_source_in_flight_insert_locked(
 		}
 	}
 	record->waiter = waiter;
+	record->waiter_was_attached = waiter != NULL;
 	if (waiter) {
 		waiter->source_id = source_fd->source_id;
 		waiter->request_id = request_id;

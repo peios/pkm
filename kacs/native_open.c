@@ -9,6 +9,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/kacs_stratafs.h>
 #include <linux/mount.h>
 #include <linux/mutex.h>
 #include <linux/namei.h>
@@ -22,6 +23,7 @@
 
 #include "access_check.h"
 #include "file_access.h"
+#include "file_metadata.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
 #include "mount_policy.h"
@@ -30,6 +32,20 @@
 #include <trace/events/kacs.h>
 
 static atomic64_t pkm_kacs_native_supersede_tmp_counter = ATOMIC64_INIT(0);
+
+static int pkm_kacs_native_creation_parent(const struct path *parent,
+					    struct path *security_parent)
+{
+	if (!parent || !parent->dentry || !security_parent)
+		return -EINVAL;
+#if IS_ENABLED(CONFIG_STRATAFS_FS)
+	if (parent->dentry->d_sb->s_magic == STRATAFS_SUPER_MAGIC)
+		return stratafs_kacs_creation_parent(parent, security_parent);
+#endif
+	*security_parent = *parent;
+	path_get(security_parent);
+	return 0;
+}
 
 u64 pkm_kacs_next_native_supersede_tmp_id(void)
 {
@@ -406,6 +422,7 @@ static long pkm_kacs_authorize_delete_on_close_for_subject(
 
 long pkm_kacs_unlink_delete_on_close_file(struct file *file)
 {
+	struct pkm_kacs_task_security *task_sec;
 	struct inode *inode;
 	struct inode *parent_inode;
 	struct path parent_path = {};
@@ -414,6 +431,11 @@ long pkm_kacs_unlink_delete_on_close_file(struct file *file)
 
 	if (!file)
 		return -EACCES;
+	if (!current || !current->security)
+		return -EACCES;
+	task_sec = pkm_kacs_task(current);
+	if (task_sec->delete_on_close_file)
+		return -EBUSY;
 
 	dentry = file_dentry(file);
 	inode = file_inode(file);
@@ -448,7 +470,12 @@ long pkm_kacs_unlink_delete_on_close_file(struct file *file)
 	}
 
 	inode_lock(parent_inode);
+	task_sec->delete_on_close_file = file;
 	ret = vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode, dentry, NULL);
+	task_sec->delete_on_close_inode = NULL;
+	task_sec->delete_on_close_dentry = NULL;
+	task_sec->delete_on_close_parent_inode = NULL;
+	task_sec->delete_on_close_file = NULL;
 	inode_unlock(parent_inode);
 	mnt_drop_write(parent_path.mnt);
 	path_put(&parent_path);
@@ -547,6 +574,35 @@ bool pkm_kacs_current_native_create_request_matches(
 	if (sd_len_out)
 		*sd_len_out = sec->native_create.sd_len;
 	return true;
+}
+
+int pkm_kacs_stratafs_rebind_native_create_request(
+	const struct inode *outer_parent, const struct inode *provider_parent)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!outer_parent || !provider_parent || !current || !current->security)
+		return -EACCES;
+	sec = pkm_kacs_task(current);
+	if (!sec->native_create.active)
+		return 0;
+	if (sec->native_create.expected_parent_inode != outer_parent)
+		return -EACCES;
+	sec->native_create.expected_parent_inode = provider_parent;
+	return 0;
+}
+
+void pkm_kacs_stratafs_end_native_create_request(
+	const struct inode *outer_parent, const struct inode *provider_parent)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!outer_parent || !provider_parent || !current || !current->security)
+		return;
+	sec = pkm_kacs_task(current);
+	if (sec->native_create.active &&
+	    sec->native_create.expected_parent_inode == provider_parent)
+		sec->native_create.expected_parent_inode = outer_parent;
 }
 
 umode_t pkm_kacs_native_create_mode(bool directory)
@@ -739,6 +795,7 @@ static long pkm_kacs_apply_native_overwrite_truncate(struct file *file)
 		ret = do_truncate(file_mnt_idmap(file), file_dentry(file), 0,
 				  ATTR_MTIME | ATTR_CTIME | ATTR_OPEN, file);
 	}
+	pkm_kacs_file_end_metadata(file);
 	put_write_access(inode);
 	return ret;
 }
@@ -786,7 +843,13 @@ long pkm_kacs_do_native_supersede_open(
 	struct file **file_out, u32 *status_out)
 {
 	struct path parent_path = {};
+	struct path security_parent = {};
+	struct path removal_parent = {};
+	struct path removal_target = {};
 	struct file parent_file = {};
+	struct file creation_parent_file = {};
+	struct file removal_parent_file = {};
+	struct file removal_target_file = {};
 	struct path tmp_path = {};
 	u8 *creator_sd_bytes = NULL;
 	struct renamedata rd = {};
@@ -803,6 +866,8 @@ long pkm_kacs_do_native_supersede_open(
 	char tmp_name[48];
 	struct qstr tmp_qstr;
 	int attempt;
+	bool stratafs_supersede = false;
+	bool supersede_context = false;
 	long ret;
 
 	if (!subject_token || !resolved_path || !resolved_path->dentry || !how ||
@@ -822,25 +887,63 @@ long pkm_kacs_do_native_supersede_open(
 			mntput(parent_path.mnt);
 		return -EACCES;
 	}
-	pkm_kacs_init_path_anchor_file(&parent_file, &parent_path);
+	stratafs_supersede =
+		parent_path.dentry->d_sb->s_magic == STRATAFS_SUPER_MAGIC;
+	if (stratafs_supersede) {
+#if IS_ENABLED(CONFIG_STRATAFS_FS)
+		ret = stratafs_kacs_validate_supersede(resolved_path);
+		if (ret)
+			goto out_parent;
+		ret = stratafs_kacs_removal_parent(resolved_path,
+						     &removal_parent);
+		if (ret)
+			goto out_parent;
+		ret = stratafs_kacs_removal_target(resolved_path,
+						     &removal_target);
+		if (ret)
+			goto out_parent;
+		pkm_kacs_init_path_anchor_file(&removal_parent_file,
+						&removal_parent);
+		pkm_kacs_init_path_anchor_file(&removal_target_file,
+						&removal_target);
+#else
+		ret = -EOPNOTSUPP;
+		goto out_parent;
+#endif
+	} else {
+		pkm_kacs_init_path_anchor_file(&parent_file, &parent_path);
+	}
+	ret = pkm_kacs_native_creation_parent(&parent_path, &security_parent);
+	if (ret)
+		goto out_parent;
+	pkm_kacs_init_path_anchor_file(&creation_parent_file, &security_parent);
 
 	ret = pkm_kacs_copy_creator_sd_from_user(
 		how, &creator_sd_bytes, &creator_sd_len);
 	if (ret)
-		goto out_parent;
+		goto out_security_parent;
 
 	ret = pkm_kacs_build_created_file_sd_for_subject(
-		subject_token, &parent_file, creator_sd_bytes, creator_sd_len,
+		subject_token, &creation_parent_file, creator_sd_bytes, creator_sd_len,
 		false, prepared->desired_access, &created_sd, &created_sd_len,
 		&granted_access);
 	if (ret)
 		goto out_creator;
+	if (stratafs_supersede) {
+		ret = pkm_kacs_stratafs_set_native_create_decision(
+			&security_parent, KACS_FILE_ADD_FILE);
+		if (ret)
+			goto out_created_sd;
+	}
 
 	ret = pkm_kacs_authorize_path_file_access_core(
-		subject_token, resolved_path, KACS_ACCESS_DELETE);
+		subject_token,
+		stratafs_supersede ? &removal_target : resolved_path,
+		KACS_ACCESS_DELETE);
 	if (ret == -EACCES) {
 		ret = pkm_kacs_authorize_live_file_access_core(
-			subject_token, &parent_file,
+			subject_token,
+			stratafs_supersede ? &removal_parent_file : &parent_file,
 			KACS_FILE_DELETE_CHILD);
 	}
 	if (ret)
@@ -850,6 +953,12 @@ long pkm_kacs_do_native_supersede_open(
 	if (!parent_inode) {
 		ret = -EACCES;
 		goto out_created_sd;
+	}
+	if (stratafs_supersede) {
+		ret = pkm_kacs_stratafs_begin_supersede(dentry);
+		if (ret)
+			goto out_created_sd;
+		supersede_context = true;
 	}
 
 	ret = mnt_want_write(parent_path.mnt);
@@ -884,6 +993,14 @@ long pkm_kacs_do_native_supersede_open(
 	pkm_kacs_clear_current_native_create_request();
 	if (ret)
 		goto out_unlock_write;
+	if (stratafs_supersede) {
+		ret = pkm_kacs_stratafs_bind_supersede_source(dentry,
+							       tmp_dentry);
+		if (ret) {
+			inode_unlock(parent_inode);
+			goto out_tmp_cleanup;
+		}
+	}
 	inode_unlock(parent_inode);
 
 	tmp_path.mnt = mntget(parent_path.mnt);
@@ -892,6 +1009,12 @@ long pkm_kacs_do_native_supersede_open(
 	path_put(&tmp_path);
 	if (ret)
 		goto out_tmp_cleanup;
+	if (stratafs_supersede) {
+		ret = pkm_kacs_stratafs_bind_supersede_file(
+			tmp_dentry, dentry, opened_file);
+		if (ret)
+			goto out_tmp_file;
+	}
 
 	rd.mnt_idmap = mnt_idmap(parent_path.mnt);
 	rd.new_parent = parent_path.dentry;
@@ -917,23 +1040,40 @@ out_tmp_file:
 	opened_file = NULL;
 out_tmp_cleanup:
 	inode_lock(parent_inode);
+	if (stratafs_supersede)
+		(void)pkm_kacs_stratafs_arm_created_cleanup(tmp_dentry);
 	(void)vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode, tmp_dentry,
 			 NULL);
+	if (stratafs_supersede)
+		pkm_kacs_stratafs_end_created_cleanup();
 	inode_unlock(parent_inode);
 	goto out_tmp_dentry;
 out_unlock_write:
 	pkm_kacs_clear_current_native_create_request();
 	inode_unlock(parent_inode);
 out_tmp_dentry:
+	if (supersede_context) {
+		pkm_kacs_stratafs_end_supersede();
+		supersede_context = false;
+	}
 	if (tmp_dentry)
 		dput(tmp_dentry);
 	mnt_drop_write(parent_path.mnt);
 out_created_sd:
+	pkm_kacs_stratafs_end_create_decision();
+	if (supersede_context)
+		pkm_kacs_stratafs_end_supersede();
 	if (created_sd)
 		pkm_kacs_free((void *)created_sd);
 out_creator:
 	kfree(creator_sd_bytes);
+out_security_parent:
+	path_put(&security_parent);
 out_parent:
+	if (removal_target.dentry)
+		path_put(&removal_target);
+	if (removal_parent.dentry)
+		path_put(&removal_parent);
 	path_put(&parent_path);
 	return ret;
 }
@@ -944,6 +1084,7 @@ static long pkm_kacs_do_native_create_open(
 	struct file **file_out, u32 *status_out)
 {
 	struct path parent_path = {};
+	struct path security_parent = {};
 	struct path child_path = {};
 	struct file parent_file = {};
 	struct file *opened_file = NULL;
@@ -960,6 +1101,7 @@ static long pkm_kacs_do_native_create_open(
 	unsigned int lookup_flags = 0;
 	umode_t mode;
 	bool directory;
+	bool stratafs_creation;
 	long ret;
 
 	if (!path || !how || !prepared || !file_out || !status_out)
@@ -968,6 +1110,7 @@ static long pkm_kacs_do_native_create_open(
 	*file_out = NULL;
 	*status_out = 0;
 	directory = prepared->directory_required;
+	stratafs_creation = false;
 	if (directory &&
 	    (prepared->desired_access & PKM_KACS_DIRECTORY_MUTATION_RIGHTS) != 0)
 		return -EOPNOTSUPP;
@@ -999,14 +1142,26 @@ static long pkm_kacs_do_native_create_open(
 		goto out_end_create;
 	}
 
-	parent_file.f_inode = parent_inode;
-	*(struct path *)&parent_file.f_path = parent_path;
+	ret = pkm_kacs_native_creation_parent(&parent_path, &security_parent);
+	if (ret)
+		goto out_end_create;
+	stratafs_creation =
+		parent_path.dentry->d_sb->s_magic == STRATAFS_SUPER_MAGIC;
+	pkm_kacs_init_path_anchor_file(&parent_file, &security_parent);
 	ret = pkm_kacs_build_created_file_sd_for_subject(
 		subject_token, &parent_file, creator_sd_bytes, creator_sd_len,
 		directory, prepared->desired_access, &created_sd, &created_sd_len,
 		&granted_access);
 	if (ret)
 		goto out_end_create;
+	if (stratafs_creation) {
+		ret = pkm_kacs_stratafs_set_native_create_decision(
+			&security_parent,
+			directory ? KACS_FILE_ADD_SUBDIRECTORY :
+				    KACS_FILE_ADD_FILE);
+		if (ret)
+			goto out_end_create;
+	}
 
 	mode = pkm_kacs_native_create_mode(directory);
 	pkm_kacs_set_current_native_create_request(parent_inode, directory,
@@ -1086,12 +1241,16 @@ static long pkm_kacs_do_native_create_open(
 	if (IS_ERR(opened_file)) {
 		ret = PTR_ERR(opened_file);
 		opened_file = NULL;
+		if (stratafs_creation)
+			(void)pkm_kacs_stratafs_arm_created_cleanup(open_dentry);
 		if (directory)
 			vfs_rmdir(mnt_idmap(parent_path.mnt), parent_inode,
 				  open_dentry, NULL);
 		else
 			vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode,
 				   open_dentry, NULL);
+		if (stratafs_creation)
+			pkm_kacs_stratafs_end_created_cleanup();
 		goto out_end_create;
 	}
 
@@ -1100,12 +1259,15 @@ static long pkm_kacs_do_native_create_open(
 	ret = 0;
 
 out_end_create:
+	pkm_kacs_stratafs_end_create_decision();
 	pkm_kacs_clear_current_native_create_request();
 	end_creating_path(&parent_path, dentry);
 	if (looked_up)
 		dput(looked_up);
 	if (created_sd)
 		pkm_kacs_free((void *)created_sd);
+	if (security_parent.dentry)
+		path_put(&security_parent);
 out_creator_sd:
 	kfree(creator_sd_bytes);
 	return ret;

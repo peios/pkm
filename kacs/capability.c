@@ -10,6 +10,7 @@
 #include <pkm/token.h>
 
 #include "capability.h"
+#include "copy_up.h"
 #include "lsm_internal.h"
 #include "process_access.h"
 #include "token_runtime.h"
@@ -426,6 +427,14 @@ int pkm_kacs_capable(const struct cred *cred,
 		     struct user_namespace *target_ns, int cap,
 		     unsigned int opts)
 {
+	/*
+	 * cap_convert_nscap() performs CAP_SETFCAP before the xattr LSM hook.
+	 * KACS owns the one exact-value StrataFS clone call that may cross that
+	 * gate; no caller-controlled setxattr path can arm this condition.
+	 */
+	if (cap == CAP_SETFCAP && cred == current_cred() &&
+	    pkm_kacs_copy_up_allows_capability_use(target_ns))
+		return 0;
 	return pkm_kacs_capable_in_cred_ns(cred, target_ns, cap, opts);
 }
 

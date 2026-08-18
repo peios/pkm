@@ -18,7 +18,12 @@ description = "Peios Kernel — bootable image (based on Linux 7.0.9)"
 [provides]
 linux-kernel = "7.0.9"
 
+# The kernel image ships beside its own modules, under the release-named
+# directory: with UKIs nothing boots from a firmware-visible path, so the
+# kernel is ordinary package content rather than something /boot must hold.
+# Filenames keep the release suffix, so a tree carrying two kernels stays
+# self-describing and the `vmlinuz-*` globs that locate it still work.
 [files]
-"kernel:arch/x86/boot/bzImage" = "boot/vmlinuz-7.0.9-peios-{{version}}"
-"kernel:System.map"            = "boot/System.map-7.0.9-peios-{{version}}"
-"kernel:.config"               = "boot/config-7.0.9-peios-{{version}}"
+"kernel:arch/x86/boot/bzImage" = "usr/lib/modules/7.0.9-peios-{{version}}/vmlinuz-7.0.9-peios-{{version}}"
+"kernel:System.map"            = "usr/lib/modules/7.0.9-peios-{{version}}/System.map-7.0.9-peios-{{version}}"
+"kernel:.config"               = "usr/lib/modules/7.0.9-peios-{{version}}/config-7.0.9-peios-{{version}}"

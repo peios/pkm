@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kacs-core",
     "crates/lcs-core",
+    "crates/stratafs-core",
     "uapi/generated/rust",
 ]
 # uapi/generated/rust is the generated `peios-uapi` crate — the canonical Rust

@@ -4,6 +4,7 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/kacs_stratafs.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/slab.h>
@@ -12,8 +13,10 @@
 #include <pkm/sd.h>
 
 #include "access_check.h"
+#include "copy_up.h"
 #include "file_access.h"
 #include "file_metadata.h"
+#include "file_sd_cache.h"
 #include <trace/events/kacs.h>
 #include "lsm_internal.h"
 #include "mount_policy.h"
@@ -49,6 +52,8 @@ int pkm_kacs_inode_getattr(const struct path *path)
 		pkm_kacs_clear_current_file_metadata_decision();
 		return -EACCES;
 	}
+	if (pkm_kacs_copy_up_allows_path_getattr(path))
+		return 0;
 
 	if (pkm_kacs_consume_file_metadata_decision(
 		    d_inode(path->dentry), PKM_KACS_METADATA_OP_GETATTR))
@@ -105,6 +110,8 @@ int pkm_kacs_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			return ret;
 		}
 	}
+	if (pkm_kacs_copy_up_allows_setattr(dentry))
+		return 0;
 
 	if (pkm_kacs_consume_file_metadata_decision(
 		    d_inode(dentry), PKM_KACS_METADATA_OP_SETATTR))
@@ -124,6 +131,8 @@ int pkm_kacs_inode_file_getattr(struct dentry *dentry, struct file_kattr *fa)
 		pkm_kacs_clear_current_file_metadata_decision();
 		return -EACCES;
 	}
+	if (pkm_kacs_copy_up_allows_getattr(dentry))
+		return 0;
 
 	if (pkm_kacs_has_file_metadata_decision(
 		    d_inode(dentry), PKM_KACS_METADATA_OP_FILEATTR_SET))
@@ -142,6 +151,8 @@ int pkm_kacs_inode_file_setattr(struct dentry *dentry, struct file_kattr *fa)
 		pkm_kacs_clear_current_file_metadata_decision();
 		return -EACCES;
 	}
+	if (pkm_kacs_copy_up_allows_setattr(dentry))
+		return 0;
 
 	if (pkm_kacs_consume_file_metadata_decision(
 		    d_inode(dentry), PKM_KACS_METADATA_OP_FILEATTR_SET))
@@ -196,6 +207,8 @@ int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name)
 				    KACS_META_BAD_ARGS, -EACCES);
 		return -EACCES;
 	}
+	if (pkm_kacs_copy_up_allows_getxattr(dentry, name))
+		return 0;
 
 	if (pkm_kacs_consume_file_metadata_decision(
 		    dentry ? d_inode(dentry) : NULL,
@@ -244,15 +257,6 @@ int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 				    KACS_META_BAD_ARGS, -EACCES);
 		return -EACCES;
 	}
-	if (pkm_kacs_is_file_capability_xattr(name)) {
-		pkm_kacs_consume_file_metadata_decision(
-			dentry ? d_inode(dentry) : NULL,
-			PKM_KACS_METADATA_OP_SETXATTR);
-		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
-				    PKM_KACS_METADATA_OP_SETXATTR, 0,
-				    KACS_META_CAPS_XATTR, -EPERM);
-		return -EPERM;
-	}
 	if (is_posix_acl_xattr(name)) {
 		pkm_kacs_consume_file_metadata_decision(
 			dentry ? d_inode(dentry) : NULL,
@@ -262,6 +266,24 @@ int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 				    KACS_META_ACL, -EACCES);
 		return -EACCES;
 	}
+	if (pkm_kacs_is_file_capability_xattr(name)) {
+		if (pkm_kacs_copy_up_allows_capability_setxattr(dentry))
+			return 0;
+		pkm_kacs_consume_file_metadata_decision(
+			dentry ? d_inode(dentry) : NULL,
+			PKM_KACS_METADATA_OP_SETXATTR);
+		trace_kacs_metadata(dentry ? d_inode(dentry) : NULL,
+				    PKM_KACS_METADATA_OP_SETXATTR, 0,
+				    KACS_META_CAPS_XATTR, -EPERM);
+		return -EPERM;
+	}
+	if (!strcmp(name, STRATAFS_STAGING_XATTR)) {
+		if (pkm_kacs_copy_up_allows_setxattr(dentry, name))
+			return 0;
+		return -EPERM;
+	}
+	if (pkm_kacs_copy_up_allows_setxattr(dentry, name))
+		return 0;
 	ret = pkm_kacs_check_signed_exec_xattr_mutation(
 		dentry ? d_inode(dentry) : NULL, name);
 	if (ret) {
@@ -314,6 +336,13 @@ int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
 				    KACS_META_ACL, -EACCES);
 		return -EACCES;
 	}
+	if (!strcmp(name, STRATAFS_STAGING_XATTR)) {
+		if (pkm_kacs_copy_up_allows_setxattr(dentry, name))
+			return 0;
+		return -EPERM;
+	}
+	if (pkm_kacs_copy_up_allows_setxattr(dentry, name))
+		return 0;
 	ret = pkm_kacs_check_signed_exec_xattr_mutation(
 		dentry ? d_inode(dentry) : NULL, name);
 	if (ret) {
@@ -341,6 +370,8 @@ int pkm_kacs_inode_listxattr(struct dentry *dentry)
 		pkm_kacs_clear_current_file_metadata_decision();
 		return -EACCES;
 	}
+	if (pkm_kacs_copy_up_allows_listxattr(dentry))
+		return 0;
 
 	pkm_kacs_consume_file_metadata_decision(d_inode(dentry),
 						PKM_KACS_METADATA_OP_NONE);
@@ -418,6 +449,49 @@ int pkm_kacs_inode_getsecurity(struct mnt_idmap *idmap, struct inode *inode,
 		return -EINVAL;
 
 	sec = pkm_kacs_inode(inode);
+	/*
+	 * Resolve the effective descriptor rather than reporting only a cache
+	 * that some earlier operation happens to have warmed.
+	 *
+	 * This hook is how a stacking filesystem reads the SD of the real inode
+	 * beneath it: vfs_getxattr() routes every security.* name through
+	 * security_inode_getsecurity() before the lower filesystem's own xattr
+	 * handler ever sees it, so overlayfs's ovl_xattr_get() and StrataFS's
+	 * stratafs_xattr_get() both land here. Answering -EOPNOTSUPP because
+	 * the cache is merely cold makes the VFS fall through to the raw
+	 * on-disk xattr -- which on a SYNTHESIZE mount does not exist. The
+	 * stacker then sees a file with no SD and, under DENY_MISSING, locks it.
+	 *
+	 * That made the answer depend on whether anything had touched this
+	 * inode first, which is why it surfaced as "symlinks are denied and
+	 * nothing else is": overlayfs runs inode_permission on every directory
+	 * it walks and probes trusted.overlay.metacopy on every regular file it
+	 * looks up -- both of which warm the real inode -- but touches a
+	 * symlink's real inode only when something actually traverses it.
+	 *
+	 * Resolving here costs nothing on a mount that stores its descriptors:
+	 * the resolve reads the same xattr the fall-through would have.
+	 *
+	 * Only one layer of a stack ever performs the ancestor walk that
+	 * synthesis needs -- a layer walks only when the layer below answered
+	 * MISSING, which means that layer did not walk -- so the recursion here
+	 * costs O(1) frames per stacking level on top of the single walk that
+	 * PKM_KACS_MAX_SD_SYNTHESIS_DEPTH already bounds. The depth cap below is
+	 * belt-and-braces against a filesystem stack deeper than Linux's own
+	 * FILESYSTEM_MAX_STACK_DEPTH; past it we fail back to the old
+	 * fall-through rather than risk the kernel stack.
+	 */
+	if (current && current->security &&
+	    pkm_kacs_task(current)->internal_sd_read_depth > 8) {
+		trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 0,
+				    KACS_META_GETSECURITY, -EOPNOTSUPP);
+		return -EOPNOTSUPP;
+	}
+	if (pkm_kacs_inode_ensure_effective_cache_by_inode(inode, sec)) {
+		trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 0,
+				    KACS_META_GETSECURITY, -EOPNOTSUPP);
+		return -EOPNOTSUPP;
+	}
 	cache = pkm_kacs_inode_sd_cache_get_current(inode, sec);
 	if (!cache) {
 		trace_kacs_metadata(inode, PKM_KACS_METADATA_OP_NONE, 0,
@@ -461,8 +535,61 @@ static void pkm_kacs_clear_file_metadata_decision(
 		return;
 
 	task_sec->metadata_decision.inode = NULL;
+	task_sec->metadata_decision.file = NULL;
 	task_sec->metadata_decision.op_class = PKM_KACS_METADATA_OP_NONE;
 	task_sec->metadata_decision.active = 0;
+}
+
+int pkm_kacs_stratafs_rebind_metadata_decision(
+	const struct inode *outer, const struct inode *provider)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!outer || !provider || !current || !current->security)
+		return -EACCES;
+	task_sec = pkm_kacs_task(current);
+	if (!task_sec->metadata_decision.active)
+		return 0;
+	if (task_sec->metadata_decision.inode != outer)
+		return -EACCES;
+
+	/*
+	 * VFS file-metadata entry points have already checked the immutable
+	 * grant on the outer descriptor.  Rebinding only its outstanding,
+	 * single-use decision preserves that authority across the stacking
+	 * boundary; the provider hook consumes it immediately.
+	 */
+	task_sec->metadata_decision.inode = provider;
+	return 0;
+}
+
+void pkm_kacs_stratafs_end_metadata_decision(const struct inode *provider)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!provider || !current || !current->security)
+		return;
+	task_sec = pkm_kacs_task(current);
+	if (task_sec->metadata_decision.active &&
+	    task_sec->metadata_decision.inode == provider)
+		pkm_kacs_clear_file_metadata_decision(task_sec);
+}
+
+struct file *
+pkm_kacs_stratafs_metadata_file(const struct inode *outer)
+{
+	struct pkm_kacs_task_security *task_sec;
+	struct file *file;
+
+	if (!outer || !current || !current->security)
+		return NULL;
+	task_sec = pkm_kacs_task(current);
+	file = task_sec->metadata_decision.file;
+	if (!task_sec->metadata_decision.active ||
+	    task_sec->metadata_decision.inode != outer || !file ||
+	    file_inode(file) != outer)
+		return NULL;
+	return file;
 }
 
 static int pkm_kacs_begin_file_metadata_decision(struct file *file,
@@ -487,9 +614,16 @@ static int pkm_kacs_begin_file_metadata_decision(struct file *file,
 	}
 
 	task_sec->metadata_decision.inode = inode;
+	task_sec->metadata_decision.file = file;
 	task_sec->metadata_decision.op_class = op_class;
 	task_sec->metadata_decision.active = 1;
 	return 0;
+}
+
+int pkm_kacs_file_truncate_metadata(struct file *file)
+{
+	return pkm_kacs_begin_file_metadata_decision(
+		file, PKM_KACS_METADATA_OP_SETATTR);
 }
 
 static int pkm_kacs_begin_inode_metadata_decision(const struct inode *inode,
@@ -509,6 +643,7 @@ static int pkm_kacs_begin_inode_metadata_decision(const struct inode *inode,
 	}
 
 	task_sec->metadata_decision.inode = inode;
+	task_sec->metadata_decision.file = NULL;
 	task_sec->metadata_decision.op_class = op_class;
 	task_sec->metadata_decision.active = 1;
 	return 0;
@@ -555,6 +690,10 @@ bool pkm_kacs_consume_file_metadata_decision(const struct inode *inode,
 	trace_kacs_metadata(inode, op_class, matched ? 1 : 0,
 			    matched ? KACS_META_CONSUME_HIT : KACS_META_DECISION,
 			    0);
+	/* StrataFS must retarget the one-shot decision to its provider hook. */
+	if (matched && inode->i_sb &&
+	    inode->i_sb->s_magic == STRATAFS_SUPER_MAGIC)
+		return true;
 	pkm_kacs_clear_file_metadata_decision(task_sec);
 	return matched;
 }
@@ -595,8 +734,10 @@ static int pkm_kacs_check_file_xattr_snapshot(struct file *file,
 					      const char *name,
 					      u32 required_access,
 					      bool write_operation,
+					      bool reject_capability,
 					      u8 op_class)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	struct inode *inode;
 	int ret;
 
@@ -611,6 +752,13 @@ static int pkm_kacs_check_file_xattr_snapshot(struct file *file,
 	if (inode && pkm_kacs_is_canonical_sd_xattr(inode, name))
 		return -EACCES;
 	if (write_operation && is_posix_acl_xattr(name))
+		return -EACCES;
+	if (reject_capability && pkm_kacs_is_file_capability_xattr(name))
+		return -EPERM;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, write_operation);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
 		return -EACCES;
 	if (write_operation) {
 		ret = pkm_kacs_check_signed_exec_xattr_mutation(inode, name);
@@ -627,33 +775,36 @@ static int pkm_kacs_check_file_xattr_snapshot(struct file *file,
 
 int pkm_kacs_file_sd_xattr_set(struct file *file, const char *name)
 {
-	if (pkm_kacs_is_file_capability_xattr(name))
-		return -EPERM;
-
 	return pkm_kacs_check_file_xattr_snapshot(
-		file, name, KACS_FILE_WRITE_EA, true,
+		file, name, KACS_FILE_WRITE_EA, true, true,
 		PKM_KACS_METADATA_OP_SETXATTR);
 }
 
 int pkm_kacs_file_sd_xattr_get(struct file *file, const char *name)
 {
 	return pkm_kacs_check_file_xattr_snapshot(
-		file, name, KACS_FILE_READ_EA, false,
+		file, name, KACS_FILE_READ_EA, false, false,
 		PKM_KACS_METADATA_OP_GETXATTR);
 }
 
 int pkm_kacs_file_sd_xattr_remove(struct file *file, const char *name)
 {
 	return pkm_kacs_check_file_xattr_snapshot(
-		file, name, KACS_FILE_WRITE_EA, true,
+		file, name, KACS_FILE_WRITE_EA, true, false,
 		PKM_KACS_METADATA_OP_SETXATTR);
 }
 
 int pkm_kacs_file_getattr(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	int ret;
 
 	if (!file)
+		return -EACCES;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, false);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
 		return -EACCES;
 	ret = pkm_kacs_check_file_snapshot_grant(
 		file, KACS_FILE_READ_ATTRIBUTES);
@@ -668,18 +819,26 @@ int pkm_kacs_file_statfs(struct file *file)
 {
 	if (!file)
 		return -EACCES;
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
 	return pkm_kacs_check_file_snapshot_grant(
 		file, KACS_FILE_READ_ATTRIBUTES);
 }
 
 int pkm_kacs_file_chmod(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	int ret;
 
 	if (!file)
 		return -EACCES;
 	if ((file->f_mode & FMODE_PATH) != 0)
 		return -EBADF;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, true);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
+		return -EACCES;
 	ret = pkm_kacs_check_file_snapshot_grant(file,
 						 KACS_ACCESS_WRITE_DAC);
 	if (ret)
@@ -691,12 +850,18 @@ int pkm_kacs_file_chmod(struct file *file)
 
 int pkm_kacs_file_chown(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	int ret;
 
 	if (!file)
 		return -EACCES;
 	if ((file->f_mode & FMODE_PATH) != 0)
 		return -EBADF;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, true);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
+		return -EACCES;
 	ret = pkm_kacs_check_file_snapshot_grant(file,
 						 KACS_ACCESS_WRITE_OWNER);
 	if (ret)
@@ -708,9 +873,15 @@ int pkm_kacs_file_chown(struct file *file)
 
 int pkm_kacs_file_utimens(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	int ret;
 
 	if (!file)
+		return -EACCES;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, true);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
 		return -EACCES;
 	ret = pkm_kacs_check_file_snapshot_grant(
 		file, KACS_FILE_WRITE_ATTRIBUTES);
@@ -723,12 +894,18 @@ int pkm_kacs_file_utimens(struct file *file)
 
 int pkm_kacs_file_fileattr_get(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	int ret;
 
 	if (!file)
 		return -EACCES;
 	if ((file->f_mode & FMODE_PATH) != 0)
 		return -EBADF;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, false);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
+		return -EACCES;
 	ret = pkm_kacs_check_file_snapshot_grant(
 		file, KACS_FILE_READ_ATTRIBUTES);
 	if (ret)
@@ -740,12 +917,18 @@ int pkm_kacs_file_fileattr_get(struct file *file)
 
 int pkm_kacs_file_fileattr_set(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	int ret;
 
 	if (!file)
 		return -EACCES;
 	if ((file->f_mode & FMODE_PATH) != 0)
 		return -EBADF;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, true);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
+		return -EACCES;
 	ret = pkm_kacs_check_file_snapshot_grant(
 		file, KACS_FILE_WRITE_ATTRIBUTES);
 	if (ret)
@@ -787,7 +970,14 @@ void pkm_kacs_path_end_metadata(const struct path *path)
 
 int pkm_kacs_file_listxattr(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
+
 	if (!file)
+		return -EACCES;
+	copy_up = pkm_kacs_copy_up_file_metadata(file, false);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
 		return -EACCES;
 	return 0;
 }

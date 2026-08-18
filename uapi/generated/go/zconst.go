@@ -216,6 +216,7 @@ const (
 	KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT             = 4
 	KACS_MOUNT_POLICY_UNMANAGED                         = 1
 	KACS_MP_BAD_ARGS                                    = 1
+	KACS_MP_FIXED_POLICY                                = 9
 	KACS_MP_GET_NO_SECURITY                             = 8
 	KACS_MP_GET_OK                                      = 7
 	KACS_MP_NO_SECURITY                                 = 2
@@ -382,12 +383,14 @@ const (
 	KACS_SE_LOAD_DRIVER_PRIVILEGE                       = 1024
 	KACS_SE_LOCK_MEMORY_PRIVILEGE                       = 16
 	KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE            = 8192
+	KACS_SE_RELABEL_PRIVILEGE                           = 4294967296
 	KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE                   = 16777216
 	KACS_SE_RESTORE_PRIVILEGE                           = 262144
 	KACS_SE_SECURITY_PRIVILEGE                          = 256
 	KACS_SE_SHUTDOWN_PRIVILEGE                          = 524288
 	KACS_SE_SYSTEMTIME_PRIVILEGE                        = 4096
 	KACS_SE_SYSTEM_PROFILE_PRIVILEGE                    = 2048
+	KACS_SE_TAKE_OWNERSHIP_PRIVILEGE                    = 512
 	KACS_SE_TCB_PRIVILEGE                               = 128
 	KACS_SFS_INIT                                       = 4
 	KACS_SFS_LOGON_SESSIONS_ACCESS_CHECK                = 2

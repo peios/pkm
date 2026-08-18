@@ -29,9 +29,11 @@ if [[ ! -f "$tree/Makefile" ]] || ! grep -q '^VERSION =' "$tree/Makefile"; then
 fi
 
 pkm_dir="$tree/security/pkm"
+stratafs_dir="$tree/fs/stratafs"
 uapi_dir="$tree/include/uapi/pkm"
+linux_include_dir="$tree/include/linux"
 
-rm -rf "$pkm_dir" "$uapi_dir"
+rm -rf "$pkm_dir" "$stratafs_dir" "$uapi_dir"
 mkdir -p "$pkm_dir/kacs" "$pkm_dir/lcs" "$pkm_dir/kmes" "$uapi_dir"
 
 # --- flat C / H / Rust sources (these dirs contain exactly the staged set) ---
@@ -47,6 +49,11 @@ for h in pkm psb syscall sid sd token access file process kmes lcs trace; do
 	install -m 0644 "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
 done
 
+# --- Narrow in-kernel interfaces. These are not UAPI and are intentionally
+#     not exported to modules. ---
+install -m 0644 "$here/include/linux/kacs_stratafs.h" \
+	"$linux_include_dir/kacs_stratafs.h"
+
 # --- Static tracepoint event headers, staged into the canonical
 #     include/trace/events/ so <trace/events/{kacs,kmes,lcs}.h> resolve with no
 #     TRACE_INCLUDE_PATH override. CREATE_TRACE_POINTS is defined in exactly one
@@ -61,6 +68,10 @@ done
 # --- Kconfig + Makefile fragments for security/pkm ---
 install -m 0644 "$here/Kconfig"  "$pkm_dir/Kconfig"
 install -m 0644 "$here/Makefile" "$pkm_dir/Makefile"
+
+# --- StrataFS: built-in VFS glue, separate from the KACS LSM subtree. ---
+mkdir -p "$stratafs_dir"
+install -m 0644 "$pkm"/stratafs/* "$stratafs_dir/"
 
 # --- in-kernel Ed25519 verifier sources (staged into crypto/) ---
 install -m 0644 "$here/crypto/ed25519.c"       "$tree/crypto/ed25519.c"
@@ -82,5 +93,7 @@ install -m 0644 "$pkm/uapi/generated/rust/src/zconst.rs" "$pkm_dir/kacs/peios_ua
 # --- Rust cores, path-rewritten for nested in-kernel module paths ---
 "$here/stage-rust-core.sh" "$pkm/crates/kacs-core/src" "$pkm_dir/kacs/kacs_core"
 "$here/stage-rust-core.sh" "$pkm/crates/lcs-core/src"  "$pkm_dir/lcs/lcs_core" lcs_core
+"$here/stage-rust-core.sh" "$pkm/crates/stratafs-core/src" \
+	"$pkm_dir/stratafs_core" stratafs_core
 
 echo "stage-sources: staged PKM sources into $tree"

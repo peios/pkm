@@ -8,6 +8,7 @@
 #include <linux/kernel.h>
 #include <linux/lockdep.h>
 #include <linux/mnt_idmapping.h>
+#include <linux/mount.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
 #include <linux/refcount.h>
@@ -17,6 +18,7 @@
 #include <linux/xattr.h>
 
 #include "../kmes/kmes.h"
+#include "file_access.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
 #include "mount_policy.h"
@@ -680,6 +682,55 @@ long pkm_kacs_inode_ensure_effective_cache(
 
 	if (needs_persist)
 		pkm_kacs_inode_queue_sd_persist(file, sec);
+	return ret;
+}
+
+long pkm_kacs_inode_ensure_effective_cache_by_inode(
+	struct inode *inode, struct pkm_kacs_inode_security *sec)
+{
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct vfsmount mnt = {};
+	struct path path = {};
+	struct file file = {};
+	struct dentry *alias;
+	long ret;
+
+	if (!inode || !sec)
+		return -EINVAL;
+
+	/*
+	 * Already resolved: nothing to do, and in particular no dentry needed.
+	 * Worth checking here rather than leaving it to
+	 * pkm_kacs_inode_ensure_effective_cache() below, because the alias
+	 * lookup is the one step that can fail for reasons unrelated to the SD.
+	 */
+	cache = pkm_kacs_inode_sd_cache_get_current(inode, sec);
+	if (cache) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return 0;
+	}
+
+	/*
+	 * The caller reached us through an inode-only interface (the
+	 * inode_getsecurity LSM hook), but resolving an SD needs a dentry: the
+	 * xattr read addresses one, and missing-SD synthesis walks d_parent to
+	 * find the descriptor to inherit from. Any alias will do -- every alias
+	 * of an inode names the same object, and a hardlinked file inherits
+	 * from whichever parent it is reached through in any case.
+	 */
+	alias = d_find_any_alias(inode);
+	if (!alias)
+		return -EACCES;
+
+	mnt.mnt_root = alias;
+	mnt.mnt_sb = inode->i_sb;
+	mnt.mnt_idmap = &nop_mnt_idmap;
+	path.mnt = &mnt;
+	path.dentry = alias;
+	pkm_kacs_init_path_anchor_file(&file, &path);
+
+	ret = pkm_kacs_inode_ensure_effective_cache(&file, sec);
+	dput(alias);
 	return ret;
 }
 

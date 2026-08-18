@@ -7,9 +7,17 @@
 struct file;
 struct inode;
 struct super_block;
+struct vm_area_struct;
 
 int pkm_kacs_inode_alloc_security(struct inode *inode);
 int pkm_kacs_file_alloc_security(struct file *file);
+int pkm_kacs_backing_file_alloc(struct file *backing_file,
+				const struct file *user_file);
+int pkm_kacs_backing_file_apply(struct file *backing_file);
+bool pkm_kacs_backing_file_inherited(const struct file *backing_file);
+int pkm_kacs_mmap_backing_file(struct vm_area_struct *vma,
+			       struct file *backing_file,
+			       struct file *user_file);
 void pkm_kacs_file_release(struct file *file);
 int pkm_kacs_file_receive(struct file *file);
 int pkm_kacs_sb_alloc_security(struct super_block *sb);

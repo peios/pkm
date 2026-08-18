@@ -3,6 +3,8 @@ crypto/ed25519-testmgr-vectors.patch
 security/pkm-lsm-wireup.patch
 security/pkm-kacs-builtin-signing-keys-section.patch
 security/security-inode-rename-flags.patch
+fs/stratafs-wireup.patch
+fs/overlayfs-readdir-cache-error.patch
 security/commoncap-ptrace-nice-bypass.patch
 security/commoncap-capability-switchboard.patch
 fs/proc-base-token-files.patch
@@ -16,8 +18,10 @@ fs/proc-array-cap-reporting.patch
 fs/proc-task_mmu-clear_refs-gate.patch
 fs/proc_namespace-mount-metadata-gate.patch
 fs/read_write-write-intent.patch
+fs/locks-stacked-lease-identity.patch
 fs/stat-getattr-gate.patch
 fs/statfs-gate.patch
+fs/sync-fsync-gate.patch
 fs/utimes-gate.patch
 fs/xattr-raw-sd-guard.patch
 fs/aio-write-intent.patch
@@ -27,6 +31,7 @@ fs/namespace-rootfs-seed-sd.patch
 fs/open-faccessat-access-gate.patch
 fs/open-fchdir-traverse.patch
 fs/open-fchmod-fchown-gate.patch
+fs/truncate-metadata-gate.patch
 fs/open-fallocate-gate.patch
 drivers/devtmpfs-seed-root-sd.patch
 io_uring/rw-write-intent.patch

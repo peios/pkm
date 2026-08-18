@@ -11,6 +11,7 @@
 #include <pkm/token.h>
 
 #include "capability.h"
+#include "copy_up.h"
 #include "cred_lifecycle.h"
 #include "exec.h"
 #include "file_access.h"
@@ -267,6 +268,7 @@ void pkm_kacs_bprm_committing_creds(const struct linux_binprm *bprm)
 	long ret;
 
 	(void)bprm;
+	pkm_kacs_copy_up_task_exit(current);
 
 	ret = pkm_kacs_revert_impersonation();
 	if (ret) {

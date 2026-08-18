@@ -136,6 +136,7 @@ pekit build source                        # apply kernel/patches + stage PKM sou
 # 3. Build + boot-test the KUnit kernel.
 pekit build kunit  --no-build=upstream,source
 pekit test  kunit  --no-build=upstream,source     # QEMU boot, assert the suite
+pekit test  stratafs --no-build=upstream,source,kunit # mounted syscall smoke
 
 # 4. Build the production kernel with the TCB key injected from a keyring.
 pekit build kernel --keyring=dev --no-build=upstream,source
@@ -170,6 +171,7 @@ dependencies' outputs as `$PEKIT_<NEED>_OUT`, and writes to `$PEKIT_OUT`
 | `build.debuginfo` | `kernel` | `vmlinux` debug info + build-id index, plus path-sanitized debug sources. |
 | `build.tools` | `source` | The in-tree userspace tools (perf, bpftool, …) as a DESTDIR image. |
 | `test.kunit` | `kunit` | Boots in QEMU; asserts the KUnit suite passes (build/run split). |
+| `test.stratafs` | `kunit` | Boots a minimal initramfs in QEMU and exercises mounted StrataFS through real KACS-governed syscalls. |
 | `gen.uapi` | — | Regenerates `uapi/generated/**` in place from `uapi/pkm` (a `gen` target — product is committed source, not an artifact). Its `verify_command` is the drift gate (`pekit verify uapi`). |
 | `test.uapi` | — | Standalone-compile gate: the canonical headers compile with a stock userspace compiler. |
 

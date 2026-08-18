@@ -1,0 +1,67 @@
+diff --git a/fs/namei.c b/fs/namei.c
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -43,6 +43,10 @@
+ #include "internal.h"
+ #include "mount.h"
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern void pkm_kacs_file_end_metadata(struct file *file);
++#endif
++
+ /* [Feb-1997 T. Schoebel-Theuer]
+  * Fundamental changes in the pathname lookup mechanisms (namei)
+  * were necessary because of omirr.  The reason is that omirr needs
+@@ -4286,6 +4290,9 @@ static int handle_truncate(struct mnt_idmap *idmap, struct file *filp)
+ 				    ATTR_MTIME|ATTR_CTIME|ATTR_OPEN,
+ 				    filp);
+ 	}
++#ifdef CONFIG_SECURITY_PKM
++	pkm_kacs_file_end_metadata(filp);
++#endif
+ 	put_write_access(inode);
+ 	return error;
+ }
+diff --git a/fs/open.c b/fs/open.c
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -35,6 +35,10 @@
+ 
+ #include "internal.h"
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern void pkm_kacs_file_end_metadata(struct file *file);
++#endif
++
+ int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
+ 		loff_t length, unsigned int time_attrs, struct file *filp)
+ {
+@@ -191,9 +195,17 @@ static long do_ftruncate(struct file *file, loff_t length, int small)
+ 
+ 	error = fsnotify_truncate_perm(&file->f_path, length);
+-	if (error)
++	if (error) {
++#ifdef CONFIG_SECURITY_PKM
++		pkm_kacs_file_end_metadata(file);
++#endif
+ 		return error;
++	}
+ 
+ 	scoped_guard(super_write, inode->i_sb)
+-		return do_truncate(file_mnt_idmap(file), dentry, length,
+-				   ATTR_MTIME | ATTR_CTIME, file);
++		error = do_truncate(file_mnt_idmap(file), dentry, length,
++				    ATTR_MTIME | ATTR_CTIME, file);
++#ifdef CONFIG_SECURITY_PKM
++	pkm_kacs_file_end_metadata(file);
++#endif
++	return error;
+ }
+@@ -684,7 +696,6 @@ out_mnt_unlock:
+ #ifdef CONFIG_SECURITY_PKM
+ extern int pkm_kacs_file_chmod(struct file *file);
+ extern int pkm_kacs_file_chown(struct file *file);
+-extern void pkm_kacs_file_end_metadata(struct file *file);
+ #endif
+ 
+ 

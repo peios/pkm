@@ -249,6 +249,8 @@ long pkm_lcs_source_accept_response_file(
 			result->source_validation_failure =
 				PKM_LCS_SOURCE_VALIDATION_UNKNOWN_RSI_STATUS_CODE;
 		result->caller_waiter_attached = record->waiter != NULL;
+		result->caller_waiter_detached =
+			record->waiter_was_attached && !record->waiter;
 	}
 
 	record->response_accepted = true;
@@ -312,6 +314,15 @@ static long pkm_lcs_source_handle_late_response_effects_file(
 	if (!file || !result)
 		return -EINVAL;
 	if (result->caller_waiter_attached)
+		return 0;
+	/*
+	 * A request queued without a waiter is deliberately asynchronous. Its
+	 * caller has not timed out and does not need late-effect recovery. Keep
+	 * that distinct from a formerly waitable request whose waiter detached:
+	 * only the latter has an uncertain synchronous outcome and must replay
+	 * mutation effects (or take the source down if replay is impossible).
+	 */
+	if (!result->caller_waiter_detached)
 		return 0;
 	if (result->malformed_source_data) {
 		if (result->request_op_code == RSI_COMMIT_TRANSACTION) {

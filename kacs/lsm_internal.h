@@ -20,6 +20,7 @@
 #define PKM_KACS_MAX_SD_BYTES 65535U
 
 struct pkm_kmes_rate_bucket;
+struct pkm_kacs_stratafs_copy_up;
 
 struct pkm_kacs_native_open_request {
 	const struct dentry *expected_dentry;
@@ -97,8 +98,17 @@ struct pkm_kacs_superblock_security {
 struct pkm_kacs_file_security {
 	u32 granted_access;
 	u32 continuous_audit_mask;
+	struct pkm_kacs_stratafs_copy_up *copy_up_context;
+	u64 copy_up_phase_generation;
 	u8 managed;
 	u8 delete_on_close;
+};
+
+struct pkm_kacs_backing_file_security {
+	u32 granted_access;
+	u32 continuous_audit_mask;
+	u8 managed;
+	u8 inherited;
 };
 
 struct pkm_kacs_file_write_intent {
@@ -120,6 +130,7 @@ enum pkm_kacs_file_metadata_op_class {
 
 struct pkm_kacs_file_metadata_decision {
 	const struct inode *inode;
+	struct file *file;
 	u8 op_class;
 	u8 active;
 };
@@ -172,11 +183,44 @@ struct pkm_kacs_psb_activation_context {
 
 struct pkm_kacs_task_security {
 	struct pkm_kacs_process_state *process_state;
+	struct pkm_kacs_stratafs_copy_up *copy_up_context;
+	const struct file *delete_on_close_file;
+	const struct inode *delete_on_close_parent_inode;
+	const struct dentry *delete_on_close_dentry;
+	const struct inode *delete_on_close_inode;
 	const struct cred *impersonation_saved_cred;
 	struct pkm_kacs_native_open_request native_open;
 	struct pkm_kacs_native_create_request native_create;
 	struct pkm_kacs_file_write_intent write_intent;
 	struct pkm_kacs_file_metadata_decision metadata_decision;
+	const void *stratafs_create_subject;
+	const struct inode *stratafs_create_authority;
+	const struct inode *stratafs_create_parent;
+	const struct dentry *stratafs_create_dentry;
+	const struct dentry *stratafs_create_link_source;
+	const struct inode *stratafs_create_link_inode;
+	u32 stratafs_create_access;
+	u8 stratafs_create_state;
+	const void *stratafs_supersede_subject;
+	const struct dentry *stratafs_supersede_target;
+	const struct inode *stratafs_supersede_target_inode;
+	const struct dentry *stratafs_supersede_source;
+	const struct inode *stratafs_supersede_source_inode;
+	const struct file *stratafs_supersede_file;
+	const struct inode *stratafs_supersede_old_parent;
+	const struct dentry *stratafs_supersede_old_dentry;
+	const struct inode *stratafs_supersede_old_inode;
+	const struct inode *stratafs_supersede_new_parent;
+	const struct dentry *stratafs_supersede_new_dentry;
+	const struct inode *stratafs_supersede_new_inode;
+	u8 stratafs_supersede_state;
+	u8 stratafs_supersede_phase;
+	const struct inode *stratafs_cleanup_parent;
+	const struct dentry *stratafs_cleanup_dentry;
+	const struct inode *stratafs_cleanup_inode;
+	const struct dentry *stratafs_cleanup_outer;
+	const struct inode *stratafs_cleanup_outer_inode;
+	const void *stratafs_cleanup_subject;
 	u32 pending_exec_pip_type;
 	u32 pending_exec_pip_trust;
 	u8 pending_exec_pip_valid;
@@ -249,6 +293,15 @@ static inline struct pkm_kacs_file_security *pkm_kacs_file(
 {
 	return (struct pkm_kacs_file_security *)((char *)file->f_security +
 						 pkm_blob_sizes.lbs_file);
+}
+
+static inline struct pkm_kacs_backing_file_security *pkm_kacs_backing_file(
+	const struct file *file)
+{
+	void *blob = backing_file_security(file);
+
+	return (struct pkm_kacs_backing_file_security *)
+		((char *)blob + pkm_blob_sizes.lbs_backing_file);
 }
 
 static inline struct pkm_kacs_superblock_security *pkm_kacs_sb(

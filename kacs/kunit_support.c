@@ -5699,7 +5699,36 @@ int pkm_kacs_kunit_check_blob_lifecycle_defaults(void)
 	    task_sec->native_create.directory || task_sec->native_create.active ||
 	    task_sec->metadata_decision.inode ||
 	    task_sec->metadata_decision.op_class != PKM_KACS_METADATA_OP_NONE ||
-	    task_sec->metadata_decision.active || task_sec->pending_exec_pip_type ||
+	    task_sec->metadata_decision.active ||
+	    task_sec->stratafs_create_subject ||
+	    task_sec->stratafs_create_authority ||
+	    task_sec->stratafs_create_parent ||
+	    task_sec->stratafs_create_dentry ||
+	    task_sec->stratafs_create_link_source ||
+	    task_sec->stratafs_create_link_inode ||
+	    task_sec->stratafs_create_access ||
+	    task_sec->stratafs_create_state ||
+	    task_sec->stratafs_supersede_subject ||
+	    task_sec->stratafs_supersede_target ||
+	    task_sec->stratafs_supersede_target_inode ||
+	    task_sec->stratafs_supersede_source ||
+	    task_sec->stratafs_supersede_source_inode ||
+	    task_sec->stratafs_supersede_file ||
+	    task_sec->stratafs_supersede_old_parent ||
+	    task_sec->stratafs_supersede_old_dentry ||
+	    task_sec->stratafs_supersede_old_inode ||
+	    task_sec->stratafs_supersede_new_parent ||
+	    task_sec->stratafs_supersede_new_dentry ||
+	    task_sec->stratafs_supersede_new_inode ||
+	    task_sec->stratafs_supersede_state ||
+	    task_sec->stratafs_supersede_phase ||
+	    task_sec->stratafs_cleanup_parent ||
+	    task_sec->stratafs_cleanup_dentry ||
+	    task_sec->stratafs_cleanup_inode ||
+	    task_sec->stratafs_cleanup_outer ||
+	    task_sec->stratafs_cleanup_outer_inode ||
+	    task_sec->stratafs_cleanup_subject ||
+	    task_sec->pending_exec_pip_type ||
 	    task_sec->pending_exec_pip_trust ||
 	    task_sec->pending_exec_pip_valid) {
 		ret = -EBADE;
@@ -5708,6 +5737,34 @@ int pkm_kacs_kunit_check_blob_lifecycle_defaults(void)
 	pkm_kacs_task_free(state->task);
 	task_allocated = false;
 	if (task_sec->process_state || task_sec->impersonation_saved_cred ||
+	    task_sec->stratafs_create_subject ||
+	    task_sec->stratafs_create_authority ||
+	    task_sec->stratafs_create_parent ||
+	    task_sec->stratafs_create_dentry ||
+	    task_sec->stratafs_create_link_source ||
+	    task_sec->stratafs_create_link_inode ||
+	    task_sec->stratafs_create_access ||
+	    task_sec->stratafs_create_state ||
+	    task_sec->stratafs_supersede_subject ||
+	    task_sec->stratafs_supersede_target ||
+	    task_sec->stratafs_supersede_target_inode ||
+	    task_sec->stratafs_supersede_source ||
+	    task_sec->stratafs_supersede_source_inode ||
+	    task_sec->stratafs_supersede_file ||
+	    task_sec->stratafs_supersede_old_parent ||
+	    task_sec->stratafs_supersede_old_dentry ||
+	    task_sec->stratafs_supersede_old_inode ||
+	    task_sec->stratafs_supersede_new_parent ||
+	    task_sec->stratafs_supersede_new_dentry ||
+	    task_sec->stratafs_supersede_new_inode ||
+	    task_sec->stratafs_supersede_state ||
+	    task_sec->stratafs_supersede_phase ||
+	    task_sec->stratafs_cleanup_parent ||
+	    task_sec->stratafs_cleanup_dentry ||
+	    task_sec->stratafs_cleanup_inode ||
+	    task_sec->stratafs_cleanup_outer ||
+	    task_sec->stratafs_cleanup_outer_inode ||
+	    task_sec->stratafs_cleanup_subject ||
 	    task_sec->pending_exec_pip_type || task_sec->pending_exec_pip_trust ||
 	    task_sec->pending_exec_pip_valid) {
 		ret = -EBADE;

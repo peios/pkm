@@ -56,6 +56,8 @@
 
 #include <linux/kernel.h>
 
+#include <linux/kacs_stratafs.h>
+
 #include <linux/magic.h>
 
 #include <linux/mm.h>

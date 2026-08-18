@@ -22,6 +22,7 @@
 #include "caap_cache.h"
 #include "cred_lifecycle.h"
 #include "cred_projection.h"
+#include "copy_up.h"
 #include "../kmes/kmes.h"
 #include "exec.h"
 #include "file_access.h"
@@ -61,6 +62,7 @@ struct lsm_blob_sizes pkm_blob_sizes __ro_after_init = {
 	.lbs_task = sizeof(struct pkm_kacs_task_security),
 	.lbs_sock = sizeof(struct pkm_kacs_socket_security),
 	.lbs_file = sizeof(struct pkm_kacs_file_security),
+	.lbs_backing_file = sizeof(struct pkm_kacs_backing_file_security),
 	.lbs_inode = sizeof(struct pkm_kacs_inode_security),
 	.lbs_superblock = sizeof(struct pkm_kacs_superblock_security),
 	.lbs_xattr_count = 1,
@@ -100,7 +102,12 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_rename, pkm_kacs_inode_rename),
 	LSM_HOOK_INIT(inode_readlink, pkm_kacs_inode_readlink),
 	LSM_HOOK_INIT(inode_init_security, pkm_kacs_inode_init_security),
+	LSM_HOOK_INIT(inode_post_create_tmpfile,
+		      pkm_kacs_copy_up_post_create_tmpfile),
+	LSM_HOOK_INIT(dentry_create_files_as,
+		      pkm_kacs_copy_up_dentry_create_files_as),
 	LSM_HOOK_INIT(file_alloc_security, pkm_kacs_file_alloc_security),
+	LSM_HOOK_INIT(backing_file_alloc, pkm_kacs_backing_file_alloc),
 	LSM_HOOK_INIT(file_release, pkm_kacs_file_release),
 	LSM_HOOK_INIT(file_open, pkm_kacs_file_open),
 	LSM_HOOK_INIT(file_receive, pkm_kacs_file_receive),
@@ -137,6 +144,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(capset, pkm_kacs_capset),
 	LSM_HOOK_INIT(task_prctl, pkm_kacs_task_prctl),
 	LSM_HOOK_INIT(mmap_file, pkm_kacs_mmap_file),
+	LSM_HOOK_INIT(mmap_backing_file, pkm_kacs_mmap_backing_file),
 	LSM_HOOK_INIT(file_mprotect, pkm_kacs_file_mprotect),
 	LSM_HOOK_INIT(bprm_check_security, pkm_kacs_bprm_check_security),
 	LSM_HOOK_INIT(bprm_creds_from_file, pkm_kacs_bprm_creds_from_file),

@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "file_access.h"
+#include "file_metadata.h"
+#include "lsm_internal.h"
+#include "object_lifecycle.h"
 
+/* Internal VFS constructor exported for stackable-filesystem users. */
+extern struct file *alloc_empty_backing_file(int flags,
+					      const struct cred *cred,
+					      const struct file *user_file);
+
+static void pkm_kunit_stratafs_metadata_decision_rebind_is_exact(
+	struct kunit *test);
 
 static void pkm_kunit_open_self_token_effective_query(struct kunit *test)
 {
@@ -164,6 +175,137 @@ static void pkm_kunit_file_mmap_snapshot_read_and_private_write(
 				1, PKM_KUNIT_FILE_WRITE_DATA, PROT_WRITE,
 				MAP_PRIVATE),
 			-EACCES);
+}
+
+
+static void pkm_kunit_backing_file_inherits_exact_outer_snapshot(
+	struct kunit *test)
+{
+	struct pkm_kacs_file_security *backing_file_sec;
+	struct pkm_kacs_file_security *user_sec;
+	struct file *backing;
+	struct file user = { };
+	void *user_blob;
+
+	user_blob = kunit_kzalloc(test,
+		pkm_blob_sizes.lbs_file + sizeof(struct pkm_kacs_file_security),
+		GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, user_blob);
+	user.f_security = user_blob;
+	user_sec = pkm_kacs_file(&user);
+	user_sec->managed = 1;
+	user_sec->granted_access = KACS_FILE_READ_DATA |
+		KACS_FILE_WRITE_DATA | KACS_ACCESS_SYNCHRONIZE;
+	user_sec->continuous_audit_mask = KACS_FILE_READ_DATA;
+
+	backing = alloc_empty_backing_file(O_RDONLY, current_cred(), &user);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(backing));
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_backing_file_inherited(backing));
+	KUNIT_ASSERT_EQ(test, pkm_kacs_backing_file_apply(backing), 0);
+	backing_file_sec = pkm_kacs_file(backing);
+	KUNIT_EXPECT_TRUE(test, backing_file_sec->managed);
+	KUNIT_EXPECT_EQ(test, backing_file_sec->granted_access,
+			user_sec->granted_access);
+	KUNIT_EXPECT_EQ(test, backing_file_sec->continuous_audit_mask,
+			user_sec->continuous_audit_mask);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_mmap_backing_file(NULL, backing, &user), 0);
+
+	/* Either side changing after capture must fail the mmap handoff. */
+	user_sec->granted_access ^= KACS_FILE_EXECUTE;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_mmap_backing_file(NULL, backing, &user), -EACCES);
+	user_sec->granted_access ^= KACS_FILE_EXECUTE;
+	backing_file_sec->continuous_audit_mask ^= KACS_FILE_WRITE_DATA;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_mmap_backing_file(NULL, backing, &user), -EACCES);
+	fput(backing);
+}
+
+
+static void pkm_kunit_backing_file_rejects_unsettled_outer_handles(
+	struct kunit *test)
+{
+	struct pkm_kacs_file_security *user_sec;
+	struct file *backing;
+	struct file user = { };
+	void *user_blob;
+
+	user_blob = kunit_kzalloc(test,
+		pkm_blob_sizes.lbs_file + sizeof(struct pkm_kacs_file_security),
+		GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, user_blob);
+	user.f_security = user_blob;
+	user_sec = pkm_kacs_file(&user);
+	user_sec->managed = 1;
+	user_sec->granted_access = KACS_FILE_READ_DATA;
+
+	user.f_mode = FMODE_PATH;
+	backing = alloc_empty_backing_file(O_RDONLY, current_cred(), &user);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(backing));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_backing_file_inherited(backing));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_backing_file_apply(backing), -ENOENT);
+	fput(backing);
+
+	user.f_mode = 0;
+	user_sec->copy_up_context = (void *)user_sec;
+	backing = alloc_empty_backing_file(O_RDONLY, current_cred(), &user);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(backing));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_backing_file_inherited(backing));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_backing_file_apply(backing), -ENOENT);
+	fput(backing);
+}
+
+
+static void pkm_kunit_copy_up_backing_file_requires_explicit_adoption(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kacs_file_security *user_sec;
+	struct file *backing;
+	struct file user = { };
+	void *user_blob;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	user_blob = kunit_kzalloc(test,
+		pkm_blob_sizes.lbs_file + sizeof(struct pkm_kacs_file_security),
+		GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, user_blob);
+	user.f_security = user_blob;
+	user_sec = pkm_kacs_file(&user);
+	user_sec->managed = 1;
+	user_sec->granted_access = KACS_FILE_READ_DATA | KACS_FILE_WRITE_DATA;
+
+	/* A non-NULL task binding is sufficient for the allocation-time gate. */
+	task_sec->copy_up_context = (void *)user_sec;
+	backing = alloc_empty_backing_file(O_RDWR, current_cred(), &user);
+	task_sec->copy_up_context = NULL;
+	KUNIT_ASSERT_FALSE(test, IS_ERR(backing));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_backing_file_inherited(backing));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_backing_file_apply(backing), -ENOENT);
+	fput(backing);
+}
+
+
+static void pkm_kunit_file_fsync_requires_synchronize_snapshot(
+	struct kunit *test)
+{
+	struct pkm_kacs_file_security *file_sec;
+	struct file file = { };
+	void *file_blob;
+
+	file_blob = kunit_kzalloc(test,
+		pkm_blob_sizes.lbs_file + sizeof(struct pkm_kacs_file_security),
+		GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, file_blob);
+	file.f_security = file_blob;
+	file_sec = pkm_kacs_file(&file);
+	file_sec->managed = 1;
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_fsync(&file), -EACCES);
+	file_sec->granted_access = KACS_ACCESS_SYNCHRONIZE;
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_fsync(&file), 0);
+	file_sec->copy_up_context = (void *)file_sec;
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_fsync(&file), -EACCES);
 }
 
 
@@ -7231,6 +7373,32 @@ static void pkm_kunit_file_mount_policy_classifies_unmanaged_special_fs(
 }
 
 
+static void pkm_kunit_file_mount_policy_fixes_stratafs_to_deny_missing(
+	struct kunit *test)
+{
+	struct kacs_mount_policy_args args = {
+		.policy = KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+	};
+	const void *subject_token;
+	u32 policy = 0;
+	u32 generation = 0;
+	u32 template_len = 0;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_mount_policy_for_magic(
+				STRATAFS_SUPER_MAGIC),
+			KACS_MOUNT_POLICY_DENY_MISSING);
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, STRATAFS_SUPER_MAGIC, &args,
+				&policy, &generation, &template_len),
+			(long)-EOPNOTSUPP);
+}
+
+
 static void pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs(
 	struct kunit *test)
 {
@@ -10105,6 +10273,10 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_open_self_token_maximum_allowed),
 	KUNIT_CASE(pkm_kunit_open_self_token_invalid_flags),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_read_and_private_write),
+	KUNIT_CASE(pkm_kunit_backing_file_inherits_exact_outer_snapshot),
+	KUNIT_CASE(pkm_kunit_backing_file_rejects_unsettled_outer_handles),
+	KUNIT_CASE(pkm_kunit_copy_up_backing_file_requires_explicit_adoption),
+	KUNIT_CASE(pkm_kunit_file_fsync_requires_synchronize_snapshot),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),
 	KUNIT_CASE(pkm_kunit_file_mprotect_snapshot_uses_vma_shape),
@@ -10290,6 +10462,8 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_get_path_file_sd_nofollow_accepts_symlink),
 	KUNIT_CASE(pkm_kunit_get_path_file_sd_empty_path_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_classifies_unmanaged_special_fs),
+	KUNIT_CASE(pkm_kunit_file_mount_policy_fixes_stratafs_to_deny_missing),
+	KUNIT_CASE(pkm_kunit_stratafs_metadata_decision_rebind_is_exact),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_defaults_to_deny_missing),
 	KUNIT_CASE(pkm_kunit_mount_policy_set_persistent_template_success),
@@ -10362,3 +10536,46 @@ static struct kunit_suite pkm_kunit_file_suite = {
 };
 
 kunit_test_suite(pkm_kunit_file_suite);
+static void pkm_kunit_stratafs_metadata_decision_rebind_is_exact(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec;
+	struct super_block outer_sb = { .s_magic = STRATAFS_SUPER_MAGIC };
+	struct inode outer = { .i_sb = &outer_sb };
+	struct inode provider = {};
+	struct inode unrelated = {};
+	struct file file = { .f_inode = &outer };
+
+	KUNIT_ASSERT_NOT_NULL(test, current->security);
+	task_sec = pkm_kacs_task(current);
+	pkm_kacs_clear_current_file_metadata_decision();
+	task_sec->metadata_decision.inode = &outer;
+	task_sec->metadata_decision.file = &file;
+	task_sec->metadata_decision.op_class = PKM_KACS_METADATA_OP_SETATTR;
+	task_sec->metadata_decision.active = 1;
+	KUNIT_EXPECT_PTR_EQ(test,
+		pkm_kacs_stratafs_metadata_file(&outer), &file);
+	KUNIT_EXPECT_PTR_EQ(test,
+		pkm_kacs_stratafs_metadata_file(&unrelated), NULL);
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_consume_file_metadata_decision(
+					&outer,
+					PKM_KACS_METADATA_OP_SETATTR));
+	KUNIT_EXPECT_TRUE(test, task_sec->metadata_decision.active);
+
+	KUNIT_EXPECT_EQ(
+		test,
+		pkm_kacs_stratafs_rebind_metadata_decision(&unrelated,
+							   &provider),
+		-EACCES);
+	KUNIT_EXPECT_PTR_EQ(test, task_sec->metadata_decision.inode, &outer);
+	KUNIT_ASSERT_EQ(
+		test,
+		pkm_kacs_stratafs_rebind_metadata_decision(&outer, &provider),
+		0);
+	KUNIT_EXPECT_PTR_EQ(test, task_sec->metadata_decision.inode,
+			    &provider);
+	pkm_kacs_stratafs_end_metadata_decision(&unrelated);
+	KUNIT_EXPECT_TRUE(test, task_sec->metadata_decision.active);
+	pkm_kacs_stratafs_end_metadata_decision(&provider);
+	KUNIT_EXPECT_FALSE(test, task_sec->metadata_decision.active);
+}

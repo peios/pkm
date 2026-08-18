@@ -5449,6 +5449,7 @@ static void pkm_lcs_kunit_late_set_value_success_applies_effects(
 				&write_result),
 			(ssize_t)response_len);
 	KUNIT_EXPECT_FALSE(test, write_result.caller_waiter_attached);
+	KUNIT_EXPECT_TRUE(test, write_result.caller_waiter_detached);
 	KUNIT_EXPECT_EQ(test, write_result.status, (u32)RSI_OK);
 
 	KUNIT_ASSERT_EQ(test,
@@ -5520,6 +5521,8 @@ static void pkm_lcs_kunit_late_mutation_without_metadata_downs_source(
 				&file, response, response_len, false,
 				&write_result),
 			(ssize_t)-EIO);
+	KUNIT_EXPECT_FALSE(test, write_result.caller_waiter_attached);
+	KUNIT_EXPECT_TRUE(test, write_result.caller_waiter_detached);
 	pkm_lcs_kunit_source_table_snapshot(&table);
 	KUNIT_EXPECT_EQ(test, table.active_count, 0U);
 	KUNIT_EXPECT_EQ(test, table.down_count, 1U);

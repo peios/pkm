@@ -7,6 +7,7 @@
 #include <linux/fiemap.h>
 #include <linux/fs.h>
 #include <linux/fscrypt.h>
+#include <linux/kacs_stratafs.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/path.h>
@@ -14,15 +15,19 @@
 #include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/string.h>
+#include <linux/xattr.h>
 
 #include <asm/ioctls.h>
 
 #include <pkm/file.h>
 #include <pkm/sd.h>
 
+#include "../kmes/kmes.h"
 #include "access_check.h"
 #include "caap_cache.h"
+#include "copy_up.h"
 #include "file_access.h"
+#include "file_metadata.h"
 #include <trace/events/kacs.h>
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
@@ -33,6 +38,452 @@
 
 #define PKM_KACS_FILE_DATA_RIGHTS                                             \
 	(KACS_FILE_READ_DATA | KACS_FILE_WRITE_DATA | KACS_FILE_APPEND_DATA)
+
+static size_t pkm_kacs_msgpack_string_size(size_t len)
+{
+	if (len <= 31)
+		return 1 + len;
+	if (len <= U8_MAX)
+		return 2 + len;
+	return 3 + len;
+}
+
+static u8 *pkm_kacs_msgpack_string_header(u8 *out, size_t len)
+{
+	if (len <= 31) {
+		*out++ = 0xa0 | len;
+	} else if (len <= U8_MAX) {
+		*out++ = 0xd9;
+		*out++ = len;
+	} else {
+		*out++ = 0xda;
+		*out++ = len >> 8;
+		*out++ = len;
+	}
+	return out;
+}
+
+static u8 *pkm_kacs_msgpack_string(u8 *out, const char *value, size_t len)
+{
+	out = pkm_kacs_msgpack_string_header(out, len);
+	memcpy(out, value, len);
+	return out + len;
+}
+
+static u8 *pkm_kacs_msgpack_u32(u8 *out, u32 value)
+{
+	*out++ = 0xce;
+	*out++ = value >> 24;
+	*out++ = value >> 16;
+	*out++ = value >> 8;
+	*out++ = value;
+	return out;
+}
+
+static u8 *pkm_kacs_msgpack_s32(u8 *out, s32 value)
+{
+	*out++ = 0xd2;
+	*out++ = (u32)value >> 24;
+	*out++ = (u32)value >> 16;
+	*out++ = (u32)value >> 8;
+	*out++ = (u32)value;
+	return out;
+}
+
+void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
+				     u32 provider_index,
+				     const char *provider_stratum,
+				     u32 create_index,
+				     const char *create_stratum,
+				     int result)
+{
+	static const char event_type[] = "STRATAFS_COPY_UP";
+	static const char path_key[] = "path";
+	static const char provider_index_key[] = "provider_index";
+	static const char provider_key[] = "provider_stratum";
+	static const char create_index_key[] = "create_index";
+	static const char create_key[] = "create_stratum";
+	static const char result_key[] = "result_errno";
+	const char *relative = relative_path ? relative_path : "";
+	size_t relative_len = strnlen(relative, PATH_MAX);
+	bool add_slash;
+	size_t path_len;
+	size_t provider_len;
+	size_t create_len;
+	size_t size;
+	u8 *payload;
+	u8 *out;
+
+	if (!provider_stratum || !create_stratum || relative_len == PATH_MAX)
+		return;
+	add_slash = !relative_len || relative[0] != '/';
+	path_len = relative_len + add_slash;
+	provider_len = strnlen(provider_stratum, PATH_MAX);
+	create_len = strnlen(create_stratum, PATH_MAX);
+	if (provider_len == PATH_MAX || create_len == PATH_MAX)
+		return;
+
+	size = 1 +
+		pkm_kacs_msgpack_string_size(sizeof(path_key) - 1) +
+		pkm_kacs_msgpack_string_size(path_len) +
+		pkm_kacs_msgpack_string_size(sizeof(provider_index_key) - 1) + 5 +
+		pkm_kacs_msgpack_string_size(sizeof(provider_key) - 1) +
+		pkm_kacs_msgpack_string_size(provider_len) +
+		pkm_kacs_msgpack_string_size(sizeof(create_index_key) - 1) + 5 +
+		pkm_kacs_msgpack_string_size(sizeof(create_key) - 1) +
+		pkm_kacs_msgpack_string_size(create_len) +
+		pkm_kacs_msgpack_string_size(sizeof(result_key) - 1) + 5;
+	payload = kmalloc(size, GFP_KERNEL);
+	if (!payload)
+		return;
+
+	out = payload;
+	*out++ = 0x86; /* map(6) */
+	out = pkm_kacs_msgpack_string(out, path_key, sizeof(path_key) - 1);
+	out = pkm_kacs_msgpack_string_header(out, path_len);
+	if (add_slash)
+		*out++ = '/';
+	memcpy(out, relative, relative_len);
+	out += relative_len;
+	out = pkm_kacs_msgpack_string(out, provider_index_key,
+				      sizeof(provider_index_key) - 1);
+	out = pkm_kacs_msgpack_u32(out, provider_index);
+	out = pkm_kacs_msgpack_string(out, provider_key,
+				      sizeof(provider_key) - 1);
+	out = pkm_kacs_msgpack_string(out, provider_stratum, provider_len);
+	out = pkm_kacs_msgpack_string(out, create_index_key,
+				      sizeof(create_index_key) - 1);
+	out = pkm_kacs_msgpack_u32(out, create_index);
+	out = pkm_kacs_msgpack_string(out, create_key, sizeof(create_key) - 1);
+	out = pkm_kacs_msgpack_string(out, create_stratum, create_len);
+	out = pkm_kacs_msgpack_string(out, result_key, sizeof(result_key) - 1);
+	out = pkm_kacs_msgpack_s32(out, result);
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
+			     sizeof(event_type) - 1, payload, out - payload);
+	kfree(payload);
+}
+
+void pkm_kacs_stratafs_audit_mutation_refused(
+	const char *relative_path, const char *operation, s32 provider_index,
+	const char *provider_stratum, int result, bool deferred)
+{
+	static const char event_type[] = "STRATAFS_MUTATION_REFUSED";
+	static const char path_key[] = "path";
+	static const char operation_key[] = "operation";
+	static const char provider_index_key[] = "provider_index";
+	static const char provider_key[] = "provider_stratum";
+	static const char result_key[] = "result_errno";
+	static const char deferred_key[] = "deferred";
+	const char *relative = relative_path ? relative_path : "";
+	const char *provider = provider_stratum ? provider_stratum : "";
+	size_t relative_len = strnlen(relative, PATH_MAX);
+	size_t operation_len;
+	size_t provider_len;
+	bool add_slash;
+	size_t path_len;
+	size_t size;
+	u8 *payload;
+	u8 *out;
+
+	if (!operation || result >= 0 || relative_len == PATH_MAX)
+		return;
+	operation_len = strnlen(operation, 64);
+	provider_len = strnlen(provider, PATH_MAX);
+	if (!operation_len || operation_len == 64 || provider_len == PATH_MAX)
+		return;
+	add_slash = !relative_len || relative[0] != '/';
+	path_len = relative_len + add_slash;
+	size = 1 +
+		pkm_kacs_msgpack_string_size(sizeof(path_key) - 1) +
+		pkm_kacs_msgpack_string_size(path_len) +
+		pkm_kacs_msgpack_string_size(sizeof(operation_key) - 1) +
+		pkm_kacs_msgpack_string_size(operation_len) +
+		pkm_kacs_msgpack_string_size(sizeof(provider_index_key) - 1) + 5 +
+		pkm_kacs_msgpack_string_size(sizeof(provider_key) - 1) +
+		pkm_kacs_msgpack_string_size(provider_len) +
+		pkm_kacs_msgpack_string_size(sizeof(result_key) - 1) + 5 +
+		pkm_kacs_msgpack_string_size(sizeof(deferred_key) - 1) + 1;
+	payload = kmalloc(size, GFP_KERNEL);
+	if (!payload)
+		return;
+
+	out = payload;
+	*out++ = 0x86; /* map(6) */
+	out = pkm_kacs_msgpack_string(out, path_key, sizeof(path_key) - 1);
+	out = pkm_kacs_msgpack_string_header(out, path_len);
+	if (add_slash)
+		*out++ = '/';
+	memcpy(out, relative, relative_len);
+	out += relative_len;
+	out = pkm_kacs_msgpack_string(out, operation_key,
+				      sizeof(operation_key) - 1);
+	out = pkm_kacs_msgpack_string(out, operation, operation_len);
+	out = pkm_kacs_msgpack_string(out, provider_index_key,
+				      sizeof(provider_index_key) - 1);
+	out = pkm_kacs_msgpack_s32(out, provider_index);
+	out = pkm_kacs_msgpack_string(out, provider_key,
+				      sizeof(provider_key) - 1);
+	out = pkm_kacs_msgpack_string(out, provider, provider_len);
+	out = pkm_kacs_msgpack_string(out, result_key, sizeof(result_key) - 1);
+	out = pkm_kacs_msgpack_s32(out, result);
+	out = pkm_kacs_msgpack_string(out, deferred_key,
+				      sizeof(deferred_key) - 1);
+	*out++ = deferred ? 0xc3 : 0xc2;
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
+			     sizeof(event_type) - 1, payload, out - payload);
+	kfree(payload);
+}
+
+ssize_t pkm_kacs_stratafs_probe_staging_marker(const struct path *path,
+					       void *buffer, size_t size)
+{
+	struct inode *inode;
+
+	if (!path || !path->dentry || !buffer || !size)
+		return -EINVAL;
+	inode = d_inode(path->dentry);
+	if (!inode)
+		return -ESTALE;
+	return __vfs_getxattr(path->dentry, inode, STRATAFS_STAGING_XATTR,
+			      buffer, size);
+}
+
+bool pkm_kacs_stratafs_delete_on_close_active(const struct dentry *outer)
+{
+	struct pkm_kacs_task_security *task_sec;
+	const struct file *file;
+
+	if (!outer || !current || !current->security)
+		return false;
+	task_sec = pkm_kacs_task(current);
+	file = task_sec->delete_on_close_file;
+	return file && file_dentry((struct file *)file) == outer &&
+	       file_inode((struct file *)file) == d_inode(outer);
+}
+
+int pkm_kacs_stratafs_delete_on_close_bind_provider(
+	const struct dentry *outer, const struct path *parent,
+	struct dentry *target)
+{
+	struct pkm_kacs_task_security *task_sec;
+	struct inode *parent_inode;
+	struct inode *target_inode;
+
+	if (!pkm_kacs_stratafs_delete_on_close_active(outer) || !parent ||
+	    !parent->mnt || !parent->dentry || !target ||
+	    target->d_parent != parent->dentry)
+		return -EPERM;
+	parent_inode = d_inode(parent->dentry);
+	target_inode = d_inode(target);
+	if (!parent_inode || !target_inode || !S_ISDIR(parent_inode->i_mode) ||
+	    !d_is_positive(target))
+		return -ESTALE;
+	task_sec = pkm_kacs_task(current);
+	if (task_sec->delete_on_close_parent_inode ||
+	    task_sec->delete_on_close_dentry || task_sec->delete_on_close_inode)
+		return -EBUSY;
+	task_sec->delete_on_close_parent_inode = parent_inode;
+	task_sec->delete_on_close_dentry = target;
+	task_sec->delete_on_close_inode = target_inode;
+	return 0;
+}
+
+void pkm_kacs_stratafs_delete_on_close_unbind_provider(void)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!current || !current->security)
+		return;
+	task_sec = pkm_kacs_task(current);
+	task_sec->delete_on_close_inode = NULL;
+	task_sec->delete_on_close_dentry = NULL;
+	task_sec->delete_on_close_parent_inode = NULL;
+}
+
+int pkm_kacs_stratafs_authorize_path(const struct path *path,
+				     u32 desired_access)
+{
+	const void *subject_token;
+	const void *caap_cache = NULL;
+	const char *name;
+	struct inode *inode;
+	u8 *bytes = NULL;
+	ssize_t len;
+	u32 granted = 0;
+	u32 continuous_audit = 0;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+	int ret;
+
+	if (!path || !path->dentry || !desired_access)
+		return -EINVAL;
+	inode = d_inode(path->dentry);
+	if (!inode)
+		return -EACCES;
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+	name = pkm_kacs_inode_sd_xattr_name(inode);
+
+	/*
+	 * Read the provider's descriptor directly.  In particular, do not ask
+	 * its superblock to synthesize a missing value: StrataFS is permanently
+	 * DENY_MISSING even when the provider mount is not.
+	 */
+	if (current && current->security)
+		pkm_kacs_task(current)->internal_sd_read_depth++;
+	len = __vfs_getxattr(path->dentry, inode, name, NULL, 0);
+	if (current && current->security)
+		pkm_kacs_task(current)->internal_sd_read_depth--;
+	if (len == -ENODATA || len == -EOPNOTSUPP)
+		return -EACCES;
+	if (len <= 0 || len > PKM_KACS_MAX_SD_BYTES)
+		return len < 0 ? (int)len : -EACCES;
+	bytes = kvmalloc(len, GFP_KERNEL);
+	if (!bytes)
+		return -ENOMEM;
+	if (current && current->security)
+		pkm_kacs_task(current)->internal_sd_read_depth++;
+	ret = __vfs_getxattr(path->dentry, inode, name, bytes, len);
+	if (current && current->security)
+		pkm_kacs_task(current)->internal_sd_read_depth--;
+	if (ret != len || kacs_rust_validate_stored_sd_bytes(bytes, len)) {
+		ret = ret < 0 ? ret : -EACCES;
+		goto out;
+	}
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret)
+		goto out;
+	ret = pkm_kacs_caap_cache_lock(&caap_cache);
+	if (ret)
+		goto out;
+	ret = kacs_rust_check_file_sd_with_intent_audit_caap(
+		subject_token, bytes, len, desired_access, 0, pip_type, pip_trust,
+		caap_cache, &granted, &continuous_audit);
+	pkm_kacs_caap_cache_unlock();
+out:
+	kvfree(bytes);
+	return ret;
+}
+
+void pkm_kacs_stratafs_end_create_decision(void)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!current || !current->security)
+		return;
+	task_sec = pkm_kacs_task(current);
+	task_sec->stratafs_create_subject = NULL;
+	task_sec->stratafs_create_authority = NULL;
+	task_sec->stratafs_create_parent = NULL;
+	task_sec->stratafs_create_dentry = NULL;
+	task_sec->stratafs_create_link_source = NULL;
+	task_sec->stratafs_create_link_inode = NULL;
+	task_sec->stratafs_create_access = 0;
+	task_sec->stratafs_create_state = 0;
+}
+
+int pkm_kacs_stratafs_begin_create_decision(const struct path *authority,
+					     u32 desired_access)
+{
+	struct pkm_kacs_task_security *task_sec;
+	const void *subject_token;
+	int ret;
+
+	if (!current || !current->security || !authority ||
+	    !authority->dentry || !desired_access)
+		return -EACCES;
+	task_sec = pkm_kacs_task(current);
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+	if (task_sec->stratafs_create_state) {
+		if (task_sec->stratafs_create_state == 1 &&
+		    task_sec->stratafs_create_subject == subject_token &&
+		    task_sec->stratafs_create_authority ==
+			    d_inode(authority->dentry) &&
+		    task_sec->stratafs_create_access == desired_access)
+			return 0;
+		return -EBUSY;
+	}
+	ret = pkm_kacs_stratafs_authorize_path(authority, desired_access);
+	if (ret)
+		return ret;
+	task_sec->stratafs_create_subject = subject_token;
+	task_sec->stratafs_create_authority = d_inode(authority->dentry);
+	task_sec->stratafs_create_access = desired_access;
+	task_sec->stratafs_create_state = 1;
+	return 0;
+}
+
+int pkm_kacs_stratafs_set_native_create_decision(
+	const struct path *authority, u32 desired_access)
+{
+	struct pkm_kacs_task_security *task_sec;
+	const void *subject_token;
+
+	if (!current || !current->security || !authority ||
+	    !authority->dentry || !d_is_dir(authority->dentry) ||
+	    !desired_access)
+		return -EACCES;
+	task_sec = pkm_kacs_task(current);
+	if (task_sec->stratafs_create_state)
+		return -EBUSY;
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token)
+		return -EACCES;
+	/* The native-create SD builder just authorized this exact directory. */
+	task_sec->stratafs_create_subject = subject_token;
+	task_sec->stratafs_create_authority = d_inode(authority->dentry);
+	task_sec->stratafs_create_access = desired_access;
+	task_sec->stratafs_create_state = 1;
+	return 0;
+}
+
+int pkm_kacs_stratafs_bind_create_decision(const struct inode *provider_parent,
+					    const struct dentry *target)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!current || !current->security || !provider_parent ||
+	    (target && (d_inode((struct dentry *)target) ||
+			target->d_parent == NULL ||
+			d_inode(target->d_parent) != provider_parent)))
+		return -EACCES;
+	task_sec = pkm_kacs_task(current);
+	if (task_sec->stratafs_create_state != 1 ||
+	    task_sec->stratafs_create_subject !=
+		pkm_kacs_current_effective_token_ptr())
+		return -EACCES;
+	task_sec->stratafs_create_parent = provider_parent;
+	task_sec->stratafs_create_dentry = target;
+	task_sec->stratafs_create_state = 2;
+	return 0;
+}
+
+int pkm_kacs_stratafs_mark_unnamed_link(const struct dentry *source)
+{
+	struct pkm_kacs_task_security *task_sec;
+
+	if (!current || !current->security || !source ||
+	    !d_really_is_positive((struct dentry *)source))
+		return -EACCES;
+	task_sec = pkm_kacs_task(current);
+	if (task_sec->stratafs_create_state != 2 ||
+	    task_sec->stratafs_create_link_source)
+		return -EACCES;
+	task_sec->stratafs_create_link_source = source;
+	task_sec->stratafs_create_link_inode = d_inode(source);
+	return 0;
+}
+
+bool pkm_kacs_stratafs_is_descriptor_xattr(const struct inode *inode,
+					   const char *name)
+{
+	return pkm_kacs_is_canonical_sd_xattr(inode, name);
+}
 
 static const u8 pkm_kacs_sysfs_write_gate_sd[] = {
 	/* Self-relative SD: owner SYSTEM, group SYSTEM, DACL below. */
@@ -81,35 +532,68 @@ void pkm_kacs_init_path_anchor_file(struct file *file, const struct path *path)
 
 int pkm_kacs_file_permission(struct file *file, int mask)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
+
+	copy_up = pkm_kacs_copy_up_file_permission(file, mask);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
+		return -EACCES;
+	/* The user-visible file was checked immediately before this call. */
+	if (pkm_kacs_backing_file_inherited(file))
+		return 0;
 	return pkm_kacs_check_file_permission_snapshot(file, mask);
 }
 
 int pkm_kacs_file_ioctl(struct file *file, unsigned int cmd,
 			unsigned long arg)
 {
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
 	return pkm_kacs_check_file_ioctl_snapshot(file, cmd, arg, false);
 }
 
 int pkm_kacs_file_ioctl_compat(struct file *file, unsigned int cmd,
 			       unsigned long arg)
 {
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
 	return pkm_kacs_check_file_ioctl_snapshot(file, cmd, arg, true);
 }
 
 int pkm_kacs_file_lock(struct file *file, unsigned int cmd)
 {
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
 	return pkm_kacs_check_file_lock_snapshot(file, cmd);
 }
 
 int pkm_kacs_file_fcntl(struct file *file, unsigned int cmd,
 			unsigned long arg)
 {
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
 	return pkm_kacs_check_file_fcntl_snapshot(file, cmd, arg);
 }
 
 int pkm_kacs_file_truncate(struct file *file)
 {
-	return pkm_kacs_check_file_truncate_snapshot(file);
+	int ret;
+
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
+	ret = pkm_kacs_check_file_truncate_snapshot(file);
+	if (ret)
+		return ret;
+	return pkm_kacs_file_truncate_metadata(file);
+}
+
+int pkm_kacs_file_fsync(struct file *file)
+{
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
+	return pkm_kacs_check_file_snapshot_grant(
+		file, KACS_ACCESS_SYNCHRONIZE);
 }
 
 int pkm_kacs_file_begin_write_intent(struct file *file, u32 rwf_flags,
@@ -155,6 +639,8 @@ int pkm_kacs_file_fallocate(struct file *file, int mode)
 	int ret;
 
 	if (!file)
+		return -EACCES;
+	if (pkm_kacs_copy_up_file_is_internal(file))
 		return -EACCES;
 
 	ret = security_file_permission(file, MAY_WRITE);
@@ -579,6 +1065,7 @@ out_unlock_caap:
 
 int pkm_kacs_file_open(struct file *file)
 {
+	enum pkm_kacs_copy_up_file_access copy_up;
 	const void *subject_token;
 	u32 desired_access = 0;
 	u32 create_options = 0;
@@ -595,6 +1082,16 @@ int pkm_kacs_file_open(struct file *file)
 		return 0;
 	if ((file->f_mode & FMODE_PATH) != 0)
 		return 0;
+	copy_up = pkm_kacs_copy_up_file_open(file);
+	if (copy_up == PKM_KACS_COPY_UP_FILE_ALLOW)
+		return 0;
+	if (copy_up == PKM_KACS_COPY_UP_FILE_DENY)
+		return -EACCES;
+	if ((file->f_mode & FMODE_BACKING) && !pkm_kacs_copy_up_active()) {
+		ret = pkm_kacs_backing_file_apply(file);
+		if (ret != -ENOENT)
+			return ret;
+	}
 
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	if (!subject_token) {

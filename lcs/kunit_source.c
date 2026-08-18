@@ -6059,7 +6059,11 @@ static void pkm_lcs_kunit_source_dispatch_drop_key_frame(struct kunit *test)
 		0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30,
 	};
 	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_source_response_result response_result = { };
+	struct pkm_lcs_source_table_snapshot table = { };
 	size_t payload_offset = RSI_REQUEST_HEADER_SIZE;
+	size_t response_len;
+	u8 response[RSI_MIN_RESPONSE_SIZE];
 	u8 out[128];
 	struct file file = { };
 	const void *token;
@@ -6096,6 +6100,26 @@ static void pkm_lcs_kunit_source_dispatch_drop_key_frame(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, memcmp(out + payload_offset, guid,
 				    RSI_GUID_SIZE), 0);
 	KUNIT_EXPECT_EQ(test, payload_offset + RSI_GUID_SIZE, enqueue.len);
+
+	/*
+	 * DROP_KEY is also used as fire-and-forget storage GC when the final fd
+	 * for an already-orphaned key closes. A successful response to that
+	 * deliberately unwaited request is not a timed-out mutation and must not
+	 * take the source down merely because it carries no late-effect metadata.
+	 */
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    RSI_OK, &response_len);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_device_write_file(
+				&file, response, response_len, false,
+				&response_result),
+			(ssize_t)response_len);
+	KUNIT_EXPECT_FALSE(test, response_result.caller_waiter_attached);
+	KUNIT_EXPECT_FALSE(test, response_result.caller_waiter_detached);
+	pkm_lcs_kunit_source_table_snapshot(&table);
+	KUNIT_EXPECT_EQ(test, table.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, table.down_count, 0U);
 
 	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
 	pkm_lcs_kunit_reset_source_table();

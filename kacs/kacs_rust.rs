@@ -40,6 +40,9 @@ mod lcs_core;
 #[path = "../lcs/rust_ingress.rs"]
 mod lcs_rust_ingress;
 mod kmes_payload;
+#[allow(dead_code)]
+#[path = "../stratafs_core/mod.rs"]
+mod stratafs_core;
 #[path = "../kmes/kmes_validate.rs"]
 mod kmes_validate;
 // KACS token-runtime scaffolding: constants, fields, and helpers for
@@ -74,4 +77,51 @@ pub extern "C" fn kacs_rust_kunit_probe() -> usize {
 /// `lcs-core` tree is linked and callable.
 pub extern "C" fn lcs_rust_kunit_probe() -> usize {
     lcs_core::kernel_compile_probe()
+}
+
+#[no_mangle]
+/// Validate a bounded C array of StrataFS stratum flags.
+pub unsafe extern "C" fn stratafs_rust_validate_flags(
+    flags: *const u32,
+    count: usize,
+    create_index: *mut i32,
+) -> i32 {
+    if flags.is_null() || create_index.is_null() || count > stratafs_core::MAX_STRATA {
+        return -1;
+    }
+    let values = unsafe { core::slice::from_raw_parts(flags, count) };
+    match stratafs_core::validate_flags(values) {
+        Ok(create) => {
+            unsafe { *create_index = create.map_or(-1, |index| index as i32) };
+            0
+        }
+        Err(error) => -(error as i32),
+    }
+}
+
+#[no_mangle]
+/// Return the highest-precedence present stratum, or -1.
+pub extern "C" fn stratafs_rust_provider(present: u64, count: usize) -> i32 {
+    stratafs_core::provider(present, count).map_or(-1, |index| index as i32)
+}
+
+#[no_mangle]
+/// Route one existing-object mutation under PSD-011 section 5.1.
+pub extern "C" fn stratafs_rust_route_existing(
+    provider: usize,
+    provider_accepts: bool,
+    create_index: i32,
+    create_present: bool,
+    copyable: bool,
+    mount_read_only: bool,
+) -> i32 {
+    let create = (create_index >= 0).then_some(create_index as usize);
+    stratafs_core::route_existing(
+        provider,
+        provider_accepts,
+        create,
+        create_present,
+        copyable,
+        mount_read_only,
+    ) as i32
 }

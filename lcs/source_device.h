@@ -109,6 +109,7 @@ struct pkm_lcs_source_in_flight_request {
 	bool delivered;
 	bool response_accepted;
 	bool key_guid_present;
+	bool waiter_was_attached;
 	u64 request_id;
 	u64 txn_id;
 	u16 op_code;
@@ -457,6 +458,7 @@ struct pkm_lcs_source_response_result {
 	bool malformed_source_data;
 	bool source_validation_failure_present;
 	bool caller_waiter_attached;
+	bool caller_waiter_detached;
 	bool key_guid_present;
 };
 

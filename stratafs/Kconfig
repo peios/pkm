@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config STRATAFS_FS
+	bool "StrataFS layered directory filesystem"
+	depends on SECURITY_PKM
+	select FS_STACK
+	help
+	  StrataFS presents an ordered set of independently managed directories
+	  as one live merged tree.  It is the Peios Linux-compatibility filesystem
+	  specified by PSD-011.
+
+	  If unsure, say N.
+
+config STRATAFS_KUNIT_TEST
+	bool "StrataFS KUnit tests"
+	depends on STRATAFS_FS && KUNIT
+	default SECURITY_PKM_KUNIT
+	help
+	  Exercise StrataFS mount parsing and bounded policy glue in-kernel.

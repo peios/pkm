@@ -2,15 +2,20 @@
 # the configured build infrastructure (top Makefile, Kconfig, Module.symvers,
 # the built scripts/, headers, and the x86 build bits), carved from build.kernel.
 #
-# Destination: usr/lib/<triplet>/modules/<release>/build. This is arch-specific
-# content (built host tools, .config, arch/x86, generated headers), so under
-# PSD-009 it belongs beneath the triplet (§3.4.2) — usr/src/ is reserved for
-# debug sources only (§3.4.1), so the RPM-style usr/src/kernels/ is not a Peios
-# destination. The modules/<release>/build shape mirrors the canonical
-# /lib/modules/<release>/build that out-of-tree `make -C` expects, relocated
-# under the triplet; when the kernel goes modular (the production shape — the
-# current monolithic build is a temporary dev simplification) the modules tree
-# lands alongside it and a kmod compatibility symlink has a natural target.
+# Destination: usr/lib/modules/<release>/build — beside the kernel image and
+# its modules, which is where the Peios filesystem layout puts kernel content.
+# usr/src/ is reserved for debug sources, so the RPM-style usr/src/kernels/ is
+# not a Peios destination.
+#
+# This lands on the canonical path exactly: /lib/modules/<release>/build, which
+# is what an out-of-tree `make -C` expects, resolves through the /lib merged
+# view straight to this directory. An earlier layout relocated the tree beneath
+# the triplet because usr/lib/<triplet>/ was then the only home for
+# arch-specific content, and planned a kmod compatibility symlink to bridge the
+# difference; usr/lib/modules/<ver>/ being a destination in its own right
+# removes both the detour and the symlink. When the kernel goes modular (the
+# production shape — the current monolithic build is a temporary dev
+# simplification) the modules tree lands directly alongside this build kit.
 #
 # No modules ship yet (the kernel is monolithic for now), so the kit has no consumer
 # today, but it is producible now and so is built rather than left as rework.
@@ -31,12 +36,12 @@ kernel = "{{version}}"
 
 
 [files]
-"kernel:Makefile"            = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/Makefile"
-"kernel:Module.symvers"      = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/Module.symvers"
-"kernel:.config"             = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/.config"
-"kernel:scripts/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/scripts/"
-"kernel:include/**"          = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/include/"
-"kernel:arch/x86/Makefile"   = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/arch/x86/Makefile"
-"kernel:arch/x86/include/**" = "usr/lib/x86_64-linux-peios/modules/7.0.9-peios-{{version}}/build/arch/x86/include/"
+"kernel:Makefile"            = "usr/lib/modules/7.0.9-peios-{{version}}/build/Makefile"
+"kernel:Module.symvers"      = "usr/lib/modules/7.0.9-peios-{{version}}/build/Module.symvers"
+"kernel:.config"             = "usr/lib/modules/7.0.9-peios-{{version}}/build/.config"
+"kernel:scripts/**"          = "usr/lib/modules/7.0.9-peios-{{version}}/build/scripts/"
+"kernel:include/**"          = "usr/lib/modules/7.0.9-peios-{{version}}/build/include/"
+"kernel:arch/x86/Makefile"   = "usr/lib/modules/7.0.9-peios-{{version}}/build/arch/x86/Makefile"
+"kernel:arch/x86/include/**" = "usr/lib/modules/7.0.9-peios-{{version}}/build/arch/x86/include/"
 # Build artifacts and C sources aren't needed to compile external modules; the
 # built host tools in scripts/ (no extension, e.g. modpost) are kept.

@@ -1,0 +1,78 @@
+diff --git a/fs/Kconfig b/fs/Kconfig
+index 5f86eabf34e6..99145a0acd31 100644
+--- a/fs/Kconfig
++++ b/fs/Kconfig
+@@ -131,5 +131,6 @@ source "fs/autofs/Kconfig"
+ source "fs/fuse/Kconfig"
+ source "fs/overlayfs/Kconfig"
++source "fs/stratafs/Kconfig"
+ 
+ menu "Caches"
+ 
+diff --git a/fs/Makefile b/fs/Makefile
+index 7e738a46d773..8785d7dd9f73 100644
+--- a/fs/Makefile
++++ b/fs/Makefile
+@@ -116,5 +116,6 @@ obj-$(CONFIG_ADFS_FS)		+= adfs/
+ obj-$(CONFIG_FUSE_FS)		+= fuse/
+ obj-$(CONFIG_OVERLAY_FS)	+= overlayfs/
++obj-$(CONFIG_STRATAFS_FS)	+= stratafs/
+ obj-$(CONFIG_ORANGEFS_FS)       += orangefs/
+ obj-$(CONFIG_UDF_FS)		+= udf/
+ obj-$(CONFIG_SUN_OPENPROMFS)	+= openpromfs/
+
+diff --git a/fs/namespace.c b/fs/namespace.c
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -2993,6 +2993,13 @@ static int do_loopback(const struct path *path, const char *old_name,
+ 	if (mnt_ns_loop(old_path.dentry))
+ 		return -EINVAL;
+ 
++	if (old_path.mnt->mnt_sb->s_op->validate_mountpoint) {
++		err = old_path.mnt->mnt_sb->s_op->validate_mountpoint(
++			old_path.mnt->mnt_sb, path);
++		if (err)
++			return err;
++	}
++
+ 	LOCK_MOUNT(mp, path);
+ 	if (IS_ERR(mp.parent))
+ 		return PTR_ERR(mp.parent);
+@@ -3602,6 +3609,13 @@ static int do_move_mount(const struct path *old_path,
+ 	if (d_is_dir(new_path->dentry) != d_is_dir(old_path->dentry))
+ 		return -EINVAL;
+ 
++	if (old_path->mnt->mnt_sb->s_op->validate_mountpoint) {
++		err = old_path->mnt->mnt_sb->s_op->validate_mountpoint(
++			old_path->mnt->mnt_sb, new_path);
++		if (err)
++			return err;
++	}
++
+ 	LOCK_MOUNT_MAYBE_BENEATH(mp, new_path, beneath);
+ 	if (IS_ERR(mp.parent))
+ 		return PTR_ERR(mp.parent);
+@@ -3765,7 +3779,12 @@ static int do_new_mount_fc(struct fs_context *fc, const struct path *mountpoint,
+ 	if (IS_ERR(mnt))
+ 		return PTR_ERR(mnt);
+ 
+ 	sb = fc->root->d_sb;
++	if (sb->s_op->validate_mountpoint) {
++		error = sb->s_op->validate_mountpoint(sb, mountpoint);
++		if (error)
++			return error;
++	}
+ 	error = security_sb_kern_mount(sb);
+ 	if (unlikely(error))
+ 		return error;
+diff --git a/include/linux/fs/super_types.h b/include/linux/fs/super_types.h
+--- a/include/linux/fs/super_types.h
++++ b/include/linux/fs/super_types.h
+@@ -126,5 +126,7 @@ struct super_operations {
+ 	void (*shutdown)(struct super_block *sb);
+ 
+ 	/* Report a filesystem error */
+ 	void (*report_error)(const struct fserror_event *event);
++	int (*validate_mountpoint)(struct super_block *sb,
++				   const struct path *mountpoint);
+ };

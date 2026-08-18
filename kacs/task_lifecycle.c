@@ -7,6 +7,7 @@
 #include <linux/types.h>
 
 #include "cred_lifecycle.h"
+#include "copy_up.h"
 #include "lsm_internal.h"
 #include "process_state.h"
 #include "task_lifecycle.h"
@@ -27,6 +28,11 @@ int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 
 	new_sec = pkm_kacs_task(task);
 	new_sec->process_state = NULL;
+	new_sec->copy_up_context = NULL;
+	new_sec->delete_on_close_file = NULL;
+	new_sec->delete_on_close_parent_inode = NULL;
+	new_sec->delete_on_close_dentry = NULL;
+	new_sec->delete_on_close_inode = NULL;
 	new_sec->impersonation_saved_cred = NULL;
 	new_sec->native_open.expected_dentry = NULL;
 	new_sec->native_open.expected_mnt = NULL;
@@ -39,8 +45,37 @@ int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	new_sec->native_create.directory = false;
 	new_sec->native_create.active = false;
 	new_sec->metadata_decision.inode = NULL;
+	new_sec->metadata_decision.file = NULL;
 	new_sec->metadata_decision.op_class = PKM_KACS_METADATA_OP_NONE;
 	new_sec->metadata_decision.active = 0;
+	new_sec->stratafs_create_subject = NULL;
+	new_sec->stratafs_create_authority = NULL;
+	new_sec->stratafs_create_parent = NULL;
+	new_sec->stratafs_create_dentry = NULL;
+	new_sec->stratafs_create_link_source = NULL;
+	new_sec->stratafs_create_link_inode = NULL;
+	new_sec->stratafs_create_access = 0;
+	new_sec->stratafs_create_state = 0;
+	new_sec->stratafs_supersede_subject = NULL;
+	new_sec->stratafs_supersede_target = NULL;
+	new_sec->stratafs_supersede_target_inode = NULL;
+	new_sec->stratafs_supersede_source = NULL;
+	new_sec->stratafs_supersede_source_inode = NULL;
+	new_sec->stratafs_supersede_file = NULL;
+	new_sec->stratafs_supersede_old_parent = NULL;
+	new_sec->stratafs_supersede_old_dentry = NULL;
+	new_sec->stratafs_supersede_old_inode = NULL;
+	new_sec->stratafs_supersede_new_parent = NULL;
+	new_sec->stratafs_supersede_new_dentry = NULL;
+	new_sec->stratafs_supersede_new_inode = NULL;
+	new_sec->stratafs_supersede_state = 0;
+	new_sec->stratafs_supersede_phase = 0;
+	new_sec->stratafs_cleanup_parent = NULL;
+	new_sec->stratafs_cleanup_dentry = NULL;
+	new_sec->stratafs_cleanup_inode = NULL;
+	new_sec->stratafs_cleanup_outer = NULL;
+	new_sec->stratafs_cleanup_outer_inode = NULL;
+	new_sec->stratafs_cleanup_subject = NULL;
 	new_sec->pending_exec_pip_type = 0;
 	new_sec->pending_exec_pip_trust = 0;
 	new_sec->pending_exec_pip_valid = 0;
@@ -89,6 +124,7 @@ void pkm_kacs_task_free(struct task_struct *task)
 		return;
 
 	sec = pkm_kacs_task(task);
+	pkm_kacs_copy_up_task_exit(task);
 	trace_kacs_task(0, (u64)(uintptr_t)sec->process_state,
 			KACS_TASK_FREE, 0);
 	pkm_kacs_process_state_put(sec->process_state);

@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Boot a KACS-enabled kernel with a minimal initramfs and exercise StrataFS
+# through real userspace syscalls.
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+	echo "usage: $0 <kernel-tree-or-bzImage>" >&2
+	exit 2
+fi
+
+if [[ -d "$1" ]]; then
+	bzimage="$1/arch/x86/boot/bzImage"
+	log="$1/stratafs-qemu.log"
+else
+	bzimage="$1"
+	log="$(cd "$(dirname "$bzimage")" && pwd)/stratafs-qemu.log"
+fi
+[[ -f "$bzimage" ]] || {
+	echo "bzImage not found: $bzimage" >&2
+	exit 1
+}
+
+qemu=${QEMU_BIN:-qemu-system-x86_64}
+timeout_s=${PKM_STRATAFS_TIMEOUT:-120}
+log=${PKM_STRATAFS_LOG:-$log}
+command -v "$qemu" >/dev/null || {
+	echo "qemu not found: $qemu" >&2
+	exit 1
+}
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/pkm-stratafs-smoke.XXXXXX")"
+cleanup()
+{
+	rm -rf -- "$work"
+}
+trap cleanup EXIT
+mkdir -p "$work/root"
+
+gcc -static -O2 -Wall -Wextra -Werror \
+	-o "$work/root/init" build/stratafs-smoke.c
+(
+	cd "$work/root"
+	find . -print0 |
+		cpio --null -o --format=newc --quiet >"$work/initrd.cpio"
+)
+
+append='console=ttyS0 quiet loglevel=4 panic=-1 kunit.enable=0 rdinit=/init'
+qemu_args=(
+	-m 2048 -smp 2 -nographic -no-reboot -serial mon:stdio
+	-machine accel=kvm:tcg
+	-kernel "$bzimage"
+	-initrd "$work/initrd.cpio"
+	-append "$append"
+)
+
+echo "test-stratafs: booting $bzimage via $qemu"
+set +e
+timeout "${timeout_s}s" "$qemu" "${qemu_args[@]}" >"$log" 2>&1
+status=$?
+set -e
+
+fail=0
+pass_marker='STRATAFS_SMOKE_PASS: 148 checks'
+fatal_re='STRATAFS_SMOKE_FAIL:|stratafs: staging recovery scan failed:|BUG:|Kernel panic|Oops:|KASAN:|UBSAN:|NULL pointer|Call Trace:|INFO: task .* blocked for more than|WARNING:'
+grep -Fq "$pass_marker" "$log" || {
+	echo "  MISSING: $pass_marker"
+	fail=1
+}
+grep -Eq "$fatal_re" "$log" && {
+	echo "  FOUND: kernel or StrataFS failure signature"
+	fail=1
+}
+if [[ $status -ne 0 ]]; then
+	echo "  QEMU exited with status $status"
+	fail=1
+fi
+
+if [[ $fail -ne 0 ]]; then
+	echo "test-stratafs: FAILED (log $log)" >&2
+	echo "----- log tail -----" >&2
+	tail -80 "$log" >&2
+	exit 1
+fi
+
+echo "test-stratafs: PASS — mounted StrataFS syscall smoke passed in QEMU"

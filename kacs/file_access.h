@@ -7,6 +7,11 @@
 
 struct path;
 
+int pkm_kacs_stratafs_authorize_path(const struct path *path,
+				     u32 desired_access);
+bool pkm_kacs_stratafs_is_descriptor_xattr(const struct inode *inode,
+					   const char *name);
+
 void pkm_kacs_init_path_anchor_file(struct file *file, const struct path *path);
 
 int pkm_kacs_file_open(struct file *file);
@@ -19,6 +24,7 @@ int pkm_kacs_file_lock(struct file *file, unsigned int cmd);
 int pkm_kacs_file_fcntl(struct file *file, unsigned int cmd,
 			unsigned long arg);
 int pkm_kacs_file_truncate(struct file *file);
+int pkm_kacs_file_fsync(struct file *file);
 
 int pkm_kacs_check_sysfs_file_write_for_subject(const void *subject_token,
 						const struct file *file,

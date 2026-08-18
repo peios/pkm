@@ -354,6 +354,14 @@ command = """
 ./build/test-kunit.sh "$PEKIT_KUNIT_OUT"
 """
 
+# Boot the same KACS-enabled kernel with a purpose-built initramfs and exercise
+# StrataFS through real mount/open/read/write/mmap/xattr/link/rename syscalls.
+[test.stratafs]
+needs = ["kunit"]
+command = """
+./build/test-stratafs.sh "$PEKIT_KUNIT_OUT"
+"""
+
 # Regenerate the language bindings under uapi/generated/{go,lua,rust} from the
 # canonical uapi/pkm headers, in place (each gen.sh runs the codegen-safe lint
 # first). This is a `gen` target, not a build: its product is committed source,

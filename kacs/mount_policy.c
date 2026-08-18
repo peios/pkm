@@ -5,6 +5,7 @@
 #include <linux/file.h>
 #include <linux/magic.h>
 #include <linux/kernel.h>
+#include <linux/kacs_stratafs.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/syscalls.h>
@@ -22,6 +23,9 @@
 u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 {
 	switch (magic) {
+	case STRATAFS_SUPER_MAGIC:
+		/* PSD-011 fixes this class; it is not an administrator choice. */
+		return KACS_MOUNT_POLICY_DENY_MISSING;
 	case PROC_SUPER_MAGIC:
 	case SYSFS_MAGIC:
 		return KACS_MOUNT_POLICY_UNMANAGED;
@@ -303,6 +307,11 @@ long pkm_kacs_set_mount_policy_core(
 	    KACS_MOUNT_POLICY_UNMANAGED) {
 		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
 					    KACS_MP_UNMANAGED, -EOPNOTSUPP);
+		return -EOPNOTSUPP;
+	}
+	if (sb->s_magic == STRATAFS_SUPER_MAGIC) {
+		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
+					    KACS_MP_FIXED_POLICY, -EOPNOTSUPP);
 		return -EOPNOTSUPP;
 	}
 

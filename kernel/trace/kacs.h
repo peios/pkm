@@ -1189,7 +1189,8 @@ DEFINE_EVENT(kacs_process_state, kacs_process_state,
 	{ KACS_MP_TEMPLATE_INVALID,	"template-invalid" },		\
 	{ KACS_MP_TCB_DENIED,		"tcb-denied" },			\
 	{ KACS_MP_GET_OK,		"get-ok" },			\
-	{ KACS_MP_GET_NO_SECURITY,	"get-no-security" }
+	{ KACS_MP_GET_NO_SECURITY,	"get-no-security" },		\
+	{ KACS_MP_FIXED_POLICY,		"fixed-policy" }
 
 /*
  * One mount-policy set or get decision. `old_*` are 0 on the guard/reject paths

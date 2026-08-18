@@ -56,6 +56,7 @@ int pkm_kacs_file_chown(struct file *file);
 int pkm_kacs_file_utimens(struct file *file);
 int pkm_kacs_file_fileattr_get(struct file *file);
 int pkm_kacs_file_fileattr_set(struct file *file);
+int pkm_kacs_file_truncate_metadata(struct file *file);
 int pkm_kacs_file_listxattr(struct file *file);
 void pkm_kacs_file_end_metadata(struct file *file);
 int pkm_kacs_path_fileattr_set(const struct path *path);

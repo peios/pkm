@@ -25,6 +25,7 @@
 #include <pkm/token.h>
 
 #include "capability.h"
+#include "copy_up.h"
 #include "file_access.h"
 #include "lsm_internal.h"
 #include "object_lifecycle.h"
@@ -855,6 +856,8 @@ int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
 		return -EACCES;
 	if (file && (file->f_mode & FMODE_PATH) != 0)
 		return -EBADF;
+	if (pkm_kacs_copy_up_file_is_internal(file))
+		return -EACCES;
 
 	mitigation_bits = pkm_kacs_process_state_mitigation_bits(state);
 	ret = pkm_kacs_check_wxp_mmap_core(mitigation_bits, prot);
@@ -871,6 +874,14 @@ int pkm_kacs_mmap_file(struct file *file, unsigned long reqprot,
 		READ_ONCE(state->pip_type), READ_ONCE(state->pip_trust));
 	if (ret)
 		return ret;
+	/*
+	 * backing_file_mmap() is reached only after the user-visible file's
+	 * snapshot check.  Keep the process mitigations above, but do not
+	 * authorize or continuously audit the same operation a second time
+	 * against the kernel-private provider handle.
+	 */
+	if (pkm_kacs_backing_file_inherited(file))
+		return 0;
 
 	return pkm_kacs_check_mmap_snapshot(file, prot, flags);
 }
@@ -889,6 +900,8 @@ int pkm_kacs_file_mprotect(struct vm_area_struct *vma,
 
 	state = pkm_kacs_current_process_state();
 	if (!state)
+		return -EACCES;
+	if (pkm_kacs_copy_up_file_is_internal(vma->vm_file))
 		return -EACCES;
 
 	mitigation_bits = pkm_kacs_process_state_mitigation_bits(state);
