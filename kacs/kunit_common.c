@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "kunit_mldsa_vectors.h"
 
 
 PKM_KUNIT_ASSERT_SIZE(struct kacs_query_args, 16);
@@ -3139,31 +3140,16 @@ void pkm_kunit_signing_fill_key(
 void pkm_kunit_signing_fill_tcb_vector_material(
 	struct pkm_kacs_kunit_signing_probe *material)
 {
-	static const u8 hash[32] = {
-		0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
-		0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
-		0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
-		0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
-	};
-	static const u8 signature[64] = {
-		0x01, 0x05, 0x5e, 0xed, 0x19, 0xb9, 0x4a, 0x3a,
-		0x8d, 0x1f, 0x9d, 0x45, 0xa1, 0x3f, 0x2b, 0x69,
-		0x02, 0x04, 0xcb, 0x20, 0x62, 0xdb, 0xfe, 0x84,
-		0xcc, 0xb2, 0xf8, 0x37, 0x8a, 0x0d, 0xad, 0x26,
-		0x9e, 0x81, 0x4a, 0xe4, 0x54, 0xfb, 0x5b, 0x30,
-		0xd3, 0x6a, 0x24, 0x42, 0xe8, 0xa3, 0x2f, 0x6b,
-		0xa2, 0xfc, 0xbb, 0x41, 0xba, 0x2e, 0x52, 0x93,
-		0x68, 0xd2, 0x26, 0x73, 0x15, 0xc1, 0x3e, 0x02,
-	};
-
 	memset(material, 0, sizeof(*material));
 	material->source = PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR;
-	memcpy(material->hash, hash, sizeof(material->hash));
-	memcpy(material->signature, signature, sizeof(material->signature));
+	memcpy(material->hash, pkm_kunit_mldsa65_tcb_hash,
+	       sizeof(material->hash));
+	memcpy(material->signature, pkm_kunit_mldsa65_tcb_sig,
+	       sizeof(material->signature));
 }
 
 
-int pkm_kunit_ed25519_crypto_verify(const u8 *public_key,
+int pkm_kunit_mldsa65_crypto_verify(const u8 *public_key,
 					   unsigned int public_key_len,
 					   const u8 *msg, unsigned int msg_len,
 					   const u8 *signature,
@@ -3172,7 +3158,7 @@ int pkm_kunit_ed25519_crypto_verify(const u8 *public_key,
 	struct crypto_sig *tfm;
 	int ret;
 
-	tfm = crypto_alloc_sig("ed25519", 0, 0);
+	tfm = crypto_alloc_sig("mldsa65", 0, 0);
 	if (IS_ERR(tfm))
 		return PTR_ERR(tfm);
 

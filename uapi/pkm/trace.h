@@ -106,7 +106,7 @@
 #define KACS_SIG_BAD_KEY_TABLE			1U  /* key table malformed / bad args */
 #define KACS_SIG_NO_KEY_MATCH			2U  /* no key verified the signature */
 #define KACS_SIG_VERIFIED			3U  /* a key verified; trust assigned */
-#define KACS_SIG_CRYPTO_UNAVAILABLE		4U  /* ed25519 tfm allocation failed */
+#define KACS_SIG_CRYPTO_UNAVAILABLE		4U  /* mldsa65 tfm allocation failed */
 #define KACS_SIG_CRYPTO_MISMATCH		5U  /* set-pubkey/verify returned nonzero */
 #define KACS_SIG_PROBE_FOUND			6U  /* valid signature material committed */
 #define KACS_SIG_ELF_MAGIC_READ			7U  /* failed reading ELF magic */

@@ -8,6 +8,7 @@
 #include <pkm/process.h>
 #include <pkm/psb.h>
 #include "access_check.h"
+#include "signing.h"
 
 #define KACS_UUID_BYTES 16U
 #define KACS_LCS_SCOPE_GUID_BYTES 16U
@@ -206,8 +207,8 @@ struct pkm_kacs_kunit_process_state_view {
 
 struct pkm_kacs_kunit_signing_probe {
 	u32 source;
-	u8 signature[64];
-	u8 hash[32];
+	u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN];
+	u8 hash[SHA256_DIGEST_SIZE];
 };
 
 struct pkm_kacs_kunit_signing_reader_args {
@@ -222,7 +223,7 @@ struct pkm_kacs_kunit_signing_reader_args {
 };
 
 struct pkm_kacs_kunit_signing_key_entry {
-	u8 public_key[32];
+	u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN];
 	u32 pip_type;
 	u32 pip_trust;
 };

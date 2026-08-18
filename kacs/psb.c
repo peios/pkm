@@ -485,6 +485,7 @@ void pkm_kacs_exec_pip_from_file(const struct file *file,
 		*pip_type_out = 0;
 		*pip_trust_out = 0;
 	}
+	pkm_kacs_signing_material_release(&material);
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -516,6 +517,7 @@ int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
 
 	if (!commit)
 		pkm_kacs_clear_pending_exec_pip();
+	pkm_kacs_signing_material_release(&material_in);
 	return ret;
 }
 
@@ -572,6 +574,7 @@ long pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
 	pkm_kacs_stage_pending_exec_pip(pip_type, pip_trust);
 	pkm_kacs_apply_pending_exec_dumpable();
 	pkm_kacs_clear_pending_exec_pip();
+	pkm_kacs_signing_material_release(&material_in);
 
 	return get_dumpable(current->mm);
 }
@@ -763,6 +766,7 @@ static int pkm_kacs_check_lsv_file_core(u32 mitigation_bits,
 	ret = pkm_kacs_check_lsv_material_core(
 		mitigation_bits, true, true, process_pip_type,
 		process_pip_trust, &material);
+	pkm_kacs_signing_material_release(&material);
 	if (ret)
 		return ret;
 
@@ -789,9 +793,11 @@ static int pkm_kacs_kunit_check_lsv_material_common(
 	if (ret)
 		return ret;
 
-	return pkm_kacs_check_lsv_material_core(
+	ret = pkm_kacs_check_lsv_material_core(
 		mitigation_bits, file_backed, executable_transition,
 		process_pip_type, process_pip_trust, &material_in);
+	pkm_kacs_signing_material_release(&material_in);
+	return ret;
 }
 
 int pkm_kacs_kunit_check_lsv_mmap_material(

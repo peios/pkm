@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "kunit_mldsa_vectors.h"
 
 
 static void pkm_kunit_boot_system_defaults(struct kunit *test)
@@ -303,129 +304,130 @@ static void pkm_kunit_blob_lifecycle_defaults(struct kunit *test)
 }
 
 
-static void pkm_kunit_ed25519_crypto_rfc8032_vectors(struct kunit *test)
+static void pkm_kunit_mldsa65_crypto_fips204_vectors(struct kunit *test)
 {
-	static const u8 public_key_empty[32] = {
-		0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
-		0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
-		0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
-		0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a,
-	};
-	static const u8 signature_empty[64] = {
-		0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72,
-		0x90, 0x86, 0xe2, 0xcc, 0x80, 0x6e, 0x82, 0x8a,
-		0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74,
-		0xd8, 0x73, 0xe0, 0x65, 0x22, 0x49, 0x01, 0x55,
-		0x5f, 0xb8, 0x82, 0x15, 0x90, 0xa3, 0x3b, 0xac,
-		0xc6, 0x1e, 0x39, 0x70, 0x1c, 0xf9, 0xb4, 0x6b,
-		0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24,
-		0x65, 0x51, 0x41, 0x43, 0x8e, 0x7a, 0x10, 0x0b,
-	};
-	static const u8 public_key_one_byte[32] = {
-		0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a,
-		0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b, 0x7e, 0xbc,
-		0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c,
-		0xc0, 0xcd, 0x55, 0xf1, 0x2a, 0xf4, 0x66, 0x0c,
-	};
-	static const u8 msg_one_byte[1] = { 0x72 };
-	static const u8 signature_one_byte[64] = {
-		0x92, 0xa0, 0x09, 0xa9, 0xf0, 0xd4, 0xca, 0xb8,
-		0x72, 0x0e, 0x82, 0x0b, 0x5f, 0x64, 0x25, 0x40,
-		0xa2, 0xb2, 0x7b, 0x54, 0x16, 0x50, 0x3f, 0x8f,
-		0xb3, 0x76, 0x22, 0x23, 0xeb, 0xdb, 0x69, 0xda,
-		0x08, 0x5a, 0xc1, 0xe4, 0x3e, 0x15, 0x99, 0x6e,
-		0x45, 0x8f, 0x36, 0x13, 0xd0, 0xf1, 0x1d, 0x8c,
-		0x38, 0x7b, 0x2e, 0xae, 0xb4, 0x30, 0x2a, 0xee,
-		0xb0, 0x0d, 0x29, 0x16, 0x12, 0xbb, 0x0c, 0x00,
-	};
-	static const u8 empty_msg[1] = {};
+	/*
+	 * Both vectors are 32-byte messages, matching how KACS uses ML-DSA:
+	 * the SHA-256 content hash is signed directly (psd-004 s6).
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_mldsa65_crypto_verify(
+				pkm_kunit_mldsa65_pubkey,
+				sizeof(pkm_kunit_mldsa65_pubkey),
+				pkm_kunit_mldsa65_tcb_hash,
+				sizeof(pkm_kunit_mldsa65_tcb_hash),
+				pkm_kunit_mldsa65_tcb_sig,
+				sizeof(pkm_kunit_mldsa65_tcb_sig)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_mldsa65_crypto_verify(
+				pkm_kunit_mldsa65_pubkey,
+				sizeof(pkm_kunit_mldsa65_pubkey),
+				pkm_kunit_mldsa65_alt_hash,
+				sizeof(pkm_kunit_mldsa65_alt_hash),
+				pkm_kunit_mldsa65_alt_sig,
+				sizeof(pkm_kunit_mldsa65_alt_sig)),
+			0);
 
+	/* A signature is bound to its message: cross-pairing must fail. */
 	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key_empty, sizeof(public_key_empty),
-				empty_msg, 0, signature_empty,
-				sizeof(signature_empty)),
-			0);
-	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key_one_byte, sizeof(public_key_one_byte),
-				msg_one_byte, sizeof(msg_one_byte),
-				signature_one_byte, sizeof(signature_one_byte)),
-			0);
+			pkm_kunit_mldsa65_crypto_verify(
+				pkm_kunit_mldsa65_pubkey,
+				sizeof(pkm_kunit_mldsa65_pubkey),
+				pkm_kunit_mldsa65_alt_hash,
+				sizeof(pkm_kunit_mldsa65_alt_hash),
+				pkm_kunit_mldsa65_tcb_sig,
+				sizeof(pkm_kunit_mldsa65_tcb_sig)),
+			-EKEYREJECTED);
 }
 
 
-static void pkm_kunit_ed25519_crypto_rejects_bad_inputs(struct kunit *test)
+static void pkm_kunit_mldsa65_crypto_rejects_bad_inputs(struct kunit *test)
 {
-	static const u8 public_key_vector[32] = {
-		0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a,
-		0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b, 0x7e, 0xbc,
-		0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c,
-		0xc0, 0xcd, 0x55, 0xf1, 0x2a, 0xf4, 0x66, 0x0c,
-	};
-	static const u8 signature_vector[64] = {
-		0x92, 0xa0, 0x09, 0xa9, 0xf0, 0xd4, 0xca, 0xb8,
-		0x72, 0x0e, 0x82, 0x0b, 0x5f, 0x64, 0x25, 0x40,
-		0xa2, 0xb2, 0x7b, 0x54, 0x16, 0x50, 0x3f, 0x8f,
-		0xb3, 0x76, 0x22, 0x23, 0xeb, 0xdb, 0x69, 0xda,
-		0x08, 0x5a, 0xc1, 0xe4, 0x3e, 0x15, 0x99, 0x6e,
-		0x45, 0x8f, 0x36, 0x13, 0xd0, 0xf1, 0x1d, 0x8c,
-		0x38, 0x7b, 0x2e, 0xae, 0xb4, 0x30, 0x2a, 0xee,
-		0xb0, 0x0d, 0x29, 0x16, 0x12, 0xbb, 0x0c, 0x00,
-	};
 	struct crypto_sig *tfm;
-	u8 public_key[32];
-	u8 signature[64];
-	u8 msg[1] = { 0x72 };
+	u8 *public_key;
+	u8 *signature;
+	u8 *msg;
 
-	memcpy(public_key, public_key_vector, sizeof(public_key));
-	memcpy(signature, signature_vector, sizeof(signature));
+	/*
+	 * kunit_kzalloc rather than the stack: an ML-DSA-65 key and signature
+	 * are 1952 and 3309 bytes, well past CONFIG_FRAME_WARN. Freed at
+	 * teardown.
+	 */
+	public_key = kunit_kzalloc(test, PKM_KACS_SIGNING_PUBLIC_KEY_LEN,
+				   GFP_KERNEL);
+	signature = kunit_kzalloc(test, PKM_KACS_SIGNING_SIGNATURE_LEN,
+				  GFP_KERNEL);
+	msg = kunit_kzalloc(test, SHA256_DIGEST_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, public_key);
+	KUNIT_ASSERT_NOT_NULL(test, signature);
+	KUNIT_ASSERT_NOT_NULL(test, msg);
+
+	memcpy(public_key, pkm_kunit_mldsa65_pubkey,
+	       PKM_KACS_SIGNING_PUBLIC_KEY_LEN);
+	memcpy(signature, pkm_kunit_mldsa65_tcb_sig,
+	       PKM_KACS_SIGNING_SIGNATURE_LEN);
+	memcpy(msg, pkm_kunit_mldsa65_tcb_hash, SHA256_DIGEST_SIZE);
+
 	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key, sizeof(public_key), msg, sizeof(msg),
-				signature, sizeof(signature)),
+			pkm_kunit_mldsa65_crypto_verify(
+				public_key, PKM_KACS_SIGNING_PUBLIC_KEY_LEN,
+				msg, SHA256_DIGEST_SIZE, signature,
+				PKM_KACS_SIGNING_SIGNATURE_LEN),
 			0);
 
 	msg[0] ^= 0x01;
 	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key, sizeof(public_key), msg, sizeof(msg),
-				signature, sizeof(signature)),
+			pkm_kunit_mldsa65_crypto_verify(
+				public_key, PKM_KACS_SIGNING_PUBLIC_KEY_LEN,
+				msg, SHA256_DIGEST_SIZE, signature,
+				PKM_KACS_SIGNING_SIGNATURE_LEN),
 			-EKEYREJECTED);
 	msg[0] ^= 0x01;
 
 	signature[0] ^= 0x01;
 	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key, sizeof(public_key), msg, sizeof(msg),
-				signature, sizeof(signature)),
+			pkm_kunit_mldsa65_crypto_verify(
+				public_key, PKM_KACS_SIGNING_PUBLIC_KEY_LEN,
+				msg, SHA256_DIGEST_SIZE, signature,
+				PKM_KACS_SIGNING_SIGNATURE_LEN),
 			-EKEYREJECTED);
 	signature[0] ^= 0x01;
 
 	public_key[0] ^= 0x01;
 	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key, sizeof(public_key), msg, sizeof(msg),
-				signature, sizeof(signature)),
+			pkm_kunit_mldsa65_crypto_verify(
+				public_key, PKM_KACS_SIGNING_PUBLIC_KEY_LEN,
+				msg, SHA256_DIGEST_SIZE, signature,
+				PKM_KACS_SIGNING_SIGNATURE_LEN),
 			-EKEYREJECTED);
 	public_key[0] ^= 0x01;
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key, sizeof(public_key) - 1, msg,
-				sizeof(msg), signature, sizeof(signature)),
+			pkm_kunit_mldsa65_crypto_verify(
+				public_key, PKM_KACS_SIGNING_PUBLIC_KEY_LEN - 1,
+				msg, SHA256_DIGEST_SIZE, signature,
+				PKM_KACS_SIGNING_SIGNATURE_LEN),
 			-EINVAL);
+	/*
+	 * A short signature is rejected deeper in, by mldsa_verify()'s own
+	 * length check, which reports -EBADMSG -- unlike the key-length case
+	 * above, which crypto_sig_set_pubkey() rejects with -EINVAL first.
+	 */
 	KUNIT_EXPECT_EQ(test,
-			pkm_kunit_ed25519_crypto_verify(
-				public_key, sizeof(public_key), msg, sizeof(msg),
-				signature, sizeof(signature) - 1),
-			-EINVAL);
+			pkm_kunit_mldsa65_crypto_verify(
+				public_key, PKM_KACS_SIGNING_PUBLIC_KEY_LEN,
+				msg, SHA256_DIGEST_SIZE, signature,
+				PKM_KACS_SIGNING_SIGNATURE_LEN - 1),
+			-EBADMSG);
 
-	tfm = crypto_alloc_sig("ed25519", 0, 0);
+	/* Verifying before a key is set must fail rather than crash. */
+	tfm = crypto_alloc_sig("mldsa65", 0, 0);
 	KUNIT_ASSERT_FALSE(test, IS_ERR(tfm));
 	KUNIT_EXPECT_EQ(test,
-			crypto_sig_verify(tfm, signature, sizeof(signature), msg,
-					  sizeof(msg)),
+			crypto_sig_verify(tfm, signature,
+					  PKM_KACS_SIGNING_SIGNATURE_LEN, msg,
+					  SHA256_DIGEST_SIZE),
 			-EINVAL);
 	crypto_free_sig(tfm);
 }
@@ -434,53 +436,44 @@ static void pkm_kunit_ed25519_crypto_rejects_bad_inputs(struct kunit *test)
 static void pkm_kunit_signing_crypto_verify_sets_tcb_trust(
 	struct kunit *test)
 {
-	static const u8 public_key[32] = {
-		0x03, 0xa1, 0x07, 0xbf, 0xf3, 0xce, 0x10, 0xbe,
-		0x1d, 0x70, 0xdd, 0x18, 0xe7, 0x4b, 0xc0, 0x99,
-		0x67, 0xe4, 0xd6, 0x30, 0x9b, 0xa5, 0x0d, 0x5f,
-		0x1d, 0xdc, 0x86, 0x64, 0x12, 0x55, 0x31, 0xb8,
-	};
-	static const u8 hash[32] = {
-		0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
-		0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf,
-		0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
-		0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
-	};
-	static const u8 signature[64] = {
-		0x01, 0x05, 0x5e, 0xed, 0x19, 0xb9, 0x4a, 0x3a,
-		0x8d, 0x1f, 0x9d, 0x45, 0xa1, 0x3f, 0x2b, 0x69,
-		0x02, 0x04, 0xcb, 0x20, 0x62, 0xdb, 0xfe, 0x84,
-		0xcc, 0xb2, 0xf8, 0x37, 0x8a, 0x0d, 0xad, 0x26,
-		0x9e, 0x81, 0x4a, 0xe4, 0x54, 0xfb, 0x5b, 0x30,
-		0xd3, 0x6a, 0x24, 0x42, 0xe8, 0xa3, 0x2f, 0x6b,
-		0xa2, 0xfc, 0xbb, 0x41, 0xba, 0x2e, 0x52, 0x93,
-		0x68, 0xd2, 0x26, 0x73, 0x15, 0xc1, 0x3e, 0x02,
-	};
-	struct pkm_kacs_kunit_signing_key_entry keys[2] = {};
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_key_entry *keys;
+	struct pkm_kacs_kunit_signing_probe *material;
 	struct pkm_kacs_kunit_signing_verify_out out = {};
 
-	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR;
-	memcpy(material.hash, hash, sizeof(material.hash));
-	memcpy(material.signature, signature, sizeof(material.signature));
-	memcpy(keys[0].public_key, public_key, sizeof(keys[0].public_key));
+	/*
+	 * Heap, not stack: an ML-DSA-65 probe is ~3.3 KiB and each key entry
+	 * ~1.9 KiB, which together would blow past CONFIG_FRAME_WARN.
+	 */
+	keys = kunit_kzalloc(test, 2 * sizeof(*keys), GFP_KERNEL);
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, keys);
+	KUNIT_ASSERT_NOT_NULL(test, material);
+
+	material->source = PKM_KACS_KUNIT_SIGNING_SOURCE_XATTR;
+	memcpy(material->hash, pkm_kunit_mldsa65_tcb_hash,
+	       sizeof(material->hash));
+	memcpy(material->signature, pkm_kunit_mldsa65_tcb_sig,
+	       sizeof(material->signature));
+	memcpy(keys[0].public_key, pkm_kunit_mldsa65_pubkey,
+	       sizeof(keys[0].public_key));
 	keys[0].pip_type = PKM_KUNIT_SIGNING_PIP_PROTECTED;
 	keys[0].pip_trust = PKM_KUNIT_SIGNING_TRUST_TCB;
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_verify_signing_material_crypto(
-				&material, keys, ARRAY_SIZE(keys), &out),
+				material, keys, 2, &out),
 			0);
 	KUNIT_EXPECT_EQ(test, out.verified, 1U);
 	KUNIT_EXPECT_EQ(test, out.pip_type,
 			PKM_KUNIT_SIGNING_PIP_PROTECTED);
 	KUNIT_EXPECT_EQ(test, out.pip_trust, PKM_KUNIT_SIGNING_TRUST_TCB);
 
-	material.hash[0] ^= 0x01;
+	/* A single flipped hash bit must drop the material to untrusted. */
+	material->hash[0] ^= 0x01;
 	memset(&out, 0, sizeof(out));
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_verify_signing_material_crypto(
-				&material, keys, ARRAY_SIZE(keys), &out),
+				material, keys, 2, &out),
 			0);
 	KUNIT_EXPECT_EQ(test, out.verified, 0U);
 	KUNIT_EXPECT_EQ(test, out.pip_type, 0U);
@@ -1189,8 +1182,8 @@ static struct kunit_case pkm_kunit_signing_cases[] = {
 	KUNIT_CASE(pkm_kunit_boot_logon_session_registered),
 	KUNIT_CASE(pkm_kunit_boot_allow_caps),
 	KUNIT_CASE(pkm_kunit_blob_lifecycle_defaults),
-	KUNIT_CASE(pkm_kunit_ed25519_crypto_rfc8032_vectors),
-	KUNIT_CASE(pkm_kunit_ed25519_crypto_rejects_bad_inputs),
+	KUNIT_CASE(pkm_kunit_mldsa65_crypto_fips204_vectors),
+	KUNIT_CASE(pkm_kunit_mldsa65_crypto_rejects_bad_inputs),
 	KUNIT_CASE(pkm_kunit_signing_crypto_verify_sets_tcb_trust),
 	KUNIT_CASE(pkm_kunit_signed_exec_pin_tracks_verified_material),
 	KUNIT_CASE(pkm_kunit_signed_exec_pin_blocks_content_mutation),

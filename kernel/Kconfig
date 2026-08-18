@@ -11,7 +11,7 @@ config SECURITY_PKM
 	depends on !SECURITY_APPARMOR
 	depends on !SECURITY_SMACK
 	depends on !SECURITY_TOMOYO
-	select CRYPTO_ED25519
+	select CRYPTO_MLDSA
 	help
 	  PKM is the Peios Kernel Module used for the KACS slow track.
 	  The current slow-track tree contains the bounded slow-track

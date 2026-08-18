@@ -1,5 +1,3 @@
-crypto/ed25519-algorithm.patch
-crypto/ed25519-testmgr-vectors.patch
 security/pkm-lsm-wireup.patch
 security/pkm-kacs-builtin-signing-keys-section.patch
 security/security-inode-rename-flags.patch

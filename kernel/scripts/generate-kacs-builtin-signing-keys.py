@@ -11,14 +11,21 @@ import sys
 HEADER_GUARD = "PKM_KACS_BUILTIN_SIGNING_KEYS_H"
 
 
+# ML-DSA-65 public key length in bytes (NIST FIPS 204).
+PUBKEY_LEN = 1952
+
+
 def parse_pubkey_hex(value: str) -> bytes | None:
     value = value.strip()
     if not value:
         return None
     if value.startswith(("0x", "0X")):
         value = value[2:]
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
-        raise ValueError("PKM_KACS_TCB_PUBKEY_HEX must be exactly 64 hex characters")
+    if not re.fullmatch(rf"[0-9a-fA-F]{{{PUBKEY_LEN * 2}}}", value):
+        raise ValueError(
+            f"PKM_KACS_TCB_PUBKEY_HEX must be exactly {PUBKEY_LEN * 2} hex "
+            f"characters (a {PUBKEY_LEN}-byte ML-DSA-65 public key)"
+        )
     return bytes.fromhex(value)
 
 

@@ -82,7 +82,7 @@ time and is supplied by the build environment, never committed — see
 | `lcs/` | LCS kernel glue: registry source device, key/transaction fds, RSI bridge, KUnit tests. |
 | `crates/kacs-core/` | Pure-Rust KACS semantic core (consumed by the kernel Rust module). |
 | `crates/lcs-core/` | Pure-Rust LCS semantic core (consumed by the kernel Rust module). |
-| `kernel/` | The graft: patch series, source-staging scripts, in-kernel Ed25519 crypto, config verifier. |
+| `kernel/` | The graft: patch series, source-staging scripts, config verifier. |
 | `regman/` | regman fragments documenting the registry knobs the PKM kernel reads. |
 | `tools/` | Peios-side helper tooling (e.g. `tools/lcs`). Distinct from the *kernel's* `tools/`, which is packaged separately — see [Packaging](#packaging). |
 
@@ -193,9 +193,8 @@ The graft is split into two halves so each is verifiable:
   is the gate: each patch applies cleanly or **fails loudly** (it refuses a
   non-kernel target and treats a "skipped" patch as an error).
 - **New files** are added by `kernel/stage-sources.sh`: the `security/pkm`
-  subtree, the UAPI headers, the in-kernel Ed25519 sources (`kernel/crypto/`),
-  the path-rewritten Rust cores (`kernel/stage-rust-core.sh`), and the generated
-  signing-key header.
+  subtree, the UAPI headers, the path-rewritten Rust cores
+  (`kernel/stage-rust-core.sh`), and the generated signing-key header.
 
 There are no white-box "did the tree get staged correctly" checks — a clean
 `make LLVM=-18` plus the KUnit suite prove the tree actually builds and behaves.
@@ -224,7 +223,7 @@ A keyring's `[tcb]` table is flattened into the stage environment:
 `*.keyring.pekit.toml` is gitignored. Generate a local dev key with:
 
 ```sh
-openssl genpkey -algorithm ed25519 -out kacs-tcb-dev.key
+openssl genpkey -algorithm ML-DSA-65 -out kacs-tcb-dev.key
 ```
 
 The production build farm holds the real TCB key and injects it the same way;

@@ -648,19 +648,30 @@ struct pkm_kunit_read_ace_spec {
 };
 
 
-#define PKM_KUNIT_SIGNING_BLOB_LEN 65U
+/*
+ * Aliases, not copies: these duplicated the Ed25519 sizes and silently drifted
+ * when the algorithm changed. Track signing.h so they cannot diverge again.
+ */
+#define PKM_KUNIT_SIGNING_BLOB_LEN PKM_KACS_SIGNING_BLOB_LEN
 
-#define PKM_KUNIT_SIGNING_SIG_LEN 64U
+#define PKM_KUNIT_SIGNING_SIG_LEN PKM_KACS_SIGNING_SIGNATURE_LEN
 
 #define PKM_KUNIT_SIGNING_VERSION 0x01U
 
-#define PKM_KUNIT_ELF_LEN 512U
-
-#define PKM_KUNIT_ELF_SIG_OFFSET 0x40U
-
+/*
+ * Synthetic ELF fixture layout. The signature section sits last and the file
+ * length is derived from it: an ML-DSA-65 blob is 3310 bytes, so a fixed
+ * 512-byte fixture with the section at 0x40 would overrun the string table,
+ * the section headers, and the end of the file itself.
+ */
 #define PKM_KUNIT_ELF_STRTAB_OFFSET 0x90U
 
 #define PKM_KUNIT_ELF_SHOFF 0x100U
+
+#define PKM_KUNIT_ELF_SIG_OFFSET 0x200U
+
+#define PKM_KUNIT_ELF_LEN \
+	(PKM_KUNIT_ELF_SIG_OFFSET + PKM_KUNIT_SIGNING_BLOB_LEN)
 
 #define PKM_KUNIT_SIGNING_PIP_PROTECTED 512U
 
@@ -1436,7 +1447,7 @@ void pkm_kunit_signing_fill_key(
 void pkm_kunit_signing_fill_tcb_vector_material(
 	struct pkm_kacs_kunit_signing_probe *material);
 
-int pkm_kunit_ed25519_crypto_verify(const u8 *public_key,
+int pkm_kunit_mldsa65_crypto_verify(const u8 *public_key,
 					   unsigned int public_key_len,
 					   const u8 *msg, unsigned int msg_len,
 					   const u8 *signature,

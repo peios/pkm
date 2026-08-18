@@ -3,7 +3,7 @@
 #
 # The patch series (apply-patches.sh) edits pre-existing kernel files; this
 # script adds the *new* files PKM contributes: the security/pkm subtree, the
-# UAPI headers, the in-kernel Ed25519 sources, the generated TCB signing-key
+# UAPI headers, the generated TCB signing-key
 # header, and the path-rewritten Rust cores. Together they leave a complete,
 # ready-to-configure kernel source tree. No compilation happens here.
 #
@@ -73,10 +73,6 @@ install -m 0644 "$here/Makefile" "$pkm_dir/Makefile"
 mkdir -p "$stratafs_dir"
 install -m 0644 "$pkm"/stratafs/* "$stratafs_dir/"
 
-# --- in-kernel Ed25519 verifier sources (staged into crypto/) ---
-install -m 0644 "$here/crypto/ed25519.c"       "$tree/crypto/ed25519.c"
-install -m 0644 "$here/crypto/ed25519-hacl.c"  "$tree/crypto/ed25519-hacl.c"
-install -m 0644 "$here/crypto/ed25519-hacl.h"  "$tree/crypto/ed25519-hacl.h"
 
 # --- generated TCB built-in signing-key header (overwrites the copied stub) ---
 genargs=(--pubkey-hex "$pubkey" --out "$pkm_dir/kacs/builtin_signing_keys.h")

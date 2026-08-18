@@ -332,7 +332,7 @@ DEFINE_EVENT(kacs_signing, kacs_signing_verify,
 		 u8 reason, long ret),
 	TP_ARGS(source, verified, pip_type, pip_trust, reason, ret));
 
-/* ed25519 crypto primitive outcome — unavailable vs mismatch (signing.c) */
+/* ML-DSA-65 crypto primitive outcome — unavailable vs mismatch (signing.c) */
 DEFINE_EVENT(kacs_signing, kacs_signing_crypto,
 	TP_PROTO(u32 source, u32 verified, u32 pip_type, u32 pip_trust,
 		 u8 reason, long ret),
