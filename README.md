@@ -3,7 +3,7 @@
 `pkm` is the Peios kernel workspace. It carries the PKM security subsystem
 (KACS, KMES, LCS) and a declarative, reproducible build pipeline that grafts
 that subsystem onto a pinned upstream Linux tree, compiles a hardened kernel
-(monolithic for now — see below), and emits the full Peios kernel package family
+(modular, signed), and emits the full Peios kernel package family
 (`.peipkg`) — the kernel
 image, its development/debug artifacts, and the in-tree userspace tooling.
 
@@ -12,12 +12,15 @@ snapshot-reproducible container image, so a checkout plus Docker is the only
 prerequisite.
 
 - **Kernel base:** Linux `v7.0.9` (pinned in `build/toolchain.lock`).
-- **Profile:** monolithic — every driver built in (`=y`), no loadable modules.
-  **This is a temporary early-development simplification, not the production
-  shape.** It lets the kernel boot the QEMU/virtio guest with no initramfs while
-  we iterate. The production kernel will be modular (signed modules +
-  lockdown-enforced); the switch happens at real-hardware bring-up. See
-  [roadmap](#known-limitations--roadmap).
+- **Profile:** modular and signed. The vendored base config is **Arch's**, and
+  its ~6300 modules are kept intact; `pkm.fragment` forces everything the boot
+  path needs to `=y`, so the kernel still boots with **no modules loaded**.
+  Modules are signed with ML-DSA-65 (`MODULE_SIG_FORCE`) and lockdown runs in
+  integrity mode. The KUnit profile stays monolithic — the test kernel must not
+  depend on the module stack to boot.
+  Note that nothing *auto*loads modules yet: there is no device manager or
+  coldplug, so a module is loaded only when something asks for it explicitly.
+  See [roadmap](#known-limitations--roadmap).
 - **Target:** `x86_64` (QEMU/virtio guest profile for now; real hardware is the goal).
 - **Security model:** KACS is the sole MAC LSM; `CONFIG_LSM="landlock,lockdown,yama,integrity,pkm"`.
 
@@ -139,7 +142,7 @@ pekit test  kunit  --no-build=upstream,source     # QEMU boot, assert the suite
 pekit test  stratafs --no-build=upstream,source,kunit # mounted syscall smoke
 
 # 4. Build the production kernel with the TCB key injected from a keyring.
-pekit build kernel --keyring=dev --no-build=upstream,source
+pekit build kernel --keyring=dev --version 0.20.0 --no-build=upstream,source
 
 # 5. Derived artifacts.
 pekit build headers   --no-build=upstream,source
@@ -166,7 +169,7 @@ dependencies' outputs as `$PEKIT_<NEED>_OUT`, and writes to `$PEKIT_OUT`
 | `build.upstream` | — | A shallow clone of the pinned `v7.0.9` tree. |
 | `build.source` | `upstream` | The grafted, **config-agnostic** kernel source (patches applied, PKM sources staged, `.git` stripped). This is the shippable kernel-source tree. |
 | `build.kunit` | `source` | KUnit-config monolithic `bzImage` (for the boot test). |
-| `build.kernel` | `source` | Production-config monolithic `bzImage`, with the TCB key embedded. |
+| `build.kernel` | `source` | Production-config modular `bzImage` + its signed modules, with the TCB key embedded. |
 | `build.headers` | `source` | Sanitized userspace UAPI (`make headers_install`). |
 | `build.debuginfo` | `kernel` | `vmlinux` debug info + build-id index, plus path-sanitized debug sources. |
 | `build.tools` | `source` | The in-tree userspace tools (perf, bpftool, …) as a DESTDIR image. |
@@ -177,10 +180,15 @@ dependencies' outputs as `$PEKIT_<NEED>_OUT`, and writes to `$PEKIT_OUT`
 
 `build.kernel` and `build.kunit` each take the config-agnostic `build.source`
 tree, configure it for their profile via `build/configure-kernel.sh`, and
-compile. The config flow is: `config.x86_64.base` → `olddefconfig` →
+compile. The config flow is: `config.x86_64.base` → `olddefconfig` → *(KUnit only)*
 `localmodconfig` (`lsmod.txt`) → merge `pkm.fragment` (+ `kunit.fragment` for the
-KUnit profile) → `olddefconfig` → `mod2yesconfig` (last, to force the monolithic
-profile) → `verify-kernel-config.sh`.
+KUnit profile) → set `MODULE_SIG_KEY` → `olddefconfig` → *(KUnit only)*
+`mod2yesconfig` (last, to flatten to built-in) → `verify-kernel-config.sh`.
+
+The narrowing steps are KUnit-only on purpose. `lsmod.txt` was captured from a
+single developer machine and describes *that* machine, so it is fine for pinning
+the QEMU test kernel and useless as a policy for Peios's target hardware — which
+is why the production profile keeps Arch's module set whole.
 
 ---
 
@@ -260,19 +268,26 @@ packages are split `lib*` / `lib*-devel` per convention.
 
 ### The package family
 
-**Kernel (5):**
+**Kernel (6):**
 
 | Package | Contents |
 |---|---|
-| `kernel` | The bootable monolithic `bzImage` + `System.map` + `.config`. |
+| `kernel` | The bootable `bzImage` + `System.map` + `.config`. |
 | `kernel-headers` | Sanitized userspace UAPI (`usr/include`). |
 | `kernel-devel` | Out-of-tree module build kit under `usr/lib/<triplet>/modules/<release>/build`. |
 | `kernel-debuginfo` | `vmlinux` debug info + build-id index. |
+| `kernel-modules` | The signed loadable modules for the release, plus the depmod index. |
 | `kernel-debugsource` | The DWARF-referenced kernel sources. |
 
-> `kernel-modules` is absent *for now* — the kernel is monolithic during early
-> development, so there is nothing to split yet. It returns when the kernel goes
-> modular (see [roadmap](#known-limitations--roadmap)).
+> `kernel-modules` ships as **one** package rather than a `core`/`extra` split.
+> Splitting is where module subsetting pays off, but it is a `[files]` map change
+> rather than a rebuild, so it stays cheap to do once there is a real image to
+> measure against.
+>
+> The depmod index is generated at build time and shipped inside the package, not
+> left to the install-time `depmod` side effect. `peipkg-compose` deliberately runs
+> no side effects, so a composed root would otherwise carry no index — and first
+> boot cannot depend on an index that only first boot would create.
 
 **Userspace tools** (built from the kernel's in-tree `tools/`, packaged with
 unprefixed names since they are userspace, not the kernel): `perf` (+ `perf-devel`,
@@ -414,13 +429,20 @@ the authoritative gates are `pekit verify uapi` and `pekit test uapi` in CI.
 
 ## Known limitations & roadmap
 
-- **Modular kernel (signed)** — the monolithic profile is an early-development
-  simplification, **not** the production shape: shipping every driver built-in is
-  untenable on arbitrary real hardware. The production kernel will be modular with
-  `CONFIG_MODULE_SIG_FORCE=y` (signing key added to the TCB keyring) and lockdown
-  enforced, so module loading stops being a free runtime-tamper vector. The switch
-  is gated on real-hardware bring-up — the same point we need an initramfs anyway.
-  Until then `kernel-modules` stays absent and there is nothing to split.
+- **Module autoloading** — the kernel is modular and its modules are signed and
+  packaged, but nothing *loads* them automatically. There is no uevent listener
+  and no coldplug, so no code decides which modules a machine needs; a module is
+  loaded only when something asks for it by name. Until that exists the boot path
+  stays entirely built-in, which is why `pkm.fragment` forces the storage, USB and
+  filesystem drivers to `=y`. Tracked as PEI-58 (device manager) and PEI-59
+  (module + firmware loading).
+- **Boot-critical modules in the initramfs** — unresolved, and the real blocker on
+  moving boot-path drivers to `=m`. `/boot/initramfs/` is populated *by packages*,
+  but which storage driver a given machine needs to reach its root is specific to
+  that machine. That is dracut's hostonly problem, and the package-driven model has
+  no answer for it yet.
+- **Firmware** — no `linux-firmware` package exists and nothing in the boot stack
+  loads firmware.
 - **Runtime package dependencies** — the userspace tool packages declare their
   shared-library needs only as `.toml` comments today; they become real
   `[dependencies]` once the Peios userspace layer that provides those libraries

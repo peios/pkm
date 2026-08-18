@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Configure a staged PKM kernel tree: vendored base + PKM fragment, narrowed to
-# the QEMU device set and made monolithic (all built-in). The monolithic profile
-# is a temporary early-development simplification (boots the QEMU guest with no
-# initramfs), NOT the production shape — production will be modular + signed.
+# Configure a staged PKM kernel tree: vendored base + PKM fragment.
+#
+# The base config is Arch's, carrying ~6300 modules. Which of them survive
+# depends on the profile:
+#
+#   production  Arch's module set is kept intact. Everything the boot path
+#               needs is forced =y by pkm.fragment, so the kernel still boots
+#               with zero modules loaded; the rest build as signed modules.
+#   kunit       Narrowed to the QEMU device set and flattened to all-built-in.
+#               The test kernel must not depend on the module stack to boot.
 # Runs inside the build image (needs make + clang + rustc + bindgen on PATH). No
 # target compilation.
 #
@@ -45,8 +51,12 @@ cd "$tree"
 cp "$cfg/config.x86_64.base" .config
 "${make[@]}" olddefconfig
 
-# 2. narrow modules to the QEMU-needed device set
-LSMOD="$cfg/lsmod.txt" "${make[@]}" localmodconfig
+# 2. KUnit only: narrow modules to the QEMU-needed device set. The production
+#    profile keeps Arch's full module set — lsmod.txt was captured from a single
+#    machine and describes that machine, not Peios's target hardware.
+if [[ "$profile" == kunit ]]; then
+	LSMOD="$cfg/lsmod.txt" "${make[@]}" localmodconfig
+fi
 
 # 3. force PKM / hardening / boot choices (after narrowing, so they survive it)
 ./scripts/kconfig/merge_config.sh -m .config "$cfg/pkm.fragment"
@@ -63,14 +73,25 @@ if [[ -n "$localversion" ]]; then
 	./scripts/config --file .config --set-str LOCALVERSION "$localversion"
 fi
 
+# 4c. point module signing at the Peios module-signing key. Set explicitly
+#     rather than left at the default `certs/signing_key.pem`, which
+#     certs/Makefile treats as a request to autogenerate an ephemeral keypair —
+#     non-reproducible, and leaving no key to sign anything with later.
+#     Deliberately a different key from the KACS TCB key; see PEI-218.
+if [[ -n "${PKM_MODSIG_KEY:-}" ]]; then
+	./scripts/config --file .config --set-str MODULE_SIG_KEY "$PKM_MODSIG_KEY"
+fi
+
 # 5. resolve all merged choices
 "${make[@]}" olddefconfig
 
-# 6. monolithic, LAST: flip every module to built-in. Must come after the final
+# 6. KUnit only, LAST: flip every module to built-in. Must come after the final
 #    olddefconfig — a `default m` tristate (e.g. WATCHDOG_PRETIMEOUT_GOV_SEL)
 #    would otherwise be re-modularized by a later resolve. The build's
 #    syncconfig preserves these =y values, so nothing re-modularizes.
-"${make[@]}" mod2yesconfig
+if [[ "$profile" == kunit ]]; then
+	"${make[@]}" mod2yesconfig
+fi
 
 # 7. invariant gate (same checker the old flow used)
 bash "$repo/kernel/verify-kernel-config.sh" .config

@@ -1,0 +1,25 @@
+# X.509 template for the Peios kernel module-signing key.
+#
+# Deliberately a separate key from the KACS TCB key, not chained to it -- see
+# dev.keyring.pekit.toml and PEI-218 for why. Consumed only when regenerating
+# the key; the kernel reads the resulting PEM via CONFIG_MODULE_SIG_KEY.
+#
+#   openssl req -new -nodes -utf8 -x509 -days 36500 -batch \
+#     -config build/config/modsig.genkey -newkey ML-DSA-65 \
+#     -outform PEM -out modsig-dev.key -keyout modsig-dev.key
+
+[ req ]
+distinguished_name = req_distinguished_name
+prompt = no
+string_mask = utf8only
+x509_extensions = myexts
+
+[ req_distinguished_name ]
+O = Peios
+CN = Peios kernel module signing key
+
+[ myexts ]
+basicConstraints=critical,CA:FALSE
+keyUsage=digitalSignature
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid

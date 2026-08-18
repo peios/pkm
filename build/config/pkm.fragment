@@ -23,13 +23,52 @@ CONFIG_RUST=y
 CONFIG_SECURITY_PKM=y
 CONFIG_LSM="landlock,lockdown,yama,integrity,pkm"
 
+# --- Lockdown: integrity mode, enabled early ---
+# security_locked_down() takes no subject -- it consults no task, cred or token,
+# so it is not an identity control and still holds if the identity layer itself
+# is compromised. That is the reason it is here: it is the one control in the
+# system not mediated by KACS's own logic. It is NOT load-bearing for module
+# signing, which MODULE_SIG_FORCE enforces independently (module/signing.c:119
+# returns -EKEYREJECTED before the lockdown call at :124).
+#
+# Integrity mode blocks the kernel-write paths: /dev/mem, kexec, hibernation,
+# raw MSR writes, PCI BAR access, ACPI table override, unsigned BPF. NOT
+# confidentiality mode, which additionally blocks reading kernel memory and
+# would break kdump and profiling.
+#
+# Known tension: lockdown is absolute ("nobody, ever") where KACS is granular
+# ("this principal, with this privilege"). Under integrity mode kexec and
+# hibernation are unavailable even to a fully authorised TCB principal, and
+# there is no per-principal exemption -- the only lever is disabling lockdown
+# globally. Nothing in Peios needs those operations today; when something does,
+# that is a deliberate trade-off, not a switch to flip quietly. See PEI-218.
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE is not set
+CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY=y
+CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y
+
 # --- PIP build-hardening prerequisites (fail-closed in lsm.c) ---
 CONFIG_STRICT_DEVMEM=y
 CONFIG_MODULE_SIG=y
 CONFIG_MODULE_SIG_FORCE=y
 CONFIG_MODULE_SIG_ALL=y
 CONFIG_MODULE_SIG_SHA512=y
-CONFIG_MODULE_SIG_KEY="certs/signing_key.pem"
+
+# --- Module signing algorithm: ML-DSA-65, matching KACS binary signing ---
+# The key itself is separate from the TCB key and is pointed at by
+# CONFIG_MODULE_SIG_KEY, which configure-kernel.sh sets from the keyring.
+# CONFIG_MODULE_SIG_KEY_TYPE_RSA is not set
+# CONFIG_MODULE_SIG_KEY_TYPE_ECDSA is not set
+CONFIG_MODULE_SIG_KEY_TYPE_MLDSA_65=y
+#
+# MANDATORY with OpenSSL < 4.0, not optional. scripts/sign-file.c:287 detects an
+# ML-DSA key on OpenSSL 3.x and strips CMS_NOATTR, because 3.x cannot produce the
+# direct-signing CMS form for ML-DSA. The result carries signedAttrs, which module
+# verification rejects outright (pkcs7_verify.c:427) unless this waiver is set —
+# without it EVERY module load fails at boot with "Invalid module sig (has
+# authattrs)". The waiver is narrow: pkcs7_parser.c:104 only marks the rejection
+# waivable when the algorithm is ML-DSA, so RSA/ECDSA signatures with signedAttrs
+# are still refused. Drop this when the pool moves to OpenSSL 4.x.
+CONFIG_PKCS7_WAIVE_AUTHATTRS_REJECTION_FOR_MLDSA=y
 
 # --- QEMU guest boot + test harness (built-in; monolithic profile) ---
 # initrd

@@ -61,6 +61,13 @@ python3 = "*"
 needs = ["source"]
 command = """
 cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
+# Stage the module-signing key into the tree. certs/Makefile extracts the
+# cert from CONFIG_MODULE_SIG_KEY and links it into .builtin_trusted_keys, so
+# the file must hold the private key and its certificate in one PEM. The name
+# is deliberately not certs/signing_key.pem, which certs/Makefile treats as a
+# request to autogenerate an ephemeral key.
+install -m 0600 "$PEKIT_KEYRING_MODSIG_PRIV" "$PEKIT_OUT/certs/peios-modsig.pem"
+export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 ./build/configure-kernel.sh "$PEKIT_OUT" kunit
 ./build/compile-kernel.sh "$PEKIT_OUT"
 """
@@ -132,8 +139,16 @@ cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 	--pubkey-hex "$PEKIT_KEYRING_TCB_PUB" \
 	--out "$PEKIT_OUT/security/pkm/kacs/builtin_signing_keys.h"
+# Stage the module-signing key into the tree. certs/Makefile extracts the
+# cert from CONFIG_MODULE_SIG_KEY and links it into .builtin_trusted_keys, so
+# the file must hold the private key and its certificate in one PEM. The name
+# is deliberately not certs/signing_key.pem, which certs/Makefile treats as a
+# request to autogenerate an ephemeral key.
+install -m 0600 "$PEKIT_KEYRING_MODSIG_PRIV" "$PEKIT_OUT/certs/peios-modsig.pem"
+export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 ./build/configure-kernel.sh "$PEKIT_OUT" production "-peios-$PEKIT_VERSION"
 ./build/compile-kernel.sh "$PEKIT_OUT"
+./build/install-modules.sh "$PEKIT_OUT" "$PEKIT_OUT/modules-root"
 """
 
 # Same toolchain as build.kunit (production profile); the keygen step adds python3
@@ -356,6 +371,16 @@ command = """
 
 # Boot the same KACS-enabled kernel with a purpose-built initramfs and exercise
 # StrataFS through real mount/open/read/write/mmap/xattr/link/rename syscalls.
+# Prove the module-signing chain on the modular kernel: boot it with a minimal
+# initramfs, load a signed module, and confirm a corrupted one is refused. With
+# MODULE_SIG_FORCE a successful load is itself the proof that the signature
+# verified against a builtin key.
+[test.modsig]
+needs = ["kernel"]
+command = """
+./build/test-modsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root"
+"""
+
 [test.stratafs]
 needs = ["kunit"]
 command = """

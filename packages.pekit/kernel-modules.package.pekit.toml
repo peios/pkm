@@ -1,0 +1,33 @@
+# kernel-modules — the loadable kernel modules for one kernel release, with the
+# depmod index that makes them resolvable. Carved from build.kernel's staging
+# root, which `make modules_install` populated (and depmod indexed) against the
+# release it just built.
+#
+# One package, not a Fedora-style core/extra split. Splitting is where module
+# subsetting pays off — an image installs the core set and never carries drivers
+# for hardware it will never see — but it is a [files] map change rather than a
+# rebuild, so it stays cheap to do later, and choosing buckets now would mean
+# guessing without a real image to measure. See PEI-218.
+
+# The shipped index is generated at build time and is correct as it stands.
+# This declaration exists for the case the spec intends it for: reindexing
+# after an out-of-tree or DKMS module is added to an installed system.
+# (Top-level, not inside a table — TOML would otherwise scope it to whichever
+# table precedes it.)
+side_effects = ["depmod"]
+
+[package]
+description = "Peios Kernel — loadable modules (based on Linux 7.0.9)"
+
+# Version-locked, not a range. A module tree is bound to the exact vmlinux it
+# was built against by vermagic and symbol CRCs; pairing it with any other
+# kernel build is a boot-time failure, not a degraded mode.
+[dependencies]
+kernel = "{{version}}"
+
+# Everything modules_install produced, including the depmod index. The build/
+# and source/ symlinks it also creates are removed by install-modules.sh —
+# they are absolute paths into a build tree that does not exist on target, and
+# kernel-devel ships the real build/ tree at this same release directory.
+[files]
+"kernel:modules-root/lib/modules/7.0.9-peios-{{version}}/**" = "usr/lib/modules/7.0.9-peios-{{version}}/"

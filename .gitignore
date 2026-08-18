@@ -6,6 +6,9 @@ __pycache__/
 *.pyc
 kacs-tcb-dev.key
 kacs-tcb-dev.key.pub
+# Kernel module-signing key (private key + self-signed cert in one PEM,
+# the shape CONFIG_MODULE_SIG_KEY expects). Per-developer, never committed.
+modsig-dev.key
 # Keyring files are per-developer / environment-specific (hold or reference key
 # material); env wraps (*.env.pekit.toml) stay committed.
 *.keyring.pekit.toml

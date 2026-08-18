@@ -10,11 +10,11 @@
 # against the PKM UAPI / KACS ABI. Install paths are named by the kernel
 # RELEASE (7.0.9, the uname version) — distinct from this package version.
 #
-# kernel-modules is absent for now: the kernel is monolithic during early
-# development (everything built-in), so there is nothing to split yet. Monolithic
-# is a temporary dev simplification, NOT the production shape — the production
-# kernel will be modular (signed + lockdown-enforced), at which point this package
-# returns.
+# The production kernel is modular: Arch's module set is built as signed modules
+# and shipped in kernel-modules, while everything the boot path needs stays
+# built-in via pkm.fragment, so the kernel boots with no modules loaded. The
+# KUnit profile remains monolithic — the test kernel must not depend on the
+# module stack to boot.
 
 format = "peipkg"
 
