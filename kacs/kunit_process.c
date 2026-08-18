@@ -2571,14 +2571,16 @@ static void pkm_kunit_tlp_mprotect_checks_new_exec_only(struct kunit *test)
 static void pkm_kunit_exec_pip_signed_material_sets_tcb_trust(
 	struct kunit *test)
 {
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 	struct pkm_kacs_kunit_signing_verify_out out = {};
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
 
-	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	pkm_kunit_signing_fill_tcb_vector_material(material);
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_determine_exec_pip_from_signing_material(
-				&material, &out),
+				material, &out),
 			0);
 	KUNIT_EXPECT_EQ(test, out.verified, 1U);
 	KUNIT_EXPECT_EQ(test, out.pip_type,
@@ -2589,15 +2591,17 @@ static void pkm_kunit_exec_pip_signed_material_sets_tcb_trust(
 
 static void pkm_kunit_exec_pip_bad_signature_resets_none(struct kunit *test)
 {
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 	struct pkm_kacs_kunit_signing_verify_out out = {};
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
 
-	pkm_kunit_signing_fill_tcb_vector_material(&material);
-	material.signature[0] ^= 0x01;
+	pkm_kunit_signing_fill_tcb_vector_material(material);
+	material->signature[0] ^= 0x01;
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_determine_exec_pip_from_signing_material(
-				&material, &out),
+				material, &out),
 			0);
 	KUNIT_EXPECT_EQ(test, out.verified, 0U);
 	KUNIT_EXPECT_EQ(test, out.pip_type, 0U);
@@ -2610,9 +2614,11 @@ static void pkm_kunit_exec_pip_pending_is_transactional(struct kunit *test)
 	struct pkm_kacs_kunit_process_state_view saved = {};
 	struct pkm_kacs_kunit_process_state_view staged = {};
 	struct pkm_kacs_kunit_process_state_view committed = {};
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 	const void *state_ptr;
 	int ret;
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
 
 	state_ptr = pkm_kacs_kunit_current_process_state_ptr();
 	KUNIT_ASSERT_EQ(test,
@@ -2620,16 +2626,16 @@ static void pkm_kunit_exec_pip_pending_is_transactional(struct kunit *test)
 			0);
 
 	pkm_kacs_kunit_set_current_pip_context(0, 0);
-	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	pkm_kunit_signing_fill_tcb_vector_material(material);
 
 	ret = pkm_kacs_kunit_stage_exec_pip_from_signing_material(
-		&material, 0, &staged);
+		material, 0, &staged);
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, staged.pip_type, 0U);
 	KUNIT_EXPECT_EQ(test, staged.pip_trust, 0U);
 
 	ret = pkm_kacs_kunit_stage_exec_pip_from_signing_material(
-		&material, 1, &committed);
+		material, 1, &committed);
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, committed.pip_type,
 			PKM_KUNIT_SIGNING_PIP_PROTECTED);
@@ -2657,9 +2663,11 @@ static void pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip(
 	struct pkm_kacs_kunit_process_state_view saved = {};
 	struct pkm_kacs_kunit_process_state_view before = {};
 	struct pkm_kacs_kunit_process_state_view after = {};
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 	const void *state_ptr;
 	int ret;
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
 
 	state_ptr = pkm_kacs_kunit_current_process_state_ptr();
 	KUNIT_ASSERT_EQ(test,
@@ -2676,9 +2684,9 @@ static void pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip(
 			pkm_kacs_kunit_process_state_snapshot(state_ptr, &before),
 			0);
 
-	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	material->source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
 	ret = pkm_kacs_kunit_stage_exec_pip_from_signing_material(
-		&material, 1, &after);
+		material, 1, &after);
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_EQ(test, after.pip_type, 0U);
 	KUNIT_EXPECT_EQ(test, after.pip_trust, 0U);
@@ -2703,9 +2711,11 @@ static void pkm_kunit_exec_commit_preserves_mitigations_and_no_child(
 	struct pkm_kacs_kunit_process_state_view saved = {};
 	struct pkm_kacs_kunit_process_state_view before = {};
 	struct pkm_kacs_kunit_process_state_view after = {};
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 	const void *state_ptr;
 	int ret;
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
 
 	state_ptr = pkm_kacs_kunit_current_process_state_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, state_ptr);
@@ -2723,9 +2733,9 @@ static void pkm_kunit_exec_commit_preserves_mitigations_and_no_child(
 			0);
 	KUNIT_EXPECT_EQ(test, before.mitigation_bits, mitigation_bits);
 
-	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	material->source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
 	ret = pkm_kacs_kunit_stage_exec_pip_from_signing_material(
-		&material, 1, &after);
+		material, 1, &after);
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_PTR_EQ(test, after.process_sd_ptr, before.process_sd_ptr);
 	KUNIT_EXPECT_PTR_EQ(test, after.rate_bucket_ptr,
@@ -2778,24 +2788,26 @@ static void pkm_kunit_exec_dumpable_decision_tracks_pip(struct kunit *test)
 static void pkm_kunit_exec_dumpable_signed_material_clears_if_mm(
 	struct kunit *test)
 {
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 	long saved_dumpable;
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
 
 	saved_dumpable = pkm_kacs_kunit_get_current_dumpable();
 	if (saved_dumpable == -ENODEV)
 		kunit_skip(test, "current task has no mm");
 	KUNIT_ASSERT_GE(test, saved_dumpable, 0L);
 
-	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	pkm_kunit_signing_fill_tcb_vector_material(material);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
-				&material, SUID_DUMP_USER),
+				material, SUID_DUMP_USER),
 			(long)SUID_DUMP_DISABLE);
 
-	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	material->source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_stage_exec_dumpable_from_signing_material(
-				&material, SUID_DUMP_USER),
+				material, SUID_DUMP_USER),
 			(long)SUID_DUMP_USER);
 
 	KUNIT_EXPECT_EQ(test,
@@ -2807,83 +2819,95 @@ static void pkm_kunit_exec_dumpable_signed_material_clears_if_mm(
 static void pkm_kunit_lsv_signed_tcb_allows_none_and_tcb_pip(
 	struct kunit *test)
 {
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 
-	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
+
+	pkm_kunit_signing_fill_tcb_vector_material(material);
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
 				KACS_MIT_LSV, PROT_EXEC, 0, 0, 1,
-				&material),
+				material),
 			0);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
 				KACS_MIT_LSV, PROT_EXEC,
 				PKM_KUNIT_SIGNING_PIP_PROTECTED,
-				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, material),
 			0);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mprotect_material(
 				KACS_MIT_LSV, 0, PROT_EXEC,
 				PKM_KUNIT_SIGNING_PIP_PROTECTED,
-				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, material),
 			0);
 }
 
 
 static void pkm_kunit_lsv_unsigned_and_bad_signature_deny(struct kunit *test)
 {
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 
-	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
+
+	material->source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
 				KACS_MIT_LSV, PROT_EXEC, 0, 0, 1,
-				&material),
+				material),
 			-EACCES);
 
-	pkm_kunit_signing_fill_tcb_vector_material(&material);
-	material.signature[0] ^= 0x01;
+	pkm_kunit_signing_fill_tcb_vector_material(material);
+	material->signature[0] ^= 0x01;
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
 				KACS_MIT_LSV, PROT_EXEC, 0, 0, 1,
-				&material),
+				material),
 			-EACCES);
 }
 
 
 static void pkm_kunit_lsv_insufficient_trust_denies(struct kunit *test)
 {
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 
-	pkm_kunit_signing_fill_tcb_vector_material(&material);
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
+
+	pkm_kunit_signing_fill_tcb_vector_material(material);
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
 				KACS_MIT_LSV, PROT_EXEC,
 				PKM_KUNIT_SIGNING_PIP_PROTECTED,
 				PKM_KUNIT_SIGNING_TRUST_TCB + 1U, 1,
-				&material),
+				material),
 			-EACCES);
 }
 
 
 static void pkm_kunit_lsv_bypasses_non_exec_and_anonymous(struct kunit *test)
 {
-	struct pkm_kacs_kunit_signing_probe material = {};
+	struct pkm_kacs_kunit_signing_probe *material;
 
-	material.source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
+
+	material->source = PKM_KACS_KUNIT_SIGNING_SOURCE_NONE;
 
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
 				0, PROT_EXEC, PKM_KUNIT_SIGNING_PIP_PROTECTED,
-				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, material),
 			0);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
 				KACS_MIT_LSV, PROT_READ,
 				PKM_KUNIT_SIGNING_PIP_PROTECTED,
-				PKM_KUNIT_SIGNING_TRUST_TCB, 1, &material),
+				PKM_KUNIT_SIGNING_TRUST_TCB, 1, material),
 			0);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_lsv_mmap_material(
