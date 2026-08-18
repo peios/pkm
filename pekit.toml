@@ -106,6 +106,8 @@ cpio = "*"
 kmod = "*"
 python3 = "*"
 perl = "*"
+tar = "*"
+xz = "*"
 
 [build.kunit.dependencies.apt]
 build-essential = "*"
@@ -124,6 +126,8 @@ cpio = "*"
 kmod = "*"
 python3 = "*"
 perl = "*"
+tar = "*"
+xz-utils = "*"
 
 [build.kernel]
 needs = ["source"]
@@ -177,6 +181,8 @@ cpio = "*"
 kmod = "*"
 python3 = "*"
 perl = "*"
+tar = "*"
+xz = "*"
 
 [build.kernel.dependencies.apt]
 build-essential = "*"
@@ -195,6 +201,8 @@ cpio = "*"
 kmod = "*"
 python3 = "*"
 perl = "*"
+tar = "*"
+xz-utils = "*"
 
 # Export the sanitized userspace UAPI headers (full Linux UAPI + our pkm/*.h,
 # which ride along since they're staged under include/uapi/pkm). Depends on
