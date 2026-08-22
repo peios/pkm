@@ -354,6 +354,63 @@ long pkm_kacs_prctl_capability_guard_core(const void *subject_token,
 	}
 }
 
+/*
+ * Whether the current task may mount, unmount, or otherwise reshape the mount
+ * tree.
+ *
+ * Mounting is an ADMINISTRATIVE act, not a TCB act: SeManageVolumePrivilege
+ * satisfies it, and SeTcbPrivilege does too because the TCB may do anything a
+ * volume manager may. Before this existed, mounting reached the kernel only as
+ * CAP_SYS_ADMIN, which maps to SeTcbPrivilege alone -- so no administrator
+ * could mount at all, and peios-install could not run outside a SYSTEM shell.
+ *
+ * CAP_SYS_ADMIN is deliberately NOT remapped. It gates dozens of unrelated
+ * operations, and pointing it at a weaker privilege would hand out far more
+ * than mounting. The mount path asks this narrower question instead; every
+ * other CAP_SYS_ADMIN user still needs the TCB.
+ *
+ * Note what this privilege is worth: its holder may mount a filesystem whose
+ * synthesised descriptors it chooses (policy=synth-* with --synth-sddl) and
+ * may mount over an existing path, which together are enough to author policy
+ * on a subtree and to shadow a system path. It is a deliberate, documented
+ * property of the design -- see the privileges topic -- and it makes this a
+ * highly sensitive privilege, nearer SeLoadDriverPrivilege than
+ * SeChangeNotifyPrivilege. Grant it accordingly.
+ *
+ * Returns true when permitted. Callers are kernel mount paths patched to
+ * consult this before falling back to the ordinary capability check.
+ */
+bool pkm_kacs_may_manage_volumes(void)
+{
+	const struct pkm_kacs_cred_security *sec;
+	const struct cred *cred = current_cred();
+	u64 privilege = KACS_SE_MANAGE_VOLUME_PRIVILEGE | KACS_SE_TCB_PRIVILEGE;
+	u64 held;
+
+	if (!cred)
+		return false;
+	sec = cred->security ? pkm_kacs_cred(cred) : NULL;
+	if (!sec || !sec->token) {
+		trace_kacs_capability(CAP_SYS_ADMIN, privilege, KACS_CAP_CAPABLE,
+				      -EPERM);
+		return false;
+	}
+
+	held = kacs_rust_token_enabled_privileges_in_mask(sec->token, privilege);
+	if (held == 0) {
+		trace_kacs_capability(CAP_SYS_ADMIN, privilege,
+				      KACS_CAP_PRIV_NOT_ENABLED, -EPERM);
+		return false;
+	}
+	if (!kacs_rust_token_mark_privileges_used(sec->token, held)) {
+		trace_kacs_capability(CAP_SYS_ADMIN, held, KACS_CAP_USE_MARK_FAIL,
+				      -EPERM);
+		return false;
+	}
+
+	return true;
+}
+
 long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 				 struct user_namespace *target_ns, int cap,
 				 unsigned int opts)

@@ -26,6 +26,10 @@ fs/aio-write-intent.patch
 fs/fhandle-open-by-handle-gate.patch
 fs/file_attr-fileattr-gates.patch
 fs/namespace-rootfs-seed-sd.patch
+# After namespace-rootfs-seed-sd: that patch edits fs/namespace.c near line
+# 6158, this one near 2001. Applying the later-in-file hunk first means
+# neither shifts the other, so both land at their recorded offsets.
+fs/namespace-mount-volume-privilege.patch
 fs/open-faccessat-access-gate.patch
 fs/open-fchdir-traverse.patch
 fs/open-fchmod-fchown-gate.patch

@@ -1,0 +1,26 @@
+diff --git a/fs/namespace.c b/fs/namespace.c
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -2001,6 +2001,22 @@
+  */
+ bool may_mount(void)
+ {
++#ifdef CONFIG_SECURITY_PKM
++	/*
++	 * PKM: mounting is an administrative act, not a TCB one.
++	 * SeManageVolumePrivilege satisfies it; SeTcbPrivilege does too. The
++	 * CAP_SYS_ADMIN fallback below stays for the non-PKM build and costs
++	 * nothing here, since a TCB token is granted CAP_SYS_ADMIN anyway.
++	 *
++	 * Asked here rather than through security_sb_mount() because that hook
++	 * runs only after this function has already allowed the operation --
++	 * an LSM cannot widen a decision it is never consulted about.
++	 */
++	extern bool pkm_kacs_may_manage_volumes(void);
++
++	if (pkm_kacs_may_manage_volumes())
++		return true;
++#endif
+ 	return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
+ }
+ 
