@@ -3,11 +3,19 @@
 # root, which `make modules_install` populated (and depmod indexed) against the
 # release it just built.
 #
-# One package, not a Fedora-style core/extra split. Splitting is where module
-# subsetting pays off — an image installs the core set and never carries drivers
-# for hardware it will never see — but it is a [files] map change rather than a
-# rebuild, so it stays cheap to do later, and choosing buckets now would mean
-# guessing without a real image to measure. See PEI-218.
+# The full set, for the running system. It is not split by hardware class — an
+# installed system may need any driver, and subsetting the real root would only
+# trade image size for a machine that cannot bring up its own hardware.
+#
+# The one carve-out is kernel-modules-irf, which takes the boot-reaching subset
+# into the initramfs root. That is a genuinely different question: the initramfs
+# is loaded whole into RAM and, under UKIs, sits inside a signed image the
+# firmware verifies in one piece, so what it carries is paid for on every boot.
+# The buckets there were measured against a real image rather than guessed — see
+# PEI-218 and build/config/irf-modules.list.
+#
+# The two overlap by design: a module needed to reach root ships in both roots,
+# because the initramfs and the real root share nothing.
 
 # The shipped index is generated at build time and is correct as it stands.
 # This declaration exists for the case the spec intends it for: reindexing

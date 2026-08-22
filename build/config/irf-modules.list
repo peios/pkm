@@ -1,0 +1,64 @@
+# Which modules the initramfs carries — the kernel-modules-irf payload.
+#
+# One path per line, relative to lib/modules/<release>/kernel/. A directory
+# takes everything beneath it. Blank lines and # comments are ignored. A listed
+# path that does not exist is skipped, so this survives config changes that
+# retire a subsystem.
+#
+# GENERIC, NOT HOSTONLY. This set is the same on every machine. Peios cannot
+# build a hostonly initramfs even if it wanted to: peipkg-compose resolves
+# offline and runs no install-time side effects, so nothing in the compose path
+# may probe the hardware it is composing for. A per-machine initramfs would also
+# have to be assembled and signed on the target, since the UKI is signed whole —
+# which would put a signing key on every installed machine. Generic is the
+# mainstream default anyway (Debian's MODULES=most, Fedora's non-hostonly
+# dracut); hostonly is the opt-in, not the norm.
+#
+# THE RULE FOR THIS FILE: the initramfs only has to reach the root filesystem.
+# Anything the real root can load for itself once it is mounted does not belong
+# here — GPU, sound, media, wifi, sensors, infiniband. Adding a subsystem here
+# costs image size on every machine forever, so the bar is "the boot cannot
+# proceed without it", not "a machine might have one".
+
+# --- Reaching the root device -------------------------------------------
+# Storage controllers, block devices and the transports they sit behind.
+drivers/ata
+drivers/block
+drivers/nvme
+drivers/scsi
+drivers/md
+drivers/message
+drivers/mmc
+drivers/firewire
+drivers/mtd
+drivers/nvmem
+drivers/virtio
+drivers/usb
+drivers/pci
+drivers/base
+drivers/char
+
+# --- Unlocking it -------------------------------------------------------
+# Keyboards, so a human can type a passphrase for an encrypted root. USB
+# keyboards also need the host controllers above.
+drivers/hid
+drivers/input
+
+# --- Mounting it --------------------------------------------------------
+# Filesystem drivers, the crypto the encrypted case needs, and the shared
+# helpers (crc, compression) both pull in.
+fs
+crypto
+lib
+arch
+
+# --- Network ------------------------------------------------------------
+# For a root filesystem reached over the network. Peios has no netboot or NFS
+# root today — live-boot mounts the boot medium, disk-boot mounts a disk — so
+# these two lines currently serve a root type that does not exist, and they are
+# 49 MB and 1182 modules of the set, more than the rest combined. Deleting them
+# is the single biggest size lever here. They are kept because MODULES=most is
+# defined to include them and dropping them is a decision about which root
+# types Peios intends to support, not a tidy-up.
+drivers/net
+net

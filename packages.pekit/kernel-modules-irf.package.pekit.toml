@@ -1,0 +1,45 @@
+# kernel-modules-irf — the modules the initramfs needs to reach the real root,
+# with an index describing exactly that set.
+#
+# The initramfs half of kernel-modules, in the same sense as live-boot-irf and
+# fsbase-irf: a separate root needs its own copy, not a view onto the main
+# root's. It carries a subset — the storage, input, filesystem, crypto and
+# network drivers required to find and mount root — while kernel-modules keeps
+# the full set for the running system. Which subset is policy, and lives in
+# pkm/build/config/irf-modules.list where it can be reviewed as one list.
+#
+# GENERIC, NOT HOSTONLY. Every machine gets the same set. peipkg-compose
+# resolves offline and runs no install-time side effects, so nothing in the
+# compose path may probe the hardware it composes for; and because the UKI is
+# signed as one image, a per-machine initramfs would have to be built and signed
+# on the target. Generic is also the mainstream default rather than a
+# compromise — Debian's MODULES=most and Fedora's non-hostonly dracut both work
+# this way.
+#
+# Its index is REGENERATED over the subset, not copied from the full tree. A
+# modules.dep describing 6449 modules would name dependencies this tree does not
+# contain, and modprobe would resolve a chain and then fail on a missing file.
+# install-modules-irf.sh re-runs depmod and asserts every module the index names
+# is present.
+#
+# No `depmod` side effect here, deliberately. The declaration exists for
+# reindexing after an out-of-tree module is added to an installed system, and
+# nothing adds modules to an initramfs root at runtime — it is rebuilt by mkirf
+# from packages instead.
+
+[package]
+# Inside [package], unlike side_effects which is a top-level key — this places
+# the package in the initramfs root the way prelude and intel-ucode do, so the
+# initramfs composes itself out of the dependency graph rather than an explicit
+# per-image list.
+default_root = "initramfs"
+description  = "Peios Kernel — initramfs module set (based on Linux 7.0.9)"
+
+# Version-locked to the kernel for the same reason kernel-modules is: vermagic
+# and symbol CRCs bind a module tree to one vmlinux. The initramfs and the real
+# root must also agree with each other, since both are produced by this build.
+[dependencies]
+kernel = "{{version}}"
+
+[files]
+"kernel:modules-irf-root/lib/modules/7.0.9-peios-{{version}}/**" = "usr/lib/modules/7.0.9-peios-{{version}}/"
