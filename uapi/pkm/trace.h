@@ -94,6 +94,7 @@
 #define KACS_EXEC_INTEGRITY_INVALID_SD		12U /* exec file cached SD invalid/empty */
 #define KACS_EXEC_IMPERSONATION_REVERT_FAIL	13U /* bprm impersonation revert failed */
 #define KACS_EXEC_PIP_COMMITTED			14U /* pending exec PIP committed at commit */
+#define KACS_EXEC_UMH_NOT_TCB			15U /* usermodehelper exec below PeiosTcb trust */
 
 /*
  * kacs_signing reason — code-signature verification outcomes and the distinct

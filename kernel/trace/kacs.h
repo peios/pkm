@@ -234,7 +234,8 @@ DEFINE_EVENT(kacs_process_access, kacs_process_access,
 	{ KACS_EXEC_INTEGRITY_NO_CACHE,		"integrity-no-cache" },	\
 	{ KACS_EXEC_INTEGRITY_INVALID_SD,	"integrity-invalid-sd" }, \
 	{ KACS_EXEC_IMPERSONATION_REVERT_FAIL,	"impersonation-revert-fail" }, \
-	{ KACS_EXEC_PIP_COMMITTED,		"pip-committed" }
+	{ KACS_EXEC_PIP_COMMITTED,		"pip-committed" },	\
+	{ KACS_EXEC_UMH_NOT_TCB,		"umh-not-tcb" }
 
 /*
  * An exec/bprm credential or PIP transition. exec_pip fields are 0 when unknown

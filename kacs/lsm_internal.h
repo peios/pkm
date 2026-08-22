@@ -182,6 +182,20 @@ struct pkm_kacs_psb_activation_context {
 };
 
 struct pkm_kacs_task_security {
+	/*
+	 * Set on a usermodehelper child before it execs, so the exec path can
+	 * apply the PeiosTcb floor to kernel-initiated execs only. Nothing
+	 * upstream distinguishes them: the child is created by
+	 * user_mode_thread(), so it never carries PF_KTHREAD, and
+	 * security_kernel_module_request() fires in the requesting task before
+	 * this one exists. See kernel/patches/kernel/umh-mark-usermodehelper.
+	 *
+	 * Deliberately never cleared. It is consumed at exec but left set, so a
+	 * helper that re-execs -- an interpreter for a #! helper, say -- stays
+	 * under the floor rather than stepping out from under it on the second
+	 * exec. The task's only purpose is to be that helper.
+	 */
+	bool usermodehelper;
 	struct pkm_kacs_process_state *process_state;
 	struct pkm_kacs_stratafs_copy_up *copy_up_context;
 	const struct file *delete_on_close_file;

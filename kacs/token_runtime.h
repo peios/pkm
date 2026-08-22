@@ -1234,6 +1234,11 @@ int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
 	struct pkm_kacs_kunit_process_state_view *out);
 int pkm_kacs_kunit_signed_exec_pin_from_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material, u32 *pinned_out);
+/*
+ * The PeiosTcb floor on usermodehelper execs (PEI-59). Pure predicate, so it is
+ * declared rather than bridged — there is no state to stand up.
+ */
+bool pkm_kacs_umh_exec_denied(bool usermodehelper, u32 exec_pip_trust);
 long pkm_kacs_kunit_exec_dumpable_after_pip(u32 pip_type,
 					    u32 current_dumpable);
 long pkm_kacs_kunit_get_current_dumpable(void);

@@ -2609,6 +2609,52 @@ static void pkm_kunit_exec_pip_bad_signature_resets_none(struct kunit *test)
 }
 
 
+/*
+ * The PeiosTcb floor on usermodehelper execs (PEI-59). The kernel spawns these
+ * on its own behalf at full privilege, and CONFIG_MODPROBE_PATH is a writable
+ * sysctl, so the binary the kernel lands on must be TCB-signed or the exec is
+ * refused outright rather than demoted to PIP None.
+ */
+static void pkm_kunit_umh_exec_untrusted_is_denied(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_umh_exec_denied(true, 0U));
+}
+
+static void pkm_kunit_umh_exec_tcb_is_allowed(struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test,
+			   pkm_kacs_umh_exec_denied(
+				   true, PKM_KUNIT_SIGNING_TRUST_TCB));
+}
+
+/*
+ * The floor is scoped to kernel-initiated execs. An ordinary exec of the very
+ * same untrusted binary must still be allowed — everywhere else an unsigned
+ * binary simply carries no integrity label.
+ */
+static void pkm_kunit_umh_exec_floor_does_not_apply_to_normal_exec(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_umh_exec_denied(false, 0U));
+	KUNIT_EXPECT_FALSE(test,
+			   pkm_kacs_umh_exec_denied(
+				   false, PKM_KUNIT_SIGNING_TRUST_TCB - 1U));
+}
+
+/*
+ * The boundary. Anything below PeiosTcb fails, including a trust level one
+ * short of it — a binary signed and graded, but not graded high enough.
+ */
+static void pkm_kunit_umh_exec_below_tcb_is_denied(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kacs_umh_exec_denied(
+				  true, PKM_KUNIT_SIGNING_TRUST_TCB - 1U));
+	KUNIT_EXPECT_FALSE(test,
+			   pkm_kacs_umh_exec_denied(
+				   true, PKM_KUNIT_SIGNING_TRUST_TCB + 1U));
+}
+
 static void pkm_kunit_exec_pip_pending_is_transactional(struct kunit *test)
 {
 	struct pkm_kacs_kunit_process_state_view saved = {};
@@ -9827,6 +9873,10 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_tlp_mprotect_checks_new_exec_only),
 	KUNIT_CASE(pkm_kunit_exec_pip_signed_material_sets_tcb_trust),
 	KUNIT_CASE(pkm_kunit_exec_pip_bad_signature_resets_none),
+	KUNIT_CASE(pkm_kunit_umh_exec_untrusted_is_denied),
+	KUNIT_CASE(pkm_kunit_umh_exec_tcb_is_allowed),
+	KUNIT_CASE(pkm_kunit_umh_exec_floor_does_not_apply_to_normal_exec),
+	KUNIT_CASE(pkm_kunit_umh_exec_below_tcb_is_denied),
 	KUNIT_CASE(pkm_kunit_exec_pip_pending_is_transactional),
 	KUNIT_CASE(pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip),
 	KUNIT_CASE(pkm_kunit_exec_commit_preserves_mitigations_and_no_child),

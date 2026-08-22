@@ -40,6 +40,7 @@ kernel/sched-setaffinity-gate.patch
 kernel/signal-task-kill-bypass.patch
 kernel/sys-prctl-capability-guard.patch
 kernel/sys-getuid-getgid-realcred.patch
+kernel/umh-mark-usermodehelper.patch
 include/cred-projected-fsuid-fsgid.patch
 include/ptrace-kacs-modes.patch
 mm/mempolicy-movememory-gate.patch

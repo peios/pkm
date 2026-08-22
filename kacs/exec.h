@@ -19,6 +19,22 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 					struct cred *new,
 					const struct cred *old,
 					bool require_file_for_npm,
-					bool stage_exec_pip);
+					bool stage_exec_pip,
+					bool usermodehelper);
+
+/*
+ * Called from kernel/umh.c on a usermodehelper child immediately before it
+ * execs, so the exec path can tell a kernel-initiated exec from any other one.
+ * See kernel/patches/kernel/umh-mark-usermodehelper.patch.
+ */
+void pkm_kacs_mark_usermodehelper(void);
+bool pkm_kacs_current_is_usermodehelper(void);
+
+/*
+ * The PeiosTcb floor itself, as a predicate: true when this exec must be
+ * refused. Split out so the rule is testable without standing up creds, tokens
+ * and a mounted file.
+ */
+bool pkm_kacs_umh_exec_denied(bool usermodehelper, u32 exec_pip_trust);
 
 #endif /* _SECURITY_PKM_KACS_EXEC_H */

@@ -173,13 +173,27 @@ static long pkm_kacs_apply_exec_primary_token(const void *primary_token,
 	return ret;
 }
 
+/*
+ * Note this denies when exec_pip_trust is 0 because no PIP was derived at all,
+ * not only when a signature was found and graded below PeiosTcb. That is
+ * deliberate: for a kernel-initiated exec, "could not establish trust" and "is
+ * not trusted" have to reach the same answer, or the floor would be bypassable
+ * by whatever prevents the derivation from running.
+ */
+bool pkm_kacs_umh_exec_denied(bool usermodehelper, u32 exec_pip_trust)
+{
+	return usermodehelper &&
+	       exec_pip_trust < PKM_KACS_PIP_TRUST_PEIOS_TCB;
+}
+
 long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 					const void *primary_token,
 					const struct file *file,
 					struct cred *new,
 					const struct cred *old,
 					bool require_file_for_npm,
-					bool stage_exec_pip)
+					bool stage_exec_pip,
+					bool usermodehelper)
 {
 	bool uid_changed;
 	bool gid_changed;
@@ -197,6 +211,30 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 		pkm_kacs_clear_pending_exec_pip();
 		pkm_kacs_exec_pip_from_file(file, &exec_pip_type,
 					    &exec_pip_trust);
+	}
+
+	/*
+	 * The PeiosTcb floor on kernel-initiated execs.
+	 *
+	 * The kernel spawns usermodehelpers on its own behalf and at full
+	 * privilege -- request_module() runs CONFIG_MODPROBE_PATH, and the path
+	 * is a writable sysctl. Redirecting it is a well-known escalation: point
+	 * it at an attacker-controlled binary and the next request_module()
+	 * executes it with the kernel's authority. Requiring the exec'd binary
+	 * to carry PeiosTcb trust makes redirection worthless on its own, since
+	 * the attacker would also have to produce a TCB-signed binary.
+	 *
+	 * This is a HARD FAIL rather than a demotion to PIP None. Everywhere
+	 * else an unsigned binary simply gets no integrity label and runs with
+	 * whatever authority its token carries; here the exec is refused, since
+	 * the caller is the kernel and there is no lesser authority to fall back
+	 * to. Checked before the uid/gid gate so an unsigned helper is refused
+	 * on identical grounds whether or not the exec also changes identity.
+	 */
+	if (pkm_kacs_umh_exec_denied(usermodehelper, exec_pip_trust)) {
+		trace_kacs_exec(false, false, exec_pip_type, exec_pip_trust,
+				KACS_EXEC_UMH_NOT_TCB, -EACCES);
+		return -EACCES;
 	}
 
 	uid_changed = !uid_eq(new->euid, old->euid);
@@ -260,7 +298,37 @@ int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 	return (int)pkm_kacs_bprm_creds_from_file_core(
 		pkm_kacs_current_effective_token_ptr(),
 		pkm_kacs_current_primary_token_ptr(), file, bprm->cred,
-		current_cred(), true, true);
+		current_cred(), true, true,
+		pkm_kacs_current_is_usermodehelper());
+}
+
+/*
+ * The mark is deliberately not cleared here or anywhere else -- see the comment
+ * on pkm_kacs_task_security.usermodehelper. A usermodehelper task exists only to
+ * be that helper, so leaving it set keeps a re-exec under the same floor instead
+ * of letting the second exec escape it.
+ */
+void pkm_kacs_mark_usermodehelper(void)
+{
+	struct pkm_kacs_task_security *sec;
+
+	if (!current || !current->security)
+		return;
+
+	sec = pkm_kacs_task(current);
+	if (sec)
+		sec->usermodehelper = true;
+}
+
+bool pkm_kacs_current_is_usermodehelper(void)
+{
+	const struct pkm_kacs_task_security *sec;
+
+	if (!current || !current->security)
+		return false;
+
+	sec = pkm_kacs_task(current);
+	return sec && sec->usermodehelper;
 }
 
 void pkm_kacs_bprm_committing_creds(const struct linux_binprm *bprm)

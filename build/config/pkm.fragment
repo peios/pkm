@@ -70,6 +70,19 @@ CONFIG_MODULE_SIG_KEY_TYPE_MLDSA_65=y
 # are still refused. Drop this when the pool moves to OpenSSL 4.x.
 CONFIG_PKCS7_WAIVE_AUTHATTRS_REJECTION_FOR_MLDSA=y
 
+# --- request_module()'s helper ---
+# The upstream default is /sbin/modprobe, which does not exist on Peios: kmod's
+# compat symlinks install beside the multicall binary in /usr/bin, and the /sbin
+# view is composed from usr/sbin + lcl/sbin, so modprobe is reachable at
+# /bin/modprobe and nowhere else. Left at the default, every kernel-initiated
+# load — get_fs_type() on mount, socket() for a protocol family, the crypto API —
+# fails to find the helper and reports nothing that names the cause.
+#
+# The path being a writable sysctl is the reason KACS applies a PeiosTcb floor to
+# usermodehelper execs: redirecting /proc/sys/kernel/modprobe gains an attacker
+# nothing unless they can also produce a TCB-signed binary. See PEI-59.
+CONFIG_MODPROBE_PATH="/bin/modprobe"
+
 # --- QEMU guest boot + test harness (built-in; monolithic profile) ---
 # initrd
 CONFIG_BLK_DEV_INITRD=y
