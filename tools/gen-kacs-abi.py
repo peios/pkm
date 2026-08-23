@@ -2,8 +2,11 @@
 """Generate the KACS ABI appendix of the Peios Kernel TRM from pkm/uapi/pkm/.
 
 Constant values and struct layouts are obtained by compiling a probe program
-against the real headers, so the output cannot drift from the ABI. Prose
-framing lives here; everything factual comes from the headers.
+against the real headers, so the output cannot drift from the ABI.
+
+This file owns the appendix outright and overwrites it wholesale. Nothing
+hand-written may live there: prose about the ABI belongs in the notes
+appendix beside it, which no generator writes.
 
 Usage:  python3 pkm/tools/gen-kacs-abi.py [--check]
 
@@ -23,108 +26,13 @@ OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
 KACS_HEADERS = ["syscall.h", "token.h", "access.h", "file.h",
                 "process.h", "psb.h", "sd.h", "sid.h"]
 
+# The page's own identity, not prose about the ABI. learn CI fails a deploy
+# on an article with no description (learn 3362f6d), so this cannot be left
+# to whoever last edited the file: the generator overwrites it wholesale.
+DESCRIPTION = ("Every KACS syscall number, structure layout, constant and "
+               "enumeration, generated from the uapi headers and measured by "
+               "compilation.")
 
-TAIL_PROSE = """
-## Token query payloads
-
-The class numbers above come from the header; these are the payloads
-each one returns. Sizes are in bytes; a variable-length payload uses
-the shapes below. An invalid class returns `EINVAL`.
-
-Two repeating shapes appear throughout. A **SID array** is
-`[count:u32le]` followed by `count` entries of
-`[sid_len:u32le][sid_bytes][attributes:u32le]`, and reports a count of
-zero when the array is empty rather than an empty payload. A **claims
-array** is `[count:u32le]` followed by `count` entries of
-`[entry_len:u32le][entry_bytes]`. A bare SID is the SID bytes alone,
-and an absent optional SID or ACL is zero bytes.
-
-| Class | Payload |
-|---|---|
-| `USER` | Bare SID. |
-| `GROUPS` | SID array. |
-| `PRIVILEGES` | 32 bytes: present, enabled, enabled-by-default and used, four `u64` in that order. |
-| `TYPE` | `u32`, 4 bytes. |
-| `INTEGRITY_LEVEL` | The mandatory-label SID `S-1-16-<level>`, 12 bytes. |
-| `OWNER` | Bare SID, resolved through the owner index: 0 is the user SID, N is `groups[N-1]`. |
-| `PRIMARY_GROUP` | Bare SID, resolved the same way. |
-| `INTERACTIVITY_SCOPE` | `u32`, 4 bytes. |
-| `RESTRICTED_SIDS` | SID array; count 0 on an unrestricted token. |
-| `SOURCE` | 16 bytes: an 8-byte name followed by a `u64` LUID. |
-| `STATISTICS` | 40 bytes: token id, LogonSession id, modified id, token type, a reserved zero, and expiration. |
-| `ORIGIN` | `u64`, 8 bytes. |
-| `ELEVATION_TYPE` | `u32`, 4 bytes. |
-| `DEVICE_GROUPS` | SID array. |
-| `APPCONTAINER_SID` | Bare SID; empty when the token is unconfined. |
-| `CAPABILITIES` | SID array. |
-| `MANDATORY_POLICY` | `u32`, 4 bytes. |
-| `LOGON_TYPE` | `u32`, 4 bytes, read from the LogonSession. |
-| `LOGON_SID` | Bare SID, derived from the LogonSession id. |
-| `DEFAULT_DACL` | Binary ACL; empty when none is set. |
-| `IMPERSONATION_LEVEL` | `u32`, 4 bytes. |
-| `USER_CLAIMS` | Claims array. |
-| `DEVICE_CLAIMS` | Claims array. |
-| `PROJECTED_SUPPLEMENTARY_GIDS` | `[count:u32le]` followed by `count` `u32` GIDs. |
-
-Nine token fields have no query class at all: `created_at`,
-`token_guid`, `audit_policy`, `write_restricted`, `user_deny_only`,
-`isolation_boundary`, `confinement_exempt`, the projected UID and GID
-— only the supplementary GIDs are reportable —
-`restricted_device_groups`, and the LCS registry credentials.
-
-## Names that differ from the design documents
-
-Several constants are referred to elsewhere under names that do not
-exist. The generated tables above are authoritative; this maps the
-older spellings onto them.
-
-| Referred to as | Actual name |
-|---|---|
-| `KACS_REAL_TOKEN` | `KACS_TOKEN_OPEN_REAL` |
-| `KACS_LEVEL_*` | `KACS_IMLEVEL_*` |
-| `KACS_FILE_SUPERSEDE`, `_OPEN`, ... | `KACS_DISPOSITION_*` |
-| `OWNER_SECURITY_INFORMATION`, ... | `KACS_SECINFO_*` |
-| `SE_PRIVILEGE_ENABLED` / `_REMOVED` | `KACS_PRIVILEGE_ATTR_ENABLED` / `_REMOVED` |
-| `KACS_PRIV_RESET_ALL_DEFAULTS` | `KACS_PRIVILEGE_RESET_ALL_DEFAULTS` |
-| `KACS_RESTRICT_WRITE_RESTRICTED` | `KACS_TOKEN_RESTRICT_WRITE_RESTRICTED` |
-| `SE_GROUP_*` | `KACS_SID_GROUP_*` |
-| `TOKEN_CLASS_*` | `KACS_TOKEN_CLASS_*` |
-
-The PIP tiers have no public names at all. The Protected type (512)
-and the `PeiosTcb` trust level (8192) exist only as kernel-private
-constants, and nothing in `uapi/pkm/` defines None, Protected or
-Isolated. A program reasoning about tiers compares the numbers
-(§3.7).
-
-## What is not here
-
-Required rights, error codes and validation rules are properties of
-the implementation rather than of the headers, so they are documented
-with the operations themselves: token rights and the per-ioctl
-requirements in §3.2.8, the file rights in §3.9, the process rights
-in §3.3.3, and the privileges in §3.4.2.
-
-Two neighbouring ABIs are generated or documented separately.
-`uapi/pkm/trace.h` is a versioned, append-only ABI of tracepoint
-reason, operation and state codes intended for tooling.
-`uapi/pkm/kmes.h` and `uapi/pkm/lcs.h` belong to their own chapters.
-
-## Build configuration
-
-`CONFIG_SECURITY_PKM=y` and `CONFIG_RUST=y` are required, as are
-`CONFIG_STRICT_DEVMEM=y` and `CONFIG_MODULE_SIG_FORCE=y` -- the last
-two enforced at initialisation rather than only at build (§3.7).
-`CONFIG_SECURITY_SELINUX`, `_APPARMOR`, `_SMACK` and `_TOMOYO` are
-refused by Kconfig dependency; `CONFIG_BPF_LSM` is refused only at
-runtime, so a kernel enabling both configures and builds and then
-fails to initialise. `CONFIG_LSM` is never parsed.
-
-Two further symbols gate large bodies of code:
-`CONFIG_SECURITY_PKM_KUNIT`, which compiles in the test harness and,
-in the signing path, a different and publicly known verification key
-(§3.6); and `CONFIG_STRATAFS_FS`, without which the copy-up API of
-§3.9.7 is inert.
-"""
 
 DEFINE = re.compile(r"^#define\s+([A-Z_][A-Z0-9_]*)(\([^)]*\))?\s+(.+?)\s*$")
 TRAILING = re.compile(r"/\*\s*(.*?)\s*\*/")
@@ -283,7 +191,21 @@ def fmt_value(name, raw, val):
     return f"`{val}`"
 
 
+def learn_is_absent():
+    """True when there is no learn/ checkout beside pkm/ to write into.
+
+    The appendices live in a sibling repository. A pkm checkout on its own
+    is a legitimate state, and so is a build container that mounts only
+    pkm/ -- neither is drift, and reporting it as drift is a false alarm
+    that trains people to ignore the gate.
+    """
+    return not OUT.parent.exists()
+
+
 def main():
+    if learn_is_absent():
+        print(f"skipped: no learn/ checkout at {OUT.parent}", file=sys.stderr)
+        return 0
     check = "--check" in sys.argv
     consts, structs = [], []
     per_header = {}
@@ -298,6 +220,7 @@ def main():
     w = o.append
     w("---")
     w("title: KACS ABI Reference")
+    w(f"description: {DESCRIPTION}")
     w("---")
     w("")
     w("Every name, value, offset and size in this appendix is generated")
@@ -306,6 +229,11 @@ def main():
     w("Regenerate it whenever the ABI changes; do not edit it by hand.")
     w("")
     w("The names here are the ones a program actually compiles against.")
+    w("Everything about the ABI a compiler cannot measure -- token query")
+    w("payload shapes, the specification spellings that differ from these")
+    w("names, what is documented elsewhere, and the kernel configuration")
+    w("-- is in the notes appendix, §3.D, which this generator does not")
+    w("touch.")
     w("")
 
     # --- syscalls
@@ -398,7 +326,6 @@ def main():
                 w(f"| {disp} | {val} |" + (f" {note} |" if has_note else ""))
         w("")
 
-    w(TAIL_PROSE)
     text = "\n".join(o).rstrip() + "\n"
     text = re.sub(r"\n{3,}", "\n\n", text)
     if check:

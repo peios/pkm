@@ -2,8 +2,11 @@
 """Generate the LCS ABI appendix of the Peios Kernel TRM from pkm/uapi/pkm/lcs.h.
 
 Constant values, ioctl encodings and struct layouts are obtained by compiling a
-probe against the real headers, so the output cannot drift from the ABI. Prose
-framing lives here; everything factual comes from the header.
+probe against the real headers, so the output cannot drift from the ABI.
+
+This file owns the appendix outright and overwrites it wholesale. Nothing
+hand-written may live there: prose about the ABI belongs in the notes
+appendix beside it, which no generator writes.
 
 Usage:  python3 pkm/tools/gen-lcs-abi.py [--check]
 
@@ -24,6 +27,13 @@ SYSCALL_H = UAPI / "pkm" / "syscall.h"
 LCS_SRC = ROOT / "pkm" / "lcs"
 OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
        / "100--peios-kernel.book/5--lcs/a1--lcs-abi.md")
+
+# The page's own identity, not prose about the ABI. learn CI fails a deploy
+# on an article with no description (learn 3362f6d), so it is emitted here
+# rather than left in a file the generator overwrites wholesale.
+DESCRIPTION = ("Every LCS syscall number, ioctl, structure layout and "
+               "constant, generated from the uapi headers and measured by "
+               "compilation.")
 
 DEFINE = re.compile(r"^#define\s+([A-Z_][A-Z0-9_]*)(\([^)]*\))?\s+(.+?)\s*$")
 TRAILING = re.compile(r"/\*\s*(.*?)\s*\*/")
@@ -202,6 +212,7 @@ def build():
 
     w("---")
     w("title: LCS ABI Reference")
+    w(f"description: {DESCRIPTION}")
     w("---")
     w("")
     w("Every name, value, offset and size in this appendix is generated from")
@@ -209,6 +220,10 @@ def build():
     w("encodings and struct layouts measured by compiling a probe against the")
     w("real header. Regenerate it whenever the ABI changes; do not edit it by")
     w("hand. The names here are the ones a program actually compiles against.")
+    w("")
+    w("What a compiler cannot measure -- which properties belong with their")
+    w("operations rather than here, and the kernel configuration -- is in the")
+    w("notes appendix, §5.B, which this generator does not touch.")
     w("")
 
     # --- syscalls -------------------------------------------------------
@@ -335,42 +350,26 @@ def build():
         o += table(["Constant", "Value"] + (["Notes"] if has_note else []), trows)
         w("")
 
-    w(TAIL_PROSE.strip())
     text = "\n".join(o).rstrip() + "\n"
     return re.sub(r"\n{3,}", "\n\n", text)
 
 
-TAIL_PROSE = """
-## What is not here
 
-The header carries names, numbers and layouts. Everything else about the
-interface is a property of the implementation rather than of the ABI, and
-is documented with the operation it belongs to: the required access right
-for each ioctl and the two-pass output buffer convention in §5.6, the
-error vocabulary in §5.6.4, the RSI payload shapes in the Registry Source
-Interface specification, and the backup stream's record payloads in the
-Registry Backup Format specification.
+def learn_is_absent():
+    """True when there is no learn/ checkout beside pkm/ to write into.
 
-`REG_BACKUP_MAGIC` above is the eight-byte header magic; the record type
-codes are the framing, not the payloads.
-
-## Build configuration
-
-LCS is built by `CONFIG_SECURITY_PKM`, a boolean option, so it is linked
-into `vmlinux` rather than loaded. `CONFIG_RUST=y` is required: the
-resolution core, the RSI codec, the backup serialiser and the transaction
-log are Rust, staged into the kernel tree as `security/pkm/lcs/lcs_core`.
-`CONFIG_SECURITY_PKM_KUNIT` compiles in the in-kernel test harness.
-
-The three syscall numbers are added to the syscall table by
-`kernel/patches/arch/syscall-table-pkm.patch`, which patches both
-`arch/x86/entry/syscalls/syscall_64.tbl` and the copy of it that ships
-under `tools/perf/`. They are registered `common`, so they are reachable
-from the x32 ABI as well as from x86-64.
-"""
+    The appendices live in a sibling repository. A pkm checkout on its own
+    is a legitimate state, and so is a build container that mounts only
+    pkm/ -- neither is drift, and reporting it as drift is a false alarm
+    that trains people to ignore the gate.
+    """
+    return not OUT.parent.exists()
 
 
 def main():
+    if learn_is_absent():
+        print(f"skipped: no learn/ checkout at {OUT.parent}", file=sys.stderr)
+        return 0
     text = build()
     if "--check" in sys.argv:
         cur = OUT.read_text() if OUT.exists() else ""

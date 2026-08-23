@@ -29,6 +29,12 @@ MAKEFILE = ROOT / "pkm/stratafs/Makefile"
 OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
        / "100--peios-kernel.book/4--stratafs/a1--constants.md")
 
+# The page's own identity. learn CI fails a deploy on an article with no
+# description (learn 3362f6d), and this file is overwritten wholesale.
+DESCRIPTION = ("Every stratafs constant \u2014 filesystem identity, stratum "
+               "flags, extended attributes, copy-up and staging markers "
+               "\u2014 generated from the source.")
+
 DEFINE = re.compile(r"^#define\s+(\w+)\s+(.+?)\s*$")
 LE_SIZES = {"__le16": 2, "__le32": 4, "__le64": 8, "__u8": 1}
 
@@ -177,7 +183,8 @@ def build():
             note = f"ASCII `{gloss}`"
         return (f"`{name}`", f"`{value}`", note)
 
-    parts = ["---", "title: Constants", "---", "", (
+    parts = ["---", "title: Constants", f"description: {DESCRIPTION}",
+             "---", "", (
         "Every value below is generated from the source by\n"
         "`pkm/tools/gen-stratafs-constants.py`. Nothing here is transcribed by\n"
         "hand, and the generator's `--check` mode fails if the two drift apart."
@@ -295,7 +302,21 @@ def build():
     return "\n".join(parts).rstrip() + "\n"
 
 
+def learn_is_absent():
+    """True when there is no learn/ checkout beside pkm/ to write into.
+
+    The appendices live in a sibling repository. A pkm checkout on its own
+    is a legitimate state, and so is a build container that mounts only
+    pkm/ -- neither is drift, and reporting it as drift is a false alarm
+    that trains people to ignore the gate.
+    """
+    return not OUT.parent.exists()
+
+
 def main():
+    if learn_is_absent():
+        print(f"skipped: no learn/ checkout at {OUT.parent}", file=sys.stderr)
+        return 0
     text = build()
     if "--check" in sys.argv:
         if not OUT.exists() or OUT.read_text() != text:

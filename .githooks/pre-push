@@ -6,6 +6,13 @@
 # userspace compiler). Both are read-only — verify regenerates into a throwaway
 # scratch dir, never the tree.
 #
+# A third gate runs here rather than through pekit: the TRM appendix generators
+# (tools/gen-*.py), which derive three appendices in the sibling learn/
+# repository from these same headers. pekit runs every command inside the
+# pkm-build container, which mounts only pkm/ — learn/ is not reachable from
+# there, so a pekit target for these could neither check nor regenerate them.
+# They need only python3 and a compiler, both of which are on the host.
+#
 # Enabled repo-wide via: git config core.hooksPath .githooks
 # Deliberately bypass with: git push --no-verify
 #
@@ -33,34 +40,63 @@ changed_paths() {
 
 paths=$(changed_paths || true)
 
-# If we positively identified the changed paths and none are under uapi/, skip.
-# On any ambiguity (empty list / errors), fall through and run the gate.
-if [ -n "$paths" ] && ! printf '%s\n' "$paths" | grep -q '^uapi/'; then
+# If we positively identified the changed paths and none touch a gated input,
+# skip. On any ambiguity (empty list / errors), fall through and run the gates.
+#
+# uapi/ feeds the bindings and both ABI appendices; kacs/ supplies the syscall
+# signatures the KACS appendix scrapes; stratafs/ and the stratafs-core crate
+# feed the constants appendix.
+gated='^uapi/|^kacs/|^stratafs/|^crates/stratafs-core/|^kernel/include/linux/kacs_stratafs\.h$'
+if [ -n "$paths" ] && ! printf '%s\n' "$paths" | grep -qE "$gated"; then
 	exit 0
 fi
 
-if ! command -v pekit >/dev/null 2>&1; then
-	echo "pre-push: pekit not found — cannot verify UAPI bindings." >&2
-	echo "          Install pekit, or 'git push --no-verify' if this is intentional." >&2
-	exit 1
+# The bindings gates are scoped to uapi/ changes; the appendix gate below cares
+# about a wider set, so it runs whenever any gated input moved.
+if [ -z "$paths" ] || printf '%s\n' "$paths" | grep -q '^uapi/'; then
+	if ! command -v pekit >/dev/null 2>&1; then
+		echo "pre-push: pekit not found — cannot verify UAPI bindings." >&2
+		echo "          Install pekit, or 'git push --no-verify' if this is intentional." >&2
+		exit 1
+	fi
+
+	echo "pre-push: verifying UAPI bindings (pekit verify uapi)…" >&2
+	if ! pekit verify uapi; then
+		echo >&2
+		echo "pre-push: UAPI drift check failed — the committed bindings are out of sync" >&2
+		echo "          with uapi/pkm, or the toolchain/container is unavailable." >&2
+		echo "          Fix with: pekit gen uapi  (then stage uapi/generated)" >&2
+		echo "          or push with --no-verify if this is an environment issue." >&2
+		exit 1
+	fi
+
+	echo "pre-push: checking UAPI standalone-compile (pekit test uapi)…" >&2
+	if ! pekit test uapi; then
+		echo >&2
+		echo "pre-push: UAPI standalone-compile check failed — the canonical headers" >&2
+		echo "          don't compile with a stock userspace compiler, or the container" >&2
+		echo "          is unavailable. Fix the headers under uapi/pkm," >&2
+		echo "          or push with --no-verify if this is an environment issue." >&2
+		exit 1
+	fi
 fi
 
-echo "pre-push: verifying UAPI bindings (pekit verify uapi)…" >&2
-if ! pekit verify uapi; then
-	echo >&2
-	echo "pre-push: UAPI drift check failed — the committed bindings are out of sync" >&2
-	echo "          with uapi/pkm, or the toolchain/container is unavailable." >&2
-	echo "          Fix with: pekit gen uapi  (then stage uapi/generated)" >&2
-	echo "          or push with --no-verify if this is an environment issue." >&2
-	exit 1
-fi
-
-echo "pre-push: checking UAPI standalone-compile (pekit test uapi)…" >&2
-if ! pekit test uapi; then
-	echo >&2
-	echo "pre-push: UAPI standalone-compile check failed — the canonical headers" >&2
-	echo "          don't compile with a stock userspace compiler, or the container" >&2
-	echo "          is unavailable. Fix the headers under uapi/pkm," >&2
-	echo "          or push with --no-verify if this is an environment issue." >&2
-	exit 1
-fi
+# TRM appendix drift. The three generators derive learn/'s KACS ABI, LCS ABI and
+# stratafs constants appendices from uapi/pkm and the stratafs sources, so a
+# header change that has not been carried into them is drift of the same kind as
+# the bindings above. Each --check re-derives everything and compares without
+# writing, and each skips cleanly when there is no learn/ checkout beside pkm/.
+#
+# The prose in those chapters lives in separate notes appendices (§3.D, §5.B)
+# that no generator writes, so regenerating cannot destroy it — see PEI-473.
+for gen in gen-kacs-abi gen-lcs-abi gen-stratafs-constants; do
+	echo "pre-push: checking TRM appendix drift (tools/$gen.py --check)…" >&2
+	if ! python3 "tools/$gen.py" --check; then
+		echo >&2
+		echo "pre-push: a TRM appendix is out of sync with the source it is" >&2
+		echo "          generated from. Fix with: python3 tools/$gen.py" >&2
+		echo "          (then commit the change in learn/), or push with" >&2
+		echo "          --no-verify if this is an environment issue." >&2
+		exit 1
+	fi
+done
