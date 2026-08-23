@@ -3,6 +3,12 @@
 #
 # Runtime shared-lib deps (TODO — see D4): libcap libc
 
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
+# `man -k` and `apropos` find them instead of falling back to a filesystem
+# scan. Top-level, not inside a table -- TOML would otherwise scope it to
+# whichever table precedes it.
+side_effects = ["man-db"]
+
 [package]
 description = "turbostat — CPU frequency/idle/power telemetry (from Linux 7.0.9 tools/power/x86/turbostat)"
 
