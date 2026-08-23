@@ -7526,26 +7526,60 @@ static void pkm_kunit_mount_policy_same_superblock_views_share_policy(
 }
 
 
-static void pkm_kunit_mount_policy_set_requires_tcb(struct kunit *test)
+/*
+ * Setting mount policy takes SeManageVolumePrivilege OR SeTcbPrivilege.
+ *
+ * It used to be TCB alone, which meant SeManageVolumePrivilege could mount a
+ * filesystem carrying its own descriptors and not one whose descriptors had to
+ * be synthesised -- so an administrator could mount, and could not mount a
+ * fresh ESP. The negative case below deliberately builds a token holding
+ * NEITHER, rather than reusing the without-TCB token: that one carries every
+ * SYSTEM privilege except TCB and CreateToken, which now includes
+ * SeManageVolumePrivilege, so it is no longer a token that should be refused.
+ */
+static void pkm_kunit_mount_policy_set_requires_volume_or_tcb(
+	struct kunit *test)
 {
-	struct kacs_mount_policy_args args = {
-		.policy = KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+	static const struct {
+		const char *what;
+		u64 privileges;
+		bool allowed;
+	} cases[] = {
+		{ "manage-volume alone",
+		  PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE, true },
+		{ "tcb alone", PKM_KUNIT_SE_TCB_PRIVILEGE, true },
+		{ "neither", 0ULL, false },
+		{ "an unrelated privilege",
+		  PKM_KUNIT_SE_LOAD_DRIVER_PRIVILEGE, false },
 	};
-	const void *subject_token;
-	u32 policy = 0;
-	u32 generation = 0;
-	u32 template_len = 0;
+	size_t i;
 
-	subject_token = kacs_rust_kunit_create_without_tcb_token();
-	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		struct kacs_mount_policy_args args = {
+			.policy = KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+		};
+		const void *subject_token;
+		u32 policy = 0;
+		u32 generation = 0;
+		u32 template_len = 0;
+		long ret;
 
-	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_set_mount_policy_for_subject(
-				subject_token, TMPFS_MAGIC, &args, &policy,
-				&generation, &template_len),
-			(long)-EPERM);
+		subject_token = kacs_rust_kunit_create_logon_type_token(
+			PKM_KUNIT_LOGON_TYPE_INTERACTIVE, cases[i].privileges);
+		KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
-	kacs_rust_token_drop(subject_token);
+		ret = pkm_kacs_kunit_set_mount_policy_for_subject(
+			subject_token, TMPFS_MAGIC, &args, &policy, &generation,
+			&template_len);
+		if (cases[i].allowed)
+			KUNIT_EXPECT_EQ_MSG(test, ret, 0L, "case: %s",
+					    cases[i].what);
+		else
+			KUNIT_EXPECT_EQ_MSG(test, ret, (long)-EPERM, "case: %s",
+					    cases[i].what);
+
+		kacs_rust_token_drop(subject_token);
+	}
 }
 
 
@@ -10468,7 +10502,7 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_mount_policy_defaults_to_deny_missing),
 	KUNIT_CASE(pkm_kunit_mount_policy_set_persistent_template_success),
 	KUNIT_CASE(pkm_kunit_mount_policy_same_superblock_views_share_policy),
-	KUNIT_CASE(pkm_kunit_mount_policy_set_requires_tcb),
+	KUNIT_CASE(pkm_kunit_mount_policy_set_requires_volume_or_tcb),
 	KUNIT_CASE(pkm_kunit_mount_policy_rejects_unmanaged_and_hard_unmanaged),
 	KUNIT_CASE(pkm_kunit_mount_policy_rejects_invalid_templates),
 	KUNIT_CASE(pkm_kunit_mount_policy_rejects_malformed_abi_args),

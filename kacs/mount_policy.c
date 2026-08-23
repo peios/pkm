@@ -14,6 +14,8 @@
 
 #include <pkm/token.h>
 
+#include "capability.h"
+
 #include "lsm_internal.h"
 #include "mount_policy.h"
 #include "token_runtime.h"
@@ -328,8 +330,15 @@ long pkm_kacs_set_mount_policy_core(
 		return -EINVAL;
 	}
 
-	if (pkm_kacs_require_enabled_privilege(
-		    subject_token, KACS_SE_TCB_PRIVILEGE)) {
+	/*
+	 * Setting mount policy is volume management, so
+	 * SeManageVolumePrivilege satisfies it and SeTcbPrivilege still does.
+	 * Without this the privilege would permit mounting a filesystem that
+	 * carries its own descriptors and refuse one whose descriptors must be
+	 * synthesised -- which is most of the reason to mount anything, and
+	 * exactly what an installer does to a fresh ESP.
+	 */
+	if (!pkm_kacs_may_manage_volumes_for_token(subject_token)) {
 		trace_kacs_mount_policy_set(sb->s_magic, 0, args->policy, 0, 0,
 					    KACS_MP_TCB_DENIED, -EPERM);
 		return -EPERM;
@@ -442,10 +451,8 @@ SYSCALL_DEFINE3(kacs_get_mount_policy, int, fd,
 	subject_token = pkm_kacs_current_effective_token_ptr();
 	if (!subject_token)
 		return -EACCES;
-	ret = pkm_kacs_require_enabled_privilege(
-		subject_token, KACS_SE_TCB_PRIVILEGE);
-	if (ret)
-		return ret;
+	if (!pkm_kacs_may_manage_volumes_for_token(subject_token))
+		return -EPERM;
 
 	ret = pkm_kacs_copy_mount_policy_args_from_user(&args, uargs, argsize);
 	if (ret)
@@ -509,8 +516,7 @@ SYSCALL_DEFINE3(kacs_set_mount_policy, int, fd,
 	if (ret)
 		return ret;
 
-	if (!kacs_rust_token_has_enabled_privilege(
-		    subject_token, KACS_SE_TCB_PRIVILEGE))
+	if (!pkm_kacs_may_manage_volumes_for_token(subject_token))
 		return -EPERM;
 
 	ret = pkm_kacs_copy_mount_template_from_user(&args, &template_bytes);
