@@ -22,10 +22,26 @@
 # install-modules-irf.sh re-runs depmod and asserts every module the index names
 # is present.
 #
-# No `depmod` side effect here, deliberately. The declaration exists for
-# reindexing after an out-of-tree module is added to an installed system, and
-# nothing adds modules to an initramfs root at runtime — it is rebuilt by mkirf
-# from packages instead.
+# The `depmod` declaration is not optional, despite nothing adding modules to
+# an initramfs root at runtime — it is rebuilt by mkirf from packages instead.
+# This package used to omit it on exactly that reasoning, and the reasoning is
+# sound about consequences and wrong about the rule.
+#
+# PSPU §5.24 states the trigger as a property of the PAYLOAD: a package whose
+# payload contains kernel modules under /usr/lib/modules/ MUST declare depmod.
+# What the consumer then does with the declaration is a separate obligation,
+# and peipkg-compose — the only thing that installs this package — runs no
+# side effects at all. So declaring it costs the initramfs nothing, while
+# omitting it made the manifest disagree with its own payload.
+#
+# Scoping the rule to "packages that can be installed into a live root" was
+# the alternative and is the wrong lever: it makes the trigger depend on what
+# a package MEANS rather than on what it CONTAINS, which is precisely the
+# property that lets `pack` check it mechanically. See PEI-474.
+#
+# (Top-level, not inside a table — TOML would otherwise scope it to whichever
+# table precedes it.)
+side_effects = ["depmod"]
 
 [package]
 # Inside [package], unlike side_effects which is a top-level key — this places
