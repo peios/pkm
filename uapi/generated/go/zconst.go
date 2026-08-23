@@ -132,6 +132,7 @@ const (
 	KACS_EXEC_TOKEN_CLONE_FAIL                          = 9
 	KACS_EXEC_TOKEN_INSTALL_FAIL                        = 8
 	KACS_EXEC_TOKEN_NPM_DERIVED                         = 4
+	KACS_EXEC_UMH_NOT_TCB                               = 15
 	KACS_FILE_ADD_FILE                                  = 2
 	KACS_FILE_ADD_SUBDIRECTORY                          = 4
 	KACS_FILE_APPEND_DATA                               = 4
@@ -382,6 +383,7 @@ const (
 	KACS_SE_INCREASE_QUOTA_PRIVILEGE                    = 32
 	KACS_SE_LOAD_DRIVER_PRIVILEGE                       = 1024
 	KACS_SE_LOCK_MEMORY_PRIVILEGE                       = 16
+	KACS_SE_MANAGE_VOLUME_PRIVILEGE                     = 268435456
 	KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE            = 8192
 	KACS_SE_RELABEL_PRIVILEGE                           = 4294967296
 	KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE                   = 16777216

@@ -380,35 +380,50 @@ long pkm_kacs_prctl_capability_guard_core(const void *subject_token,
  * Returns true when permitted. Callers are kernel mount paths patched to
  * consult this before falling back to the ordinary capability check.
  */
-bool pkm_kacs_may_manage_volumes(void)
+/*
+ * The decision itself, against an explicit token.
+ *
+ * Split from the wrapper below for the same reason
+ * pkm_kacs_check_capability_for_token is: a function that reads
+ * current_cred() cannot be driven from KUnit, and the privilege arithmetic is
+ * the part worth testing.
+ */
+bool pkm_kacs_may_manage_volumes_for_token(const void *subject_token)
 {
-	const struct pkm_kacs_cred_security *sec;
-	const struct cred *cred = current_cred();
 	u64 privilege = KACS_SE_MANAGE_VOLUME_PRIVILEGE | KACS_SE_TCB_PRIVILEGE;
 	u64 held;
 
-	if (!cred)
-		return false;
-	sec = cred->security ? pkm_kacs_cred(cred) : NULL;
-	if (!sec || !sec->token) {
+	if (!subject_token) {
 		trace_kacs_capability(CAP_SYS_ADMIN, privilege, KACS_CAP_CAPABLE,
 				      -EPERM);
 		return false;
 	}
 
-	held = kacs_rust_token_enabled_privileges_in_mask(sec->token, privilege);
+	held = kacs_rust_token_enabled_privileges_in_mask(subject_token,
+							  privilege);
 	if (held == 0) {
 		trace_kacs_capability(CAP_SYS_ADMIN, privilege,
 				      KACS_CAP_PRIV_NOT_ENABLED, -EPERM);
 		return false;
 	}
-	if (!kacs_rust_token_mark_privileges_used(sec->token, held)) {
+	if (!kacs_rust_token_mark_privileges_used(subject_token, held)) {
 		trace_kacs_capability(CAP_SYS_ADMIN, held, KACS_CAP_USE_MARK_FAIL,
 				      -EPERM);
 		return false;
 	}
 
 	return true;
+}
+
+bool pkm_kacs_may_manage_volumes(void)
+{
+	const struct pkm_kacs_cred_security *sec;
+	const struct cred *cred = current_cred();
+
+	if (!cred)
+		return false;
+	sec = cred->security ? pkm_kacs_cred(cred) : NULL;
+	return pkm_kacs_may_manage_volumes_for_token(sec ? sec->token : NULL);
 }
 
 long pkm_kacs_capable_in_cred_ns(const struct cred *cred,

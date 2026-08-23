@@ -11,6 +11,7 @@ struct user_namespace;
 
 u64 pkm_kacs_allow_cap_mask_u64(void);
 bool pkm_kacs_may_manage_volumes(void);
+bool pkm_kacs_may_manage_volumes_for_token(const void *subject_token);
 void pkm_kacs_raise_allow_compat_caps(struct cred *cred);
 void pkm_kacs_capget_fixup(kernel_cap_t *effective,
 			   kernel_cap_t *inheritable,

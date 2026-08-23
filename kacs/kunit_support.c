@@ -5398,6 +5398,11 @@ long pkm_kacs_kunit_check_capability_for_subject(const void *subject_token,
 	return pkm_kacs_check_capability_for_token(subject_token, cap);
 }
 
+bool pkm_kacs_kunit_may_manage_volumes_for_subject(const void *subject_token)
+{
+	return pkm_kacs_may_manage_volumes_for_token(subject_token);
+}
+
 long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,
 					     u64 effective_mask,
 					     u64 inheritable_mask,

@@ -467,6 +467,82 @@ static void pkm_kunit_remote_shutdown_success_requires_both_privileges(
 }
 
 
+/*
+ * Mounting is gated on SeManageVolumePrivilege, and SeTcbPrivilege satisfies
+ * it too. The point of the privilege is that an administrator can mount
+ * WITHOUT being the TCB, so the first case here is the whole feature: a token
+ * holding only SeManageVolume is allowed.
+ */
+static void pkm_kunit_may_manage_volumes_accepts_volume_or_tcb(
+	struct kunit *test)
+{
+	static const struct {
+		const char *what;
+		u64 privileges;
+		bool allowed;
+	} cases[] = {
+		{ "manage-volume alone", PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE,
+		  true },
+		{ "tcb alone", PKM_KUNIT_SE_TCB_PRIVILEGE, true },
+		{ "both", PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE |
+			  PKM_KUNIT_SE_TCB_PRIVILEGE, true },
+		{ "neither", 0ULL, false },
+		/*
+		 * An unrelated privilege must not do: this gate is specific,
+		 * not "holds something administrative".
+		 */
+		{ "an unrelated privilege",
+		  PKM_KUNIT_SE_LOAD_DRIVER_PRIVILEGE, false },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		const void *token;
+
+		token = kacs_rust_kunit_create_logon_type_token(
+			PKM_KUNIT_LOGON_TYPE_INTERACTIVE,
+			cases[i].privileges);
+		KUNIT_ASSERT_NOT_NULL(test, token);
+		KUNIT_EXPECT_EQ_MSG(
+			test,
+			(int)pkm_kacs_kunit_may_manage_volumes_for_subject(token),
+			(int)cases[i].allowed, "case: %s", cases[i].what);
+		kacs_rust_token_drop(token);
+	}
+}
+
+/* A missing token denies rather than faults. */
+static void pkm_kunit_may_manage_volumes_without_a_token_denies(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_manage_volumes_for_subject(NULL));
+}
+
+/*
+ * A granted mount marks the privilege used, so a privilege-use audit records
+ * it like every other privileged operation.
+ */
+static void pkm_kunit_may_manage_volumes_marks_the_privilege_used(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot before = { };
+	struct pkm_kacs_boot_snapshot after = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE,
+		PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(token, &before));
+
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_manage_volumes_for_subject(token));
+
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
+	KUNIT_EXPECT_NE(test, after.privileges_used, before.privileges_used);
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_kunit_capability_privilege_mapping_matrix(struct kunit *test)
 {
 	static const struct {
@@ -9817,6 +9893,9 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_remote_shutdown_denies_without_remote_privilege),
 	KUNIT_CASE(pkm_kunit_remote_shutdown_denies_without_shutdown_privilege),
 	KUNIT_CASE(pkm_kunit_remote_shutdown_success_requires_both_privileges),
+	KUNIT_CASE(pkm_kunit_may_manage_volumes_accepts_volume_or_tcb),
+	KUNIT_CASE(pkm_kunit_may_manage_volumes_without_a_token_denies),
+	KUNIT_CASE(pkm_kunit_may_manage_volumes_marks_the_privilege_used),
 	KUNIT_CASE(pkm_kunit_capability_privilege_mapping_matrix),
 	KUNIT_CASE(pkm_kunit_capability_switchboard_full_matrix),
 	KUNIT_CASE(pkm_kunit_capability_privilege_denied_without_privilege),
