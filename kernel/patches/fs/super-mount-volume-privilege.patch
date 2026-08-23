@@ -1,0 +1,24 @@
+diff --git a/fs/super.c b/fs/super.c
+--- a/fs/super.c
++++ b/fs/super.c
+@@ -693,6 +693,20 @@
+ 
+ bool mount_capable(struct fs_context *fc)
+ {
++#ifdef CONFIG_SECURITY_PKM
++	/*
++	 * PKM: the second of the two gates a mount passes. may_mount() asks
++	 * whether the caller may reshape its namespace; this asks whether this
++	 * context may bring a superblock into being. Both are volume
++	 * management, so SeManageVolumePrivilege satisfies both -- gating only
++	 * the first would let an administrator reach fsconfig() and fail there
++	 * instead, which is a worse outcome than a clean refusal.
++	 */
++	extern bool pkm_kacs_may_manage_volumes(void);
++
++	if (pkm_kacs_may_manage_volumes())
++		return true;
++#endif
+ 	if (!(fc->fs_type->fs_flags & FS_USERNS_MOUNT))
+ 		return capable(CAP_SYS_ADMIN);
+ 	else

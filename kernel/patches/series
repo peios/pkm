@@ -30,6 +30,8 @@ fs/namespace-rootfs-seed-sd.patch
 # 6158, this one near 2001. Applying the later-in-file hunk first means
 # neither shifts the other, so both land at their recorded offsets.
 fs/namespace-mount-volume-privilege.patch
+fs/super-mount-volume-privilege.patch
+fs/fsopen-reconfigure-volume-privilege.patch
 fs/open-faccessat-access-gate.patch
 fs/open-fchdir-traverse.patch
 fs/open-fchmod-fchown-gate.patch
