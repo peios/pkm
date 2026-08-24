@@ -108,6 +108,28 @@ stratafs_find_entry(struct stratafs_dir_file *dir, const char *name, int len)
 	return NULL;
 }
 
+static bool stratafs_entry_is_staging(struct super_block *sb,
+				      unsigned int participant_index,
+				      const char *parent_relative,
+				      const char *name, int len, int *error)
+{
+	struct qstr q = QSTR_INIT(name, len);
+	char *relative;
+	bool staging;
+
+	if (participant_index != STRATAFS_SB(sb)->create_index)
+		return false;
+
+	relative = stratafs_child_relative(parent_relative, &q);
+	if (IS_ERR(relative)) {
+		*error = PTR_ERR(relative);
+		return false;
+	}
+	staging = stratafs_is_staging(sb, participant_index, relative);
+	kfree(relative);
+	return staging;
+}
+
 static bool stratafs_capture_actor(struct dir_context *ctx, const char *name,
 				   int len, loff_t offset, u64 ino,
 				   unsigned int type)
@@ -121,22 +143,13 @@ static bool stratafs_capture_actor(struct dir_context *ctx, const char *name,
 		return true;
 	if (stratafs_find_entry(capture->dir, name, len))
 		return true;
-	if (capture->participant_index ==
-	    STRATAFS_SB(file_inode(capture->outer)->i_sb)->create_index) {
-		struct qstr q = QSTR_INIT(name, len);
-		char *relative = stratafs_child_relative(capture->dir->relative, &q);
-
-		if (IS_ERR(relative)) {
-			capture->error = PTR_ERR(relative);
-			return false;
-		}
-		if (stratafs_is_staging(file_inode(capture->outer)->i_sb,
-					   capture->participant_index, relative)) {
-			kfree(relative);
-			return true;
-		}
-		kfree(relative);
-	}
+	if (stratafs_entry_is_staging(file_inode(capture->outer)->i_sb,
+				      capture->participant_index,
+				      capture->dir->relative, name, len,
+				      &capture->error))
+		return true;
+	if (capture->error)
+		return false;
 
 	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
 	if (!entry) {
@@ -762,9 +775,23 @@ out_decision:
 	return ret;
 }
 
+/*
+ * Whether a create-stratum entry is an in-flight copy-up staging object.
+ *
+ * Enumeration has always hidden these, but the emptiness and foreign-entry
+ * scans did not, so an in-flight copy-up made rmdir of the directory fail
+ * with ENOTEMPTY -- and a rename refuse EXDEV -- over an entry the caller
+ * cannot see in the merged view.
+ *
+ * Extracted so the three scans cannot drift apart again.
+ */
 struct stratafs_empty_context {
 	struct dir_context ctx;
+	struct super_block *sb;
+	const char *relative;
+	unsigned int participant_index;
 	bool empty;
+	int error;
 };
 
 static bool stratafs_empty_actor(struct dir_context *ctx, const char *name,
@@ -777,6 +804,12 @@ static bool stratafs_empty_actor(struct dir_context *ctx, const char *name,
 	if ((len == 1 && name[0] == '.') ||
 	    (len == 2 && name[0] == '.' && name[1] == '.'))
 		return true;
+	if (stratafs_entry_is_staging(empty->sb, empty->participant_index,
+				      empty->relative, name, len,
+				      &empty->error))
+		return true;
+	if (empty->error)
+		return false;
 	empty->empty = false;
 	return false;
 }
@@ -800,6 +833,9 @@ static int stratafs_merged_empty(struct dentry *dentry)
 	for (i = 0; i < sbi->count; i++) {
 		struct stratafs_empty_context empty = {
 			.ctx.actor = stratafs_empty_actor,
+			.sb = dentry->d_sb,
+			.relative = info->relative,
+			.participant_index = i,
 			.empty = true,
 		};
 		struct file *real;
@@ -815,6 +851,8 @@ static int stratafs_merged_empty(struct dentry *dentry)
 		}
 		ret = iterate_dir(real, &empty.ctx);
 		fput(real);
+		if (!ret)
+			ret = empty.error;
 		if (ret)
 			goto out;
 		if (!empty.empty) {
@@ -968,6 +1006,9 @@ struct stratafs_foreign_context {
 	struct dir_context ctx;
 	struct path provider;
 	const struct cred *cred;
+	struct super_block *sb;
+	const char *relative;
+	unsigned int participant_index;
 	bool foreign;
 	int error;
 };
@@ -986,6 +1027,12 @@ static bool stratafs_foreign_actor(struct dir_context *ctx, const char *name,
 	if ((len == 1 && name[0] == '.') ||
 	    (len == 2 && name[0] == '.' && name[1] == '.'))
 		return true;
+	if (stratafs_entry_is_staging(foreign->sb, foreign->participant_index,
+				      foreign->relative, name, len,
+				      &foreign->error))
+		return true;
+	if (foreign->error)
+		return false;
 	terminated = kmemdup_nul(name, len, GFP_KERNEL);
 	if (!terminated) {
 		foreign->error = -ENOMEM;
@@ -1035,6 +1082,9 @@ static int stratafs_directory_provider_only(struct dentry *dentry,
 			.ctx.actor = stratafs_foreign_actor,
 			.provider = paths.path[provider_index],
 			.cred = sbi->resolution_cred,
+			.sb = dentry->d_sb,
+			.relative = info->relative,
+			.participant_index = i,
 		};
 		struct file *real;
 
