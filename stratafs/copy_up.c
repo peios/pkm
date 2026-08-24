@@ -942,8 +942,19 @@ static int stratafs_copy_one_xattr(
 	}
 	if (!strcmp(name, XATTR_NAME_CAPS)) {
 		ret = pkm_kacs_stratafs_copy_up_set_capability(context, value, size);
-		if (ret)
-			goto leave;
+		/*
+		 * Unconditional, not just on error.  The clone helper has
+		 * *already* installed the attribute via vfs_setxattr() with
+		 * XATTR_CREATE, having satisfied CAP_SETFCAP synchronously
+		 * inside the call, and it clears capability_clone_active before
+		 * returning.  Falling through to the generic path below re-
+		 * entered the LSM with that window closed, so the second write
+		 * was denied -EPERM and stratafs_copy_xattrs() turned it into
+		 * -EIO -- failing every copy-up of a capability-bearing file
+		 * (ping, newuidmap, newgidmap) after the privileged work had
+		 * correctly succeeded.
+		 */
+		goto leave;
 	}
 	ret = vfs_setxattr(mnt_idmap(stage->mnt), stage->dentry, name, value,
 			   size, XATTR_CREATE);
