@@ -1030,8 +1030,8 @@ out:
 }
 
 static int stratafs_copy_metadata(
-	struct pkm_kacs_stratafs_copy_up *context, const struct path *source,
-	const struct path *stage)
+	struct super_block *sb, struct pkm_kacs_stratafs_copy_up *context,
+	const struct path *source, const struct path *stage)
 {
 	struct inode *inode = d_inode(source->dentry);
 	struct iattr attr = {
@@ -1058,6 +1058,46 @@ static int stratafs_copy_metadata(
 		return ret;
 	}
 	ret = stratafs_notify_change(stage, &attr);
+	if (ret) {
+		stratafs_copy_phase_leave(context);
+		return ret;
+	}
+
+	/*
+	 * POSIX ownership, so quota follows the object rather than the caller.
+	 *
+	 * PCSA §5.8: the copy is accounted to the owner of the object copied
+	 * *from*, not to the caller whose operation caused it. The KACS
+	 * descriptor already carried its owner SID across (§6.3), but disk
+	 * quota keys on uid/gid, and the stage is created with current_cred()
+	 * -- so the space landed against whoever provoked the copy.
+	 *
+	 * That mattered because §6.2 deliberately permits a caller entitled to
+	 * write a file in a read-only stratum to cause an entry to appear in
+	 * the create stratum without holding rights over that directory, on
+	 * the reasoning that they gain no access and the space is accounted to
+	 * the preserved owner. Half of that was not true.
+	 *
+	 * Chowning to another uid needs authority the caller does not have, so
+	 * it runs under the mount's own credential -- the same one stratafs
+	 * already uses to reach providers the caller cannot. It is a separate
+	 * notify_change because the mode and timestamp above are the caller's
+	 * to set and should stay that way.
+	 */
+	if (!uid_eq(inode->i_uid, current_fsuid()) ||
+	    !gid_eq(inode->i_gid, current_fsgid())) {
+		struct iattr owner = {
+			.ia_valid = ATTR_UID | ATTR_GID,
+			.ia_uid = inode->i_uid,
+			.ia_gid = inode->i_gid,
+		};
+		const struct cred *old_cred;
+
+		old_cred = override_creds(STRATAFS_SB(sb)->resolution_cred);
+		ret = stratafs_notify_change(stage, &owner);
+		revert_creds(old_cred);
+	}
+
 	stratafs_copy_phase_leave(context);
 	return ret;
 }
@@ -1375,7 +1415,8 @@ static int stratafs_copy_up_named(struct dentry *dentry, const char *relative,
 	 * their own path below.
 	 */
 	if (directory || d_is_symlink(source.dentry)) {
-		ret = stratafs_copy_metadata(context, &source, &stage);
+		ret = stratafs_copy_metadata(dentry->d_sb, context, &source,
+					     &stage);
 		if (ret)
 			goto out_stage;
 	}
@@ -1583,7 +1624,7 @@ static int stratafs_copy_up_regular(
 	ret = stratafs_copy_xattrs(dentry->d_sb, context, &source, &stage);
 	if (ret)
 		goto out_stage;
-	ret = stratafs_copy_metadata(context, &source, &stage);
+	ret = stratafs_copy_metadata(dentry->d_sb, context, &source, &stage);
 	if (ret)
 		goto out_stage;
 	if (outer) {
