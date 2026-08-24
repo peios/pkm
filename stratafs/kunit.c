@@ -116,6 +116,50 @@ static void stratafs_kunit_mount_table_round_trip(struct kunit *test)
 	}
 }
 
+/*
+ * §2.3: "A remount MUST NOT add, remove, reorder, or re-flag strata; an
+ * attempt to do so MUST fail with EINVAL."
+ *
+ * ->reconfigure used to test the *presence* of strata=, not whether its value
+ * differed.  A remount supplying a byte-identical stack does none of the four
+ * forbidden things, and refusing it breaks option-string replay: `mount -o
+ * remount` tools rebuild the whole option string from /proc/self/mountinfo,
+ * so flipping a stratafs mount read-only meant replaying a strata= that
+ * changed nothing.
+ */
+static void stratafs_kunit_remount_compares_the_stack(struct kunit *test)
+{
+	static const char *const stack = "/a\\:b:/c\\+d+am:/e\\,f+ro";
+	static const char *const differing[] = {
+		"/a\\:b:/c\\+d+am",                 /* a stratum removed */
+		"/c\\+d+am:/a\\:b:/e\\,f+ro",       /* reordered */
+		"/a\\:b:/c\\+d+ro:/e\\,f+ro",       /* re-flagged */
+		"/a\\:b:/c\\+d+am:/e\\,f+ro:/g",    /* a stratum added */
+	};
+	struct stratafs_sb_info mounted = {};
+	struct stratafs_sb_info same = {};
+	unsigned int i;
+
+	KUNIT_ASSERT_EQ(test, stratafs_parse_strata(&mounted, stack), 0);
+	KUNIT_ASSERT_EQ(test, stratafs_parse_strata(&same, stack), 0);
+	KUNIT_EXPECT_TRUE_MSG(test, stratafs_strata_unchanged(&same, &mounted),
+			      "an identical stack must be accepted");
+	stratafs_kunit_free_parsed(&same);
+
+	for (i = 0; i < ARRAY_SIZE(differing); i++) {
+		struct stratafs_sb_info other = {};
+
+		KUNIT_ASSERT_EQ_MSG(test,
+			stratafs_parse_strata(&other, differing[i]), 0,
+			"parse of %s", differing[i]);
+		KUNIT_EXPECT_FALSE_MSG(test,
+			stratafs_strata_unchanged(&other, &mounted),
+			"%s differs and must be refused", differing[i]);
+		stratafs_kunit_free_parsed(&other);
+	}
+	stratafs_kunit_free_parsed(&mounted);
+}
+
 static void stratafs_kunit_parse_rejects_malformed(struct kunit *test)
 {
 	const char *const invalid[] = {
@@ -176,6 +220,7 @@ static struct kunit_case stratafs_kunit_cases[] = {
 	KUNIT_CASE(stratafs_kunit_parse_valid),
 	KUNIT_CASE(stratafs_kunit_parse_escapes),
 	KUNIT_CASE(stratafs_kunit_mount_table_round_trip),
+	KUNIT_CASE(stratafs_kunit_remount_compares_the_stack),
 	KUNIT_CASE(stratafs_kunit_parse_rejects_malformed),
 	KUNIT_CASE(stratafs_kunit_routing),
 	KUNIT_CASE(stratafs_kunit_live_mount_cookie),

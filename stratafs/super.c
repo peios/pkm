@@ -10,6 +10,7 @@
 #include <linux/security.h>
 #include <linux/seq_file.h>
 #include <linux/statfs.h>
+#include <linux/string.h>
 #include <linux/user_namespace.h>
 
 #include "stratafs.h"
@@ -384,11 +385,41 @@ static int stratafs_parse_monolithic(struct fs_context *fc, void *data)
 	return vfs_parse_monolithic_sep(fc, data, stratafs_next_option);
 }
 
+/*
+ * §2.3: "A remount MUST NOT add, remove, reorder, or re-flag strata; an
+ * attempt to do so MUST fail with EINVAL."
+ *
+ * The test used to be on the *presence* of strata=, not on whether its value
+ * differs. A remount supplying a byte-identical stack does none of the four
+ * forbidden things, so the rule does not require it to fail — and refusing it
+ * breaks a real workflow: `mount -o remount` tools reconstruct the whole
+ * option string from /proc/self/mountinfo and replay it, so flipping a
+ * stratafs mount read-only meant replaying a strata= that changed nothing.
+ *
+ * (That replay only compares equal because ->show_options no longer
+ * double-escapes the value; see the note there.)
+ */
+bool stratafs_strata_unchanged(const struct stratafs_sb_info *supplied,
+			       const struct stratafs_sb_info *mounted)
+{
+	/*
+	 * Not `current`: that is the kernel's macro for the running task, and a
+	 * parameter of that name expands into nonsense here.
+	 */
+	if (!supplied->display_options || !mounted->display_options)
+		return false;
+	return strcmp(supplied->display_options, mounted->display_options) == 0;
+}
+
 static int stratafs_reconfigure(struct fs_context *fc)
 {
 	struct stratafs_fs_context *ctx = fc->fs_private;
 
-	if (ctx && ctx->seen_strata)
+	if (!ctx || !ctx->seen_strata)
+		return 0;
+	if (!fc->root)
+		return -EINVAL;
+	if (!stratafs_strata_unchanged(ctx->sbi, STRATAFS_SB(fc->root->d_sb)))
 		return -EINVAL;
 	return 0;
 }

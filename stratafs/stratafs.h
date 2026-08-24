@@ -120,6 +120,15 @@ struct seq_file;
  * seq_file and an sbi, rather than a fabricated dentry and superblock.
  */
 void stratafs_show_strata(struct seq_file *m, const struct stratafs_sb_info *sbi);
+
+/*
+ * Whether a remount's strata= names the stack the mount already has, §2.3.
+ *
+ * Split out so a KUnit case can drive it with two parsed sbis rather than a
+ * fabricated fs_context.
+ */
+bool stratafs_strata_unchanged(const struct stratafs_sb_info *supplied,
+			       const struct stratafs_sb_info *mounted);
 #define STRATAFS_I(inode) ((struct stratafs_inode_info *)(inode)->i_private)
 
 extern const struct dentry_operations stratafs_dentry_operations;
