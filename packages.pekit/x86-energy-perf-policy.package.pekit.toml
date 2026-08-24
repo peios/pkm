@@ -10,7 +10,7 @@
 side_effects = ["man-db"]
 
 [package]
-description = "x86_energy_perf_policy — set CPU energy/performance bias (from Linux 7.0.9 tools/power/x86)"
+description = "x86_energy_perf_policy - set CPU energy/performance bias (from Linux 7.0.9 tools/power/x86)"
 
 [files]
 "tools:usr/bin/x86_energy_perf_policy" = "usr/bin/x86_energy_perf_policy"

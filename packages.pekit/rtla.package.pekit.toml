@@ -8,7 +8,7 @@
 # by the build image's libbpf-dev/libcpupower-dev.
 
 [package]
-description = "rtla — real-time latency analysis (osnoise, timerlat) (from Linux 7.0.9 tools/tracing/rtla)"
+description = "rtla - real-time latency analysis (osnoise, timerlat) (from Linux 7.0.9 tools/tracing/rtla)"
 
 [files]
 "tools:usr/bin/rtla"     = "usr/bin/rtla"

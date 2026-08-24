@@ -29,7 +29,7 @@ excludes = [
 ]
 
 [package]
-description = "Peios Kernel — development headers and build kit"
+description = "Peios Kernel - development headers and build kit"
 
 [dependencies]
 kernel = "{{version}}"

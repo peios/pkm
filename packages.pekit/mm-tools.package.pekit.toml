@@ -7,7 +7,7 @@
 # show_page_info.
 
 [package]
-description = "mm-tools — memory-management diagnostics (from Linux 7.0.9 tools/mm)"
+description = "mm-tools - memory-management diagnostics (from Linux 7.0.9 tools/mm)"
 
 [files]
 "tools:usr/bin/page-types"               = "usr/bin/page-types"

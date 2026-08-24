@@ -14,7 +14,7 @@
 #   libpfm libtraceevent libcapstone libLLVM libdebuginfod libbabeltrace libgcc_s libc
 
 [package]
-description = "perf — Linux performance analysis tooling (from Linux 7.0.9 tools/perf)"
+description = "perf - Linux performance analysis tooling (from Linux 7.0.9 tools/perf)"
 
 [files]
 "tools:usr/bin/perf"  = "usr/bin/perf"

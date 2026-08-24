@@ -6,7 +6,7 @@
 # Runtime shared-lib deps (TODO — see D4): libc
 
 [package]
-description = "getdelays — taskstats delay-accounting demo (from Linux 7.0.9 tools/accounting)"
+description = "getdelays - taskstats delay-accounting demo (from Linux 7.0.9 tools/accounting)"
 
 [files]
 "tools:usr/bin/getdelays" = "usr/bin/getdelays"

@@ -25,7 +25,7 @@
 side_effects = ["depmod"]
 
 [package]
-description = "Peios Kernel — loadable modules (based on Linux 7.0.9)"
+description = "Peios Kernel - loadable modules (based on Linux 7.0.9)"
 
 # Version-locked, not a range. A module tree is bound to the exact vmlinux it
 # was built against by vermagic and symbol CRCs; pairing it with any other

@@ -4,7 +4,7 @@
 # Runtime shared-lib deps (TODO — see D4): libm libpanelw libncursesw libtinfo libc
 
 [package]
-description = "tmon — thermal subsystem monitor (from Linux 7.0.9 tools/thermal/tmon)"
+description = "tmon - thermal subsystem monitor (from Linux 7.0.9 tools/thermal/tmon)"
 
 [files]
 "tools:usr/bin/tmon" = "usr/bin/tmon"

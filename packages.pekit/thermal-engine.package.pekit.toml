@@ -6,7 +6,7 @@
 #   libthermal_tools libthermal libnl-genl-3 libnl-3 libconfig libc
 
 [package]
-description = "thermal-engine — userspace thermal management daemon (from Linux 7.0.9 tools/thermal)"
+description = "thermal-engine - userspace thermal management daemon (from Linux 7.0.9 tools/thermal)"
 
 [dependencies]
 libthermal       = "{{version}}"

@@ -14,7 +14,7 @@
 #   lsvmbus: python3 interpreter
 
 [package]
-description = "hv — Linux Hyper-V guest integration daemons + tools (from Linux 7.0.9 tools/hv)"
+description = "hv - Linux Hyper-V guest integration daemons + tools (from Linux 7.0.9 tools/hv)"
 
 [files]
 "tools:usr/bin/hv_kvp_daemon"       = "usr/bin/hv_kvp_daemon"

@@ -6,7 +6,7 @@
 # libbpf-dev. (No libcpupower — CPU idle-state control is rtla-specific.)
 
 [package]
-description = "rv — runtime verification monitor front-end (from Linux 7.0.9 tools/verification/rv)"
+description = "rv - runtime verification monitor front-end (from Linux 7.0.9 tools/verification/rv)"
 
 [files]
 "tools:usr/bin/rv" = "usr/bin/rv"

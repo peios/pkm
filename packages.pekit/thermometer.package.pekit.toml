@@ -5,7 +5,7 @@
 # Runtime shared-lib deps (TODO — see D4): libthermal_tools libconfig libc
 
 [package]
-description = "thermometer — thermal-zone temperature logger (from Linux 7.0.9 tools/thermal)"
+description = "thermometer - thermal-zone temperature logger (from Linux 7.0.9 tools/thermal)"
 
 [dependencies]
 libthermal-tools = "{{version}}"

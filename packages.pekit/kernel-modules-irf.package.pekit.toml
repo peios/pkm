@@ -49,7 +49,7 @@ side_effects = ["depmod"]
 # initramfs composes itself out of the dependency graph rather than an explicit
 # per-image list.
 default_root = "initramfs"
-description  = "Peios Kernel — initramfs module set (based on Linux 7.0.9)"
+description  = "Peios Kernel - initramfs module set (based on Linux 7.0.9)"
 
 # Version-locked to the kernel for the same reason kernel-modules is: vermagic
 # and symbol CRCs bind a module tree to one vmlinux. The initramfs and the real

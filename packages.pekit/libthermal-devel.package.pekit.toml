@@ -3,7 +3,7 @@
 # duplicated here.)
 
 [package]
-description = "libthermal — development files (header, static lib, pkg-config)"
+description = "libthermal - development files (header, static lib, pkg-config)"
 
 [dependencies]
 libthermal = "{{version}}"

@@ -5,7 +5,7 @@
 # Runtime shared-lib deps (TODO — see D4): libc
 
 [package]
-description = "gpio-utils — userspace GPIO chardev tools (from Linux 7.0.9 tools/gpio)"
+description = "gpio-utils - userspace GPIO chardev tools (from Linux 7.0.9 tools/gpio)"
 
 [files]
 "tools:usr/bin/lsgpio"                    = "usr/bin/lsgpio"

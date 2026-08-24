@@ -2,7 +2,7 @@
 # symlink (which resolves into cpupower-libs).
 
 [package]
-description = "libcpupower — development files (headers)"
+description = "libcpupower - development files (headers)"
 
 [dependencies]
 cpupower-libs = "{{version}}"

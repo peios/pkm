@@ -5,7 +5,7 @@
 # plotting paths (a Peios python-packaging concern — see D1/python3-perf).
 
 [package]
-description = "intel_pstate_tracer — trace/plot intel_pstate activity (from Linux 7.0.9 tools/power/x86)"
+description = "intel_pstate_tracer - trace/plot intel_pstate activity (from Linux 7.0.9 tools/power/x86)"
 
 [files]
 "tools:usr/bin/intel_pstate_tracer" = "usr/bin/intel_pstate_tracer"

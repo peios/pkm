@@ -3,7 +3,7 @@
 # Produced by build.headers (make headers_install); no runtime dep on the kernel.
 
 [package]
-description = "Peios Kernel — userspace API headers"
+description = "Peios Kernel - userspace API headers"
 # Overrides the GPL-2.0-only inherited from the shared base, which is right for
 # the kernel image but wrong for these headers. The syscall-note exception is
 # what permits non-GPL userspace to include the sanitized UAPI at all — it is

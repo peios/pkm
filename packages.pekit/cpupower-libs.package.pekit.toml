@@ -3,7 +3,7 @@
 # Runtime shared-lib deps (TODO — see D4): libc
 
 [package]
-description = "libcpupower — cpupower shared library"
+description = "libcpupower - cpupower shared library"
 
 [files]
 "tools:usr/lib/x86_64-linux-peios/libcpupower.so.1"     = "usr/lib/x86_64-linux-peios/libcpupower.so.1"

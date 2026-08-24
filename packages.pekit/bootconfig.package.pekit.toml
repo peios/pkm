@@ -4,7 +4,7 @@
 # Runtime shared-lib deps (TODO — see D4): libc
 
 [package]
-description = "bootconfig — kernel boot-config tool (from Linux 7.0.9 tools/bootconfig)"
+description = "bootconfig - kernel boot-config tool (from Linux 7.0.9 tools/bootconfig)"
 
 [files]
 "tools:usr/bin/bootconfig" = "usr/bin/bootconfig"

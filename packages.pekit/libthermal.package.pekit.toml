@@ -8,7 +8,7 @@
 # Runtime shared-lib deps (TODO — see D4): libnl-3 libnl-genl-3 libc
 
 [package]
-description = "libthermal — kernel thermal-netlink client library"
+description = "libthermal - kernel thermal-netlink client library"
 
 [files]
 "tools:usr/lib/x86_64-linux-peios/libthermal.so"       = "usr/lib/x86_64-linux-peios/libthermal.so"

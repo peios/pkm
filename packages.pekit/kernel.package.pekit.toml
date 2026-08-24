@@ -5,7 +5,7 @@
 # output; files named by the kernel release (uname), package by the Peios version.
 
 [package]
-description = "Peios Kernel — bootable image (based on Linux 7.0.9)"
+description = "Peios Kernel - bootable image (based on Linux 7.0.9)"
 
 # The Linux version this kernel is built from, as a versioned virtual name —
 # the same treatment kernel-headers gives its UAPI, and for the same reason:

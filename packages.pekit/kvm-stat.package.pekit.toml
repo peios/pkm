@@ -5,7 +5,7 @@
 # Runtime deps (TODO — see D4): python3 interpreter
 
 [package]
-description = "kvm_stat — KVM event monitor (from Linux 7.0.9 tools/kvm/kvm_stat)"
+description = "kvm_stat - KVM event monitor (from Linux 7.0.9 tools/kvm/kvm_stat)"
 
 [files]
 "tools:usr/bin/kvm_stat"                = "usr/bin/kvm_stat"

@@ -15,7 +15,7 @@
 side_effects = ["man-db"]
 
 [package]
-description = "cpupower — CPU frequency/idle control (from Linux 7.0.9 tools/power/cpupower)"
+description = "cpupower - CPU frequency/idle control (from Linux 7.0.9 tools/power/cpupower)"
 
 [dependencies]
 cpupower-libs = "{{version}}"

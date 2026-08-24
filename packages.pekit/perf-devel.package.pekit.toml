@@ -2,7 +2,7 @@
 # Split out of perf so the runtime package carries no headers.
 
 [package]
-description = "perf — dlfilter development header"
+description = "perf - dlfilter development header"
 
 [dependencies]
 perf = "{{version}}"

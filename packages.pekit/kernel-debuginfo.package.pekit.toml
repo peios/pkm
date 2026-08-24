@@ -3,7 +3,7 @@
 # symbols automatically. Produced by build.debuginfo.
 
 [package]
-description = "Peios Kernel — debugging symbols"
+description = "Peios Kernel - debugging symbols"
 
 [dependencies]
 kernel = "{{version}}"

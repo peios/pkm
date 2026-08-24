@@ -6,7 +6,7 @@
 # Runtime shared-lib deps (TODO — see D4): libc
 
 [package]
-description = "libthermal_tools — private helper library for the thermal tools"
+description = "libthermal_tools - private helper library for the thermal tools"
 
 [files]
 "tools:usr/lib/x86_64-linux-peios/libthermal_tools.so"       = "usr/lib/x86_64-linux-peios/libthermal_tools.so"

@@ -10,7 +10,7 @@
 side_effects = ["man-db"]
 
 [package]
-description = "turbostat — CPU frequency/idle/power telemetry (from Linux 7.0.9 tools/power/x86/turbostat)"
+description = "turbostat - CPU frequency/idle/power telemetry (from Linux 7.0.9 tools/power/x86/turbostat)"
 
 [files]
 "tools:usr/bin/turbostat" = "usr/bin/turbostat"

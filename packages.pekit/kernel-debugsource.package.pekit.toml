@@ -3,7 +3,7 @@
 # resolves them against this package). Produced by build.debuginfo.
 
 [package]
-description = "Peios Kernel — debug sources"
+description = "Peios Kernel - debug sources"
 
 [dependencies]
 kernel = "{{version}}"

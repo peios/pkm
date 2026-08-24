@@ -13,7 +13,7 @@
 side_effects = ["man-db"]
 
 [package]
-description = "usbip — USB/IP client and daemon + libusbip (from Linux 7.0.9 tools/usb/usbip)"
+description = "usbip - USB/IP client and daemon + libusbip (from Linux 7.0.9 tools/usb/usbip)"
 
 [files]
 "tools:usr/bin/usbip"  = "usr/bin/usbip"

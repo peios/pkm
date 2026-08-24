@@ -9,7 +9,7 @@
 # concern — see D1).
 
 [package]
-description = "cgroup-tools — drgn-based cgroup diagnostics (from Linux 7.0.9 tools/cgroup)"
+description = "cgroup-tools - drgn-based cgroup diagnostics (from Linux 7.0.9 tools/cgroup)"
 
 [files]
 "tools:usr/bin/iocost_coef_gen" = "usr/bin/iocost_coef_gen"

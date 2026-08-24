@@ -3,7 +3,7 @@
 # not shipped.
 
 [package]
-description = "usbip — development files (libusbip headers, static lib)"
+description = "usbip - development files (libusbip headers, static lib)"
 
 [dependencies]
 usbip = "{{version}}"

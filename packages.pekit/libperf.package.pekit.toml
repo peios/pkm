@@ -5,7 +5,7 @@
 # Runtime shared-lib deps (TODO — see D4): libc
 
 [package]
-description = "libperf — perf events/sampling shared library"
+description = "libperf - perf events/sampling shared library"
 
 [files]
 "tools:usr/lib/x86_64-linux-peios/libperf.so.0"     = "usr/lib/x86_64-linux-peios/libperf.so.0"

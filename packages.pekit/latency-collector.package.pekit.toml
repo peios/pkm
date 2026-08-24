@@ -4,7 +4,7 @@
 # Runtime shared-lib deps (TODO — see D4): libtracefs libc
 
 [package]
-description = "latency-collector — kernel latency trace collector (from Linux 7.0.9 tools/tracing/latency)"
+description = "latency-collector - kernel latency trace collector (from Linux 7.0.9 tools/tracing/latency)"
 
 [files]
 "tools:usr/bin/latency-collector" = "usr/bin/latency-collector"

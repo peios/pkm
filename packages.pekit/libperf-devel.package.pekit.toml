@@ -6,7 +6,7 @@
 excludes = ["tools:usr/include/perf/perf_dlfilter.h"]
 
 [package]
-description = "libperf — development files (headers, static lib, pkg-config)"
+description = "libperf - development files (headers, static lib, pkg-config)"
 
 [dependencies]
 libperf = "{{version}}"
