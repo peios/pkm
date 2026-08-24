@@ -174,7 +174,6 @@ fn path_validation_accepts_forward_slashes_and_rejects_malformed_paths() {
     assert_eq!(path.component_count, 3);
     assert_eq!(path.first_component, "Machine");
     assert_eq!(path.final_component, "Registry");
-    assert!(path.used_forward_separator);
 
     assert_eq!(
         validate_registry_path_bytes(b"", PathKind::Absolute, &limits),

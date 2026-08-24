@@ -43,7 +43,6 @@ fn symlink_default_value_accepts_length_delimited_absolute_registry_path() {
     assert_eq!(target.component_count, 3);
     assert_eq!(target.first_component, "Machine");
     assert_eq!(target.final_component, "App");
-    assert!(target.used_forward_separator);
 }
 
 #[test]

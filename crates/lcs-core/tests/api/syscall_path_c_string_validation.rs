@@ -9,7 +9,6 @@ fn syscall_path_c_string_strips_terminator_before_validation() {
     assert_eq!(summary.raw, "Machine/System");
     assert_eq!(summary.first_component, "Machine");
     assert_eq!(summary.final_component, "System");
-    assert!(summary.used_forward_separator);
 }
 
 #[test]

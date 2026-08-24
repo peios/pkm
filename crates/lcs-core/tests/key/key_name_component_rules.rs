@@ -117,7 +117,6 @@ fn paths_normalize_forward_separators_and_reject_empty_components() {
     assert_eq!(path.component_count, 3);
     assert_eq!(path.first_component, "Machine");
     assert_eq!(path.final_component, "Service Name");
-    assert!(path.used_forward_separator);
 
     assert_eq!(
         validate_registry_path_str("Machine//System", PathKind::Absolute, &limits),

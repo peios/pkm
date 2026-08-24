@@ -4710,7 +4710,6 @@ static void pkm_lcs_kunit_relative_open_preflight_success(struct kunit *test)
 			KEY_QUERY_VALUE);
 	KUNIT_EXPECT_EQ(test, result.access.path_resolution_allowed, 1U);
 	KUNIT_EXPECT_EQ(test, result.path.component_count, 2U);
-	KUNIT_EXPECT_TRUE(test, result.path.used_forward_separator);
 	KUNIT_EXPECT_EQ(test, result.parent.source_id, 11U);
 	KUNIT_EXPECT_EQ(test, result.parent.parent_depth, 2U);
 	KUNIT_EXPECT_FALSE(test, result.parent.orphaned);
@@ -4736,7 +4735,6 @@ static void pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars(
 		},
 		.path = {
 			.component_count = 99,
-			.used_forward_separator = true,
 		},
 		.parent = {
 			.source_id = 88,
@@ -4751,7 +4749,6 @@ static void pkm_lcs_kunit_relative_open_preflight_stops_bad_scalars(
 	KUNIT_EXPECT_EQ(test, result.access.requested_access, 0U);
 	KUNIT_EXPECT_EQ(test, result.access.path_resolution_allowed, 0U);
 	KUNIT_EXPECT_EQ(test, result.path.component_count, 0U);
-	KUNIT_EXPECT_FALSE(test, result.path.used_forward_separator);
 	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
 	KUNIT_EXPECT_EQ(test, ctx.strnlens, 0U);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
@@ -4796,7 +4793,6 @@ static void pkm_lcs_kunit_relative_open_preflight_rejects_bad_parent_fd(
 				KEY_QUERY_VALUE, 0, &result),
 			(long)-EBADF);
 	KUNIT_EXPECT_EQ(test, result.path.component_count, 2U);
-	KUNIT_EXPECT_FALSE(test, result.path.used_forward_separator);
 	KUNIT_EXPECT_EQ(test, result.parent.source_id, 0U);
 	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);

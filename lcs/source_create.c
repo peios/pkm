@@ -207,19 +207,25 @@ static long pkm_lcs_create_missing_parent_copy_child(
 	return 0;
 }
 
-static __maybe_unused long pkm_lcs_create_missing_validate_child_depth(
-	struct pkm_lcs_create_missing_parent_resolution *result)
+/*
+ * Depth-check the child about to be created and record its depth.
+ *
+ * Extracted rather than inlined at the one production call site so the KUnit
+ * boundary case drives *this* code. It used to have a near-identical private
+ * twin, marked __maybe_unused and reachable only from the KUnit shim, so the
+ * test pinned a copy that could drift from the path it was standing in for.
+ */
+static long pkm_lcs_create_missing_set_child_depth(
+	struct pkm_lcs_create_missing_parent_resolution *result,
+	u32 max_key_depth)
 {
-	const struct pkm_lcs_runtime_limits *limits;
 	long ret;
 
 	if (!result || !result->parent.component_count)
 		return -EINVAL;
-	limits = result->limits_present ? &result->limits : NULL;
 
 	ret = pkm_lcs_validate_relative_open_depth_counts(
-		result->parent.component_count, 1,
-		limits ? limits->max_key_depth : pkm_lcs_runtime_max_key_depth());
+		result->parent.component_count, 1, max_key_depth);
 	if (ret)
 		return ret;
 
@@ -402,11 +408,9 @@ long pkm_lcs_create_missing_absolute_parent_for_token(
 	if (ret)
 		goto out_result;
 
-	ret = pkm_lcs_validate_relative_open_depth_counts(
-		result->parent.component_count, 1, limits.max_key_depth);
+	ret = pkm_lcs_create_missing_set_child_depth(result, limits.max_key_depth);
 	if (ret)
 		goto out_result;
-	result->child_depth = result->parent.component_count + 1U;
 
 	pkm_lcs_materialized_path_destroy(&components);
 	pkm_lcs_syscall_path_copy_destroy(&copy);
@@ -1917,7 +1921,8 @@ long pkm_lcs_kunit_create_missing_child_depth(u32 parent_depth,
 		return -EINVAL;
 
 	resolution.parent.component_count = parent_depth;
-	ret = pkm_lcs_create_missing_validate_child_depth(&resolution);
+	ret = pkm_lcs_create_missing_set_child_depth(
+		&resolution, pkm_lcs_runtime_max_key_depth());
 	*child_depth_out = ret ? 0 : resolution.child_depth;
 	return ret;
 }

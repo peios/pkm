@@ -231,8 +231,6 @@ pub struct PkmLcsKeyFdStringViewCopy {
 #[repr(C)]
 pub struct PkmLcsPathValidationResultCopy {
     pub component_count: u32,
-    pub used_forward_separator: bool,
-    pub _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -4409,11 +4407,7 @@ pub unsafe extern "C" fn lcs_rust_validate_syscall_relative_path(
     };
 
     unsafe {
-        *result_out = PkmLcsPathValidationResultCopy {
-            component_count: 0,
-            used_forward_separator: false,
-            _pad: [0; 3],
-        };
+        *result_out = PkmLcsPathValidationResultCopy { component_count: 0 };
     }
 
     let path_bytes = unsafe { slice::from_raw_parts(path, path_len as usize) };
@@ -4421,7 +4415,6 @@ pub unsafe extern "C" fn lcs_rust_validate_syscall_relative_path(
         Ok(summary) => {
             unsafe {
                 (*result_out).component_count = summary.component_count as u32;
-                (*result_out).used_forward_separator = summary.used_forward_separator;
             }
             0
         }

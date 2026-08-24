@@ -35,7 +35,6 @@ fn reg_link_payload_is_length_delimited_utf8_path_without_trailing_null() {
     assert_eq!(target.raw, "Machine/Software/App");
     assert_eq!(target.first_component, "Machine");
     assert_eq!(target.final_component, "App");
-    assert!(target.used_forward_separator);
 
     assert_eq!(
         validate_symlink_target_bytes(&Default::default(), b"Machine\\Software\0"),

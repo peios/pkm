@@ -23,7 +23,6 @@ pub struct PathSummary<'a> {
     pub component_count: usize,
     pub first_component: &'a str,
     pub final_component: &'a str,
-    pub used_forward_separator: bool,
 }
 
 /// Validates a length-delimited byte path.
@@ -97,13 +96,9 @@ pub fn validate_registry_path_str<'a>(
     let mut component_len = 0usize;
     let mut component_count = 0usize;
     let mut first_component = None;
-    let mut used_forward_separator = false;
 
     for (index, byte) in bytes.iter().copied().enumerate() {
         if is_separator(byte) {
-            if byte == b'/' {
-                used_forward_separator = true;
-            }
             if component_len == 0 {
                 return Err(LcsError::EmptyPathComponent);
             }
@@ -152,7 +147,6 @@ pub fn validate_registry_path_str<'a>(
         component_count,
         first_component: first_component.expect("validated non-empty path has first component"),
         final_component: component,
-        used_forward_separator,
     })
 }
 

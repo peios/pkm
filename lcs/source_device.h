@@ -407,8 +407,6 @@ struct pkm_lcs_source_bootstrap_refresh_result {
 
 struct pkm_lcs_path_validation_result {
 	u32 component_count;
-	bool used_forward_separator;
-	u8 _pad[3];
 };
 
 struct pkm_lcs_path_component_materialization {
