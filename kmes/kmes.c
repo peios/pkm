@@ -2238,7 +2238,23 @@ static long pkm_kmes_attach_core(u32 cpu_id, int *fd_out, u64 *capacity_out)
 		return -EINVAL;
 	if (!pkm_kmes_ready || !pkm_kmes_cpus || pkm_kmes_cpu_count == 0)
 		return -ENOMEM;
-	if (cpu_id >= pkm_kmes_cpu_count)
+	/*
+	 * Bounded by the array size, not the ring count.
+	 *
+	 * cpu_id is a logical CPU index -- the same numbering the ring's
+	 * cpu_id metadata field and every event header use -- and the array is
+	 * indexed by it. pkm_kmes_cpu_count is a *count* of rings allocated
+	 * while walking for_each_possible_cpu, so the two agree only when the
+	 * possible-CPU mask is dense.
+	 *
+	 * On a sparse mask -- offlined-at-boot CPUs, possible_cpus=/maxcpus=,
+	 * some hypervisor vCPU topologies -- checking the count rejected high
+	 * CPUs that exist and have rings, making their events permanently
+	 * unreachable: accumulated, overwritten, with no consumer able to
+	 * attach. Holes below the top are still rejected, by the live check
+	 * below, which is where that decision belongs.
+	 */
+	if (cpu_id >= pkm_kmes_cpu_slots)
 		return -EINVAL;
 
 	mutex_lock(&pkm_kmes_topology_lock);
