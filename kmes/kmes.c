@@ -1603,6 +1603,7 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	struct pkm_kmes_cpu_state *cpu = NULL;
 	u64 timestamp;
 	u64 write_pos;
+	u64 batch_write_pos;
 	u64 tail_pos;
 	u64 sequence;
 	unsigned int cpu_id;
@@ -1666,9 +1667,24 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	tail_pos = cpu->tail_pos;
 	sequence = cpu->sequence;
 
+	/*
+	 * Reserve for the whole batch, publish the tail, then write. See the
+	 * note in pkm_kmes_emit_kernel_batch(): publishing the tail after the
+	 * writes left a wrapping batch overwriting the region the
+	 * consumer-visible tail still pointed into, which a concurrent drain
+	 * reads as clean. Every event here has already been size-checked
+	 * above, so the reservation pass has nothing to reject.
+	 */
+	batch_write_pos = write_pos;
 	for (index = 0; index < count; index++) {
-		pkm_kmes_reserve_space_local(cpu, &tail_pos, write_pos,
+		pkm_kmes_reserve_space_local(cpu, &tail_pos, batch_write_pos,
 					     events[index].event_size);
+		batch_write_pos += events[index].event_size;
+	}
+
+	pkm_kmes_store_tail_pos(cpu, tail_pos);
+
+	for (index = 0; index < count; index++) {
 		sequence++;
 		pkm_kmes_write_event_at(cpu, write_pos, origin_class, &eff_guid,
 					&true_guid, &proc_guid,
@@ -1681,7 +1697,6 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	}
 
 	cpu->sequence = sequence;
-	pkm_kmes_store_tail_pos(cpu, tail_pos);
 	pkm_kmes_store_write_pos(cpu, write_pos);
 	wake_needed = pkm_kmes_note_wake(cpu);
 
@@ -2479,6 +2494,7 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 	struct pkm_kmes_cpu_state *cpu = NULL;
 	u64 timestamp = 0;
 	u64 write_pos = 0;
+	u64 batch_write_pos = 0;
 	u64 tail_pos = 0;
 	u64 sequence = 0;
 	unsigned int cpu_id = 0;
@@ -2512,37 +2528,80 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 	tail_pos = cpu->tail_pos;
 	sequence = cpu->sequence;
 
+	/*
+	 * Reserve for the whole batch first, then publish the tail, then write.
+	 *
+	 * The tail used to be published after the write loop, so during a
+	 * wrapping batch the producer was overwriting the region from the old
+	 * tail forward while the consumer-visible tail still pointed into it.
+	 * A consumer draining concurrently would save that stale tail, read an
+	 * event whose bytes were being overwritten, re-read the tail, find it
+	 * unchanged, and conclude the read was clean. The drain loop's
+	 * size-sanity check does not save it: what is being written over the
+	 * event *is* a valid event stream, so a plausible header is likely.
+	 *
+	 * Deferring to one tail transition per batch is worth keeping -- it is
+	 * what makes a batch atomic from the consumer's side. Only the order
+	 * was wrong. The tail moves forward monotonically and its end state is
+	 * knowable up front, so the reservation walk runs first and its result
+	 * is released before a single byte is overwritten. The write_pos store
+	 * stays at the end, which is what preserves batch atomicity.
+	 *
+	 * The reservation pass reads event boundaries out of the ring to find
+	 * what it is skipping past; running it before any write is also what
+	 * keeps those reads looking at the old contents rather than at bytes
+	 * this batch has already replaced.
+	 */
+	batch_write_pos = write_pos;
+	for (index = 0; index < count; index++) {
+		u32 event_size = 0;
+
+		if (!pkm_kmes_kernel_event_structurally_valid(
+			    &events[index], cpu->capacity, &event_size)) {
+			pkm_kmes_drop_event(cpu);
+			trace_kmes_drop(cpu->cpu_id, cpu->dropped_events, 0,
+					batch_write_pos, tail_pos, cpu->capacity,
+					KMES_DROP_BATCH_STRUCT_INVALID);
+			continue;
+		}
+		pkm_kmes_reserve_space_local(cpu, &tail_pos, batch_write_pos,
+					     event_size);
+		batch_write_pos += event_size;
+		wrote_any = true;
+	}
+
+	if (!wrote_any) {
+		cpu->sequence = sequence + count;
+		goto out;
+	}
+
+	pkm_kmes_store_tail_pos(cpu, tail_pos);
+
+	/*
+	 * Validity is re-derived rather than remembered: a kernel batch has no
+	 * count bound, so there is nowhere to buffer per-event state under
+	 * preempt_disable(). The check is pure, so the second pass agrees with
+	 * the first by construction.
+	 */
 	for (index = 0; index < count; index++) {
 		const struct pkm_kmes_kernel_event *event = &events[index];
 		u32 event_size = 0;
 
 		sequence++;
 		if (!pkm_kmes_kernel_event_structurally_valid(
-			    event, cpu->capacity, &event_size)) {
-			pkm_kmes_drop_event(cpu);
-			trace_kmes_drop(cpu->cpu_id, cpu->dropped_events, 0,
-					write_pos, tail_pos, cpu->capacity,
-					KMES_DROP_BATCH_STRUCT_INVALID);
+			    event, cpu->capacity, &event_size))
 			continue;
-		}
-
-		pkm_kmes_reserve_space_local(cpu, &tail_pos, write_pos,
-					     event_size);
 		pkm_kmes_write_event_at(cpu, write_pos, origin_class, &eff_guid,
 					&true_guid, &proc_guid,
 					event->event_type, event->event_type_len,
 					event->payload, event->payload_len,
 					timestamp, sequence);
 		write_pos += event_size;
-		wrote_any = true;
 	}
 
 	cpu->sequence = sequence;
-	if (wrote_any) {
-		pkm_kmes_store_tail_pos(cpu, tail_pos);
-		pkm_kmes_store_write_pos(cpu, write_pos);
-		wake_needed = pkm_kmes_note_wake(cpu);
-	}
+	pkm_kmes_store_write_pos(cpu, write_pos);
+	wake_needed = pkm_kmes_note_wake(cpu);
 
 out:
 	preempt_enable();
