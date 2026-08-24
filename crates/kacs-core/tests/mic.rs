@@ -309,10 +309,10 @@ fn non_dominant_masking_blocks_requested_categories() {
     )
     .expect("mic should succeed");
 
-    assert_eq!(
-        decided,
-        READ_CONTROL | WRITE_DAC | WRITE_OWNER | 0x0000_0020
-    );
+    // READ_CONTROL is not decided: EnforceMIC restores READ_CONTROL |
+    // SYNCHRONIZE after the up-strips, so a non-dominant caller can always
+    // read the descriptor. Everything else in the mapping is blocked.
+    assert_eq!(decided, WRITE_DAC | WRITE_OWNER | 0x0000_0020);
     assert_eq!(mic.mandatory_decided, decided);
     assert_eq!(provenance.relabel_granted, 0);
 }
