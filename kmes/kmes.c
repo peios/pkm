@@ -892,26 +892,64 @@ static void pkm_kmes_write_event(struct pkm_kmes_cpu_state *cpu, u8 origin_class
 		*wake_needed_out = pkm_kmes_note_wake(cpu);
 }
 
+/*
+ * Events lost before the per-CPU rings exist.
+ *
+ * KMES's gap-detection model rests on a drop always leaving a trace: a
+ * sequence number consumed so a consumer sees a hole, or dropped_events
+ * incremented so the harness can count it. Emission before initialisation
+ * completes could do neither -- there is no ring to hold either -- so the
+ * loss was invisible, in the window most likely to contain interesting
+ * early-boot events.
+ *
+ * A sequence number still cannot be consumed. Counting them at least makes
+ * the loss countable, and the total is reported once the rings come up.
+ */
+static atomic64_t pkm_kmes_pre_init_drops = ATOMIC64_INIT(0);
+
 static int pkm_kmes_runtime_capacity(u64 *capacity_out)
 {
 	unsigned int cpu;
+	bool found = false;
 
 	if (!capacity_out)
 		return -EINVAL;
 	if (!pkm_kmes_ready || !pkm_kmes_cpus || pkm_kmes_cpu_count == 0)
 		return -ENOMEM;
 
+	/*
+	 * Returns the capacity every live ring shares.
+	 *
+	 * Callers -- notably the staging-time 50%-of-capacity check -- use this
+	 * for an event that will later be written to the ring of whatever CPU
+	 * the thread lands on, which is not necessarily the ring read here.
+	 * That is sound only because allocation and the capacity swap give
+	 * every ring the same capacity, so the value is a property of the
+	 * configuration rather than of a particular ring.
+	 *
+	 * The invariant is load-bearing and nothing else states it, so warn
+	 * rather than let a future per-CPU capacity silently turn the staging
+	 * check into a check of the wrong ring. The write phase re-checks
+	 * against the correct ring, so the enforcement stays right either way;
+	 * this is about the earlier check meaning what it appears to mean.
+	 */
 	for (cpu = 0; cpu < pkm_kmes_cpu_slots; cpu++) {
 		struct pkm_kmes_cpu_state *ring =
 			READ_ONCE(pkm_kmes_cpus[cpu].live);
 
 		if (!ring || !ring->data)
 			continue;
+		if (found) {
+			WARN_ONCE(ring->capacity != *capacity_out,
+				  "kmes: ring %u capacity %llu != %llu\n",
+				  cpu, ring->capacity, *capacity_out);
+			continue;
+		}
 		*capacity_out = ring->capacity;
-		return 0;
+		found = true;
 	}
 
-	return -ENOMEM;
+	return found ? 0 : -ENOMEM;
 }
 
 int pkm_kmes_runtime_config_snapshot(struct pkm_kmes_runtime_config *out)
@@ -1576,8 +1614,11 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 
 	if (!count)
 		return 0;
-	if (!events || !pkm_kmes_ready || !pkm_kmes_cpus)
+	if (!events || !pkm_kmes_ready || !pkm_kmes_cpus) {
+		if (!pkm_kmes_ready)
+			atomic64_add(count, &pkm_kmes_pre_init_drops);
 		return -ENOMEM;
+	}
 
 	preempt_disable();
 
@@ -2292,6 +2333,13 @@ int pkm_kmes_init(void)
 
 	pkm_kmes_cpus = cpus;
 	pkm_kmes_ready = true;
+	{
+		s64 lost = atomic64_read(&pkm_kmes_pre_init_drops);
+
+		if (lost)
+			pr_warn("kmes: %lld events lost before initialisation\n",
+				lost);
+	}
 	return 0;
 
 fail:
@@ -2319,8 +2367,10 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	kacs_uuid_t proc_guid;
 	bool wake_needed = false;
 
-	if (!pkm_kmes_ready)
+	if (!pkm_kmes_ready) {
+		atomic64_inc(&pkm_kmes_pre_init_drops);
 		return;
+	}
 
 	trace_kmes_kacs_emit(origin_class, (u32)event_type_len,
 			     (u32)payload_len, 0);
@@ -2332,7 +2382,17 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 		goto out;
 
 	cpu = READ_ONCE(pkm_kmes_cpus[cpu_id].live);
-	if (!cpu || !cpu->data)
+	/*
+	 * A cpu_id mismatch means the ring selection itself is untrustworthy,
+	 * so this returns without consuming a sequence number or counting a
+	 * drop -- the same treatment both batch paths give it.
+	 *
+	 * It used to sit below with the structural checks, which made it a
+	 * counted drop *after* the sequence had been taken, so the same
+	 * internal inconsistency produced a consumer-visible gap on one path
+	 * and nothing at all on the other two.
+	 */
+	if (!cpu || !cpu->data || cpu->cpu_id != cpu_id)
 		goto out;
 	timestamp = ktime_get_real_ns();
 	sequence = ++cpu->sequence;
@@ -2347,7 +2407,16 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	true_guid = kacs_primary_token_guid();
 	proc_guid = kacs_process_guid();
 
-	if (event_type_len == 0 || event_type_len > PKM_KMES_MAX_KERNEL_TYPE_LEN)
+	/*
+	 * Same structural checks pkm_kmes_kernel_event_structurally_valid()
+	 * applies on the batch path.  Kernel emitters are trusted, so the NULL
+	 * guards are robustness rather than attack surface -- but without them
+	 * a caller bug was a fault here and a counted drop one function over.
+	 */
+	if (!event_type || event_type_len == 0 ||
+	    event_type_len > PKM_KMES_MAX_KERNEL_TYPE_LEN)
+		goto drop;
+	if (payload_len && !payload)
 		goto drop;
 	if (check_add_overflow(KMES_EVENT_HEADER_BASE_SIZE, event_type_len,
 			       &header_size))
@@ -2355,8 +2424,6 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	if (check_add_overflow(header_size, payload_len, &event_size))
 		goto drop;
 	if (event_size > U32_MAX || event_size > cpu->capacity / 2)
-		goto drop;
-	if (cpu->cpu_id != cpu_id)
 		goto drop;
 
 	pkm_kmes_reserve_space(cpu, event_size);
@@ -2422,6 +2489,8 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 	bool wake_needed = false;
 	bool wrote_any = false;
 
+	if (!pkm_kmes_ready && count && events)
+		atomic64_add(count, &pkm_kmes_pre_init_drops);
 	if (!count || !events || !pkm_kmes_ready || !pkm_kmes_cpus)
 		return;
 
