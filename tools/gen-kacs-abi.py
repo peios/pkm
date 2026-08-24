@@ -24,7 +24,7 @@ OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
 # Headers making up the KACS ABI. kmes.h and lcs.h belong to their own
 # chapters; trace.h is generated separately.
 KACS_HEADERS = ["syscall.h", "token.h", "access.h", "file.h",
-                "process.h", "psb.h", "sd.h", "sid.h"]
+                "process.h", "psb.h", "sd.h", "sid.h", "trace.h"]
 
 # The page's own identity, not prose about the ABI. learn CI fails a deploy
 # on an article with no description (learn 3362f6d), so this cannot be left
@@ -289,11 +289,17 @@ def main():
         "psb.h": "Process mitigation bits",
         "sd.h": "Security descriptor constants",
         "sid.h": "SID constants",
+        "trace.h": "Tracepoint diagnostic codes",
     }
     for h in KACS_HEADERS:
         if h == "syscall.h":
             continue
         cs = [c for c in per_header[h][0]]
+        # trace.h is the single source of truth for the kacs:, kmes: and lcs:
+        # tracepoint codes alike. Only the KACS ones belong in the KACS ABI
+        # appendix; the others need homes in their own subsystems' references.
+        if h == "trace.h":
+            cs = [c for c in cs if c[0].startswith("KACS_")]
         if not cs:
             continue
         w(f"## {titles.get(h, h)}")
