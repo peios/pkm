@@ -951,6 +951,16 @@ static int stratafs_remove(struct inode *dir, struct dentry *dentry,
 		goto out_target;
 	}
 	if (deferred) {
+		/*
+		 * §5.3 step 3, against the providing stratum's directory and
+		 * the arm-time token. Arm time checked delete-child on the
+		 * *merged* parent, whose provider need not be the stratum the
+		 * entry actually lives in.
+		 */
+		ret = pkm_kacs_stratafs_delete_on_close_authorize_parent(
+			dentry, &provider_parent);
+		if (ret)
+			goto out_target;
 		ret = pkm_kacs_stratafs_delete_on_close_bind_provider(
 			dentry, &provider_parent, target);
 		if (ret)

@@ -164,8 +164,13 @@ void pkm_kacs_file_release(struct file *file)
 
 	file_sec = pkm_kacs_file(file);
 	pkm_kacs_copy_up_file_release(file);
-	if (!file_sec->delete_on_close)
+	if (!file_sec->delete_on_close) {
+		if (file_sec->delete_on_close_token) {
+			kacs_rust_token_drop(file_sec->delete_on_close_token);
+			file_sec->delete_on_close_token = NULL;
+		}
 		return;
+	}
 
 	inode = file_inode(file);
 	if (!inode || !inode->i_security)
@@ -182,6 +187,11 @@ void pkm_kacs_file_release(struct file *file)
 		atomic_dec(&inode_sec->delete_on_close_lineages);
 	file_sec->delete_on_close = 0;
 	mutex_unlock(&inode_sec->lock);
+
+	if (file_sec->delete_on_close_token) {
+		kacs_rust_token_drop(file_sec->delete_on_close_token);
+		file_sec->delete_on_close_token = NULL;
+	}
 }
 
 int pkm_kacs_file_receive(struct file *file)

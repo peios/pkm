@@ -54,6 +54,12 @@ void pkm_kacs_stratafs_audit_mutation_refused(
 ssize_t pkm_kacs_stratafs_probe_staging_marker(const struct path *path,
 					       void *buffer, size_t size);
 bool pkm_kacs_stratafs_delete_on_close_active(const struct dentry *outer);
+/*
+ * Authorise a deferred removal against the providing stratum's directory,
+ * using the token that armed delete-on-close. PCSA §5.3 step 3.
+ */
+int pkm_kacs_stratafs_delete_on_close_authorize_parent(
+	const struct dentry *outer, const struct path *parent);
 int pkm_kacs_stratafs_delete_on_close_bind_provider(
 	const struct dentry *outer, const struct path *parent,
 	struct dentry *target);

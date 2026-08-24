@@ -102,6 +102,16 @@ struct pkm_kacs_file_security {
 	u64 copy_up_phase_generation;
 	u8 managed;
 	u8 delete_on_close;
+	/*
+	 * The token that armed delete-on-close, held by reference.
+	 *
+	 * PCSA §5.3 requires the deferred removal to be authorised against the
+	 * token that *requested* it, captured when the request was made -- not
+	 * against whoever happens to close the file. Arm and close can be
+	 * arbitrarily far apart and in different tasks, so the reference lives
+	 * as long as the file blob and is dropped in ->file_release.
+	 */
+	const void *delete_on_close_token;
 };
 
 struct pkm_kacs_backing_file_security {

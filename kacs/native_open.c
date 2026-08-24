@@ -523,6 +523,8 @@ long pkm_kacs_maybe_arm_delete_on_close_for_subject(
 	} else {
 		atomic_inc(&inode_sec->delete_on_close_lineages);
 		file_sec->delete_on_close = 1;
+		file_sec->delete_on_close_token =
+			kacs_rust_token_clone(subject_token);
 		ret = 0;
 	}
 	mutex_unlock(&inode_sec->lock);

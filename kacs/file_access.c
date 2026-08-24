@@ -263,6 +263,49 @@ bool pkm_kacs_stratafs_delete_on_close_active(const struct dentry *outer)
 	       file_inode((struct file *)file) == d_inode(outer);
 }
 
+/*
+ * Authorise a deferred removal against the *providing* stratum's directory.
+ *
+ * PCSA §5.3 step 3: the right to delete an entry is checked against that
+ * stratum's directory -- not the merged parent's -- using the token that
+ * requested the deferred deletion.
+ *
+ * Arm time could not do this. The authorizer there has only a struct file, and
+ * which stratum actually holds the entry is stratafs-internal: it needs the
+ * provider index and the parent's relative path, neither of which KACS can
+ * see. stratafs computes exactly that directory before it removes anything,
+ * so the check belongs here, where the answer already exists.
+ *
+ * The merged parent's provider is by definition liable to be a different
+ * stratum from the one holding the entry, so checking it was not an edge case
+ * -- it was the common one.
+ */
+int pkm_kacs_stratafs_delete_on_close_authorize_parent(
+	const struct dentry *outer, const struct path *parent)
+{
+	struct pkm_kacs_task_security *task_sec;
+	struct pkm_kacs_file_security *file_sec;
+	struct file parent_anchor = {};
+	struct file *file;
+
+	if (!pkm_kacs_stratafs_delete_on_close_active(outer) || !parent ||
+	    !parent->mnt || !parent->dentry)
+		return -EPERM;
+
+	task_sec = pkm_kacs_task(current);
+	file = (struct file *)task_sec->delete_on_close_file;
+	if (!file || !file->f_security)
+		return -EPERM;
+	file_sec = pkm_kacs_file(file);
+	if (!file_sec->delete_on_close_token)
+		return -EPERM;
+
+	pkm_kacs_init_path_anchor_file(&parent_anchor, parent);
+	return (int)pkm_kacs_authorize_live_file_access_core(
+		file_sec->delete_on_close_token, &parent_anchor,
+		KACS_FILE_DELETE_CHILD);
+}
+
 int pkm_kacs_stratafs_delete_on_close_bind_provider(
 	const struct dentry *outer, const struct path *parent,
 	struct dentry *target)
