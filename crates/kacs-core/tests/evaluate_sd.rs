@@ -831,9 +831,13 @@ fn mic_category_matrix_narrows_dacl_grants_for_below_label_callers() {
             SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
             READ_CONTROL | EXECUTE_RIGHT,
         ),
+        // READ_CONTROL survives NO_READ_UP: EnforceMIC restores
+        // READ_CONTROL | SYNCHRONIZE after the up-strips, so a non-dominant
+        // caller can always read the descriptor. See the note in mic.rs and
+        // the Kernel TRM's EnforceMIC pseudocode.
         (
             SYSTEM_MANDATORY_LABEL_NO_READ_UP | SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
-            EXECUTE_RIGHT,
+            READ_CONTROL | EXECUTE_RIGHT,
         ),
         (
             SYSTEM_MANDATORY_LABEL_NO_WRITE_UP | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
@@ -843,7 +847,7 @@ fn mic_category_matrix_narrows_dacl_grants_for_below_label_callers() {
             SYSTEM_MANDATORY_LABEL_NO_READ_UP
                 | SYSTEM_MANDATORY_LABEL_NO_WRITE_UP
                 | SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP,
-            0,
+            READ_CONTROL,
         ),
     ];
 
