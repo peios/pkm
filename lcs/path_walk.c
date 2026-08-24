@@ -808,9 +808,9 @@ long pkm_lcs_walk_absolute_components(
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	ret = pkm_lcs_walk_absolute_components_impl(
 		source_id, txn_id, root_guid, components, component_count,
-		false, false, 0, PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT, NULL, 0,
-		layers, layer_count, private_layers, private_layer_count, -1,
-		&limits, result);
+		false, false, 0, limits.symlink_depth_limit, NULL, 0, layers,
+		layer_count, private_layers, private_layer_count, -1, &limits,
+		result);
 	trace_lcs_walk_absolute(source_id, txn_id,
 				root_guid ? (u64)jhash(root_guid, RSI_GUID_SIZE,
 						       0) :
@@ -1107,9 +1107,8 @@ long pkm_lcs_walk_relative_components(
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 	ret = pkm_lcs_walk_relative_components_impl(
 		parent, txn_id, components, component_count, false, false, 0,
-		PKM_LCS_SYMLINK_DEPTH_LIMIT_DEFAULT, NULL, 0, layers,
-		layer_count, private_layers, private_layer_count, -1, &limits,
-		result);
+		limits.symlink_depth_limit, NULL, 0, layers, layer_count,
+		private_layers, private_layer_count, -1, &limits, result);
 	trace_lcs_walk_relative(
 		parent ? parent->source_id : 0, txn_id,
 		(parent && parent->ancestor_guids) ?
