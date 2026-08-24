@@ -580,6 +580,7 @@ long pkm_kacs_kunit_get_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_get_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len)
 {
+	const void *caap_cache = NULL;
 	struct pkm_kacs_inode_sd_cache *cache;
 	long ret;
 
@@ -592,9 +593,15 @@ long pkm_kacs_kunit_get_file_sd_for_subject(
 	if (!cache)
 		return -EINVAL;
 
+	ret = pkm_kacs_caap_cache_lock(&caap_cache);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return ret;
+	}
 	ret = pkm_kacs_query_file_sd_bytes_core(args->subject_token, cache,
-						args->security_info, out_sd_ptr,
-						out_sd_len);
+						args->security_info, caap_cache,
+						out_sd_ptr, out_sd_len);
+	pkm_kacs_caap_cache_unlock();
 	pkm_kacs_inode_sd_cache_free(cache);
 	return ret;
 }
@@ -603,6 +610,7 @@ long pkm_kacs_kunit_set_file_sd_for_subject(
 	const struct pkm_kacs_kunit_file_sd_set_args *args,
 	const u8 **out_sd_ptr, size_t *out_sd_len)
 {
+	const void *caap_cache = NULL;
 	struct pkm_kacs_inode_sd_cache *cache;
 	const u8 *result_sd = NULL;
 	size_t result_sd_len = 0;
@@ -621,12 +629,19 @@ long pkm_kacs_kunit_set_file_sd_for_subject(
 	if (!cache)
 		return -EINVAL;
 
+	ret = pkm_kacs_caap_cache_lock(&caap_cache);
+	if (ret) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return ret;
+	}
 	ret = pkm_kacs_prepare_new_file_sd_core(args->subject_token, cache,
 						args->security_info,
 						args->input_sd_ptr,
 						args->input_sd_len, true,
+						caap_cache,
 						&result_sd,
 						&result_sd_len);
+	pkm_kacs_caap_cache_unlock();
 	if (!ret) {
 		if (args->target_file_sd_state != PKM_KACS_KUNIT_FILE_SD_VALID)
 			(void)kacs_rust_token_mark_privileges_used(

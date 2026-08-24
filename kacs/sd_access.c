@@ -21,6 +21,7 @@
 #include <pkm/sd.h>
 #include <pkm/token.h>
 
+#include "caap_cache.h"
 #include "file_access.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
@@ -102,7 +103,8 @@ long pkm_kacs_set_sd_required_access(u32 security_info,
 
 long pkm_kacs_query_file_sd_bytes_core(
 	const void *subject_token, const struct pkm_kacs_inode_sd_cache *cache,
-	u32 security_info, const u8 **out_sd_ptr, size_t *out_sd_len)
+	u32 security_info, const void *caap_cache, const u8 **out_sd_ptr,
+	size_t *out_sd_len)
 {
 	u32 desired_access;
 	u32 granted = 0;
@@ -127,9 +129,20 @@ long pkm_kacs_query_file_sd_bytes_core(
 	if (ret)
 		return ret;
 
-	ret = kacs_rust_check_cached_file_sd_with_intent(
+	/*
+	 * The live policy set, not an empty one.
+	 *
+	 * With EMPTY_POLICIES an object whose SACL carries a scoped-policy ACE
+	 * found no matching policy, and CAAP treats referenced-but-absent as a
+	 * failure: it falls back to the recovery policy, which grants
+	 * Administrators, SYSTEM and OWNER RIGHTS GENERIC_ALL. So a central
+	 * access policy written to *restrict* administrators was replaced, on
+	 * this path, by one granting them everything.
+	 */
+	ret = kacs_rust_check_cached_file_sd_with_intent_audit_caap(
 		subject_token, cache->bytes, cache->len, &cache->layout,
-		desired_access, 0, pip_type, pip_trust, &granted);
+		desired_access, 0, pip_type, pip_trust, caap_cache, &granted,
+		NULL);
 	if (ret)
 		return ret;
 
@@ -141,7 +154,8 @@ long pkm_kacs_query_file_sd_bytes_core(
 long pkm_kacs_prepare_new_file_sd_core(
 	const void *subject_token, const struct pkm_kacs_inode_sd_cache *cache,
 	u32 security_info, const u8 *input_sd_ptr, size_t input_sd_len,
-	bool authorize_live, const u8 **new_sd_ptr, size_t *new_sd_len)
+	bool authorize_live, const void *caap_cache, const u8 **new_sd_ptr,
+	size_t *new_sd_len)
 {
 	long ret;
 
@@ -168,11 +182,17 @@ long pkm_kacs_prepare_new_file_sd_core(
 							   &pip_trust);
 			if (ret)
 				return ret;
-			ret = kacs_rust_check_cached_file_sd_with_intent(
+			/* See the note in the query path above. This is the
+			 * more serious of the two: it is the path by which a
+			 * descriptor is rewritten, so an administrator the
+			 * policy meant to exclude reached WRITE_DAC and could
+			 * rewrite the DACL -- after which the policy is moot
+			 * everywhere else too. */
+			ret = kacs_rust_check_cached_file_sd_with_intent_audit_caap(
 				subject_token, cache->bytes, cache->len,
 				&cache->layout, desired_access,
 				KACS_RESTORE_INTENT, pip_type, pip_trust,
-				&granted);
+				caap_cache, &granted, NULL);
 			if (ret)
 				return ret;
 		}
@@ -796,11 +816,18 @@ long pkm_kacs_query_file_sd_core(const void *subject_token,
 		if (!cache)
 			return -EACCES;
 		if (use_live_access_check) {
+			const void *caap_cache = NULL;
+
+			ret = pkm_kacs_caap_cache_lock(&caap_cache);
+			if (ret)
+				return ret;
 			ret = pkm_kacs_query_file_sd_bytes_core(subject_token,
 								cache,
 								security_info,
+								caap_cache,
 								out_sd_ptr,
 								out_sd_len);
+			pkm_kacs_caap_cache_unlock();
 		} else if (cache->state != PKM_KACS_INODE_SD_VALID ||
 			   !cache->bytes || cache->len == 0) {
 			ret = -EACCES;
@@ -840,6 +867,7 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 			       const u8 *input_sd_ptr,
 			       size_t input_sd_len)
 {
+	const void *caap_cache = NULL;
 	struct pkm_kacs_file_security *file_sec;
 	struct pkm_kacs_inode_security *sec;
 	struct pkm_kacs_inode_sd_cache *cache = NULL;
@@ -892,11 +920,16 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	if (ret)
 		goto out_unlock;
 
+	ret = pkm_kacs_caap_cache_lock(&caap_cache);
+	if (ret)
+		goto out_unlock;
 	ret = pkm_kacs_prepare_new_file_sd_core(subject_token, cache,
 						security_info, input_sd_ptr,
 						input_sd_len,
 						use_live_access_check,
+						caap_cache,
 						&new_sd_bytes, &new_sd_len);
+	pkm_kacs_caap_cache_unlock();
 	if (ret)
 		goto out_unlock;
 	used_restore_bypass = cache->state != PKM_KACS_INODE_SD_VALID;

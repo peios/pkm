@@ -18,11 +18,13 @@ long pkm_kacs_path_sd_lookup_flags(u32 flags, unsigned int *lookup_flags_out);
 
 long pkm_kacs_query_file_sd_bytes_core(
 	const void *subject_token, const struct pkm_kacs_inode_sd_cache *cache,
-	u32 security_info, const u8 **out_sd_ptr, size_t *out_sd_len);
+	u32 security_info, const void *caap_cache, const u8 **out_sd_ptr,
+	size_t *out_sd_len);
 long pkm_kacs_prepare_new_file_sd_core(
 	const void *subject_token, const struct pkm_kacs_inode_sd_cache *cache,
 	u32 security_info, const u8 *input_sd_ptr, size_t input_sd_len,
-	bool authorize_live, const u8 **new_sd_ptr, size_t *new_sd_len);
+	bool authorize_live, const void *caap_cache, const u8 **new_sd_ptr,
+	size_t *new_sd_len);
 
 long pkm_kacs_query_token_sd_core(const void *subject_token,
 				  const void *target_token,
