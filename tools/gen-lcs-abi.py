@@ -23,6 +23,7 @@ import textwrap
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 UAPI = ROOT / "pkm" / "uapi"
 HDR = UAPI / "pkm" / "lcs.h"
+TRACE_H = UAPI / "pkm" / "trace.h"
 SYSCALL_H = UAPI / "pkm" / "syscall.h"
 LCS_SRC = ROOT / "pkm" / "lcs"
 OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
@@ -135,7 +136,8 @@ def syscall_signatures():
 def probe(consts, structs, syscall_consts):
     """Compile a probe to resolve constant values, ioctl encodings and layouts."""
     src = ['#include <stdio.h>', '#include <stddef.h>', '#include <stdint.h>',
-           '#include <pkm/lcs.h>', '#include <pkm/syscall.h>', "int main(void){"]
+           '#include <pkm/lcs.h>', '#include <pkm/syscall.h>',
+           '#include <pkm/trace.h>', "int main(void){"]
     numeric = []
     for name, args, raw, _, _ in consts + syscall_consts:
         if args or raw.startswith('"'):
@@ -205,7 +207,13 @@ def build():
     consts, structs = parse_header(HDR)
     syscall_consts = [c for c in parse_header(SYSCALL_H)[0]
                       if c[0].startswith("SYS_REG_")]
-    values, sizes, offsets = probe(consts, structs, syscall_consts)
+    # trace.h is the single source of truth for the kacs:, kmes: and lcs:
+    # tracepoint codes alike. Only the LCS ones belong here; the KACS ones are
+    # generated into the KACS ABI appendix by gen-kacs-abi.py.
+    trace_consts = [c for c in parse_header(TRACE_H)[0]
+                    if c[0].startswith("LCS_")]
+    values, sizes, offsets = probe(consts + trace_consts, structs,
+                                   syscall_consts)
     by_name = {c[0]: c for c in consts}
     o = []
     w = o.append
@@ -349,6 +357,49 @@ def build():
             trows.append([f"`{name}`", val] + ([note] if has_note else []))
         o += table(["Constant", "Value"] + (["Notes"] if has_note else []), trows)
         w("")
+
+    if trace_consts:
+        w("## Tracepoint diagnostic codes")
+        w("")
+        w("From `uapi/pkm/trace.h`. These are a diagnostic contract for")
+        w("ftrace, perf and eBPF consumers, letting a tool decode an `lcs:`")
+        w("event's `reason`, `op` or `state` field without recompiling")
+        w("against a specific kernel. No LCS syscall accepts or returns")
+        w("them, and values are append-only.")
+        w("")
+        groups = []
+        for entry in trace_consts:
+            if not groups or groups[-1][0] != entry[4]:
+                groups.append((entry[4], []))
+            groups[-1][1].append(entry)
+        for group, rows in groups:
+            # Not capitalised: these blocks open with the tracepoint's own
+            # identifier, and title-casing turns lcs_rsi_request into
+            # Lcs_rsi_request. Split into a short heading plus a wrapped body
+            # the way the KACS appendix does, since several run to a paragraph.
+            text = re.sub(r"\s+", " ", PSD_REF.sub("", group or "").strip())
+            parts = re.split(r"(?<=\.)\s+", text, maxsplit=1)
+            head = parts[0].rstrip(".")
+            body = parts[1].strip() if len(parts) > 1 else ""
+            if len(head) > 90:
+                head, body = "", text
+            if head:
+                w(f"*{head}.*")
+                w("")
+            if body:
+                for chunk in textwrap.wrap(body, 72):
+                    w(chunk)
+                w("")
+            has_note = any(r[3] for r in rows)
+            trows = []
+            for name, args, raw, comment, _ in rows:
+                val = (fmt_value(raw, values[name]) if name in values
+                       else f"`{raw}`")
+                note = PSD_REF.sub("", comment).strip()
+                trows.append([f"`{name}`", val] + ([note] if has_note else []))
+            o += table(["Constant", "Value"] + (["Notes"] if has_note else []),
+                       trows)
+            w("")
 
     text = "\n".join(o).rstrip() + "\n"
     return re.sub(r"\n{3,}", "\n\n", text)
