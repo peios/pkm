@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <kunit/test.h>
+#include <linux/seq_file.h>
 
 #include "stratafs.h"
 
@@ -39,6 +40,80 @@ static void stratafs_kunit_parse_escapes(struct kunit *test)
 	KUNIT_EXPECT_STREQ(test, sbi.strata[1].path, "/c+d");
 	KUNIT_EXPECT_STREQ(test, sbi.strata[2].path, "/e,f");
 	stratafs_kunit_free_parsed(&sbi);
+}
+
+/*
+ * §7.3: the mount table reports the stack "sufficient to reconstruct" it — the
+ * same paths, in the same order, with the same flags.
+ *
+ * ->show_options used to emit display_options through seq_show_option(), which
+ * octal-escapes ',', a backslash and whitespace. That is a second escaping layer on a
+ * value that already carries §7.1's, so a stack containing an escaped separator
+ * came back out unreconstructable: an escaped ':' reported with its backslash
+ * itself octal-escaped, which the parser then rejects as a dangling escape;
+ * an escaped ',' reported as something that reads back as a different path.
+ *
+ * Paths free of ':', '+', ',', a backslash and whitespace — the spec's own example
+ * among them — round-tripped byte-identical, which is why this survived.
+ *
+ * This drives the real emission path through stratafs_show_strata() and feeds
+ * what it wrote straight back into the parser.
+ */
+static void stratafs_kunit_mount_table_round_trip(struct kunit *test)
+{
+	static const char *const stacks[] = {
+		/* The spec's own example: no separators, always worked. */
+		"/system/retc:/lcl/etc+create:/usr/etc+ro",
+		/* One escaped instance of each §7.1 separator. */
+		"/a\\:b:/c\\+d+am:/e\\,f+ro",
+		/* An escaped backslash in a path, and a space. */
+		"/a\\\\b:/c d+create",
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(stacks); i++) {
+		struct stratafs_sb_info first = {};
+		struct stratafs_sb_info second = {};
+		struct seq_file m = {};
+		const char *reported;
+		unsigned int j;
+
+		KUNIT_ASSERT_EQ_MSG(test,
+			stratafs_parse_strata(&first, stacks[i]), 0,
+			"parse of %s", stacks[i]);
+
+		m.size = PAGE_SIZE;
+		m.buf = kunit_kzalloc(test, m.size, GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, m.buf);
+
+		stratafs_show_strata(&m, &first);
+		KUNIT_ASSERT_LT_MSG(test, m.count, m.size,
+				    "seq buffer overflowed for %s", stacks[i]);
+		m.buf[m.count] = '\0';
+
+		/* Skip the ",strata=" the mount table prefixes. */
+		KUNIT_ASSERT_EQ_MSG(test,
+			strncmp(m.buf, ",strata=", 8), 0,
+			"reported %s", m.buf);
+		reported = m.buf + 8;
+
+		KUNIT_ASSERT_EQ_MSG(test,
+			stratafs_parse_strata(&second, reported), 0,
+			"reparse of reported %s", reported);
+
+		KUNIT_EXPECT_EQ_MSG(test, second.count, first.count,
+				    "stratum count for %s", stacks[i]);
+		for (j = 0; j < first.count && j < second.count; j++) {
+			KUNIT_EXPECT_STREQ_MSG(test, second.strata[j].path,
+					       first.strata[j].path,
+					       "path %u of %s", j, stacks[i]);
+			KUNIT_EXPECT_EQ_MSG(test, second.strata[j].flags,
+					    first.strata[j].flags,
+					    "flags %u of %s", j, stacks[i]);
+		}
+		stratafs_kunit_free_parsed(&second);
+		stratafs_kunit_free_parsed(&first);
+	}
 }
 
 static void stratafs_kunit_parse_rejects_malformed(struct kunit *test)
@@ -100,6 +175,7 @@ static void stratafs_kunit_live_mount_cookie(struct kunit *test)
 static struct kunit_case stratafs_kunit_cases[] = {
 	KUNIT_CASE(stratafs_kunit_parse_valid),
 	KUNIT_CASE(stratafs_kunit_parse_escapes),
+	KUNIT_CASE(stratafs_kunit_mount_table_round_trip),
 	KUNIT_CASE(stratafs_kunit_parse_rejects_malformed),
 	KUNIT_CASE(stratafs_kunit_routing),
 	KUNIT_CASE(stratafs_kunit_live_mount_cookie),

@@ -571,11 +571,38 @@ static void stratafs_put_super(struct super_block *sb)
 	stratafs_free_sbi(sbi);
 }
 
+/*
+ * §7.3 requires the mount table to report the stack "in exactly the strata=
+ * form of §7.1, including flags and escaping", and "sufficient to reconstruct
+ * the stack: the same paths, in the same order, with the same flags."
+ *
+ * seq_show_option() cannot do that here. It applies seq_escape() with
+ * ESCAPE_OCTAL over ",\t\n\\", which is a second and incompatible escaping
+ * layer on a value that already carries §7.1's. The stored value's backslashes
+ * get re-escaped, so a path containing ':' reports as a dangling escape and is
+ * rejected on read-back, and one containing ',' reads back as a different path:
+ *
+ *	supplied /a\:b  ->  reported strata=/a\134:b     (rejected)
+ *	supplied /a\,b  ->  reported strata=/a\134\054b  (reads as /a\,b)
+ *
+ * Paths free of ':', '+', ',', '\' and whitespace — the spec's own example
+ * among them — round-trip byte-identical, which is why this survived.
+ *
+ * display_options holds the caller's raw option value (super.c), and §7.1's
+ * escaping already makes it safe inside a comma-separated options string. So
+ * it goes out verbatim: the key through seq_puts, then the value.
+ */
+void stratafs_show_strata(struct seq_file *m, const struct stratafs_sb_info *sbi)
+{
+	if (!sbi->display_options)
+		return;
+	seq_puts(m, ",strata=");
+	seq_puts(m, sbi->display_options);
+}
+
 static int stratafs_show_options(struct seq_file *m, struct dentry *root)
 {
-	struct stratafs_sb_info *sbi = STRATAFS_SB(root->d_sb);
-
-	seq_show_option(m, "strata", sbi->display_options);
+	stratafs_show_strata(m, STRATAFS_SB(root->d_sb));
 	return 0;
 }
 

@@ -110,6 +110,16 @@ struct stratafs_fs_context {
 };
 
 #define STRATAFS_SB(sb) ((struct stratafs_sb_info *)(sb)->s_fs_info)
+
+struct seq_file;
+
+/*
+ * Write the ",strata=..." the mount table reports, §7.3.
+ *
+ * Split out of ->show_options so it can be driven from a KUnit case with a
+ * seq_file and an sbi, rather than a fabricated dentry and superblock.
+ */
+void stratafs_show_strata(struct seq_file *m, const struct stratafs_sb_info *sbi);
 #define STRATAFS_I(inode) ((struct stratafs_inode_info *)(inode)->i_private)
 
 extern const struct dentry_operations stratafs_dentry_operations;
