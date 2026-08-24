@@ -388,6 +388,32 @@ int stratafs_get_provider(struct dentry *dentry, struct path *path,
 		path_get(path);
 		if (index)
 			*index = provider;
+		/*
+		 * Follow the root's inode number to whatever now provides it.
+		 *
+		 * The root inode is created once in stratafs_fill_super and
+		 * ->d_revalidate keeps s_root, so nothing else ever rewrites
+		 * its i_ino. When a higher-precedence stratum root appears, or
+		 * the mount-time one goes, stat() on the mount point kept
+		 * reporting the number allocated for the mount-time provider.
+		 *
+		 * The identity map is already keyed by provider inode, so the
+		 * number the root should report is the number any other merged
+		 * path to that same provider reports. Without this they
+		 * disagree -- two paths naming one object with unequal inode
+		 * numbers, which is the false-inequality direction and is what
+		 * breaks hard-link detection in backup tools.
+		 *
+		 * The dentry stays pinned; only the number follows.
+		 */
+		if (d_inode(dentry)) {
+			struct inode *provider_inode = d_inode(path->dentry);
+			unsigned long number = stratafs_provider_ino(
+				dentry->d_sb, provider_inode);
+
+			if (number)
+				d_inode(dentry)->i_ino = number;
+		}
 		stratafs_put_paths(&roots, STRATAFS_SB(dentry->d_sb)->count);
 		return 0;
 	}
