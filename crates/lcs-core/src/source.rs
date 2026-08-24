@@ -174,6 +174,7 @@ pub fn source_registration_error_errno(err: LcsError) -> Option<SourceRegistrati
         | LcsError::ZeroHiveCount
         | LcsError::UnknownHiveFlags { .. }
         | LcsError::GlobalHiveHasScopeGuid
+        | LcsError::PrivateHiveHasNilScopeGuid
         | LcsError::NilHiveRootGuid
         | LcsError::DuplicateHiveRootGuid
         | LcsError::DuplicateHiveIdentity
@@ -446,6 +447,12 @@ pub fn source_registration_hive_scope(hive: &SourceRegistrationHive<'_>) -> LcsR
     }
 
     if (hive.flags & RSI_HIVE_PRIVATE) != 0 {
+        // Symmetric with the global check below: the two sides of the
+        // scope-GUID contract have to agree, and KACS already refuses a nil
+        // scope GUID on a token.
+        if hive.scope_guid == NIL_GUID {
+            return Err(LcsError::PrivateHiveHasNilScopeGuid);
+        }
         return Ok(HiveScope::Private(hive.scope_guid));
     }
 

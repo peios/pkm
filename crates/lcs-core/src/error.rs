@@ -189,6 +189,14 @@ pub enum LcsError {
     },
     /// A global source registration hive carried a non-zero scope GUID.
     GlobalHiveHasScopeGuid,
+    /// A private source registration hive carried a nil scope GUID.
+    ///
+    /// KACS rejects a nil scope GUID on a token, so such a hive could never be
+    /// routed to: it would register successfully, reserve its route identity
+    /// and hold its name against other sources in that scope, while no token
+    /// could ever carry the GUID needed to reach it. Every lookup would return
+    /// ENOENT with nothing to say why.
+    PrivateHiveHasNilScopeGuid,
     /// A source registration hive root GUID was nil.
     NilHiveRootGuid,
     /// A source registration request reused a root GUID within the request.

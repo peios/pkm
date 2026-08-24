@@ -58,6 +58,7 @@ fn malformed_registration_arguments_project_to_einval() {
             unknown: 0x04,
         },
         LcsError::GlobalHiveHasScopeGuid,
+        LcsError::PrivateHiveHasNilScopeGuid,
         LcsError::NilHiveRootGuid,
         LcsError::DuplicateHiveRootGuid,
         LcsError::DuplicateHiveIdentity,

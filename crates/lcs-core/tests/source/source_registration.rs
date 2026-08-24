@@ -68,7 +68,7 @@ fn source_registration_accepts_new_slot_and_sequence_floor() {
     let hives = [
         global_hive("Machine", MACHINE_GUID),
         private_hive("Machine", PRIVATE_GUID, SCOPE_A),
-        private_hive("Machine", USERS_GUID, NIL_GUID),
+        private_hive("Machine", USERS_GUID, SCOPE_B),
     ];
 
     assert_eq!(
@@ -144,6 +144,34 @@ fn source_registration_rejects_malformed_hive_entries() {
     assert_eq!(
         validate_source_registration(&limits, &[], &request(&global_with_scope, 0)),
         Err(LcsError::GlobalHiveHasScopeGuid)
+    );
+
+    // The other half of the same contract. Such a hive used to register
+    // successfully and then be permanently unroutable: KACS refuses a nil
+    // scope GUID on a token, so nothing could ever carry the GUID needed to
+    // reach it, while it still held its name against other sources.
+    let private_without_scope = [SourceRegistrationHive {
+        name: "Machine",
+        root_guid: MACHINE_GUID,
+        flags: RSI_HIVE_PRIVATE,
+        scope_guid: NIL_GUID,
+    }];
+    assert_eq!(
+        validate_source_registration(&limits, &[], &request(&private_without_scope, 0)),
+        Err(LcsError::PrivateHiveHasNilScopeGuid)
+    );
+
+    // And the case that must still be accepted, so the check cannot be
+    // satisfied by rejecting every private hive.
+    let private_with_scope = [SourceRegistrationHive {
+        name: "Machine",
+        root_guid: MACHINE_GUID,
+        flags: RSI_HIVE_PRIVATE,
+        scope_guid: SCOPE_A,
+    }];
+    assert!(
+        validate_source_registration(&limits, &[], &request(&private_with_scope, 0)).is_ok(),
+        "a private hive with a real scope GUID must still register"
     );
 
     assert_eq!(
