@@ -1139,6 +1139,7 @@ long pkm_kmes_runtime_config_apply(
 	u64 failed_retained_capacity = 0;
 	u32 old_rate;
 	u32 failed_errno = 0;
+	bool swap_failed = false;
 	long ret;
 
 	if (!pkm_kmes_runtime_config_valid(config))
@@ -1150,6 +1151,21 @@ long pkm_kmes_runtime_config_apply(
 	if (ret)
 		goto out;
 
+	/*
+	 * A failed capacity swap rolls back the capacity, and nothing else.
+	 *
+	 * The store below commits all four parameters, so jumping straight to
+	 * `out` on a swap failure also discarded already-validated changes to
+	 * MaxEventSize, MaxNestingDepth and MaxEmitRatePerProcess -- none of
+	 * which have anything to do with ring capacity.
+	 *
+	 * That is worst exactly when the knobs matter most.  An administrator
+	 * raising MaxEventSize *and* BufferCapacity in one edit, because the
+	 * system is dropping large events, hits an -ENOMEM on the swap -- most
+	 * likely precisely because the system is under memory pressure -- and
+	 * silently loses the MaxEventSize change too, with a
+	 * KMES_BUFFER_SWAP_FAILED event that mentions only capacity.
+	 */
 	if (config->buffer_capacity != current_capacity) {
 		ret = pkm_kmes_swap_capacity_locked(config->buffer_capacity);
 		if (ret) {
@@ -1159,15 +1175,33 @@ long pkm_kmes_runtime_config_apply(
 				failed_retained_capacity = current_capacity;
 				failed_errno = ENOMEM;
 			}
-			goto out;
+			swap_failed = true;
 		}
 	}
 
-	pkm_kmes_runtime_config_store_locked(config);
+	if (swap_failed) {
+		/*
+		 * Commit the other three against the capacity that is actually
+		 * live, so the stored configuration describes the running
+		 * system rather than the requested one.
+		 */
+		struct pkm_kmes_runtime_config retained = *config;
+
+		retained.buffer_capacity = current_capacity;
+		pkm_kmes_runtime_config_store_locked(&retained);
+	} else {
+		pkm_kmes_runtime_config_store_locked(config);
+	}
+	/*
+	 * Unconditional on the swap: the rate is one of the three that commit
+	 * either way, and the buckets must follow whatever was stored.  Still
+	 * gated on the rate having actually changed.
+	 */
 	if (config->max_emit_rate_per_process != old_rate)
 		pkm_kmes_rate_buckets_reconfigure(
 			config->max_emit_rate_per_process);
-	ret = 0;
+	if (!swap_failed)
+		ret = 0;
 
 out:
 	mutex_unlock(&pkm_kmes_topology_lock);
@@ -1842,14 +1876,26 @@ static long pkm_kmes_emit_batch_common(const void *token,
 
 	if (ret == 0)
 		emitted = count;
-	{
-		long store_ret =
-			pkm_kmes_store_emitted_out(emitted_out, emitted_out_user,
-						   emitted);
-
-		if (store_ret)
-			ret = store_ret;
-	}
+	/*
+	 * A failure to report the count does not unmake the emission.
+	 *
+	 * The events are already in the ring and visible to consumers by this
+	 * point, so turning a failed put_user() into EFAULT told the caller
+	 * "your arguments were bad, nothing happened" about a batch that had
+	 * happened.  EFAULT is documented as meaning exactly that, and is
+	 * indistinguishable from the pre-flight EFAULT that genuinely emits
+	 * nothing -- so a caller retrying on it, which is the sensible response
+	 * to what looks like a pre-flight failure, duplicated the whole batch.
+	 *
+	 * The window is narrow but reachable: emitted_out was writable at the
+	 * early check and became unwritable before this store, which another
+	 * thread unmapping or mprotect-ing the page is enough to cause.
+	 *
+	 * So the store's failure is ignored.  The caller asked for `count`
+	 * events and got them, which keeps the return value truthful about the
+	 * side effect -- the thing that matters.
+	 */
+	(void)pkm_kmes_store_emitted_out(emitted_out, emitted_out_user, emitted);
 
 out:
 	if (!tcb_exempt) {
