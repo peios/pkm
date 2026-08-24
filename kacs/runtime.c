@@ -180,9 +180,26 @@ kacs_uuid_t kacs_primary_token_guid(void)
 
 kacs_uuid_t kacs_process_guid(void)
 {
-	struct pkm_kacs_process_state *state = pkm_kacs_current_process_state();
+	struct pkm_kacs_process_state *state;
 	kacs_uuid_t uuid = { };
 
+	/*
+	 * The same guard the other two identity-stamp accessors carry.
+	 *
+	 * In softirq or hardirq-deferred work `current` is whatever task was
+	 * interrupted, so without this the stamp names a process that had
+	 * nothing to do with the event.  KMES captures all three stamps
+	 * together, and the token pair already nulls out here -- which made the
+	 * result read as "no token identity, but process X", a plausible shape
+	 * for a kernel-originated event and therefore not obviously wrong to a
+	 * consumer.  The stamps are the part of an event a consumer is told it
+	 * may trust absolutely, so misattribution is the worst failure this
+	 * path has.
+	 */
+	if (!current || !in_task())
+		return uuid;
+
+	state = pkm_kacs_current_process_state();
 	if (!state)
 		return uuid;
 
