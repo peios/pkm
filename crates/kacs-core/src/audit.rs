@@ -6,7 +6,9 @@ use crate::ace::{
     SYSTEM_AUDIT_OBJECT_ACE_TYPE,
 };
 use crate::acl::Acl;
-use crate::condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
+use crate::condition::{
+    evaluate_conditional_expression, ConditionalContext, ConditionalResult, OwnerMatch,
+};
 use crate::dacl::{sid_matches_token, AcePolarity};
 use crate::error::KacsResult;
 use crate::object_tree::ObjectTypeList;
@@ -66,7 +68,15 @@ pub fn evaluate_sacl<'a>(
     conditional_context: &ConditionalContext<'_>,
     object_audit_context: Option<&[u8]>,
 ) -> KacsResult<EvaluateSaclState<'a>> {
-    let caller_is_owner = owner_matches_identity(token, owner);
+    // The SACL walk matches on the broadest reading -- every branch of
+    // audit_sid_matches uses deny polarity, so an audit ACE fires for a group
+    // that is enabled *or* deny-only. Presence alone was broader still, and
+    // made S-1-3-4 the one SID in the walk that ignored attributes entirely.
+    let caller_is_owner = OwnerMatch {
+        present: owner_matches_identity(token, owner),
+        allow: sid_matches_token(token, owner, AcePolarity::Allow),
+        deny: sid_matches_token(token, owner, AcePolarity::Deny),
+    };
     let principal_self_matches =
         self_sid.map(|sid| sid_matches_token(token, sid, AcePolarity::Deny));
     let mut context = *conditional_context;
@@ -114,7 +124,7 @@ fn handle_sacl_ace<'a>(
     match (ace.ace_type(), ace.kind()) {
         (SYSTEM_AUDIT_ACE_TYPE, AceKind::SingleSid { sid, .. })
         | (SYSTEM_AUDIT_OBJECT_ACE_TYPE, AceKind::Object { sid, .. }) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner, self_sid) {
+            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {
@@ -141,7 +151,7 @@ fn handle_sacl_ace<'a>(
                 ..
             },
         ) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner, self_sid) {
+            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {
@@ -163,7 +173,7 @@ fn handle_sacl_ace<'a>(
         }
         (SYSTEM_ALARM_ACE_TYPE, AceKind::SingleSid { sid, .. })
         | (SYSTEM_ALARM_OBJECT_ACE_TYPE, AceKind::Object { sid, .. }) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner, self_sid) {
+            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {
@@ -187,7 +197,7 @@ fn handle_sacl_ace<'a>(
                 ..
             },
         ) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner, self_sid) {
+            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {

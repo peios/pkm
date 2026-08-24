@@ -1,6 +1,6 @@
 use crate::access_mask::GenericMapping;
 use crate::claims::ClaimAttribute;
-use crate::condition::ConditionalContext;
+use crate::condition::{ConditionalContext, OwnerMatch};
 use crate::dacl::{
     caller_is_owner_normal, confinement_contains, confinement_contains_capability,
     evaluate_dacl_states, merge_absolute_results, merge_restricted_results, restricted_contains,
@@ -180,7 +180,7 @@ pub fn evaluate_security_descriptor<'a>(
             groups: restricted_context.restricted_sids,
         });
         conditional_restricted.identity_membership_is_presence_based = true;
-        conditional_restricted.caller_is_owner = restricted_owner;
+        conditional_restricted.caller_is_owner = OwnerMatch::presence(restricted_owner);
         conditional_restricted.device_groups = restricted_context.restricted_device_groups;
         conditional_restricted.device_membership_uses_virtual_groups = true;
 
@@ -198,7 +198,7 @@ pub fn evaluate_security_descriptor<'a>(
                     granted: 0,
                     decided: 0,
                 },
-                caller_is_owner: restricted_owner,
+                caller_is_owner: OwnerMatch::presence(restricted_owner),
             },
             |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
         )?;
@@ -227,7 +227,7 @@ pub fn evaluate_security_descriptor<'a>(
         let mut conditional_confinement = normal_context;
         conditional_confinement.self_sid = confinement_self;
         conditional_confinement.principal_self_matches = Some(confinement_self.is_some());
-        conditional_confinement.caller_is_owner = confinement_owner;
+        conditional_confinement.caller_is_owner = OwnerMatch::presence(confinement_owner);
         conditional_confinement.device_membership_uses_virtual_groups = true;
 
         let confinement = evaluate_dacl_states(
@@ -244,7 +244,7 @@ pub fn evaluate_security_descriptor<'a>(
                     granted: 0,
                     decided: 0,
                 },
-                caller_is_owner: confinement_owner,
+                caller_is_owner: OwnerMatch::presence(confinement_owner),
             },
             |sid, _| {
                 sid == confinement_sid || confinement_contains_capability(&token.confinement, sid)

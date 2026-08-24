@@ -24,6 +24,60 @@ pub enum ConditionalResult {
     Unknown,
 }
 
+/// How the object's owner SID matches the evaluating identity.
+///
+/// `S-1-3-4` used to be resolved with a single presence test -- is the owner
+/// SID the token user, or in the group list at all -- and the same answer was
+/// returned at both polarities. That ignored `SE_GROUP_ENABLED`,
+/// `SE_GROUP_USE_FOR_DENY_ONLY` and `user_deny_only`, so a group deliberately
+/// weakened still matched `OWNER RIGHTS` through it: a token restricted by
+/// setting Administrators to deny-only could not gain access *through*
+/// Administrators, but an allow ACE on `S-1-3-4` over an Administrators-owned
+/// object granted anyway. `OWNER RIGHTS` ACEs typically carry `WRITE_DAC`,
+/// which is enough to rewrite the DACL and make the rest moot.
+///
+/// The two polarities are precomputed together because the owner is fixed for
+/// a whole walk while the polarity is per ACE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OwnerMatch {
+    /// The owner SID is in the identity at all, attributes disregarded.
+    ///
+    /// This is what the *implicit* owner grant uses. That grant is a separate
+    /// rule from the explicit `S-1-3-4` ACE match and is suppressed by the
+    /// `OWNER RIGHTS` pre-scan rather than by polarity.
+    pub present: bool,
+    /// Matches under allow polarity: enabled, not deny-only, and not the user
+    /// SID of a `user_deny_only` token.
+    pub allow: bool,
+    /// Matches under deny polarity.
+    pub deny: bool,
+}
+
+impl OwnerMatch {
+    /// A match computed from a presence-only identity, where no attributes
+    /// exist to distinguish the polarities.
+    ///
+    /// The restricted-SID and confinement passes are genuinely presence-based
+    /// -- their SID lists carry no attributes at all, which is why they also
+    /// set `identity_membership_is_presence_based`.
+    pub fn presence(present: bool) -> Self {
+        Self {
+            present,
+            allow: present,
+            deny: present,
+        }
+    }
+
+    /// The match for one ACE's polarity.
+    pub fn for_allow(self, for_allow: bool) -> bool {
+        if for_allow {
+            self.allow
+        } else {
+            self.deny
+        }
+    }
+}
+
 /// Claim, identity, and virtual-SID inputs used while evaluating a conditional
 /// ACE expression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -33,8 +87,8 @@ pub struct ConditionalContext<'a> {
     /// Precomputed `PRINCIPAL_SELF` match outcome when the caller needs to
     /// override default matching.
     pub principal_self_matches: Option<bool>,
-    /// Whether the caller is considered the owner for this evaluation.
-    pub caller_is_owner: bool,
+    /// How the caller matches the object's owner, per polarity.
+    pub caller_is_owner: OwnerMatch,
     /// Optional identity view used for restricted or synthetic membership
     /// checks.
     pub identity: Option<IdentityView<'a>>,
@@ -65,7 +119,7 @@ impl<'a> Default for ConditionalContext<'a> {
         Self {
             self_sid: None,
             principal_self_matches: None,
-            caller_is_owner: false,
+            caller_is_owner: OwnerMatch::default(),
             identity: None,
             identity_membership_is_presence_based: false,
             device_groups: &[],
@@ -1046,7 +1100,7 @@ fn sid_in_membership_set(
 
     if !device || context.device_membership_uses_virtual_groups {
         if sid_bytes == OWNER_RIGHTS_SID_BYTES {
-            return Some(context.caller_is_owner);
+            return Some(context.caller_is_owner.for_allow(for_allow));
         }
         if sid_bytes == PRINCIPAL_SELF_SID_BYTES {
             if let Some(matches) = context.principal_self_matches {

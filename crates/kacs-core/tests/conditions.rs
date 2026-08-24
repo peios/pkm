@@ -1,6 +1,7 @@
 mod common;
 use common::{append_tokens, expr, parse_sid, sid_bytes};
 use kacs_core::{
+    OwnerMatch,
     evaluate_conditional_expression, ClaimAttribute, ClaimValue, ConditionalContext,
     ConditionalResult, GenericMapping, SidAndAttributes, TokenView,
     CLAIM_SECURITY_ATTRIBUTE_DISABLED, CLAIM_SECURITY_ATTRIBUTE_USE_FOR_DENY_ONLY,
@@ -1434,7 +1435,7 @@ fn member_of_sees_virtual_groups_and_polarity() {
     let token = token(&user, &groups);
     let context = ConditionalContext {
         self_sid: Some(parse_sid(&user)),
-        caller_is_owner: true,
+        caller_is_owner: OwnerMatch::presence(true),
         ..ConditionalContext::default()
     };
     let principal_self_program = expr(&append_tokens(&[sid_literal(&principal_self), vec![0x89]]));

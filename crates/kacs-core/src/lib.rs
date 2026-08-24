@@ -110,7 +110,9 @@ pub use claims::{
     CLAIM_SECURITY_ATTRIBUTE_VALUE_CASE_SENSITIVE, CLAIM_TYPE_BOOLEAN, CLAIM_TYPE_INT64,
     CLAIM_TYPE_OCTET, CLAIM_TYPE_SID, CLAIM_TYPE_STRING, CLAIM_TYPE_UINT64,
 };
-pub use condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
+pub use condition::{
+    evaluate_conditional_expression, ConditionalContext, ConditionalResult, OwnerMatch,
+};
 pub use dacl::{
     evaluate_dacl, evaluate_dacl_result_list, evaluate_dacl_result_list_with_confinement_context,
     evaluate_dacl_result_list_with_context, evaluate_dacl_result_list_with_restricted_context,

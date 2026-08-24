@@ -1,5 +1,5 @@
 use crate::access_mask::GenericMapping;
-use crate::condition::{
+use crate::condition::{OwnerMatch, 
     evaluate_conditional_expression, validate_conditional_expression_structure, ConditionalContext,
     ConditionalResult,
 };
@@ -601,7 +601,7 @@ fn rule_applies(
     let applies_context = ConditionalContext {
         self_sid: None,
         principal_self_matches: None,
-        caller_is_owner: false,
+        caller_is_owner: OwnerMatch::default(),
         identity: None,
         identity_membership_is_presence_based: false,
         device_groups: &[],

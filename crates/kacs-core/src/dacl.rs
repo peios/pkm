@@ -6,7 +6,9 @@ use crate::ace::{
     Ace, AceKind, ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_OBJECT_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
     ACCESS_DENIED_OBJECT_ACE_TYPE, ACE_OBJECT_TYPE_PRESENT,
 };
-use crate::condition::{evaluate_conditional_expression, ConditionalContext, ConditionalResult};
+use crate::condition::{
+    evaluate_conditional_expression, ConditionalContext, ConditionalResult, OwnerMatch,
+};
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::ObjectTypeList;
 use crate::pkm_alloc::Vec;
@@ -134,7 +136,7 @@ pub(crate) struct DaclStateInput<'sd, 'tok, 'ctx, 'b> {
     pub(crate) conditional_context: ConditionalContext<'ctx>,
     pub(crate) object_tree: Option<&'b ObjectTypeList>,
     pub(crate) initial_state: AccessDecisionState,
-    pub(crate) caller_is_owner: bool,
+    pub(crate) caller_is_owner: OwnerMatch,
 }
 
 /// Evaluates the descriptor's DACL in ordinary scalar mode.
@@ -245,7 +247,7 @@ pub fn evaluate_dacl_with_restricted_context(
         groups: restricted_context.restricted_sids,
     });
     restricted_conditions.identity_membership_is_presence_based = true;
-    restricted_conditions.caller_is_owner = restricted_owner;
+    restricted_conditions.caller_is_owner = OwnerMatch::presence(restricted_owner);
     restricted_conditions.device_groups = restricted_context.restricted_device_groups;
     restricted_conditions.device_membership_uses_virtual_groups = true;
 
@@ -263,7 +265,7 @@ pub fn evaluate_dacl_with_restricted_context(
                 granted: 0,
                 decided: 0,
             },
-            caller_is_owner: restricted_owner,
+            caller_is_owner: OwnerMatch::presence(restricted_owner),
         },
         |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
     )?;
@@ -328,7 +330,7 @@ pub fn evaluate_dacl_with_confinement_context(
     let mut confinement_conditions = *conditional_context;
     confinement_conditions.self_sid = confinement_self;
     confinement_conditions.principal_self_matches = Some(confinement_self.is_some());
-    confinement_conditions.caller_is_owner = confinement_owner;
+    confinement_conditions.caller_is_owner = OwnerMatch::presence(confinement_owner);
     confinement_conditions.device_membership_uses_virtual_groups = true;
 
     let confinement = evaluate_dacl_states(
@@ -345,7 +347,7 @@ pub fn evaluate_dacl_with_confinement_context(
                 granted: 0,
                 decided: 0,
             },
-            caller_is_owner: confinement_owner,
+            caller_is_owner: OwnerMatch::presence(confinement_owner),
         },
         |sid, _| {
             sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
@@ -574,7 +576,7 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
         groups: restricted_context.restricted_sids,
     });
     restricted_conditions.identity_membership_is_presence_based = true;
-    restricted_conditions.caller_is_owner = restricted_owner;
+    restricted_conditions.caller_is_owner = OwnerMatch::presence(restricted_owner);
     restricted_conditions.device_groups = restricted_context.restricted_device_groups;
     restricted_conditions.device_membership_uses_virtual_groups = true;
 
@@ -592,7 +594,7 @@ pub fn evaluate_dacl_result_list_with_restricted_context(
                 granted: 0,
                 decided: 0,
             },
-            caller_is_owner: restricted_owner,
+            caller_is_owner: OwnerMatch::presence(restricted_owner),
         },
         |sid, _| restricted_contains(restricted_context.restricted_sids, sid),
     )?;
@@ -679,7 +681,7 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
     let mut confinement_conditions = *conditional_context;
     confinement_conditions.self_sid = confinement_self;
     confinement_conditions.principal_self_matches = Some(confinement_self.is_some());
-    confinement_conditions.caller_is_owner = confinement_owner;
+    confinement_conditions.caller_is_owner = OwnerMatch::presence(confinement_owner);
     confinement_conditions.device_membership_uses_virtual_groups = true;
 
     let confinement = evaluate_dacl_states(
@@ -696,7 +698,7 @@ pub fn evaluate_dacl_result_list_with_confinement_context(
                 granted: 0,
                 decided: 0,
             },
-            caller_is_owner: confinement_owner,
+            caller_is_owner: OwnerMatch::presence(confinement_owner),
         },
         |sid, _| {
             sid == confinement_sid || confinement_contains_capability(confinement_context, sid)
@@ -747,7 +749,10 @@ where
     let mut decided = initial_state.decided;
     let mut granted = initial_state.granted;
 
-    if caller_is_owner && !skip_owner_implicit && !owner_rights_suppressed {
+    // The *implicit* owner grant, which is a separate rule from the explicit
+    // S-1-3-4 ACE match below and is suppressed by the OWNER RIGHTS pre-scan
+    // rather than by polarity. Left presence-based on purpose.
+    if caller_is_owner.present && !skip_owner_implicit && !owner_rights_suppressed {
         let implicit = (READ_CONTROL | WRITE_DAC) & valid_rights & !decided;
         decided |= implicit;
         granted |= implicit;
@@ -978,9 +983,18 @@ fn merge_granted(
     merged | privilege_granted
 }
 
-pub(crate) fn caller_is_owner_normal(sd: &SecurityDescriptor<'_>, token: &TokenView<'_>) -> bool {
-    sd.owner()
-        .is_some_and(|owner| owner_matches_identity(token, owner))
+pub(crate) fn caller_is_owner_normal(
+    sd: &SecurityDescriptor<'_>,
+    token: &TokenView<'_>,
+) -> OwnerMatch {
+    let Some(owner) = sd.owner() else {
+        return OwnerMatch::default();
+    };
+    OwnerMatch {
+        present: owner_matches_identity(token, owner),
+        allow: sid_matches_token(token, owner, AcePolarity::Allow),
+        deny: sid_matches_token(token, owner, AcePolarity::Deny),
+    }
 }
 
 pub(crate) fn restricted_contains(restricted_sids: &[SidAndAttributes<'_>], sid: Sid<'_>) -> bool {
@@ -1181,7 +1195,7 @@ fn project_object_target(flags: u32, object_type: Option<&[u8; 16]>) -> KacsResu
 fn ace_matches_identity<F>(
     ace_sid: Sid<'_>,
     polarity: AcePolarity,
-    caller_is_owner: bool,
+    caller_is_owner: OwnerMatch,
     self_sid: Option<Sid<'_>>,
     ordinary_sid_matches: F,
 ) -> bool
@@ -1189,7 +1203,7 @@ where
     F: Fn(Sid<'_>, AcePolarity) -> bool + Copy,
 {
     if ace_sid.as_bytes() == OWNER_RIGHTS_SID_BYTES {
-        return caller_is_owner;
+        return caller_is_owner.for_allow(polarity == AcePolarity::Allow);
     }
 
     if ace_sid.as_bytes() == PRINCIPAL_SELF_SID_BYTES {

@@ -5,7 +5,7 @@ use crate::access_mask::GenericMapping;
 use crate::audit::AuditEvent;
 use crate::caap::CaapPolicyEntry;
 use crate::claims::{parse_claim_attribute_array, ClaimAttribute};
-use crate::condition::ConditionalContext;
+use crate::condition::{ConditionalContext, OwnerMatch};
 use crate::dacl::AccessStatus;
 use crate::error::{KacsError, KacsResult};
 use crate::object_tree::{ObjectTypeList, ObjectTypeNode};
@@ -283,7 +283,7 @@ pub fn execute_access_check_abi<'a>(
     let conditional_context = ConditionalContext {
         self_sid,
         principal_self_matches: None,
-        caller_is_owner: false,
+        caller_is_owner: OwnerMatch::default(),
         identity: None,
         identity_membership_is_presence_based: false,
         device_groups: resolved.device_groups,
@@ -370,7 +370,7 @@ pub fn execute_access_check_list_abi<'a>(
     let conditional_context = ConditionalContext {
         self_sid,
         principal_self_matches: None,
-        caller_is_owner: false,
+        caller_is_owner: OwnerMatch::default(),
         identity: None,
         identity_membership_is_presence_based: false,
         device_groups: resolved.device_groups,

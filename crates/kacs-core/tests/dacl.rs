@@ -821,3 +821,141 @@ fn unknown_ace_types_are_skipped_during_evaluation() {
     assert!(result.success);
     assert_eq!(result.granted, READ_CONTROL);
 }
+
+// --- OWNER RIGHTS obeys the ordinary polarity rules (PEI-248) ---
+
+#[test]
+fn deny_only_group_owner_does_not_match_owner_rights_allow_aces() {
+    // A restricted token made by setting Administrators to deny-only may only
+    // block through that group, never gain through it. If the object's owner
+    // *is* Administrators, an allow ACE on S-1-3-4 used to grant anyway,
+    // because the owner match was presence-based and ignored the attribute.
+    //
+    // WRITE_DAC is the right that makes this bite: it rewrites the DACL.
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let administrators = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 544]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2001]);
+    let groups = [SidAndAttributes {
+        sid: parse_sid(&administrators),
+        attributes: SE_GROUP_USE_FOR_DENY_ONLY,
+    }];
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL | WRITE_DAC,
+        &owner_rights,
+    )]);
+    let sd_bytes = sd_with_dacl(&administrators, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &groups,
+    };
+
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL | WRITE_DAC, &mapping(), false)
+        .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn deny_only_group_owner_still_matches_owner_rights_deny_aces() {
+    // The other half of the rule, and the reason the fix is polarity-aware
+    // rather than simply stricter: a deny-only group must still *block*.
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let administrators = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 544]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2002]);
+    let groups = [SidAndAttributes {
+        sid: parse_sid(&administrators),
+        attributes: SE_GROUP_USE_FOR_DENY_ONLY,
+    }];
+    let dacl = acl_bytes(&[
+        basic_ace(ACCESS_DENIED_ACE_TYPE, 0, WRITE_DAC, &owner_rights),
+        basic_ace(
+            ACCESS_ALLOWED_ACE_TYPE,
+            0,
+            READ_CONTROL | WRITE_DAC,
+            &user,
+        ),
+    ]);
+    let sd_bytes = sd_with_dacl(&administrators, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &groups,
+    };
+
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL | WRITE_DAC, &mapping(), false)
+        .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(
+        result.granted, READ_CONTROL,
+        "WRITE_DAC must be denied through the deny-only group, READ_CONTROL still granted",
+    );
+}
+
+#[test]
+fn user_deny_only_owner_does_not_match_owner_rights_allow_aces() {
+    // A write-restricted token has user_deny_only forced true, so its user SID
+    // matches deny ACEs only. If the object's owner is that user, an allow ACE
+    // on S-1-3-4 used to match regardless.
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2003]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL | WRITE_DAC,
+        &owner_rights,
+    )]);
+    let sd_bytes = sd_with_dacl(&owner, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&owner),
+        user_deny_only: true,
+        groups: &[],
+    };
+
+    // skip_owner_implicit, so this measures the explicit S-1-3-4 ACE alone and
+    // not the implicit owner grant, which is a separate rule.
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL | WRITE_DAC, &mapping(), true)
+        .expect("evaluation should succeed");
+
+    assert!(!result.success);
+    assert_eq!(result.granted, 0);
+}
+
+#[test]
+fn an_enabled_group_owner_still_matches_owner_rights_allow_aces() {
+    // The fix must not simply stop S-1-3-4 matching through groups. An
+    // ordinary enabled group is the common case and has to keep working.
+    let owner_rights = sid_bytes([0, 0, 0, 0, 0, 3], &[4]);
+    let administrators = sid_bytes([0, 0, 0, 0, 0, 5], &[32, 544]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 2004]);
+    let groups = [SidAndAttributes {
+        sid: parse_sid(&administrators),
+        attributes: SE_GROUP_ENABLED,
+    }];
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL | WRITE_DAC,
+        &owner_rights,
+    )]);
+    let sd_bytes = sd_with_dacl(&administrators, Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = TokenView {
+        user: parse_sid(&user),
+        user_deny_only: false,
+        groups: &groups,
+    };
+
+    let result = evaluate_dacl(&sd, &token, READ_CONTROL | WRITE_DAC, &mapping(), false)
+        .expect("evaluation should succeed");
+
+    assert!(result.success);
+    assert_eq!(result.granted, READ_CONTROL | WRITE_DAC);
+}
