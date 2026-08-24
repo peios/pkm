@@ -8388,6 +8388,7 @@ fn emit_file_set_sd_audit_events(
             None,
             normalized.mapped,
             normalized.mapped,
+            normalized.maximum_allowed,
             &FILE_GENERIC_MAPPING,
             &conditional_context,
             None,

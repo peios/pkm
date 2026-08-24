@@ -541,6 +541,88 @@ fn audit_aces_use_mapped_desired_overlap_and_final_success_or_failure() {
 }
 
 #[test]
+fn a_maximum_allowed_open_still_emits_its_success_audit() {
+    // MAXIMUM_ALLOWED is stripped before generic mapping, so it maps to a zero
+    // desired mask and every audit ACE short-circuited on
+    // `(ace_mask & mapped_desired) == 0`. A key with a success-audit SACL
+    // recorded ordinary opens and missed exactly the probing ones:
+    // MAXIMUM_ALLOWED is what an enumerator or introspection tool uses, so a
+    // sweep of what a principal can reach left no trail.
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 13001]);
+    let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user)]);
+    let sacl = acl_bytes(&[basic_ace(
+        SYSTEM_AUDIT_ACE_TYPE,
+        SUCCESSFUL_ACCESS_ACE_FLAG,
+        READ_CONTROL,
+        &user,
+    )]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = primary_token(parse_sid(&user));
+
+    let result = access_check_core(
+        Some(&sd),
+        &token,
+        default_pip(),
+        kacs_core::MAXIMUM_ALLOWED,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        None,
+        0,
+        &[],
+    )
+    .expect("maximum-allowed audit should evaluate");
+
+    assert_eq!(result.granted, READ_CONTROL);
+    assert_eq!(result.audit_events.len(), 1, "the open must be audited");
+    assert!(
+        result.audit_events[0].success,
+        "MAXIMUM_ALLOWED returns whatever is available and never fails",
+    );
+}
+
+#[test]
+fn a_maximum_allowed_open_does_not_audit_a_right_it_did_not_get() {
+    // The check must not become "MAXIMUM_ALLOWED matches every audit ACE".
+    // The ACE says "audit when someone gets this right", and here they did not.
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 13002]);
+    let dacl = acl_bytes(&[basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL, &user)]);
+    let sacl = acl_bytes(&[basic_ace(
+        SYSTEM_AUDIT_ACE_TYPE,
+        SUCCESSFUL_ACCESS_ACE_FLAG,
+        WRITE_DAC,
+        &user,
+    )]);
+    let sd_bytes = sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl));
+    let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");
+    let token = primary_token(parse_sid(&user));
+
+    let result = access_check_core(
+        Some(&sd),
+        &token,
+        default_pip(),
+        kacs_core::MAXIMUM_ALLOWED,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        None,
+        0,
+        &[],
+    )
+    .expect("maximum-allowed audit should evaluate");
+
+    assert_eq!(result.granted, READ_CONTROL);
+    assert!(result.audit_events.is_empty());
+}
+
+#[test]
 fn callback_unknown_audits_and_alarm_masks_are_accumulated() {
     let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
     let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);

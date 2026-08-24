@@ -64,10 +64,30 @@ pub fn evaluate_sacl<'a>(
     object_tree: Option<&ObjectTypeList>,
     mapped_desired: u32,
     granted: u32,
+    max_allowed_mode: bool,
     mapping: &GenericMapping,
     conditional_context: &ConditionalContext<'_>,
     object_audit_context: Option<&[u8]>,
 ) -> KacsResult<EvaluateSaclState<'a>> {
+    // What the SACL is matched against.
+    //
+    // MAXIMUM_ALLOWED is stripped before generic mapping, so it maps to a
+    // *zero* desired mask. Every ACE then short-circuits on
+    // `(ace_mask & mapped_desired) == 0` and nothing is audited at all --
+    // meaning a key with a success-audit SACL recorded ordinary opens and
+    // missed exactly the probing ones an auditor most wants to see, since
+    // MAXIMUM_ALLOWED is what a well-behaved enumerator uses.
+    //
+    // Matched against `granted` instead: the ACE says "audit when someone gets
+    // this right", and with MAXIMUM_ALLOWED they did get it. That also makes
+    // every such open audit as a success, which is right -- a MAXIMUM_ALLOWED
+    // request returns whatever is available and never fails, so a failure ACE
+    // has nothing to record.
+    let mapped_desired = if max_allowed_mode {
+        granted
+    } else {
+        mapped_desired
+    };
     // The SACL walk matches on the broadest reading -- every branch of
     // audit_sid_matches uses deny polarity, so an audit ACE fires for a group
     // that is enabled *or* deny-only. Presence alone was broader still, and
