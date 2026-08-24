@@ -622,9 +622,15 @@ static int stratafs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	    d_is_dir(roots.path[sbi->create_index].dentry))
 		selected = sbi->create_index;
 	else {
+		/*
+		 * Highest-precedence *present* stratum, per PCSA -- presence
+		 * alone, with no directory requirement. Requiring one skipped a
+		 * present-but-non-directory root and reported a lower stratum's
+		 * filesystem instead. Reachable only if a stratum root's type
+		 * changes after mount, since mount-time validation excludes it.
+		 */
 		for (i = 0; i < sbi->count; i++) {
-			if ((roots.present & BIT_ULL(i)) &&
-			    d_is_dir(roots.path[i].dentry)) {
+			if (roots.present & BIT_ULL(i)) {
 				selected = i;
 				break;
 			}

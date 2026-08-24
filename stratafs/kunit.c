@@ -216,6 +216,47 @@ static void stratafs_kunit_live_mount_cookie(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, stratafs_stage_owner_live(boot, mount));
 }
 
+/*
+ * The reserved namespace, §9.1.
+ *
+ * Three rules that meet at one boundary: everything under
+ * "system.stratafs.", the bare name "system.stratafs" without the dot, and
+ * the staging attribute, which gets the same treatment despite lying outside
+ * the namespace entirely.
+ *
+ * The bare name used to be unreserved and forwarded to the provider, because
+ * the prefix constant carries its trailing dot. The obvious fix -- compare one
+ * byte short -- over-reserves instead, capturing "system.stratafsfoo", so both
+ * directions are pinned here.
+ */
+static void stratafs_kunit_reserved_xattr_names(struct kunit *test)
+{
+	static const char *const reserved[] = {
+		"system.stratafs.origin",
+		"system.stratafs.",
+		"system.stratafs",
+		STRATAFS_XATTR_STAGING,
+	};
+	static const char *const forwarded[] = {
+		"system.stratafsfoo",
+		"system.stratafs_other",
+		"system.strataf",
+		"user.system.stratafs",
+		"security.capability",
+		"",
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(reserved); i++)
+		KUNIT_EXPECT_TRUE_MSG(test, stratafs_reserved_xattr(reserved[i]),
+				      "%s must be reserved", reserved[i]);
+
+	for (i = 0; i < ARRAY_SIZE(forwarded); i++)
+		KUNIT_EXPECT_FALSE_MSG(test,
+				       stratafs_reserved_xattr(forwarded[i]),
+				       "%s must reach the provider", forwarded[i]);
+}
+
 static struct kunit_case stratafs_kunit_cases[] = {
 	KUNIT_CASE(stratafs_kunit_parse_valid),
 	KUNIT_CASE(stratafs_kunit_parse_escapes),
@@ -224,6 +265,7 @@ static struct kunit_case stratafs_kunit_cases[] = {
 	KUNIT_CASE(stratafs_kunit_parse_rejects_malformed),
 	KUNIT_CASE(stratafs_kunit_routing),
 	KUNIT_CASE(stratafs_kunit_live_mount_cookie),
+	KUNIT_CASE(stratafs_kunit_reserved_xattr_names),
 	{}
 };
 

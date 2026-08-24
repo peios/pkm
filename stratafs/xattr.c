@@ -8,11 +8,23 @@
 
 #include "stratafs.h"
 
-static bool stratafs_reserved_xattr(const char *name)
+bool stratafs_reserved_xattr(const char *name)
 {
-	return !strncmp(name, STRATAFS_XATTR_PREFIX,
-			strlen(STRATAFS_XATTR_PREFIX)) ||
-	       !strcmp(name, STRATAFS_XATTR_STAGING);
+	const size_t prefix_len = strlen(STRATAFS_XATTR_PREFIX);
+
+	/* Everything beneath the namespace. */
+	if (!strncmp(name, STRATAFS_XATTR_PREFIX, prefix_len))
+		return true;
+	/*
+	 * And the namespace name itself. The prefix carries its trailing dot,
+	 * so matching on it alone left the bare "system.stratafs" unreserved
+	 * and forwarded it to the provider. Testing for the NUL is what keeps
+	 * this from also reserving "system.stratafsfoo".
+	 */
+	if (!strncmp(name, STRATAFS_XATTR_PREFIX, prefix_len - 1) &&
+	    name[prefix_len - 1] == '\0')
+		return true;
+	return !strcmp(name, STRATAFS_XATTR_STAGING);
 }
 
 static size_t stratafs_escaped_path_len(const char *path)

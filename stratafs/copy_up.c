@@ -1035,11 +1035,19 @@ static int stratafs_copy_metadata(
 {
 	struct inode *inode = d_inode(source->dentry);
 	struct iattr attr = {
-		.ia_valid = ATTR_MODE | ATTR_MTIME | ATTR_MTIME_SET,
-		.ia_mode = inode->i_mode,
+		.ia_valid = ATTR_MTIME | ATTR_MTIME_SET,
 		.ia_mtime = inode_get_mtime(inode),
 	};
 	int ret;
+
+	/*
+	 * A symlink's mode is fixed by the VFS and not the caller's to set, so
+	 * only the timestamp is carried across for one.
+	 */
+	if (!S_ISLNK(inode->i_mode)) {
+		attr.ia_valid |= ATTR_MODE;
+		attr.ia_mode = inode->i_mode;
+	}
 
 	ret = pkm_kacs_stratafs_copy_up_begin_populate(context);
 	if (ret)
@@ -1360,7 +1368,13 @@ static int stratafs_copy_up_named(struct dentry *dentry, const char *relative,
 	ret = stratafs_copy_xattrs(dentry->d_sb, context, &source, &stage);
 	if (ret)
 		goto out_stage;
-	if (directory) {
+	/*
+	 * Symlinks too: PCSA asks that modification timestamps be preserved,
+	 * and a copied-up symlink used to arrive with the current time because
+	 * only the directory case reached here. Regular files are handled on
+	 * their own path below.
+	 */
+	if (directory || d_is_symlink(source.dentry)) {
 		ret = stratafs_copy_metadata(context, &source, &stage);
 		if (ret)
 			goto out_stage;

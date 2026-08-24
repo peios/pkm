@@ -129,6 +129,14 @@ void stratafs_show_strata(struct seq_file *m, const struct stratafs_sb_info *sbi
  */
 bool stratafs_strata_unchanged(const struct stratafs_sb_info *supplied,
 			       const struct stratafs_sb_info *mounted);
+
+/*
+ * Whether an xattr name belongs to stratafs and must not reach a provider.
+ *
+ * Not static so a KUnit case can drive it directly: the rule has three parts
+ * and the boundary between them is exactly where it went wrong.
+ */
+bool stratafs_reserved_xattr(const char *name);
 #define STRATAFS_I(inode) ((struct stratafs_inode_info *)(inode)->i_private)
 
 extern const struct dentry_operations stratafs_dentry_operations;
