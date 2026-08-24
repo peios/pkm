@@ -472,7 +472,8 @@ int stratafs_check_directory_access(struct mnt_idmap *idmap,
 	relative = stratafs_inode_relative(inode);
 	if (IS_ERR(relative))
 		return PTR_ERR(relative);
-	ret = stratafs_resolve_all(inode->i_sb, relative, true, &paths);
+	/* Masked, per §3.3; see the note in stratafs_merged_empty. */
+	ret = stratafs_resolve_all(inode->i_sb, relative, false, &paths);
 	if (ret)
 		goto out_relative;
 	if (relative[0]) {

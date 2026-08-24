@@ -294,7 +294,7 @@ static int stratafs_dir_open(struct inode *inode, struct file *file)
 	}
 	ret = stratafs_dir_open_result(
 		"participant-resolution",
-		stratafs_resolve_all(inode->i_sb, dir->relative, true,
+		stratafs_resolve_all(inode->i_sb, dir->relative, false,
 				     &dir->participants));
 	if (ret)
 		goto fail;
@@ -400,7 +400,7 @@ static int stratafs_dir_fsync(struct file *file, loff_t start, loff_t end,
 	relative = stratafs_inode_relative(file_inode(file));
 	if (IS_ERR(relative))
 		return PTR_ERR(relative);
-	ret = stratafs_resolve_all(file_inode(file)->i_sb, relative, true,
+	ret = stratafs_resolve_all(file_inode(file)->i_sb, relative, false,
 				   &paths);
 	kfree(relative);
 	if (ret)
@@ -822,7 +822,21 @@ static int stratafs_merged_empty(struct dentry *dentry)
 	unsigned int i;
 	int ret;
 
-	ret = stratafs_resolve_all(dentry->d_sb, info->relative, true, &paths);
+/*
+	 * follow_final = false: a stratum holding the name as a symlink is
+	 * masked, exactly as any other non-directory is. PCSA §3.3 -- "a
+	 * stratum that holds the name as a non-directory does not participate
+	 * and is masked entirely".
+	 *
+	 * Following it made the participant set disagree with lookup, which
+	 * has always resolved with follow_final = false. A stratum owner who
+	 * replaced a directory with a symlink could therefore change which
+	 * real directory contributed entries to another stratum's merged
+	 * view, with the access check running against a target the mounter
+	 * never named.
+	 */
+	ret = stratafs_resolve_all(dentry->d_sb, info->relative, false,
+				   &paths);
 	if (ret)
 		return ret;
 	ret = stratafs_check_paths_access(&paths, sbi->count,
@@ -1074,7 +1088,8 @@ static int stratafs_directory_provider_only(struct dentry *dentry,
 	unsigned int i;
 	int ret;
 
-	ret = stratafs_resolve_all(dentry->d_sb, info->relative, true, &paths);
+	/* Masked, as in stratafs_merged_empty above. */
+	ret = stratafs_resolve_all(dentry->d_sb, info->relative, false, &paths);
 	if (ret)
 		return ret;
 	ret = stratafs_check_paths_access(&paths, sbi->count,
