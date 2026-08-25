@@ -791,6 +791,7 @@ struct stratafs_empty_context {
 	const char *relative;
 	unsigned int participant_index;
 	bool empty;
+	bool staging_seen;
 	int error;
 };
 
@@ -806,8 +807,10 @@ static bool stratafs_empty_actor(struct dir_context *ctx, const char *name,
 		return true;
 	if (stratafs_entry_is_staging(empty->sb, empty->participant_index,
 				      empty->relative, name, len,
-				      &empty->error))
+				      &empty->error)) {
+		empty->staging_seen = true;
 		return true;
+	}
 	if (empty->error)
 		return false;
 	empty->empty = false;
@@ -873,6 +876,33 @@ static int stratafs_merged_empty(struct dentry *dentry)
 			ret = -ENOTEMPTY;
 			goto out;
 		}
+		/*
+		 * The scan above skips staging entries, so a directory holding
+		 * nothing but orphaned ones reports empty and the caller's
+		 * rmdir proceeds -- and then fails ENOTEMPTY at the provider,
+		 * on entries the caller cannot see and has no way to remove.
+		 *
+		 * Recovery runs here, on the one directory known to be
+		 * blocked, rather than as a recursive walk of the create
+		 * stratum at mount: it costs nothing until someone actually
+		 * meets the case, and it reaches directories a mount-time scan
+		 * would have to visit every one of to find.
+		 *
+		 * This is inspection doing removal work, which is worth being
+		 * deliberate about. It only ever removes entries belonging to
+		 * no live mount -- stratafs_recover_one re-checks ownership
+		 * per entry, because two mounts may share a create stratum. A
+		 * staging entry owned by a live mount survives, and the
+		 * provider's own rmdir then fails ENOTEMPTY, which is the
+		 * right answer while another mount is copying up in there.
+		 *
+		 * Safe to call from here: merged_empty runs before rmdir takes
+		 * mnt_want_write or locks the provider's parent, and the
+		 * directory recovery locks is this one, not that parent.
+		 */
+		if (empty.staging_seen)
+			stratafs_recover_staging_parent(dentry->d_sb,
+							&paths.path[i]);
 	}
 out:
 	stratafs_put_paths(&paths, sbi->count);
