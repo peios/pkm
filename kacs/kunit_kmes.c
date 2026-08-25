@@ -363,6 +363,90 @@ static void pkm_kunit_kmes_attach_einval_on_out_of_range_cpu(
 }
 
 
+static void pkm_kunit_kmes_slot_count_query_reports_the_array_size(
+	struct kunit *test)
+{
+	const void *token;
+	int fd = 0x5a;
+	u64 slots = 0;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	/*
+	 * The sentinel index asks for the slot count instead of a ring. It
+	 * succeeds, opens no descriptor -- so the caller's fd out-param is
+	 * left as the sentinel attach_core writes, not a live fd it would
+	 * have to close -- and reports the array size.
+	 *
+	 * The quantity matters: a consumer enumerates against the slot array
+	 * size, not the number of rings allocated. The two agree here because
+	 * KUnit runs on a dense possible-CPU mask, so asserting nr_cpu_ids
+	 * pins the reported quantity to the one that bounds a valid cpu_id.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(
+				token, KMES_ATTACH_QUERY_SLOTS, &fd, &slots),
+			0L);
+	KUNIT_EXPECT_LT(test, fd, 0);
+	KUNIT_EXPECT_EQ(test, slots, (u64)nr_cpu_ids);
+
+	/*
+	 * The last index the count admits is attachable, so a consumer that
+	 * trusts the count is not walking past the end of the array.
+	 */
+	if (slots > 0) {
+		int ring_fd = -1;
+		u64 capacity = 0;
+
+		KUNIT_EXPECT_EQ(test,
+				pkm_kmes_kunit_attach_for_token(
+					token, (u32)(slots - 1), &ring_fd,
+					&capacity),
+				0L);
+		if (ring_fd >= 0)
+			KUNIT_EXPECT_EQ(test,
+					close_fd((unsigned int)ring_fd), 0);
+	}
+
+	kacs_rust_token_drop(token);
+}
+
+
+static void pkm_kunit_kmes_slot_count_query_denies_without_security(
+	struct kunit *test)
+{
+	const void *token;
+	struct pkm_kacs_priv_adjust_entry entry = {
+		.luid = PKM_KUNIT_PRIV_LUID_SECURITY,
+		.attributes = 0,
+	};
+	u64 previous_enabled = 0;
+	int fd = 0x5a;
+	u64 slots = 0xfeedfaceULL;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_adjust_privs(token, &entry, 1,
+						     &previous_enabled),
+			0);
+
+	/*
+	 * Topology is not free information: the query rides the same
+	 * SeSecurityPrivilege gate as the attach it precedes, and leaves the
+	 * caller's out-params untouched when it refuses.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(
+				token, KMES_ATTACH_QUERY_SLOTS, &fd, &slots),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test, fd, 0x5a);
+	KUNIT_EXPECT_EQ(test, slots, 0xfeedfaceULL);
+	kacs_rust_token_drop(token);
+}
+
+
 static void pkm_kunit_kmes_attach_denies_without_security(
 	struct kunit *test)
 {
@@ -1558,6 +1642,8 @@ static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_attach_repeated_same_cpu_shares_consumer_metadata),
 	KUNIT_CASE(pkm_kunit_kmes_mmap_clears_write_upgrade),
 	KUNIT_CASE(pkm_kunit_kmes_attach_einval_on_out_of_range_cpu),
+	KUNIT_CASE(pkm_kunit_kmes_slot_count_query_reports_the_array_size),
+	KUNIT_CASE(pkm_kunit_kmes_slot_count_query_denies_without_security),
 	KUNIT_CASE(pkm_kunit_kmes_attach_denies_without_security),
 	KUNIT_CASE(pkm_kunit_kmes_attach_checks_privilege_before_usercopy),
 	KUNIT_CASE(pkm_kunit_kmes_attach_mapping_view_tracks_emission),

@@ -68,6 +68,9 @@
 #define PKM_KMES_PRIVILEGE_SE_AUDIT (1ULL << 21)
 #define PKM_KMES_SELF_EVENT_PAYLOAD_MAX 768U
 
+/* attach_core's out-param for a call that opens no descriptor. */
+#define PKM_KMES_NO_FD (-1)
+
 static const char pkm_kmes_self_config_invalid_event_type[] =
 	"KMES_SELF_CONFIG_INVALID";
 static const char pkm_kmes_buffer_swap_failed_event_type[] =
@@ -2229,6 +2232,24 @@ static int pkm_kmes_consumer_fd_create(struct pkm_kmes_cpu_state *cpu)
 	return fd;
 }
 
+/*
+ * The ring-slot count, for consumer enumeration.
+ *
+ * Reported as the array size rather than the ring count, because that is what
+ * bounds a valid cpu_id: a consumer walks 0 .. slots-1 and skips the slots
+ * that answer -EINVAL. Reporting the ring count instead would hand back a
+ * bound that hides every ring above the first hole in the possible-CPU mask,
+ * which is the bug this exists to close.
+ */
+static long pkm_kmes_slot_count_core(u64 *slots_out)
+{
+	if (!slots_out)
+		return -EINVAL;
+
+	*slots_out = READ_ONCE(pkm_kmes_cpu_slots);
+	return 0;
+}
+
 static long pkm_kmes_attach_core(u32 cpu_id, int *fd_out, u64 *capacity_out)
 {
 	struct pkm_kmes_cpu_state *ring;
@@ -2238,6 +2259,18 @@ static long pkm_kmes_attach_core(u32 cpu_id, int *fd_out, u64 *capacity_out)
 		return -EINVAL;
 	if (!pkm_kmes_ready || !pkm_kmes_cpus || pkm_kmes_cpu_count == 0)
 		return -ENOMEM;
+
+	/*
+	 * The slot-count query rides this entry point rather than a syscall of
+	 * its own so that it takes the same privilege gate and the same
+	 * initialisation checks as the attach it precedes -- and so that the
+	 * routing is one decision in one place, reachable from every caller.
+	 */
+	if (cpu_id == KMES_ATTACH_QUERY_SLOTS) {
+		*fd_out = PKM_KMES_NO_FD;
+		return pkm_kmes_slot_count_core(capacity_out);
+	}
+
 	/*
 	 * Bounded by the array size, not the ring count.
 	 *
@@ -2293,11 +2326,13 @@ long pkm_kmes_attach_user_for_token(const void *token, u32 cpu_id,
 		return ret;
 
 	if (copy_to_user(capacity, &cpu_capacity, sizeof(cpu_capacity))) {
-		close_fd((unsigned int)fd);
+		if (fd >= 0)
+			close_fd((unsigned int)fd);
 		return -EFAULT;
 	}
 
-	return fd;
+	/* The slot-count query opens no descriptor and returns 0. */
+	return fd >= 0 ? fd : 0;
 }
 
 SYSCALL_DEFINE2(kmes_attach, unsigned int, cpu_id, u64 __user *, capacity)

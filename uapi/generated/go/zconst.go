@@ -605,6 +605,7 @@ const (
 	KEY_READ                                            = 131097
 	KEY_SET_VALUE                                       = 2
 	KEY_WRITE                                           = 131078
+	KMES_ATTACH_QUERY_SLOTS                             = 4294967295
 	KMES_ATTACH_REQUIRED_PRIVILEGE                      = 256
 	KMES_BATCH_MAX_ENTRIES                              = 256
 	KMES_CONFIG_BUFFER_CAPACITY_DEFAULT                 = 4194304

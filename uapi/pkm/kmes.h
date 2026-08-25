@@ -9,10 +9,10 @@
  *
  * Events are emitted via SYS_KMES_EMIT / SYS_KMES_EMIT_BATCH and consumed
  * through per-CPU ring buffers. SYS_KMES_ATTACH(cpu_id, capacity) returns one
- * mmap-able fd for a single CPU's ring; a consumer enumerates CPUs by calling
- * it with cpu_id 0, 1, ... until it returns -EINVAL. This header defines the
- * emission ABI, the ring-buffer metadata layout, and the on-wire event header
- * a consumer parses.
+ * mmap-able fd for a single CPU's ring; a consumer learns how many ring slots
+ * exist with KMES_ATTACH_QUERY_SLOTS below and attaches to each in turn. This
+ * header defines the emission ABI, the ring-buffer metadata layout, and the
+ * on-wire event header a consumer parses.
  */
 
 /* Event origin class — kmes_event_header.origin_class. */
@@ -38,6 +38,25 @@ struct kmes_emit_entry {
 	__u32 payload_len;
 	__u8  _pad1[4];
 };
+
+/*
+ * Ring-slot discovery.
+ *
+ * Ring slots are indexed by logical CPU id and the array is sized by the
+ * kernel's nr_cpu_ids, so a slot inside the array holds no ring when that CPU
+ * is not possible. Counting up from 0 until SYS_KMES_ATTACH returns -EINVAL
+ * therefore stops at the first hole and misses every ring above it, leaving
+ * those CPUs' events permanently unreachable.
+ *
+ * Call SYS_KMES_ATTACH with cpu_id KMES_ATTACH_QUERY_SLOTS to learn the slot
+ * count instead. It writes the count through the capacity argument, returns 0,
+ * and opens no descriptor. Enumerate 0 .. count-1 and treat -EINVAL as "this
+ * slot holds no ring", not as the end of the array.
+ *
+ * The sentinel is outside the index space for good: nr_cpu_ids is bounded by
+ * CONFIG_NR_CPUS, which cannot reach 2^32-1.
+ */
+#define KMES_ATTACH_QUERY_SLOTS		0xFFFFFFFFU
 
 /* Largest entry count a single SYS_KMES_EMIT_BATCH call accepts. */
 #define KMES_BATCH_MAX_ENTRIES	256U
