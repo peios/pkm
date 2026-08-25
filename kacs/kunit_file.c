@@ -10299,6 +10299,156 @@ static void pkm_kunit_open_current_thread_token_observes_effective_token_and_rev
 	kacs_rust_token_drop(client_token);
 }
 
+/*
+ * Read a msgpack string, comparing it against `expect`. Advances *pos past the
+ * value; returns false on any mismatch. Only the 5-bit fixstr and str8 forms
+ * appear in this payload.
+ */
+static bool pkm_kunit_msgpack_expect_str(const u8 *buf, size_t len, size_t *pos,
+					 const char *expect)
+{
+	size_t expect_len = strlen(expect);
+	size_t value_len;
+
+	if (*pos >= len)
+		return false;
+	if ((buf[*pos] & 0xe0) == 0xa0) {
+		value_len = buf[*pos] & 0x1f;
+		*pos += 1;
+	} else if (buf[*pos] == 0xd9) {
+		if (*pos + 2 > len)
+			return false;
+		value_len = buf[*pos + 1];
+		*pos += 2;
+	} else {
+		return false;
+	}
+	if (value_len != expect_len || *pos + value_len > len)
+		return false;
+	if (memcmp(buf + *pos, expect, value_len))
+		return false;
+	*pos += value_len;
+	return true;
+}
+
+static void pkm_kunit_stratafs_refusal_payload_shapes(struct kunit *test)
+{
+	u8 buf[256];
+	size_t size;
+	size_t len;
+	size_t pos;
+
+	/*
+	 * A refusal with a known provider names the stratum as a string.
+	 */
+	size = pkm_kacs_kunit_stratafs_refusal_payload(
+		NULL, 0, "/a/b", "unlink", 2, "/mnt/lower", -EROFS, false);
+	KUNIT_ASSERT_GT(test, size, 0UL);
+	KUNIT_ASSERT_LE(test, size, sizeof(buf));
+	len = pkm_kacs_kunit_stratafs_refusal_payload(
+		buf, sizeof(buf), "/a/b", "unlink", 2, "/mnt/lower", -EROFS,
+		false);
+	KUNIT_ASSERT_EQ(test, len, size);
+
+	pos = 0;
+	KUNIT_EXPECT_EQ(test, buf[pos], 0x86);
+	pos++;
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "path"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "/a/b"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "operation"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "unlink"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "provider_index"));
+	KUNIT_ASSERT_LT(test, pos + 5, len);
+	KUNIT_EXPECT_EQ(test, buf[pos], 0xd2);
+	KUNIT_EXPECT_EQ(test, buf[pos + 4], 2);
+	pos += 5;
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "provider_stratum"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "/mnt/lower"));
+
+	/*
+	 * A refusal raised before any provider is known -- create, tmpfile,
+	 * the heads of link and rename -- reports nil, not an empty string, so
+	 * a reader can tell "no provider was involved" from "the provider's
+	 * path is empty". provider_index stays -1 alongside it.
+	 */
+	size = pkm_kacs_kunit_stratafs_refusal_payload(
+		NULL, 0, "/a/b", "create", -1, "", -EROFS, false);
+	KUNIT_ASSERT_GT(test, size, 0UL);
+	KUNIT_ASSERT_LE(test, size, sizeof(buf));
+	len = pkm_kacs_kunit_stratafs_refusal_payload(
+		buf, sizeof(buf), "/a/b", "create", -1, "", -EROFS, false);
+	KUNIT_ASSERT_EQ(test, len, size);
+
+	pos = 1;
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "path"));
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "/a/b"));
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "operation"));
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "create"));
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "provider_index"));
+	KUNIT_ASSERT_LT(test, pos + 5, len);
+	KUNIT_EXPECT_EQ(test, buf[pos], 0xd2);
+	KUNIT_EXPECT_EQ(test, buf[pos + 1], 0xff);
+	KUNIT_EXPECT_EQ(test, buf[pos + 2], 0xff);
+	KUNIT_EXPECT_EQ(test, buf[pos + 3], 0xff);
+	KUNIT_EXPECT_EQ(test, buf[pos + 4], 0xff);
+	pos += 5;
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "provider_stratum"));
+	KUNIT_ASSERT_LT(test, pos, len);
+	KUNIT_EXPECT_EQ(test, buf[pos], 0xc0);
+
+	/*
+	 * Sizing and writing are two passes over the same field list. If they
+	 * disagree the emitter overruns its kmalloc, so a buffer one byte
+	 * short must be refused rather than partially written.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_stratafs_refusal_payload(
+				buf, size - 1, "/a/b", "create", -1, "",
+				-EROFS, false),
+			0UL);
+
+	/* A path with no leading slash gains one; the size must allow for it. */
+	size = pkm_kacs_kunit_stratafs_refusal_payload(
+		NULL, 0, "a/b", "create", -1, "", -EROFS, false);
+	len = pkm_kacs_kunit_stratafs_refusal_payload(
+		buf, sizeof(buf), "a/b", "create", -1, "", -EROFS, false);
+	KUNIT_EXPECT_EQ(test, len, size);
+	pos = 1;
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "path"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "/a/b"));
+
+	/* A success result is not a refusal and encodes nothing. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_stratafs_refusal_payload(
+				NULL, 0, "/a/b", "create", -1, "", 0, false),
+			0UL);
+}
+
+
 static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_open_self_token_effective_query),
 	KUNIT_CASE(pkm_kunit_open_self_token_real_generic_read),
@@ -10498,6 +10648,7 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_mount_policy_classifies_unmanaged_special_fs),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_fixes_stratafs_to_deny_missing),
 	KUNIT_CASE(pkm_kunit_stratafs_metadata_decision_rebind_is_exact),
+	KUNIT_CASE(pkm_kunit_stratafs_refusal_payload_shapes),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_defaults_to_deny_missing),
 	KUNIT_CASE(pkm_kunit_mount_policy_set_persistent_template_success),

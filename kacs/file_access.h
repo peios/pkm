@@ -61,4 +61,16 @@ int pkm_kacs_check_file_fcntl_snapshot(struct file *file, unsigned int cmd,
 int pkm_kacs_check_file_truncate_snapshot(struct file *file);
 int pkm_kacs_check_file_fallocate_snapshot(struct file *file, int mode);
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+/*
+ * The STRATAFS_MUTATION_REFUSED payload encoder, exposed so a test can read
+ * the bytes. With out == NULL it returns the size; with a buffer it encodes
+ * and returns the bytes written. 0 means unencodable.
+ */
+size_t pkm_kacs_kunit_stratafs_refusal_payload(
+	u8 *out, size_t capacity, const char *relative_path,
+	const char *operation, s32 provider_index,
+	const char *provider_stratum, int result, bool deferred);
+#endif
+
 #endif /* _SECURITY_PKM_KACS_FILE_ACCESS_H */

@@ -164,11 +164,20 @@ void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 	kfree(payload);
 }
 
-void pkm_kacs_stratafs_audit_mutation_refused(
-	const char *relative_path, const char *operation, s32 provider_index,
+/*
+ * Encode a STRATAFS_MUTATION_REFUSED payload, or measure it.
+ *
+ * With out == NULL this returns the byte count the payload needs; with a
+ * buffer it encodes and returns the bytes written. 0 means the inputs cannot
+ * be encoded. Sizing and writing share one function deliberately: they are two
+ * passes over the same field list, and a payload whose size arithmetic and
+ * writer disagree overruns a kmalloc.
+ */
+static size_t pkm_kacs_stratafs_refusal_payload(
+	u8 *out, size_t capacity, const char *relative_path,
+	const char *operation, s32 provider_index,
 	const char *provider_stratum, int result, bool deferred)
 {
-	static const char event_type[] = "STRATAFS_MUTATION_REFUSED";
 	static const char path_key[] = "path";
 	static const char operation_key[] = "operation";
 	static const char provider_index_key[] = "provider_index";
@@ -178,22 +187,33 @@ void pkm_kacs_stratafs_audit_mutation_refused(
 	const char *relative = relative_path ? relative_path : "";
 	const char *provider = provider_stratum ? provider_stratum : "";
 	size_t relative_len = strnlen(relative, PATH_MAX);
+	/*
+	 * A refusal raised before any provider is known -- create, tmpfile,
+	 * and the heads of link and rename -- has no stratum to name. That is
+	 * reported as msgpack nil rather than as an empty string, so a reader
+	 * can tell "no provider was involved" from "the provider's path is
+	 * empty". provider_index is already -1 in the same records; the two
+	 * now agree.
+	 */
+	bool provider_known = provider_index >= 0;
 	size_t operation_len;
 	size_t provider_len;
 	bool add_slash;
 	size_t path_len;
 	size_t size;
-	u8 *payload;
-	u8 *out;
+	u8 *o;
 
 	if (!operation || result >= 0 || relative_len == PATH_MAX)
-		return;
+		return 0;
 	operation_len = strnlen(operation, 64);
-	provider_len = strnlen(provider, PATH_MAX);
-	if (!operation_len || operation_len == 64 || provider_len == PATH_MAX)
-		return;
+	if (!operation_len || operation_len == 64)
+		return 0;
+	provider_len = provider_known ? strnlen(provider, PATH_MAX) : 0;
+	if (provider_len == PATH_MAX)
+		return 0;
 	add_slash = !relative_len || relative[0] != '/';
 	path_len = relative_len + add_slash;
+
 	size = 1 +
 		pkm_kacs_msgpack_string_size(sizeof(path_key) - 1) +
 		pkm_kacs_msgpack_string_size(path_len) +
@@ -201,40 +221,79 @@ void pkm_kacs_stratafs_audit_mutation_refused(
 		pkm_kacs_msgpack_string_size(operation_len) +
 		pkm_kacs_msgpack_string_size(sizeof(provider_index_key) - 1) + 5 +
 		pkm_kacs_msgpack_string_size(sizeof(provider_key) - 1) +
-		pkm_kacs_msgpack_string_size(provider_len) +
+		(provider_known ? pkm_kacs_msgpack_string_size(provider_len) : 1) +
 		pkm_kacs_msgpack_string_size(sizeof(result_key) - 1) + 5 +
 		pkm_kacs_msgpack_string_size(sizeof(deferred_key) - 1) + 1;
+	if (!out)
+		return size;
+	if (capacity < size)
+		return 0;
+
+	o = out;
+	*o++ = 0x86; /* map(6) */
+	o = pkm_kacs_msgpack_string(o, path_key, sizeof(path_key) - 1);
+	o = pkm_kacs_msgpack_string_header(o, path_len);
+	if (add_slash)
+		*o++ = '/';
+	memcpy(o, relative, relative_len);
+	o += relative_len;
+	o = pkm_kacs_msgpack_string(o, operation_key,
+				    sizeof(operation_key) - 1);
+	o = pkm_kacs_msgpack_string(o, operation, operation_len);
+	o = pkm_kacs_msgpack_string(o, provider_index_key,
+				    sizeof(provider_index_key) - 1);
+	o = pkm_kacs_msgpack_s32(o, provider_index);
+	o = pkm_kacs_msgpack_string(o, provider_key, sizeof(provider_key) - 1);
+	if (provider_known)
+		o = pkm_kacs_msgpack_string(o, provider, provider_len);
+	else
+		*o++ = 0xc0; /* nil */
+	o = pkm_kacs_msgpack_string(o, result_key, sizeof(result_key) - 1);
+	o = pkm_kacs_msgpack_s32(o, result);
+	o = pkm_kacs_msgpack_string(o, deferred_key, sizeof(deferred_key) - 1);
+	*o++ = deferred ? 0xc3 : 0xc2;
+
+	return (size_t)(o - out);
+}
+
+void pkm_kacs_stratafs_audit_mutation_refused(
+	const char *relative_path, const char *operation, s32 provider_index,
+	const char *provider_stratum, int result, bool deferred)
+{
+	static const char event_type[] = "STRATAFS_MUTATION_REFUSED";
+	size_t size;
+	size_t len;
+	u8 *payload;
+
+	size = pkm_kacs_stratafs_refusal_payload(
+		NULL, 0, relative_path, operation, provider_index,
+		provider_stratum, result, deferred);
+	if (!size)
+		return;
 	payload = kmalloc(size, GFP_KERNEL);
 	if (!payload)
 		return;
 
-	out = payload;
-	*out++ = 0x86; /* map(6) */
-	out = pkm_kacs_msgpack_string(out, path_key, sizeof(path_key) - 1);
-	out = pkm_kacs_msgpack_string_header(out, path_len);
-	if (add_slash)
-		*out++ = '/';
-	memcpy(out, relative, relative_len);
-	out += relative_len;
-	out = pkm_kacs_msgpack_string(out, operation_key,
-				      sizeof(operation_key) - 1);
-	out = pkm_kacs_msgpack_string(out, operation, operation_len);
-	out = pkm_kacs_msgpack_string(out, provider_index_key,
-				      sizeof(provider_index_key) - 1);
-	out = pkm_kacs_msgpack_s32(out, provider_index);
-	out = pkm_kacs_msgpack_string(out, provider_key,
-				      sizeof(provider_key) - 1);
-	out = pkm_kacs_msgpack_string(out, provider, provider_len);
-	out = pkm_kacs_msgpack_string(out, result_key, sizeof(result_key) - 1);
-	out = pkm_kacs_msgpack_s32(out, result);
-	out = pkm_kacs_msgpack_string(out, deferred_key,
-				      sizeof(deferred_key) - 1);
-	*out++ = deferred ? 0xc3 : 0xc2;
-
-	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-			     sizeof(event_type) - 1, payload, out - payload);
+	len = pkm_kacs_stratafs_refusal_payload(
+		payload, size, relative_path, operation, provider_index,
+		provider_stratum, result, deferred);
+	if (len)
+		pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
+				     sizeof(event_type) - 1, payload, len);
 	kfree(payload);
 }
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+size_t pkm_kacs_kunit_stratafs_refusal_payload(
+	u8 *out, size_t capacity, const char *relative_path,
+	const char *operation, s32 provider_index,
+	const char *provider_stratum, int result, bool deferred)
+{
+	return pkm_kacs_stratafs_refusal_payload(
+		out, capacity, relative_path, operation, provider_index,
+		provider_stratum, result, deferred);
+}
+#endif
 
 ssize_t pkm_kacs_stratafs_probe_staging_marker(const struct path *path,
 					       void *buffer, size_t size)
