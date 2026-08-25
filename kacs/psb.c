@@ -459,33 +459,39 @@ static int pkm_kacs_check_wxp_mprotect_core(u32 mitigation_bits,
 	return 0;
 }
 
-void pkm_kacs_exec_pip_from_file(const struct file *file,
-					u32 *pip_type_out,
-					u32 *pip_trust_out)
+/*
+ * Returns 0 whether or not the binary carried a usable signature; negative
+ * only when verification could not be performed. A probe failure is 0: a file
+ * with no signature section is unsigned, not unverifiable.
+ */
+int pkm_kacs_exec_pip_from_file(const struct file *file,
+				u32 *pip_type_out,
+				u32 *pip_trust_out)
 {
 	struct pkm_kacs_signing_material material;
 	int ret;
 
 	if (!pip_type_out || !pip_trust_out)
-		return;
+		return -EINVAL;
 
 	*pip_type_out = 0;
 	*pip_trust_out = 0;
 	if (!file)
-		return;
+		return 0;
 
 	ret = pkm_kacs_signing_probe_file((struct file *)file, &material);
 	if (ret)
-		return;
+		return 0;
 
-	pkm_kacs_exec_pip_from_material(&material, pip_type_out,
-					pip_trust_out);
-	if ((*pip_type_out != 0 || *pip_trust_out != 0) &&
+	ret = pkm_kacs_exec_pip_from_material(&material, pip_type_out,
+					      pip_trust_out);
+	if (!ret && (*pip_type_out != 0 || *pip_trust_out != 0) &&
 	    pkm_kacs_mark_signed_exec_pinned_file(file)) {
 		*pip_type_out = 0;
 		*pip_trust_out = 0;
 	}
 	pkm_kacs_signing_material_release(&material);
+	return ret;
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT

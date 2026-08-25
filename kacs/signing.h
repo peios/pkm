@@ -57,10 +57,11 @@ struct pkm_kacs_signing_trust_result {
 
 int pkm_kacs_signing_probe_file(struct file *file,
 				struct pkm_kacs_signing_material *out);
+int pkm_kacs_signing_crypto_probe(void);
 int pkm_kacs_signing_verify_builtin(
 	const struct pkm_kacs_signing_material *material,
 	struct pkm_kacs_signing_trust_result *result);
-void pkm_kacs_exec_pip_from_material(
+int pkm_kacs_exec_pip_from_material(
 	const struct pkm_kacs_signing_material *material, u32 *pip_type_out,
 	u32 *pip_trust_out);
 

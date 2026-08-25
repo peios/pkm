@@ -128,6 +128,7 @@ const (
 	KACS_EXEC_NPM_DERIVE_FAIL                           = 7
 	KACS_EXEC_NPM_NO_FILE                               = 6
 	KACS_EXEC_PIP_COMMITTED                             = 14
+	KACS_EXEC_SIGNATURE_UNVERIFIABLE                    = 16
 	KACS_EXEC_TOKEN_CLONE                               = 5
 	KACS_EXEC_TOKEN_CLONE_FAIL                          = 9
 	KACS_EXEC_TOKEN_INSTALL_FAIL                        = 8

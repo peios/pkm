@@ -208,9 +208,36 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 	}
 
 	if (stage_exec_pip) {
+		int pip_ret;
+
 		pkm_kacs_clear_pending_exec_pip();
-		pkm_kacs_exec_pip_from_file(file, &exec_pip_type,
-					    &exec_pip_trust);
+		pip_ret = pkm_kacs_exec_pip_from_file(file, &exec_pip_type,
+						      &exec_pip_trust);
+		/*
+		 * Verification could not be performed -- the ML-DSA transform
+		 * was unavailable, or a key in the table was rejected by it.
+		 * This is NOT the unsigned path.
+		 *
+		 * An unsigned binary runs with no integrity label, which is a
+		 * legitimate outcome. Treating an unverifiable one the same way
+		 * silently strips PIP from every process the system executes,
+		 * and the result is indistinguishable from a correctly working
+		 * system that happens to have no signed binaries -- so nothing
+		 * would surface it until signing was deployed, at which point
+		 * it would look like the signing rollout broke something.
+		 *
+		 * Fail the exec instead. pkm_init() probes the transform at
+		 * boot and refuses to bring the LSM up without it, so reaching
+		 * here means a transient failure -- allocation pressure -- and
+		 * refusing that exec is recoverable in a way losing the
+		 * integrity boundary is not.
+		 */
+		if (pip_ret < 0) {
+			trace_kacs_exec(false, false, 0, 0,
+					KACS_EXEC_SIGNATURE_UNVERIFIABLE,
+					pip_ret);
+			return -EACCES;
+		}
 	}
 
 	/*

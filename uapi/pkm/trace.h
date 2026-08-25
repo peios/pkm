@@ -95,6 +95,7 @@
 #define KACS_EXEC_IMPERSONATION_REVERT_FAIL	13U /* bprm impersonation revert failed */
 #define KACS_EXEC_PIP_COMMITTED			14U /* pending exec PIP committed at commit */
 #define KACS_EXEC_UMH_NOT_TCB			15U /* usermodehelper exec below PeiosTcb trust */
+#define KACS_EXEC_SIGNATURE_UNVERIFIABLE	16U /* exec refused: signature could not be verified */
 
 /*
  * kacs_signing reason — code-signature verification outcomes and the distinct

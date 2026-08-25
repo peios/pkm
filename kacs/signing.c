@@ -13,8 +13,10 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/init.h>
 #include <linux/xattr.h>
 
+#include "../kmes/kmes.h"
 #include "builtin_signing_keys.h"
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 #include "kunit_mldsa_vectors.h"
@@ -806,7 +808,16 @@ static const struct pkm_kacs_signing_key_entry pkm_kacs_builtin_signing_keys[]
 };
 #endif
 
-typedef bool (*pkm_kacs_signing_verify_fn)(
+/*
+ * Verify one signature against one key.
+ *
+ * Tri-state on purpose: 1 verified, 0 did not verify, negative errno could
+ * not be verified. Folding the third into the second is what made a missing
+ * crypto transform indistinguishable from a bad signature -- and since an
+ * unverified binary simply runs with no integrity label, that turned a
+ * crypto-availability problem into a silent, system-wide loss of PIP.
+ */
+typedef int (*pkm_kacs_signing_verify_fn)(
 	const u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN],
 	const u8 hash[SHA256_DIGEST_SIZE],
 	const u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN], void *ctx);
@@ -919,10 +930,24 @@ static int __maybe_unused pkm_kacs_signing_verify_with_keys(
 	for (i = 0; i < usable_count; i++) {
 		u32 pip_type;
 		u32 pip_trust;
+		int verified;
 
-		if (!verify(keys[i].public_key, material->hash,
-			    pkm_kacs_signing_material_sig(material),
-			    verify_ctx))
+		verified = verify(keys[i].public_key, material->hash,
+				  pkm_kacs_signing_material_sig(material),
+				  verify_ctx);
+		/*
+		 * Could not verify. Not "did not verify": stopping here rather
+		 * than trying the remaining keys is deliberate, because the
+		 * failure is in the machinery and every remaining key would
+		 * meet the same one.
+		 */
+		if (verified < 0) {
+			trace_kacs_signing_verify(material->source, 0, 0, 0,
+						  KACS_SIG_CRYPTO_UNAVAILABLE,
+						  verified);
+			return verified;
+		}
+		if (!verified)
 			continue;
 
 		pip_type = le32_to_cpu(keys[i].pip_type);
@@ -940,7 +965,7 @@ static int __maybe_unused pkm_kacs_signing_verify_with_keys(
 	return 0;
 }
 
-static bool __maybe_unused pkm_kacs_signing_crypto_verify(
+static int __maybe_unused pkm_kacs_signing_crypto_verify(
 	const u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN],
 	const u8 hash[SHA256_DIGEST_SIZE],
 	const u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN], void *ctx)
@@ -955,22 +980,110 @@ static bool __maybe_unused pkm_kacs_signing_crypto_verify(
 		trace_kacs_signing_crypto(0, 0, 0, 0,
 					  KACS_SIG_CRYPTO_UNAVAILABLE,
 					  PTR_ERR(tfm));
-		return false;
+		return PTR_ERR(tfm);
 	}
 
+	/*
+	 * A key the transform will not accept is a fault in the key table, not
+	 * a non-matching signature, so it is reported as such. The table is
+	 * validated wholesale above, which makes this narrow -- but "this key
+	 * is malformed" and "this key did not sign it" are different facts and
+	 * only one of them means try the next key.
+	 */
 	ret = crypto_sig_set_pubkey(tfm, public_key,
 				    PKM_KACS_SIGNING_PUBLIC_KEY_LEN);
-	if (!ret)
-		ret = crypto_sig_verify(tfm, signature,
-					PKM_KACS_SIGNING_SIGNATURE_LEN, hash,
-					SHA256_DIGEST_SIZE);
+	if (ret) {
+		crypto_free_sig(tfm);
+		trace_kacs_signing_crypto(0, 0, 0, 0,
+					  KACS_SIG_CRYPTO_UNAVAILABLE, ret);
+		return ret;
+	}
 
+	ret = crypto_sig_verify(tfm, signature,
+				PKM_KACS_SIGNING_SIGNATURE_LEN, hash,
+				SHA256_DIGEST_SIZE);
 	crypto_free_sig(tfm);
-	if (ret)
+	if (ret) {
 		trace_kacs_signing_crypto(0, 0, 0, 0, KACS_SIG_CRYPTO_MISMATCH,
 					  ret);
-	return ret == 0;
+		return 0;
+	}
+	return 1;
 }
+
+/*
+ * Probe the ML-DSA transform, once, after the crypto subsystem is up.
+ *
+ * A real crypto_alloc_sig call rather than an IS_ENABLED test:
+ * CONFIG_CRYPTO_MLDSA is an unconditional `select` under SECURITY_PKM, which
+ * is a bool, so a config check would be dead code. There is no Kconfig path to
+ * a PKM kernel without it. What can still go wrong is ordering -- the
+ * algorithm not registered when KACS needs it -- and only calling the
+ * allocator sees that.
+ */
+int pkm_kacs_signing_crypto_probe(void)
+{
+	struct crypto_sig *tfm;
+
+	tfm = crypto_alloc_sig("mldsa65", 0, 0);
+	if (IS_ERR(tfm)) {
+		trace_kacs_signing_crypto(0, 0, 0, 0,
+					  KACS_SIG_CRYPTO_UNAVAILABLE,
+					  PTR_ERR(tfm));
+		return PTR_ERR(tfm);
+	}
+	crypto_free_sig(tfm);
+	return 0;
+}
+
+/*
+ * Announce an unusable signature transform at boot.
+ *
+ * This runs as a late_initcall, not from pkm_init(), for two reasons found by
+ * trying the other way:
+ *
+ *   - At LSM init the algorithm is not yet registered. crypto_alloc_sig
+ *     returns -ENOENT on every boot, so a probe there fires always.
+ *   - A non-zero return from an LSM's init is only WARN'd
+ *     (security/lsm_init.c, lsm_init_single). The hooks are simply never
+ *     added, so "refuse to initialise" means booting with no KACS at all --
+ *     strictly worse than the failure it was meant to prevent.
+ *
+ * So this cannot refuse; it reports. The enforcement is at exec, where a
+ * signature that cannot be verified fails the exec rather than passing as
+ * unsigned. What this adds is that the condition is visible at boot instead of
+ * being inferred from every process running without an integrity label.
+ */
+static int __init pkm_kacs_signing_crypto_announce(void)
+{
+	static const char event_type[] = "KACS_SIGNING_CRYPTO_UNAVAILABLE";
+	/* msgpack map(1): "errno" => int32. */
+	u8 payload[1 + 1 + 5 + 5];
+	int ret;
+	u8 *out;
+
+	ret = pkm_kacs_signing_crypto_probe();
+	if (!ret)
+		return 0;
+
+	pr_err("pkm: ML-DSA signature transform unavailable (%d); every signed exec will be refused\n",
+	       ret);
+
+	out = payload;
+	*out++ = 0x81;
+	*out++ = 0xa5;
+	memcpy(out, "errno", 5);
+	out += 5;
+	*out++ = 0xd2;
+	*out++ = (u32)ret >> 24;
+	*out++ = (u32)ret >> 16;
+	*out++ = (u32)ret >> 8;
+	*out++ = (u32)ret;
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
+			     sizeof(event_type) - 1, payload, out - payload);
+	return 0;
+}
+late_initcall(pkm_kacs_signing_crypto_announce);
 
 int pkm_kacs_signing_verify_builtin(
 	const struct pkm_kacs_signing_material *material,
@@ -982,7 +1095,14 @@ int pkm_kacs_signing_verify_builtin(
 		pkm_kacs_signing_crypto_verify, NULL, result);
 }
 
-void pkm_kacs_exec_pip_from_material(
+/*
+ * Returns 0 whether or not the binary verified -- an unsigned binary is an
+ * ordinary outcome and simply gets no integrity label. A negative return means
+ * verification could not be performed at all, which the caller must not treat
+ * as "unsigned": that is precisely the conflation that let a missing crypto
+ * transform strip PIP from every process on the system without a trace.
+ */
+int pkm_kacs_exec_pip_from_material(
 	const struct pkm_kacs_signing_material *material, u32 *pip_type_out,
 	u32 *pip_trust_out)
 {
@@ -990,22 +1110,25 @@ void pkm_kacs_exec_pip_from_material(
 	int ret;
 
 	if (!pip_type_out || !pip_trust_out)
-		return;
+		return -EINVAL;
 
 	*pip_type_out = 0;
 	*pip_trust_out = 0;
 	if (!material)
-		return;
+		return 0;
 
 	ret = pkm_kacs_signing_verify_with_keys(
 		material, pkm_kacs_builtin_signing_keys,
 		ARRAY_SIZE(pkm_kacs_builtin_signing_keys),
 		pkm_kacs_signing_crypto_verify, NULL, &result);
-	if (ret || !result.verified)
-		return;
+	if (ret)
+		return ret;
+	if (!result.verified)
+		return 0;
 
 	*pip_type_out = result.pip_type;
 	*pip_trust_out = result.pip_trust;
+	return 0;
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -1019,6 +1142,8 @@ struct pkm_kacs_kunit_signing_verify_ctx {
 	size_t key_count;
 	u32 match_key_index;
 	u32 match_enabled;
+	/* Non-zero simulates "verification could not be performed". */
+	int unavailable_errno;
 };
 
 static int pkm_kacs_kunit_signing_reader_size(void *ctx, size_t *size_out)
@@ -1086,7 +1211,7 @@ static int pkm_kacs_kunit_signing_reader_xattr(void *ctx, u8 *dst,
 	return 0;
 }
 
-static bool pkm_kacs_kunit_signing_fake_verify(
+static int pkm_kacs_kunit_signing_fake_verify(
 	const u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN],
 	const u8 hash[SHA256_DIGEST_SIZE],
 	const u8 signature[PKM_KACS_SIGNING_SIGNATURE_LEN], void *ctx)
@@ -1096,13 +1221,22 @@ static bool pkm_kacs_kunit_signing_fake_verify(
 	(void)hash;
 	(void)signature;
 
-	if (!verify_ctx || !verify_ctx->match_enabled ||
+	if (!verify_ctx)
+		return 0;
+	/*
+	 * Checked before the match gate: unavailability is a property of the
+	 * machinery, so it must fire whether or not this key would have
+	 * matched.
+	 */
+	if (verify_ctx->unavailable_errno)
+		return verify_ctx->unavailable_errno;
+	if (!verify_ctx->match_enabled ||
 	    verify_ctx->match_key_index >= verify_ctx->key_count)
-		return false;
+		return 0;
 
 	return memcmp(public_key,
 		      verify_ctx->keys[verify_ctx->match_key_index].public_key,
-		      PKM_KACS_SIGNING_PUBLIC_KEY_LEN) == 0;
+		      PKM_KACS_SIGNING_PUBLIC_KEY_LEN) == 0 ? 1 : 0;
 }
 
 static int pkm_kacs_kunit_copy_signing_keys(
@@ -1207,6 +1341,44 @@ int pkm_kacs_kunit_probe_signing_material(
 	return 0;
 }
 
+int pkm_kacs_kunit_verify_signing_material_unavailable(
+	const struct pkm_kacs_kunit_signing_probe *material,
+	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
+	int unavailable_errno)
+{
+	struct pkm_kacs_kunit_signing_verify_ctx verify_ctx;
+	struct pkm_kacs_signing_trust_result result;
+	struct pkm_kacs_signing_key_entry *key_table = NULL;
+	struct pkm_kacs_signing_material material_in;
+	int ret;
+
+	if (!material)
+		return -EINVAL;
+
+	memset(&material_in, 0, sizeof(material_in));
+	material_in.source = material->source;
+	if (pkm_kacs_signing_material_set_sig(&material_in, material->signature))
+		return -ENOMEM;
+	memcpy(material_in.hash, material->hash, sizeof(material_in.hash));
+
+	ret = pkm_kacs_kunit_copy_signing_keys(keys, key_count, &key_table);
+	if (ret)
+		goto out_free;
+
+	memset(&verify_ctx, 0, sizeof(verify_ctx));
+	verify_ctx.keys = key_table;
+	verify_ctx.key_count = key_count;
+	verify_ctx.unavailable_errno = unavailable_errno;
+	ret = pkm_kacs_signing_verify_with_keys(
+		&material_in, key_table, key_count,
+		pkm_kacs_kunit_signing_fake_verify, &verify_ctx, &result);
+
+out_free:
+	pkm_kacs_signing_material_release(&material_in);
+	kfree(key_table);
+	return ret;
+}
+
 int pkm_kacs_kunit_verify_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material,
 	const struct pkm_kacs_kunit_signing_key_entry *keys, size_t key_count,
@@ -1233,6 +1405,7 @@ int pkm_kacs_kunit_verify_signing_material(
 	if (ret)
 		goto out_free;
 
+	memset(&verify_ctx, 0, sizeof(verify_ctx));
 	verify_ctx.keys = key_table;
 	verify_ctx.key_count = key_count;
 	verify_ctx.match_key_index = match_key_index;

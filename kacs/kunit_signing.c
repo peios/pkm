@@ -1147,6 +1147,65 @@ static void pkm_kunit_signing_verify_first_key_sets_tcb_trust(
 }
 
 
+static void pkm_kunit_signing_unverifiable_is_not_unsigned(struct kunit *test)
+{
+	struct pkm_kacs_kunit_signing_key_entry *keys;
+	struct pkm_kacs_kunit_signing_probe *material;
+	struct pkm_kacs_kunit_signing_verify_out out = {};
+
+	material = kunit_kzalloc(test, sizeof(*material), GFP_KERNEL);
+	keys = kunit_kzalloc(test, 2 * sizeof(*keys), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, material);
+	KUNIT_ASSERT_NOT_NULL(test, keys);
+
+	pkm_kunit_signing_fill_probe(material);
+	pkm_kunit_signing_fill_key(&keys[0], 0x10,
+				   PKM_KUNIT_SIGNING_PIP_PROTECTED,
+				   PKM_KUNIT_SIGNING_TRUST_TCB);
+
+	/*
+	 * The key matches, so without the tri-state this would verify. A
+	 * verifier that cannot perform the check must not be able to produce
+	 * either answer: it propagates its errno instead.
+	 *
+	 * This is the whole point of the change. "Could not verify" folded
+	 * into "did not verify" made a missing ML-DSA transform look exactly
+	 * like an unsigned binary, and an unsigned binary just runs with no
+	 * integrity label -- so PIP would disappear system-wide with nothing
+	 * to distinguish it from a working system that has nothing signed.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material_unavailable(
+				material, keys, 2, -ENOENT),
+			-ENOENT);
+
+	/* The same table, verifiable, still reports the match. */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material(
+				material, keys, 2, 0, 1, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verified, 1U);
+
+	/* A transient allocation failure is reported the same way. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_verify_signing_material_unavailable(
+				material, keys, 2, -ENOMEM),
+			-ENOMEM);
+}
+
+
+static void pkm_kunit_signing_crypto_transform_is_available(struct kunit *test)
+{
+	/*
+	 * The boot-time announcement rests on this being answerable at all.
+	 * If mldsa65 ever stops being reachable from a PKM kernel, every
+	 * signed exec is refused, and this is the case that says so directly
+	 * rather than through a hundred downstream failures.
+	 */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_signing_crypto_probe(), 0);
+}
+
+
 static void pkm_kunit_signing_verify_later_key_after_miss(struct kunit *test)
 {
 	struct pkm_kacs_kunit_signing_key_entry *keys;
@@ -1324,6 +1383,8 @@ static struct kunit_case pkm_kunit_signing_cases[] = {
 	KUNIT_CASE(pkm_kunit_signing_reader_malformed_elf_blocks_xattr),
 	KUNIT_CASE(pkm_kunit_signing_verify_unsigned_has_no_trust),
 	KUNIT_CASE(pkm_kunit_signing_verify_first_key_sets_tcb_trust),
+	KUNIT_CASE(pkm_kunit_signing_unverifiable_is_not_unsigned),
+	KUNIT_CASE(pkm_kunit_signing_crypto_transform_is_available),
 	KUNIT_CASE(pkm_kunit_signing_verify_later_key_after_miss),
 	KUNIT_CASE(pkm_kunit_signing_verify_no_matching_key_unsigned),
 	KUNIT_CASE(pkm_kunit_signing_verify_unsupported_tier_fails_closed),
