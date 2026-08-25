@@ -261,11 +261,24 @@ long pkm_lcs_private_credentials_acquire_for_token(
 	if (!token)
 		return -EACCES;
 
+	/*
+	 * The configured caps are checked here, at use, rather than when the
+	 * token was built. KACS applies only its own hard 256 when it parses
+	 * the credential extension, because reading LCS's configured limits
+	 * from KACS would invert the dependency between them.
+	 *
+	 * So an over-cap token is accepted and then fails every registry
+	 * operation any thread holding it performs. That is E2BIG and not
+	 * EACCES: nothing about it is an access decision, and reporting a
+	 * denial sends whoever is debugging it towards descriptors and
+	 * privileges instead of towards a count that was fixed when the token
+	 * was assembled, possibly in another process.
+	 */
 	scope_count = kacs_rust_token_lcs_scope_guid_count(token);
 	private_layer_count = kacs_rust_token_lcs_private_layer_count(token);
 	if (scope_count > limits->max_scope_guids_per_token ||
 	    private_layer_count > limits->max_private_layers_per_token)
-		return -EACCES;
+		return -E2BIG;
 
 	if (scope_count) {
 		view->scope_guids = kcalloc(scope_count,

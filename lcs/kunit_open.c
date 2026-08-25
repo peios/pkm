@@ -1840,6 +1840,69 @@ static void pkm_lcs_kunit_reg_open_key_uses_dynamic_hive(
 }
 
 
+static void pkm_lcs_kunit_private_credentials_over_cap_is_e2big(
+	struct kunit *test)
+{
+	static const u8 scopes[2][KACS_LCS_SCOPE_GUID_BYTES] = {
+		{ 0x11 }, { 0x22 },
+	};
+	static const char private_layer[] = "PrivateLayer";
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_private_credential_view view = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_lcs_private_credential_token(
+		scopes, ARRAY_SIZE(scopes), private_layer,
+		sizeof(private_layer) - 1);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	/*
+	 * Both caps are use-time, because KACS applies only its own hard 256
+	 * when it parses the credential extension and does not read LCS's
+	 * configured limits. An over-cap token is therefore accepted and then
+	 * fails every registry operation a thread holding it performs.
+	 *
+	 * E2BIG, not EACCES. Nothing here is an access decision, and a denial
+	 * sends whoever debugs it towards descriptors and privileges instead
+	 * of towards a count fixed when the token was assembled.
+	 */
+	limits.max_scope_guids_per_token = 1;
+	limits.max_private_layers_per_token = 8;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_private_credentials_acquire_for_token(
+				token, &limits, &view),
+			-E2BIG);
+
+	limits.max_scope_guids_per_token = 8;
+	limits.max_private_layers_per_token = 0;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_private_credentials_acquire_for_token(
+				token, &limits, &view),
+			-E2BIG);
+
+	/* Within both caps the same token acquires cleanly. */
+	limits.max_scope_guids_per_token = 8;
+	limits.max_private_layers_per_token = 8;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_private_credentials_acquire_for_token(
+				token, &limits, &view),
+			0L);
+	KUNIT_EXPECT_EQ(test, view.scope_count, ARRAY_SIZE(scopes));
+	pkm_lcs_private_credentials_release(&view);
+
+	/*
+	 * A missing token is still EACCES: that one genuinely is an access
+	 * decision, and the two must not collapse together.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_private_credentials_acquire_for_token(
+				NULL, &limits, &view),
+			-EACCES);
+
+	kacs_rust_token_drop(token);
+}
+
+
 static void pkm_lcs_kunit_reg_open_key_uses_empty_private_credential_view(
 	struct kunit *test)
 {
@@ -10095,6 +10158,7 @@ static struct kunit_case pkm_lcs_kunit_open_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_root_uses_read_key),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_syscall_dispatches_absolute),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_dynamic_hive),
+	KUNIT_CASE(pkm_lcs_kunit_private_credentials_over_cap_is_e2big),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_empty_private_credential_view),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_kacs_private_scope),
 	KUNIT_CASE(pkm_lcs_kunit_reg_open_key_uses_live_layer_table),
