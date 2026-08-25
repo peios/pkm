@@ -836,7 +836,7 @@ const (
 	REG_IOC_HIDE_KEY_NR                                 = 9
 	REG_IOC_NOTIFY                                      = 1074287116
 	REG_IOC_NOTIFY_NR                                   = 12
-	REG_IOC_QUERY_KEY_INFO                              = 2151698951
+	REG_IOC_QUERY_KEY_INFO                              = 3225440775
 	REG_IOC_QUERY_KEY_INFO_NR                           = 7
 	REG_IOC_QUERY_VALUE                                 = 3225440768
 	REG_IOC_QUERY_VALUES_BATCH                          = 3222819332

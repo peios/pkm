@@ -253,8 +253,15 @@ struct reg_src_hive_entry {
 	_IOWR(REG_IOC_TYPE, REG_IOC_ENUM_VALUES_NR, struct reg_enum_value_args)
 #define REG_IOC_ENUM_SUBKEYS \
 	_IOWR(REG_IOC_TYPE, REG_IOC_ENUM_SUBKEYS_NR, struct reg_enum_subkey_args)
+/*
+ * _IOWR, not _IOR: the kernel reads the caller's name_len and name_ptr out of
+ * the argument struct before it writes the result back, so the argument
+ * crosses in both directions. It was declared _IOR, which put the wrong
+ * direction bits in the encoded number -- and since the kernel dispatches on
+ * the whole encoded value, correcting it is a wire break, not a relabelling.
+ */
 #define REG_IOC_QUERY_KEY_INFO \
-	_IOR(REG_IOC_TYPE, REG_IOC_QUERY_KEY_INFO_NR, struct reg_query_key_info_args)
+	_IOWR(REG_IOC_TYPE, REG_IOC_QUERY_KEY_INFO_NR, struct reg_query_key_info_args)
 #define REG_IOC_DELETE_KEY \
 	_IOW(REG_IOC_TYPE, REG_IOC_DELETE_KEY_NR, struct reg_delete_key_args)
 #define REG_IOC_HIDE_KEY \

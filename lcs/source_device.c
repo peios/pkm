@@ -186,6 +186,20 @@ long pkm_lcs_source_wait_for_slot(
 		long remaining;
 		long wait_ret;
 
+		/*
+		 * Check the deadline before admission, not only after losing a
+		 * contention round. A request that found a slot immediately
+		 * free was dispatched even with an already-expired deadline and
+		 * then timed out in the wait leg instead -- so "no request is
+		 * sent if the deadline expired before a slot was reserved" held
+		 * only under contention, which is the one case where it is
+		 * hardest to observe.
+		 */
+		if (!pkm_lcs_source_deadline_remaining(deadline)) {
+			ret = -ETIMEDOUT;
+			break;
+		}
+
 		ret = pkm_lcs_source_slot_admission_state(source_id, limits);
 		if (ret != -EAGAIN)
 			break;
