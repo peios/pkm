@@ -3322,6 +3322,78 @@ static bool pkm_lcs_set_value_data_is_positive_dword(
 	return get_unaligned_le32(input->data) > 0;
 }
 
+/*
+ * Refuse a REG_LINK target whose first component does not name a hive.
+ *
+ * PCSA §2.3: relative symlink targets are invalid, and invalid target
+ * structure fails with EINVAL. Registry paths carry no syntactic marker for
+ * absolute -- `Machine\A` and `Sub\Key` are structurally identical -- so the
+ * only thing separating them is whether the first component routes. Nothing
+ * checked, and every target was treated as absolute.
+ *
+ * That left `Sub\Key` not merely unresolvable but *latent*: hive registration
+ * is dynamic, so a target naming nothing today resolves into a real hive the
+ * moment some source claims that name, and symlink targets are subject to
+ * private-hive routing -- so a sandboxed process registering a private hive
+ * called `Sub` captures it.
+ *
+ * Checking at write time is what closes that. A target that cannot be written
+ * cannot be captured later, and the failure lands on whoever authored the
+ * mistake rather than on whoever follows the link years afterwards.
+ *
+ * The cost is that a symlink cannot forward-reference a hive registered after
+ * it. That is the same ordering constraint the rest of the registry already
+ * has, and the alternative is leaving the capture open.
+ */
+static long pkm_lcs_key_fd_set_value_symlink_target_gate(
+	const void *token, const struct pkm_lcs_set_value_input *input,
+	const struct reg_set_value_args *args)
+{
+	struct pkm_lcs_hive_route_result route = { };
+	u8 (*scope_guids)[16] = NULL;
+	u32 scope_count;
+	u32 i;
+	long ret;
+
+	if (!input || !args)
+		return -EINVAL;
+	if (args->type != REG_LINK)
+		return 0;
+	if (!input->data || args->data_len == 0)
+		return -EINVAL;
+
+	/*
+	 * The caller's scope GUIDs, not none.
+	 *
+	 * pkm_lcs_route_absolute_path_for_token uses the token only to rewrite
+	 * a CurrentUser component; it passes scope GUIDs straight through. So
+	 * routing with none would refuse every target in a private hive, which
+	 * is a legitimate thing for a symlink to name.
+	 */
+	scope_count = token ? kacs_rust_token_lcs_scope_guid_count(token) : 0;
+	if (scope_count) {
+		scope_guids = kcalloc(scope_count, sizeof(*scope_guids),
+				      GFP_KERNEL);
+		if (!scope_guids)
+			return -ENOMEM;
+		for (i = 0; i < scope_count; i++) {
+			if (kacs_rust_token_lcs_scope_guid(token, i,
+							   scope_guids[i])) {
+				kfree(scope_guids);
+				return -EINVAL;
+			}
+		}
+	}
+
+	ret = pkm_lcs_route_absolute_path_for_token(
+		token, (const char *)input->data, args->data_len, false,
+		(const u8 (*)[16])scope_guids, scope_count, &route);
+	kfree(scope_guids);
+	if (ret)
+		return -EINVAL;
+	return 0;
+}
+
 static long pkm_lcs_key_fd_set_value_precedence_tcb_gate(
 	const struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_set_value_input *input,
@@ -4600,6 +4672,9 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 
 	ret = pkm_lcs_key_fd_set_value_precedence_tcb_gate(key_fd, token,
 							   &input, args);
+	if (ret)
+		goto out_input;
+	ret = pkm_lcs_key_fd_set_value_symlink_target_gate(token, &input, args);
 	if (ret)
 		goto out_input;
 	ret = pkm_lcs_key_fd_revalidate_after_source_restart(key_fd,
