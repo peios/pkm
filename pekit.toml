@@ -156,7 +156,7 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 # The initramfs subset is carved from the tree above rather than installed
 # again, so both packages describe the same build of the same modules.
 ./build/install-modules-irf.sh "$(pwd)" "$PEKIT_OUT/modules-root" \
-	"$PEKIT_OUT/modules-irf-root"
+	"$PEKIT_OUT/modules-irf-root" "$PEKIT_OUT/System.map"
 """
 
 # Same toolchain as build.kunit (production profile); the keygen step adds python3

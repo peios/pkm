@@ -16,23 +16,27 @@
 # composed initramfs root would otherwise carry no index at all — and the boot
 # that needs the index is the one that would have had to create it.
 #
-# usage: install-modules-irf.sh <source-dir> <full-module-root> <staging-root>
+# usage: install-modules-irf.sh <source-dir> <full-module-root> <staging-root> <System.map>
 #
 # <source-dir> is the pkm source tree, for build/config/irf-modules.list. The
 # release is taken from the installed tree rather than by asking the kernel
 # Makefile: install-modules.sh has already created exactly one release directory
 # there, so reading it needs no build tree and cannot disagree with what was
-# actually installed.
+# actually installed. <System.map> is the built kernel's symbol table, which
+# lets depmod say which symbols a module imports that neither vmlinux nor any
+# module in the subset provides.
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-	echo "usage: $0 <source-dir> <full-module-root> <staging-root>" >&2
+if [[ $# -ne 4 ]]; then
+	echo "usage: $0 <source-dir> <full-module-root> <staging-root> <System.map>" >&2
 	exit 2
 fi
 
 srcdir=$(cd "$1" && pwd) || exit 1
 full=$(cd "$2" && pwd) || exit 1
 root=$3
+sysmap=$4
+[[ -s "$sysmap" ]] || { echo "missing System.map: $sysmap" >&2; exit 1; }
 
 list="$srcdir/build/config/irf-modules.list"
 [[ -r "$list" ]] || { echo "missing module list: $list" >&2; exit 1; }
@@ -57,10 +61,17 @@ mkdir -p "$dst/kernel"
 # depmod records match the paths modprobe will look up.
 copied=0
 skipped=()
+excluded=()
 while read -r path; do
 	path=${path%%#*}
 	path=$(echo "$path" | tr -d '[:space:]')
 	[[ -n "$path" ]] || continue
+	if [[ "$path" == -* ]]; then
+		# Applied after the copy loop: an exclusion must win over an earlier
+		# directory line whatever order the two appear in.
+		excluded+=("${path#-}")
+		continue
+	fi
 	if [[ ! -e "$src/kernel/$path" ]]; then
 		skipped+=("$path")
 		continue
@@ -71,6 +82,9 @@ while read -r path; do
 done < "$list"
 
 [[ "$copied" -gt 0 ]] || { echo "module list matched nothing under $src/kernel" >&2; exit 1; }
+for path in "${excluded[@]}"; do
+	rm -rf "$dst/kernel/$path"
+done
 if [[ ${#skipped[@]} -gt 0 ]]; then
 	echo "install-modules-irf: not present in this build, skipped: ${skipped[*]}"
 fi
@@ -87,7 +101,19 @@ done
 # -b takes the tree as a root; naming the release explicitly matters because a
 # bare depmod indexes the *running* kernel, which is the build host's, not the
 # one just built.
-depmod -b "$root" "$release"
+#
+# -e -F: report every symbol a module imports that neither vmlinux (System.map)
+# nor another module in THIS tree exports. Over a subset that is the failure
+# the dangling-file check below cannot see: depmod does not record a dependency
+# it cannot resolve, so e1000e without drivers/ptp, and ptp without drivers/pps,
+# each produced a clean index and an "Unknown symbol" at boot. depmod only
+# warns, so the warnings are the assertion.
+unresolved=$(depmod -e -F "$sysmap" -b "$root" "$release" 2>&1 | grep -i "needs unknown symbol" || true)
+[[ -z "$unresolved" ]] || {
+	echo "initramfs module set has unresolved symbols — add the providing subtree to irf-modules.list:" >&2
+	echo "$unresolved" | head -20 >&2
+	exit 1
+}
 
 for f in modules.dep modules.dep.bin modules.alias modules.alias.bin \
 	 modules.symbols modules.symbols.bin; do

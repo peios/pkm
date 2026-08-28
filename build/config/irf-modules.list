@@ -1,9 +1,18 @@
 # Which modules the initramfs carries — the kernel-modules-irf payload.
 #
 # One path per line, relative to lib/modules/<release>/kernel/. A directory
-# takes everything beneath it. Blank lines and # comments are ignored. A listed
-# path that does not exist is skipped, so this survives config changes that
-# retire a subsystem.
+# takes everything beneath it. A line starting with `-` removes that path from
+# what the lines above pulled in. Blank lines and # comments are ignored. A
+# listed path that does not exist is skipped, so this survives config changes
+# that retire a subsystem.
+#
+# THE SET MUST BE CLOSED UNDER SYMBOL DEPENDENCIES. install-modules-irf.sh runs
+# depmod -e over the result and fails the build if any module imports a symbol
+# that neither vmlinux nor another module in the set exports — depmod cannot
+# record a dependency it cannot resolve, so such a module would index cleanly
+# and fail at boot with "Unknown symbol". When the gate names a module, either
+# add the subtree that provides the symbol or, if the module has no business in
+# an initramfs, exclude it.
 #
 # GENERIC, NOT HOSTONLY. This set is the same on every machine. Peios cannot
 # build a hostonly initramfs even if it wanted to: peipkg-compose resolves
@@ -35,6 +44,67 @@ drivers/nvmem
 drivers/virtio
 drivers/usb
 drivers/pci
+# Two PCI controller drivers import from outside drivers/pci: pci-hyperv from
+# the Hyper-V VMBus (a Hyper-V guest reaches its disk through it), and
+# pci-pwrctrl-slot from the power-sequencing helpers. Both small.
+drivers/hv
+drivers/power/sequencing
+# virtio_vdpa (drivers/virtio) is a virtio transport over vDPA devices; the
+# vDPA bus in turn pulls the vhost ring helpers and a mlx5 back-end, so the
+# transport goes rather than the bus coming in.
+-drivers/virtio/virtio_vdpa.ko.zst
+# The PCMCIA SCSI adapters under drivers/scsi import the PCMCIA core.
+drivers/pcmcia
+# Parallel port. Not itself a way to a root, but lp, ppdev, the ppa/imm SCSI
+# bridges, pata_parport and two USB adapters all import it, and the core is
+# two small modules — cheaper to carry than to list every consumer.
+drivers/parport
+# bcma-hcd (a USB host on the Broadcom BCMA bus) imports the bus driver.
+drivers/bcma
+# The ChromeOS embedded controller: a Chromebook's keyboard (cros_ec_keyb,
+# under drivers/input) speaks to it, so a passphrase prompt there needs it.
+drivers/platform/chrome
+-drivers/platform/chrome/cros_typec_switch.ko.zst
+-drivers/platform/chrome/cros-ec-typec.ko.zst
+# The Surface aggregator, for the same reason: a Surface's keyboard is a
+# surface-hid device on it.
+drivers/platform/surface
+-drivers/platform/surface/surface_platform_profile.ko.zst
+-drivers/platform/surface/surface3-wmi.ko.zst
+# An EEPROM behind the QNAP MCU.
+-drivers/nvmem/nvmem-qnap-mcu-eeprom.ko.zst
+# 9p over RDMA (drivers/infiniband), vsock over VMCI (the VMware guest
+# stack), UIO on the DFL FPGA bus, the AMD TEE (the CCP under drivers/crypto).
+-net/9p/9pnet_rdma.ko.zst
+-net/sunrpc/xprtrdma
+-net/rds/rds_rdma.ko.zst
+-net/smc
+# Qualcomm IPC router transports over MHI and SMD (rpmsg).
+-net/qrtr/qrtr-mhi.ko.zst
+-net/qrtr/qrtr-smd.ko.zst
+-net/vmw_vsock/vmw_vsock_vmci_transport.ko.zst
+-drivers/uio/uio_dfl.ko.zst
+-drivers/tee/amdtee
+# Single-module providers other SCSI drivers import: ses needs the enclosure
+# class, wd719x the 93cx6 EEPROM reader, qedi (iSCSI offload) the UIO core.
+drivers/misc/enclosure.ko.zst
+drivers/misc/eeprom/eeprom_93cx6.ko.zst
+# The SD/MMC hosts under drivers/mmc for the Alcor and TI FlashMedia readers
+# sit on these bridge drivers.
+drivers/misc/cardreader
+drivers/misc/tifm_core.ko.zst
+drivers/misc/tifm_7xx1.ko.zst
+drivers/misc/cb710
+# mmc_block — every eMMC/SD root — imports the RPMB core.
+drivers/misc/rpmb-core.ko.zst
+drivers/uio
+# b44 (Broadcom 44xx Ethernet, under drivers/net) sits on the SSB bus.
+drivers/ssb
+# Small cores the Intel and Myricom NICs import: igb the bit-banging I2C
+# algorithm, ixgbe and myri10ge direct cache access, ice the GNSS class.
+drivers/i2c/algos
+drivers/dca
+drivers/gnss
 drivers/base
 drivers/char
 
@@ -51,6 +121,39 @@ fs
 crypto
 lib
 arch
+# dm-crypt imports the trusted and encrypted key types from security/keys,
+# and the trusted type can be backed by a TEE.
+security
+drivers/tee
+# Excluded from the above: modules whose imports the set does not provide and
+# which no root-reaching path needs.
+#   fs/smb        cifs links the RDMA stack (drivers/infiniband)
+#   fs/ecryptfs   the `encrypted` key type (security/keys)
+#   arch/x86/kvm  SEV firmware calls (drivers/crypto/ccp); a hypervisor is
+#                 not something the initramfs runs
+#   fs/vboxsf     the VirtualBox guest driver (drivers/virt/vboxguest)
+-fs/smb
+-fs/ecryptfs
+-fs/vboxsf
+-arch/x86/kvm
+#   lpfc  Emulex Fibre Channel HBA; imports the NVMe-over-FC target side
+#         (excluded above). An FC-attached root is not a case Peios has met.
+-drivers/scsi/lpfc
+#   SCSI target-mode drivers (the machine serving disks, not reading them):
+#   tcm_qla2xxx and efct import the target core (drivers/target)
+-drivers/scsi/qla2xxx/tcm_qla2xxx.ko.zst
+-drivers/scsi/elx/efct.ko.zst
+#   drivers/block/rnbd   network block device over RDMA (drivers/infiniband)
+#   nvme-rdma            NVMe over RDMA fabrics, same stack
+-drivers/block/rnbd
+-drivers/nvme/host/nvme-rdma.ko.zst
+#   drivers/nvme/target  NVMe target mode: serving namespaces, not reading them
+-drivers/nvme/target
+#   regmap back-ends for buses the set does not carry (w1, slimbus, soundwire)
+-drivers/base/regmap/regmap-w1.ko.zst
+-drivers/base/regmap/regmap-slimbus.ko.zst
+-drivers/base/regmap/regmap-sdw.ko.zst
+-drivers/base/regmap/regmap-sdw-mbq.ko.zst
 
 # --- Network ------------------------------------------------------------
 # For a root filesystem reached over the network. Peios has no netboot or NFS
@@ -61,6 +164,58 @@ arch
 # defined to include them and dropping them is a decision about which root
 # types Peios intends to support, not a tidy-up.
 drivers/net
+# The rule at the top says no wireless, and drivers/net would otherwise bring
+# it: a wireless root needs a supplicant and credentials the initramfs does not
+# have. Amateur-radio and parallel-port network drivers go for the same
+# reason as lp above.
+-drivers/net/wireless
+-drivers/net/hamradio
+-drivers/net/plip
+# WWAN modems (MHI bus), CAN bus and MCTP: not paths to a root filesystem.
+-drivers/net/wwan
+-drivers/net/mhi_net.ko.zst
+-drivers/net/can
+-drivers/net/mctp
+# Networking over NTB and over Thunderbolt: each wants its bus (drivers/ntb,
+# drivers/thunderbolt), neither reaches a root.
+-drivers/net/ntb_netdev.ko.zst
+-drivers/net/thunderbolt
+# USB device (gadget) mode — the machine as a peripheral. The UDC core stays
+# because the dual-role host controllers (dwc2, dwc3, isp1760) import it; the
+# gadget functions and legacy composites go. Plus the Nokia Tahvo PHY, which
+# wants the Retu MFD.
+-drivers/usb/gadget/function
+-drivers/usb/gadget/legacy
+-drivers/usb/phy/phy-tahvo.ko.zst
+# USB Type-C port management wants USB4 (drivers/thunderbolt); a keyboard
+# on a Type-C port works without it. Input devices read through IIO ADC
+# channels and the iqs62x MFD are embedded-board parts.
+-drivers/usb/typec
+-drivers/input/joystick/adc-joystick.ko.zst
+-drivers/input/touchscreen/resistive-adc-touch.ko.zst
+-drivers/input/keyboard/adc-keys.ko.zst
+-drivers/input/keyboard/iqs62x-keys.ko.zst
+# The Atmel maXTouch touchscreen exposes a V4L2 raw-data device (drivers/media).
+-drivers/input/touchscreen/atmel_mxt_ts.ko.zst
+-drivers/input/touchscreen/sur40.ko.zst
+# mc13783_ts reads the Freescale PMIC's ADC (drivers/mfd); tsc2007 and the
+# Colibri VF50 go through IIO.
+-drivers/input/touchscreen/mc13783_ts.ko.zst
+-drivers/input/touchscreen/tsc2007.ko.zst
+-drivers/input/touchscreen/colibri-vf50-ts.ko.zst
+# drivers/input/misc is power buttons, haptics and board-specific parts on
+# MFDs the set does not carry; a passphrase comes in through keyboard/.
+-drivers/input/misc
+# A PTP clock on the DFL FPGA bus.
+-drivers/ptp/ptp_dfl_tod.ko.zst
+# HID quirk drivers that import sound, IIO, LED or vendor-platform code; a
+# keyboard on any of these still works through hid-generic.
+-drivers/hid/hid-asus.ko.zst
+-drivers/hid/hid-prodikeys.ko.zst
+-drivers/hid/hid-mcp2221.ko.zst
+-drivers/hid/hid-lg-g15.ko.zst
+-drivers/hid/hid-playstation.ko.zst
+-drivers/hid/hid-picolcd.ko.zst
 # Not a network driver, but Intel's wired drivers (e1000e, igb, ixgbe, ice) all
 # import ptp_clock_register from it, and a module whose symbols are missing
 # fails to load with "Unknown symbol" — found when the initramfs coldplug hook
@@ -69,4 +224,7 @@ drivers/net
 # file, so install-modules-irf.sh's dangling-reference check passes. If the
 # network block above ever goes, this line goes with it.
 drivers/ptp
+# ptp in turn imports pps_register_source from here. Same story one level
+# down; the two go together.
+drivers/pps
 net
