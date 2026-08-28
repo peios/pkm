@@ -79,11 +79,11 @@ CONFIG_MODULE_SIG_KEY_TYPE_MLDSA_65=y
 CONFIG_PKCS7_WAIVE_AUTHATTRS_REJECTION_FOR_MLDSA=y
 
 # --- Firmware loader ---
-# FW_UPLOAD is a sysfs interface for pushing firmware INTO a device
-# (FPGA/persistent-flash updates), bypassing the file-based loader entirely.
-# Nothing on Peios needs it, and it is a path a firmware-signing check
-# (PEI-493) would not cover. Off.
-# CONFIG_FW_UPLOAD is not set
+# FW_UPLOAD (a sysfs interface for pushing firmware INTO a device, bypassing
+# the file-based loader) cannot be turned off: CXL, FPGA, greybus, the
+# Microchip firmware driver and pse-pd all `select` it. It stays =y. A
+# load-time firmware check (PEI-493) does not cover this path; the drivers
+# that expose it are the place to gate it if that ever matters.
 
 # --- request_module()'s helper ---
 # The upstream default is /sbin/modprobe, which does not exist on Peios: kmod's
