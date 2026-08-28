@@ -1,0 +1,47 @@
+diff --git a/net/socket.c b/net/socket.c
+--- a/net/socket.c
++++ b/net/socket.c
+@@ -2286,6 +2286,19 @@
+ 	return test_bit(SOCK_CUSTOM_SOCKOPT, &sock->flags);
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++/*
++ * KACS socket options live under their own level, SOL_KACS
++ * (<pkm/socket.h>), and are dispatched here, ahead of the protocol's
++ * own handlers, so they behave the same on every family that supports them.
++ */
++#include <pkm/socket.h>
++extern int pkm_kacs_sock_setsockopt(struct socket *sock, int optname,
++				    sockptr_t optval, unsigned int optlen);
++extern int pkm_kacs_sock_getsockopt(struct socket *sock, int optname,
++				    sockptr_t optval, sockptr_t optlen);
++#endif
++
+ int do_sock_setsockopt(struct socket *sock, bool compat, int level,
+ 		       int optname, sockptr_t optval, int optlen)
+ {
+@@ -2314,6 +2327,11 @@
+ 	if (kernel_optval)
+ 		optval = KERNEL_SOCKPTR(kernel_optval);
+ 	ops = READ_ONCE(sock->ops);
++#ifdef CONFIG_SECURITY_PKM
++	if (level == SOL_KACS)
++		err = pkm_kacs_sock_setsockopt(sock, optname, optval, optlen);
++	else
++#endif
+ 	if (level == SOL_SOCKET && !sock_use_custom_sol_socket(sock))
+ 		err = sock_setsockopt(sock, level, optname, optval, optlen);
+ 	else if (unlikely(!ops->setsockopt))
+@@ -2371,6 +2389,11 @@
+ 		copy_from_sockptr(&max_optlen, optlen, sizeof(int));
+ 
+ 	ops = READ_ONCE(sock->ops);
++#ifdef CONFIG_SECURITY_PKM
++	if (level == SOL_KACS) {
++		err = pkm_kacs_sock_getsockopt(sock, optname, optval, optlen);
++	} else
++#endif
+ 	if (level == SOL_SOCKET) {
+ 		err = sk_getsockopt(sock->sk, level, optname, optval, optlen);
+ 	} else if (unlikely(!ops->getsockopt)) {

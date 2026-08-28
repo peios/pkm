@@ -53,5 +53,6 @@ mm/mempolicy-movememory-gate.patch
 mm/migrate-pages-gate.patch
 mm/process_vm_access-rw-mode-split.patch
 net/sock-peercred-projection.patch
+net/socket-sol-kacs-dispatch.patch
 arch/x86-prctl-shadow-stack.patch
 arch/syscall-table-pkm.patch

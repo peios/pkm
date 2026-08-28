@@ -2,16 +2,19 @@
 
 #include <linux/atomic.h>
 #include <linux/errno.h>
+#include <linux/fdtable.h>
 #include <linux/kernel.h>
 #include <linux/net.h>
 #include <linux/slab.h>
 #include <linux/socket.h>
+#include <linux/sockptr.h>
 #include <linux/string.h>
-#include <linux/syscalls.h>
 #include <linux/types.h>
 #include <linux/un.h>
 
 #include <net/sock.h>
+
+#include <pkm/socket.h>
 
 #include "lsm_internal.h"
 #include "socket.h"
@@ -213,8 +216,8 @@ static long pkm_kacs_set_socket_impersonation_level_core(
 	    !pkm_kacs_socket_type_supported(sock->type)) {
 		trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
 						sock->state, level, 0,
-						KACS_SOCK_NOT_UNIX, -EACCES);
-		return -EACCES;
+						KACS_SOCK_NOT_UNIX, -EOPNOTSUPP);
+		return -EOPNOTSUPP;
 	}
 	if (!pkm_kacs_socket_level_valid(level)) {
 		trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
@@ -225,8 +228,8 @@ static long pkm_kacs_set_socket_impersonation_level_core(
 	if (sock->state != SS_UNCONNECTED || sec->peer_token) {
 		trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
 						sock->state, level, 0,
-						KACS_SOCK_WRONG_STATE, -EACCES);
-		return -EACCES;
+						KACS_SOCK_WRONG_STATE, -EISCONN);
+		return -EISCONN;
 	}
 
 	sec->max_impersonation = level;
@@ -253,24 +256,6 @@ static long pkm_kacs_open_peer_token_core(
 	trace_kacs_socket_open_peer_token(
 		0, 0, 0, sec->max_impersonation,
 		PKM_KACS_PEER_TOKEN_ACCESS_MASK, KACS_SOCK_OPEN_TOKEN, ret);
-	return ret;
-}
-
-static long pkm_kacs_impersonate_peer_core(
-	const struct pkm_kacs_socket_security *sec)
-{
-	long ret;
-
-	if (!sec || !sec->peer_token) {
-		trace_kacs_socket_impersonate_peer(0, 0, 0, 0, 0,
-						   KACS_SOCK_NO_PEER_TOKEN,
-						   -EACCES);
-		return -EACCES;
-	}
-
-	ret = pkm_kacs_impersonate_token_for_current(sec->peer_token);
-	trace_kacs_socket_impersonate_peer(0, 0, 0, sec->max_impersonation, 0,
-					   KACS_SOCK_IMPERSONATE, ret);
 	return ret;
 }
 
@@ -459,32 +444,105 @@ int pkm_kacs_unix_may_send(struct socket *sock, struct socket *other)
 	return ret;
 }
 
-static long pkm_kacs_lookup_peer_socket(
-	int sock_fd, struct socket **sock_out,
-	struct pkm_kacs_socket_security **sec_out)
+/*
+ * SOL_KACS option handlers, reached from net/socket.c ahead of the
+ * protocol's own setsockopt/getsockopt. optval/optlen are sockptrs so the
+ * same entry serves user and kernel (KUnit) callers.
+ */
+static long pkm_kacs_sockopt_socket(struct socket *sock,
+				    struct pkm_kacs_socket_security **sec_out)
 {
-	struct socket *sock;
-	int err = 0;
-
-	if (!sock_out || !sec_out)
-		return -EINVAL;
-
-	*sock_out = NULL;
-	*sec_out = NULL;
-
-	sock = sockfd_lookup(sock_fd, &err);
-	if (!sock)
-		return err ? err : -EBADF;
-	if (!sock->sk || !sock->sk->sk_security ||
-	    sock->sk->sk_family != AF_UNIX ||
-	    !pkm_kacs_socket_type_supported(sock->type)) {
-		sockfd_put(sock);
+	if (!sock || !sock->sk || !sock->sk->sk_security)
 		return -EACCES;
-	}
+	if (sock->sk->sk_family != AF_UNIX ||
+	    !pkm_kacs_socket_type_supported(sock->type))
+		return -EOPNOTSUPP;
 
-	*sock_out = sock;
 	*sec_out = pkm_kacs_sock(sock->sk);
 	return 0;
+}
+
+int pkm_kacs_sock_setsockopt(struct socket *sock, int optname,
+			     sockptr_t optval, unsigned int optlen)
+{
+	struct pkm_kacs_socket_security *sec;
+	u32 level;
+	long ret;
+
+	if (optname != KACS_SO_IMPERSONATION_LEVEL)
+		return -ENOPROTOOPT;
+	if (optlen < sizeof(level))
+		return -EINVAL;
+	if (copy_from_sockptr(&level, optval, sizeof(level)))
+		return -EFAULT;
+
+	ret = pkm_kacs_sockopt_socket(sock, &sec);
+	if (ret)
+		return ret;
+
+	return pkm_kacs_set_socket_impersonation_level_core(sock, sec, level);
+}
+
+static int pkm_kacs_sockopt_put(sockptr_t optval, sockptr_t optlen,
+				const void *val, int len)
+{
+	if (copy_to_sockptr(optval, val, len))
+		return -EFAULT;
+	if (copy_to_sockptr(optlen, &len, sizeof(len)))
+		return -EFAULT;
+	return 0;
+}
+
+int pkm_kacs_sock_getsockopt(struct socket *sock, int optname,
+			     sockptr_t optval, sockptr_t optlen)
+{
+	struct pkm_kacs_socket_security *sec;
+	int len;
+	long ret;
+
+	if (copy_from_sockptr(&len, optlen, sizeof(len)))
+		return -EFAULT;
+	if (len < 0)
+		return -EINVAL;
+
+	switch (optname) {
+	case KACS_SO_PEER_TOKEN: {
+		int fd;
+
+		if (len < sizeof(fd))
+			return -EINVAL;
+		ret = pkm_kacs_sockopt_socket(sock, &sec);
+		if (ret)
+			return ret;
+		if (sock->state != SS_CONNECTED)
+			return -ENOTCONN;
+		if (!sec->peer_token)
+			return -ENODATA;
+
+		ret = pkm_kacs_open_peer_token_core(sec);
+		if (ret < 0)
+			return ret;
+		fd = ret;
+		ret = pkm_kacs_sockopt_put(optval, optlen, &fd, sizeof(fd));
+		if (ret)
+			close_fd(fd);
+		return ret;
+	}
+	case KACS_SO_IMPERSONATION_LEVEL: {
+		u32 level;
+
+		if (len < sizeof(level))
+			return -EINVAL;
+		ret = pkm_kacs_sockopt_socket(sock, &sec);
+		if (ret)
+			return ret;
+		level = sec->max_impersonation;
+		return pkm_kacs_sockopt_put(optval, optlen, &level,
+					    sizeof(level));
+	}
+	default:
+		return -ENOPROTOOPT;
+	}
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -665,7 +723,8 @@ long pkm_kacs_kunit_set_socket_impersonation_level(
 		return ret;
 	sec = pkm_kacs_sock(&sk);
 
-	ret = pkm_kacs_set_socket_impersonation_level_core(&sock, sec, level);
+	ret = pkm_kacs_sock_setsockopt(&sock, KACS_SO_IMPERSONATION_LEVEL,
+				       KERNEL_SOCKPTR(&level), sizeof(level));
 	pkm_kacs_kunit_socket_snapshot(sec, out);
 	pkm_kacs_kunit_cleanup_socket(&sk, blob);
 	return ret;
@@ -838,6 +897,8 @@ long pkm_kacs_kunit_open_peer_token_for_socket_type(u32 socket_type,
 	struct sock sk;
 	struct pkm_kacs_socket_security *sec;
 	void *blob = NULL;
+	int fd = -1;
+	int len = sizeof(fd);
 	long ret;
 
 	ret = pkm_kacs_kunit_init_socket(&sock, &sk, &blob, socket_type,
@@ -848,12 +909,10 @@ long pkm_kacs_kunit_open_peer_token_for_socket_type(u32 socket_type,
 	if (connected && pkm_kacs_socket_type_supported(socket_type) &&
 	    peer_token)
 		sec->peer_token = kacs_rust_token_clone(peer_token);
-	if (connected && pkm_kacs_socket_type_supported(socket_type))
-		ret = pkm_kacs_open_peer_token_core(sec);
-	else
-		ret = -EACCES;
+	ret = pkm_kacs_sock_getsockopt(&sock, KACS_SO_PEER_TOKEN,
+				       KERNEL_SOCKPTR(&fd), KERNEL_SOCKPTR(&len));
 	pkm_kacs_kunit_cleanup_socket(&sk, blob);
-	return ret;
+	return ret ? ret : fd;
 }
 
 long pkm_kacs_kunit_open_peer_token_for_socket(u32 connected,
@@ -871,6 +930,8 @@ long pkm_kacs_kunit_impersonate_peer_for_socket_type(u32 socket_type,
 	struct sock sk;
 	struct pkm_kacs_socket_security *sec;
 	void *blob = NULL;
+	int fd = -1;
+	int len = sizeof(fd);
 	long ret;
 
 	ret = pkm_kacs_kunit_init_socket(&sock, &sk, &blob, socket_type,
@@ -881,10 +942,12 @@ long pkm_kacs_kunit_impersonate_peer_for_socket_type(u32 socket_type,
 	if (connected && pkm_kacs_socket_type_supported(socket_type) &&
 	    peer_token)
 		sec->peer_token = kacs_rust_token_clone(peer_token);
-	if (connected && pkm_kacs_socket_type_supported(socket_type))
-		ret = pkm_kacs_impersonate_peer_core(sec);
-	else
-		ret = -EACCES;
+	ret = pkm_kacs_sock_getsockopt(&sock, KACS_SO_PEER_TOKEN,
+				       KERNEL_SOCKPTR(&fd), KERNEL_SOCKPTR(&len));
+	if (!ret) {
+		ret = pkm_kacs_impersonate_token_for_current(sec->peer_token);
+		close_fd(fd);
+	}
 	pkm_kacs_kunit_cleanup_socket(&sk, blob);
 	return ret;
 }
@@ -896,56 +959,3 @@ long pkm_kacs_kunit_impersonate_peer_for_socket(u32 connected,
 		SOCK_STREAM, connected, peer_token);
 }
 #endif /* CONFIG_SECURITY_PKM_KUNIT */
-
-SYSCALL_DEFINE2(kacs_set_impersonation_level, int, sock_fd, u32, level)
-{
-	struct pkm_kacs_socket_security *sec;
-	struct socket *sock;
-	long ret;
-
-	ret = pkm_kacs_lookup_peer_socket(sock_fd, &sock, &sec);
-	if (ret)
-		return ret;
-
-	ret = pkm_kacs_set_socket_impersonation_level_core(sock, sec, level);
-	sockfd_put(sock);
-	return ret;
-}
-
-SYSCALL_DEFINE1(kacs_open_peer_token, int, sock_fd)
-{
-	struct pkm_kacs_socket_security *sec;
-	struct socket *sock;
-	long ret;
-
-	ret = pkm_kacs_lookup_peer_socket(sock_fd, &sock, &sec);
-	if (ret)
-		return ret;
-	if (sock->state != SS_CONNECTED) {
-		sockfd_put(sock);
-		return -EACCES;
-	}
-
-	ret = pkm_kacs_open_peer_token_core(sec);
-	sockfd_put(sock);
-	return ret;
-}
-
-SYSCALL_DEFINE1(kacs_impersonate_peer, int, sock_fd)
-{
-	struct pkm_kacs_socket_security *sec;
-	struct socket *sock;
-	long ret;
-
-	ret = pkm_kacs_lookup_peer_socket(sock_fd, &sock, &sec);
-	if (ret)
-		return ret;
-	if (sock->state != SS_CONNECTED) {
-		sockfd_put(sock);
-		return -EACCES;
-	}
-
-	ret = pkm_kacs_impersonate_peer_core(sec);
-	sockfd_put(sock);
-	return ret;
-}

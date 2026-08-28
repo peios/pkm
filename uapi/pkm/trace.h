@@ -150,7 +150,7 @@
 #define KACS_SOCK_CONNECT		13U /* unix_stream_connect result */
 #define KACS_SOCK_LEVEL_SET		14U /* impersonation level updated */
 #define KACS_SOCK_OPEN_TOKEN		15U /* open peer-token fd result */
-#define KACS_SOCK_IMPERSONATE		16U /* impersonate peer result */
+/* 16 was KACS_SOCK_IMPERSONATE (kacs_impersonate_peer); retired, not reused. */
 
 /*
  * kacs_namespace stage — which sub-decision of a namespace-mutation hook a

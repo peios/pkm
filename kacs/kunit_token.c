@@ -5810,7 +5810,7 @@ static void pkm_kunit_peer_socket_set_level_connected_fails_closed(
 
 	ret = pkm_kacs_kunit_set_socket_impersonation_level(
 		SOCK_STREAM, 1, KACS_IMLEVEL_DELEGATION, &view);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EISCONN);
 	KUNIT_EXPECT_EQ(test, view.max_impersonation,
 			(u32)KACS_IMLEVEL_IMPERSONATION);
 }
@@ -5824,7 +5824,7 @@ static void pkm_kunit_peer_socket_set_level_unsupported_type_fails_closed(
 
 	ret = pkm_kacs_kunit_set_socket_impersonation_level(
 		SOCK_DGRAM, 0, KACS_IMLEVEL_IDENTIFICATION, &view);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test, view.max_impersonation,
 			(u32)KACS_IMLEVEL_IMPERSONATION);
 }
@@ -6332,29 +6332,29 @@ static void pkm_kunit_peer_socket_unsupported_or_uncaptured_fail_closed(
 	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
 		pkm_kacs_current_effective_token_ptr(), SOCK_DGRAM,
 		KACS_IMLEVEL_IMPERSONATION, 0, 0, NULL, NULL, NULL);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_open_peer_token_for_socket(0, NULL),
-			(long)-EACCES);
+			(long)-ENOTCONN);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_open_peer_token_for_socket(1, NULL),
-			(long)-EACCES);
+			(long)-ENODATA);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_open_peer_token_for_socket_type(
 				SOCK_DGRAM, 1,
 				pkm_kacs_current_effective_token_ptr()),
-			(long)-EACCES);
+			(long)-EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_impersonate_peer_for_socket(0, NULL),
-			(long)-EACCES);
+			(long)-ENOTCONN);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_impersonate_peer_for_socket(1, NULL),
-			(long)-EACCES);
+			(long)-ENODATA);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_impersonate_peer_for_socket_type(
 				SOCK_DGRAM, 1,
 				pkm_kacs_current_effective_token_ptr()),
-			(long)-EACCES);
+			(long)-EOPNOTSUPP);
 }
 
 

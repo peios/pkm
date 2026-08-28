@@ -2,7 +2,7 @@ diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/sy
 index 524155d..f7c0011 100644
 --- a/arch/x86/entry/syscalls/syscall_64.tbl
 +++ b/arch/x86/entry/syscalls/syscall_64.tbl
-@@ -441,3 +441,28 @@
+@@ -441,3 +441,25 @@
  547	x32	pwritev2		compat_sys_pwritev64v2
  # This is the end of the legacy x32 range.  Numbers 548 and above are
  # not special and are not to be used for x32-specific syscalls.
@@ -13,10 +13,7 @@ index 524155d..f7c0011 100644
 +1004	common	kacs_create_logon_session		sys_kacs_create_logon_session
 +1005	common	kacs_set_psb		sys_kacs_set_psb
 +1006	common	kacs_destroy_empty_logon_session		sys_kacs_destroy_empty_logon_session
-+1010	common	kacs_open_peer_token		sys_kacs_open_peer_token
-+1011	common	kacs_impersonate_peer		sys_kacs_impersonate_peer
 +1012	common	kacs_revert		sys_kacs_revert
-+1013	common	kacs_set_impersonation_level		sys_kacs_set_impersonation_level
 +1020	common	kacs_open		sys_kacs_open
 +1021	common	kacs_get_sd		sys_kacs_get_sd
 +1022	common	kacs_set_sd		sys_kacs_set_sd
@@ -35,7 +32,7 @@ diff --git a/tools/perf/arch/x86/entry/syscalls/syscall_64.tbl b/tools/perf/arch
 index 524155d..f7c0011 100644
 --- a/tools/perf/arch/x86/entry/syscalls/syscall_64.tbl
 +++ b/tools/perf/arch/x86/entry/syscalls/syscall_64.tbl
-@@ -441,3 +441,28 @@
+@@ -441,3 +441,25 @@
  547	x32	pwritev2		compat_sys_pwritev64v2
  # This is the end of the legacy x32 range.  Numbers 548 and above are
  # not special and are not to be used for x32-specific syscalls.
@@ -46,10 +43,7 @@ index 524155d..f7c0011 100644
 +1004	common	kacs_create_logon_session		sys_kacs_create_logon_session
 +1005	common	kacs_set_psb		sys_kacs_set_psb
 +1006	common	kacs_destroy_empty_logon_session		sys_kacs_destroy_empty_logon_session
-+1010	common	kacs_open_peer_token		sys_kacs_open_peer_token
-+1011	common	kacs_impersonate_peer		sys_kacs_impersonate_peer
 +1012	common	kacs_revert		sys_kacs_revert
-+1013	common	kacs_set_impersonation_level		sys_kacs_set_impersonation_level
 +1020	common	kacs_open		sys_kacs_open
 +1021	common	kacs_get_sd		sys_kacs_get_sd
 +1022	common	kacs_set_sd		sys_kacs_set_sd

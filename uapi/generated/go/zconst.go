@@ -439,7 +439,6 @@ const (
 	KACS_SOCK_BIND                                      = 12
 	KACS_SOCK_CONNECT                                   = 13
 	KACS_SOCK_HAVE_SD                                   = 10
-	KACS_SOCK_IMPERSONATE                               = 16
 	KACS_SOCK_LEVEL_SET                                 = 14
 	KACS_SOCK_NOT_UNIX                                  = 1
 	KACS_SOCK_NO_PEER_TOKEN                             = 6
@@ -450,6 +449,8 @@ const (
 	KACS_SOCK_PIP_CONTEXT                               = 7
 	KACS_SOCK_SD_DECISION                               = 8
 	KACS_SOCK_WRONG_STATE                               = 5
+	KACS_SO_IMPERSONATION_LEVEL                         = 2
+	KACS_SO_PEER_TOKEN                                  = 1
 	KACS_STATUS_CREATED                                 = 2
 	KACS_STATUS_OPENED                                  = 1
 	KACS_STATUS_OVERWRITTEN                             = 3
@@ -976,6 +977,7 @@ const (
 	RSI_WRITE_KEY_FIELD_SD                              = 1
 	RSI_WRITE_KEY_RESPONSE                              = 32786
 	SACL_SECURITY_INFORMATION                           = 8
+	SOL_KACS                                            = 4096
 	SYS_KACS_ACCESS_CHECK                               = 1023
 	SYS_KACS_ACCESS_CHECK_LIST                          = 1024
 	SYS_KACS_CREATE_LOGON_SESSION                       = 1004
@@ -983,15 +985,12 @@ const (
 	SYS_KACS_DESTROY_EMPTY_LOGON_SESSION                = 1006
 	SYS_KACS_GET_MOUNT_POLICY                           = 1026
 	SYS_KACS_GET_SD                                     = 1021
-	SYS_KACS_IMPERSONATE_PEER                           = 1011
 	SYS_KACS_OPEN                                       = 1020
-	SYS_KACS_OPEN_PEER_TOKEN                            = 1010
 	SYS_KACS_OPEN_PROCESS_TOKEN                         = 1001
 	SYS_KACS_OPEN_SELF_TOKEN                            = 1000
 	SYS_KACS_OPEN_THREAD_TOKEN                          = 1002
 	SYS_KACS_REVERT                                     = 1012
 	SYS_KACS_SET_CAAP                                   = 1025
-	SYS_KACS_SET_IMPERSONATION_LEVEL                    = 1013
 	SYS_KACS_SET_MOUNT_POLICY                           = 1027
 	SYS_KACS_SET_PSB                                    = 1005
 	SYS_KACS_SET_SD                                     = 1022

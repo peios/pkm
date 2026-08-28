@@ -23,11 +23,17 @@
 #define SYS_KACS_SET_PSB		1005
 #define SYS_KACS_DESTROY_EMPTY_LOGON_SESSION	1006
 
-/* KACS — peer tokens and impersonation. */
-#define SYS_KACS_OPEN_PEER_TOKEN	1010
-#define SYS_KACS_IMPERSONATE_PEER	1011
+/*
+ * KACS — impersonation.
+ *
+ * 1010, 1011 and 1013 are retired and MUST NOT be reused: they were
+ * kacs_open_peer_token, kacs_impersonate_peer and
+ * kacs_set_impersonation_level, replaced by the SOL_KACS socket options in
+ * <pkm/socket.h>. A retired number stays a hole so that a stale binary
+ * built against it fails with -ENOSYS rather than reaching a different
+ * syscall.
+ */
 #define SYS_KACS_REVERT			1012
-#define SYS_KACS_SET_IMPERSONATION_LEVEL 1013
 
 /* KACS — files, security descriptors, access checks, mount policy. */
 #define SYS_KACS_OPEN			1020
