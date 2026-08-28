@@ -124,6 +124,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(socket_bind, pkm_kacs_socket_bind),
 	LSM_HOOK_INIT(unix_stream_connect, pkm_kacs_unix_stream_connect),
 	LSM_HOOK_INIT(unix_may_send, pkm_kacs_unix_may_send),
+	LSM_HOOK_INIT(socket_listen, pkm_kacs_socket_listen),
 	LSM_HOOK_INIT(task_kill, pkm_kacs_task_kill),
 	LSM_HOOK_INIT(ptrace_access_check, pkm_kacs_ptrace_access_check),
 	LSM_HOOK_INIT(ptrace_traceme, pkm_kacs_ptrace_traceme),

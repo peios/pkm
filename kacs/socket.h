@@ -17,6 +17,7 @@ int pkm_kacs_socket_bind(struct socket *sock, struct sockaddr *address,
 int pkm_kacs_unix_stream_connect(struct sock *sock, struct sock *other,
 				 struct sock *newsk);
 int pkm_kacs_unix_may_send(struct socket *sock, struct socket *other);
+int pkm_kacs_socket_listen(struct socket *sock, int backlog);
 /* SOL_KACS option handlers, dispatched from net/socket.c. */
 int pkm_kacs_sock_setsockopt(struct socket *sock, int optname,
 			     sockptr_t optval, unsigned int optlen);

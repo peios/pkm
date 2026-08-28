@@ -414,7 +414,9 @@ DEFINE_EVENT(kacs_signing_probe, kacs_signing_probe,
 	{ KACS_SOCK_ATTACH,		"attach" },			\
 	{ KACS_SOCK_GATE,		"gate" },			\
 	{ KACS_SOCK_REGISTER,		"register" },			\
-	{ KACS_SOCK_DELIVER,		"deliver" }
+	{ KACS_SOCK_DELIVER,		"deliver" },			\
+	{ KACS_SOCK_LISTEN,		"listen" },			\
+	{ KACS_SOCK_RESTAMP,		"restamp" }
 
 /*
  * One AF_UNIX socket SD / impersonation decision. Socket-shape fields are 0 at

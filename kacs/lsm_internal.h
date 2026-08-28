@@ -185,6 +185,14 @@ struct pkm_kacs_socket_security {
 	 * convey_lock, a mutex because derivation allocates.
 	 */
 	bool pass_token;
+	/* KACS_SO_IMPERSONATION_LEVEL was set explicitly (listener default) */
+	bool level_set;
+	/*
+	 * The identity this listener conveys to connecting clients: captured
+	 * from the effective token at listen(), replaced by KACS_SO_RESTAMP.
+	 * Guarded by register_lock.
+	 */
+	const void *listener_token;
 	struct mutex convey_lock;
 	const void *convey_src;
 	const void *convey_token;

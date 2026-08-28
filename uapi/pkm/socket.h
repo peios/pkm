@@ -30,12 +30,15 @@
  * getsockopt only. optval: int — a new token fd, carrying fixed
  * TOKEN_QUERY | TOKEN_IMPERSONATE access and opened O_CLOEXEC, for this
  * end's conveyed-identity register: the peer identity associated with the
- * data this end has consumed so far. The register is initialised by the
- * identity captured at connect() and advanced by each KACS_SCM_TOKEN the
- * reader's position passes (a token still queued but unread is not yet
- * visible). Every call returns a fresh fd to an immutable snapshot; two
- * calls may name different tokens, but no token ever changes. -ENOTCONN if
- * the socket is not connected; -ENODATA if nothing has been conveyed yet.
+ * data this end has consumed so far. The register is initialised at
+ * connect() — on the accepted end with the client's identity, on the
+ * connecting end with the listener's identity as captured at listen() (at
+ * KACS_IMLEVEL_IDENTIFICATION unless the listener set its own level) — and
+ * advanced by each KACS_SCM_TOKEN the reader's position passes (a token
+ * still queued but unread is not yet visible). Every call returns a fresh
+ * fd to an immutable snapshot; two calls may name different tokens, but no
+ * token ever changes. -ENOTCONN if the socket is not connected; -ENODATA if
+ * nothing has been conveyed yet.
  */
 #define KACS_SO_PEER_TOKEN		1
 
@@ -56,6 +59,17 @@
  * Default 0.
  */
 #define KACS_SO_PASS_TOKEN		3
+
+/*
+ * setsockopt only, on a listening socket. optval: int, ignored. Replaces
+ * the identity the listener conveys to connecting clients — captured when
+ * listen() was called — with the caller's current effective identity, at
+ * the listener's level. Self-gated: a process can always attest to what it
+ * is. For a process that receives a listener it did not create (from a
+ * descriptor store after a restart, or from a broker), so that clients see
+ * the process actually accepting. -EINVAL if the socket is not listening.
+ */
+#define KACS_SO_RESTAMP			4
 
 /*
  * Ancillary message type, at cmsg_level SOL_KACS. Data: one int.

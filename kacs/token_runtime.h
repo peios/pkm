@@ -581,6 +581,7 @@ struct pkm_kacs_kunit_set_psb_args {
 
 struct pkm_kacs_kunit_socket_view {
 	const void *peer_token;
+	const void *listener_token;
 	const void *socket_sd_ptr;
 	size_t socket_sd_len;
 	u32 max_impersonation;
@@ -1187,6 +1188,9 @@ long pkm_kacs_kunit_socket_pass_token_send(u32 socket_type, u32 level,
 long pkm_kacs_kunit_socket_attach_fd(int fd, u32 socket_level,
 				     const void *server_primary,
 				     const void **token_out);
+long pkm_kacs_kunit_socket_listen_stamp(u32 level_set, u32 level, u32 restamp,
+					const void **first_out,
+					const void **second_out);
 long pkm_kacs_kunit_socket_register_flow(u32 socket_type, const void *initial,
 					 const void *conveyed, u32 *deliver_out,
 					 u32 *boundary_out,

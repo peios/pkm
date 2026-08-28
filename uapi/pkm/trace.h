@@ -155,6 +155,8 @@
 #define KACS_SOCK_GATE			18U /* explicit KACS_SCM_TOKEN send-gate verdict */
 #define KACS_SOCK_REGISTER		19U /* conveyed-identity register advanced */
 #define KACS_SOCK_DELIVER		20U /* KACS_SCM_TOKEN delivered to a receiver */
+#define KACS_SOCK_LISTEN		21U /* listener identity captured at listen() */
+#define KACS_SOCK_RESTAMP		22U /* listener identity replaced by KACS_SO_RESTAMP */
 
 /*
  * kacs_namespace stage — which sub-decision of a namespace-mutation hook a

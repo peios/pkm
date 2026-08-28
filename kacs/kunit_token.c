@@ -6474,6 +6474,66 @@ static void pkm_kunit_socket_register_follows_read_position(
 }
 
 
+static void pkm_kunit_socket_listener_conveys_itself_at_identification(
+	struct kunit *test)
+{
+	const void *first = NULL, *second = NULL;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	/* no level chosen: Identification — clients verify, not impersonate */
+	ret = pkm_kacs_kunit_socket_listen_stamp(0, 0, 1, &first, &second);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, first);
+	KUNIT_ASSERT_NOT_NULL(test, second);
+	KUNIT_EXPECT_EQ(test, kacs_rust_token_impersonation_level(first),
+			(u32)KACS_IMLEVEL_IDENTIFICATION);
+	KUNIT_EXPECT_FALSE(test, kacs_rust_token_is_primary(first));
+	/* a restamp captures afresh: a new token object, same level */
+	KUNIT_EXPECT_PTR_NE(test, first, second);
+	KUNIT_EXPECT_EQ(test, kacs_rust_token_impersonation_level(second),
+			(u32)KACS_IMLEVEL_IDENTIFICATION);
+	kacs_rust_token_drop(first);
+	kacs_rust_token_drop(second);
+
+	/* a listener that chose its level conveys itself at that level */
+	first = NULL;
+	ret = pkm_kacs_kunit_socket_listen_stamp(1, KACS_IMLEVEL_IMPERSONATION,
+						 0, &first, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, first);
+	KUNIT_EXPECT_EQ(test, kacs_rust_token_impersonation_level(first),
+			(u32)KACS_IMLEVEL_IMPERSONATION);
+	kacs_rust_token_drop(first);
+}
+
+
+static void pkm_kunit_socket_connect_fills_client_register(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_socket_view listener = { }, accepted = { };
+	const void *captured = NULL;
+	long ret;
+
+	/*
+	 * The capture helper wires client → listener → accepted through the
+	 * connect core; the listener carries no listen-time stamp here (it was
+	 * never listen()ed), so the client register stays empty — which is the
+	 * socketpair shape. The accepted end holds the client's identity.
+	 */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
+		pkm_kacs_current_effective_token_ptr(), SOCK_STREAM,
+		KACS_IMLEVEL_IMPERSONATION, 0, 0, &captured, &listener,
+		&accepted);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, captured);
+	KUNIT_EXPECT_PTR_EQ(test, accepted.peer_token, captured);
+	KUNIT_EXPECT_NULL(test, listener.listener_token);
+	kacs_rust_token_drop(captured);
+}
+
+
 static void pkm_kunit_peer_socket_unsupported_or_uncaptured_fail_closed(
 	struct kunit *test)
 {
@@ -12573,6 +12633,8 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_socket_pass_token_conveys_cached_identity),
 	KUNIT_CASE(pkm_kunit_socket_attach_gates_like_impersonation),
 	KUNIT_CASE(pkm_kunit_socket_register_follows_read_position),
+	KUNIT_CASE(pkm_kunit_socket_listener_conveys_itself_at_identification),
+	KUNIT_CASE(pkm_kunit_socket_connect_fills_client_register),
 	KUNIT_CASE(pkm_kunit_token_impersonate_rejects_primary_token),
 	KUNIT_CASE(pkm_kunit_token_query_user_probe_and_payload),
 	KUNIT_CASE(pkm_kunit_token_query_groups_payload),

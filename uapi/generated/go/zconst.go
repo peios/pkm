@@ -444,6 +444,7 @@ const (
 	KACS_SOCK_GATE                                      = 18
 	KACS_SOCK_HAVE_SD                                   = 10
 	KACS_SOCK_LEVEL_SET                                 = 14
+	KACS_SOCK_LISTEN                                    = 21
 	KACS_SOCK_NOT_UNIX                                  = 1
 	KACS_SOCK_NO_PEER_TOKEN                             = 6
 	KACS_SOCK_NO_SD                                     = 9
@@ -452,11 +453,13 @@ const (
 	KACS_SOCK_OPEN_TOKEN                                = 15
 	KACS_SOCK_PIP_CONTEXT                               = 7
 	KACS_SOCK_REGISTER                                  = 19
+	KACS_SOCK_RESTAMP                                   = 22
 	KACS_SOCK_SD_DECISION                               = 8
 	KACS_SOCK_WRONG_STATE                               = 5
 	KACS_SO_IMPERSONATION_LEVEL                         = 2
 	KACS_SO_PASS_TOKEN                                  = 3
 	KACS_SO_PEER_TOKEN                                  = 1
+	KACS_SO_RESTAMP                                     = 4
 	KACS_STATUS_CREATED                                 = 2
 	KACS_STATUS_OPENED                                  = 1
 	KACS_STATUS_OVERWRITTEN                             = 3
