@@ -48,6 +48,8 @@ require_unset CONFIG_BPF_LSM
 require_set CONFIG_LSM '"landlock,lockdown,yama,integrity,pkm"'
 require_set CONFIG_STRICT_DEVMEM y
 require_set CONFIG_MODULE_SIG_FORCE y
+require_unset CONFIG_SECURITY_LOADPIN
+require_unset CONFIG_FW_UPLOAD
 
 # Module signing must be ML-DSA-65, matching KACS binary signing, and the
 # authattrs waiver must accompany it. Dropping the waiver without moving to

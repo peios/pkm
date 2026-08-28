@@ -22,6 +22,14 @@ CONFIG_RUST=y
 # CONFIG_BPF_LSM is not set
 CONFIG_SECURITY_PKM=y
 CONFIG_LSM="landlock,lockdown,yama,integrity,pkm"
+# LoadPin (pin module/firmware loads to one filesystem) was =y in the base
+# config but never in CONFIG_LSM, so it was compiled and never initialised —
+# and it could not work here anyway: it pins to whichever filesystem serves
+# the FIRST kernel file load, which on Peios is the writable initramfs
+# tmpfs (the coldplug hook modprobes before root is mounted), at which point
+# it disables itself. Module signing (MODULE_SIG_FORCE) and PEI-493 are the
+# controls Peios actually relies on. PEI-495.
+# CONFIG_SECURITY_LOADPIN is not set
 
 # --- Lockdown: integrity mode, enabled early ---
 # security_locked_down() takes no subject -- it consults no task, cred or token,
@@ -69,6 +77,13 @@ CONFIG_MODULE_SIG_KEY_TYPE_MLDSA_65=y
 # waivable when the algorithm is ML-DSA, so RSA/ECDSA signatures with signedAttrs
 # are still refused. Drop this when the pool moves to OpenSSL 4.x.
 CONFIG_PKCS7_WAIVE_AUTHATTRS_REJECTION_FOR_MLDSA=y
+
+# --- Firmware loader ---
+# FW_UPLOAD is a sysfs interface for pushing firmware INTO a device
+# (FPGA/persistent-flash updates), bypassing the file-based loader entirely.
+# Nothing on Peios needs it, and it is a path a firmware-signing check
+# (PEI-493) would not cover. Off.
+# CONFIG_FW_UPLOAD is not set
 
 # --- request_module()'s helper ---
 # The upstream default is /sbin/modprobe, which does not exist on Peios: kmod's
