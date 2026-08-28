@@ -979,6 +979,9 @@ long pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 	const void *subject_token, u8 *buf, size_t buf_len,
 	size_t *required_out);
 long pkm_kacs_kunit_signal_origin_is_kernel(u32 origin_kind);
+long pkm_kacs_kunit_task_kill_states(const void *subject_token,
+				     void *caller_state, void *target_state,
+				     int sig);
 long pkm_kacs_kunit_check_signal_for_subject(
 	const struct pkm_kacs_kunit_process_signal_check_args *args);
 long pkm_kacs_kunit_check_signal_for_current(

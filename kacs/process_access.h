@@ -10,6 +10,10 @@ struct pkm_kacs_process_sd;
 struct pkm_kacs_process_state;
 struct task_struct;
 
+long pkm_kacs_task_kill_states(const void *subject_token,
+			       struct pkm_kacs_process_state *caller_state,
+			       struct pkm_kacs_process_state *target_state,
+			       int sig);
 bool pkm_kacs_pip_dominates(u32 caller_pip_type, u32 caller_pip_trust,
 			    u32 target_pip_type, u32 target_pip_trust);
 long pkm_kacs_authorize_process_sd_access(

@@ -567,8 +567,6 @@ int pkm_kacs_task_kill(struct task_struct *target,
 	struct pkm_kacs_process_state *target_state;
 	const struct cred *subject_cred;
 	const void *subject_token;
-	u32 desired_access;
-	long ret;
 
 	if (!target || !target->security)
 		return -EACCES;
@@ -591,6 +589,22 @@ int pkm_kacs_task_kill(struct task_struct *target,
 
 	target_state = pkm_kacs_task(target)->process_state;
 	subject_token = pkm_kacs_cred(subject_cred)->token;
+	return pkm_kacs_task_kill_states(subject_token, caller_state,
+					 target_state, sig);
+}
+
+/*
+ * The post-origin body of task_kill, on process states rather than tasks so
+ * KUnit can reach the structural same-process exemption (PEI-148).
+ */
+long pkm_kacs_task_kill_states(const void *subject_token,
+			       struct pkm_kacs_process_state *caller_state,
+			       struct pkm_kacs_process_state *target_state,
+			       int sig)
+{
+	u32 desired_access;
+	long ret;
+
 	if (!caller_state || !target_state || !subject_token)
 		return -EACCES;
 
@@ -609,6 +623,14 @@ int pkm_kacs_task_kill(struct task_struct *target,
 	return pkm_kacs_authorize_process_access_core(
 		subject_token, target_state, READ_ONCE(caller_state->pip_type),
 		READ_ONCE(caller_state->pip_trust), desired_access);
+}
+
+long pkm_kacs_kunit_task_kill_states(const void *subject_token,
+				     void *caller_state, void *target_state,
+				     int sig)
+{
+	return pkm_kacs_task_kill_states(subject_token, caller_state,
+					 target_state, sig);
 }
 
 int pkm_kacs_ptrace_access_check(struct task_struct *child,

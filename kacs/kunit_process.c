@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "lsm_internal.h"
+#include "process_state.h"
 
 
 static void pkm_kunit_capget_reports_allow_substrate(struct kunit *test)
@@ -3493,6 +3495,110 @@ static void pkm_kunit_proc_token_inspection_denied_by_pip(
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 
 	pkm_kacs_free((void *)process_sd);
+}
+
+
+/* PEI-148: the same-process exemption is structural, never SD-based. */
+static void pkm_kunit_signal_same_process_is_structural(struct kunit *test)
+{
+	/* self-relative SD: DACL present, empty ACL -- nobody is granted anything */
+	static const u8 empty_dacl_sd[28] = { 1, 0, 0x04, 0x80, 0, 0, 0, 0,
+					      0, 0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0,
+					      2, 0, 8, 0, 0, 0, 0, 0 };
+	struct pkm_kacs_process_state *self_state;
+	struct pkm_kacs_process_state *other_state;
+	struct pkm_kacs_process_sd *sd;
+	struct pkm_kacs_boot_snapshot snapshot = { };
+	const void *primary = pkm_kacs_current_primary_token_ptr();
+	const void *restricted = NULL;
+	const u8 *default_sd;
+	const u8 *deny_sd = NULL;
+	size_t default_len = 0;
+	size_t deny_len = 0;
+	u8 payload[64];
+	size_t payload_len;
+
+	KUNIT_ASSERT_NOT_NULL(test, primary);
+	self_state = pkm_kacs_process_state_alloc(primary, 0, 0, 0);
+	other_state = pkm_kacs_process_state_alloc(primary, 0, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, self_state);
+	KUNIT_ASSERT_NOT_NULL(test, other_state);
+
+	/*
+	 * Both processes carry the default SD with its DACL replaced by an
+	 * empty one: owner and group intact, nobody granted anything.
+	 */
+	default_sd = kacs_rust_create_default_process_sd(primary, &default_len);
+	KUNIT_ASSERT_NOT_NULL(test, default_sd);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_merge_process_sd(primary, default_sd, default_len,
+						   KACS_SECINFO_DACL, empty_dacl_sd,
+						   sizeof(empty_dacl_sd), &deny_sd,
+						   &deny_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, deny_sd);
+	sd = pkm_kacs_process_sd_wrap_bytes(deny_sd, deny_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_kacs_process_state_replace_sd(self_state, sd);
+	/* a second, separately owned copy for the other process */
+	deny_sd = NULL;
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_merge_process_sd(primary, default_sd, default_len,
+						   KACS_SECINFO_DACL, empty_dacl_sd,
+						   sizeof(empty_dacl_sd), &deny_sd,
+						   &deny_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, deny_sd);
+	sd = pkm_kacs_process_sd_wrap_bytes(deny_sd, deny_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	pkm_kacs_process_state_replace_sd(other_state, sd);
+	pkm_kacs_free((void *)default_sd);
+
+	/* (1) same process: allowed regardless of the SD */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_task_kill_states(primary, self_state,
+							self_state, SIGKILL),
+			0L);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_task_kill_states(primary, self_state,
+							self_state, SIGCONT),
+			0L);
+	/*
+	 * The KUnit primary token holds SeDebugPrivilege, which rescues the
+	 * descriptor check (never dominance), so cross-process enforcement is
+	 * shown below with a token that has had SeDebug and SeTcb removed.
+	 */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_task_kill_states(primary, self_state,
+							other_state, SIGTERM),
+			0L);
+
+	/* (2) a restricted token signalling its own process is still allowed */
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(primary, &snapshot));
+	payload_len = pkm_kunit_build_restrict_payload(
+		payload, (u32[]){ 0U }, 1, snapshot.groups_ptr, 1);
+	KUNIT_ASSERT_GT(test, (long)payload_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_restrict(primary, primary,
+						 KACS_SE_DEBUG_PRIVILEGE |
+							 KACS_SE_TCB_PRIVILEGE,
+						 0U, payload, payload_len, 1U,
+						 1U, &restricted),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, restricted);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_task_kill_states(restricted, self_state,
+							self_state, SIGABRT),
+			0L);
+	/* (3) cross-process: the SD is enforced */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_task_kill_states(restricted, self_state,
+							other_state, SIGABRT),
+			(long)-EACCES);
+
+	kacs_rust_token_drop(restricted);
+	pkm_kacs_process_state_put(self_state);
+	pkm_kacs_process_state_put(other_state);
 }
 
 
@@ -9979,6 +10085,7 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_proc_token_inspection_denied_by_process_sd),
 	KUNIT_CASE(pkm_kunit_proc_token_inspection_denied_by_pip),
 	KUNIT_CASE(pkm_kunit_signal_terminate_success),
+	KUNIT_CASE(pkm_kunit_signal_same_process_is_structural),
 	KUNIT_CASE(pkm_kunit_signal_info_success),
 	KUNIT_CASE(pkm_kunit_process_sd_access_uses_caller_psb_pip),
 	KUNIT_CASE(pkm_kunit_signal_denied_by_process_sd),
