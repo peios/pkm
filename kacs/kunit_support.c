@@ -5870,7 +5870,7 @@ int pkm_kacs_kunit_reproject_exec_caps(
 	if (pkm_kacs_bprm_creds_from_file_core(
 		    pkm_kacs_current_effective_token_ptr(),
 		    pkm_kacs_current_primary_token_ptr(), NULL, bprm.cred,
-		    current_cred(), false, false, false)) {
+		    current_cred(), false, false, false, 0)) {
 		ret = -EACCES;
 		goto out;
 	}
@@ -5960,7 +5960,7 @@ long pkm_kacs_kunit_check_exec_setid_compat_for_subject(
 
 	ret = pkm_kacs_bprm_creds_from_file_core(
 		subject_token, subject_token, NULL, new, old, false, false,
-		false);
+		false, 0);
 	if (!ret) {
 		out->uid = __kuid_val(new->uid);
 		out->euid = __kuid_val(new->euid);
@@ -6058,7 +6058,7 @@ long pkm_kacs_kunit_check_exec_new_process_min(
 
 	ret = pkm_kacs_bprm_creds_from_file_core(
 		args->subject_token, args->primary_token, &state->file, new,
-		old, true, false, false);
+		old, true, false, false, 0);
 	if (!ret) {
 		new_sec = pkm_kacs_cred(new);
 		if (!new_sec->token) {

@@ -20,7 +20,13 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 					const struct cred *old,
 					bool require_file_for_npm,
 					bool stage_exec_pip,
-					bool usermodehelper);
+					bool usermodehelper,
+					unsigned int bprm_unsafe);
+bool pkm_kacs_exec_pip_cap_for_unsafe(unsigned int bprm_unsafe,
+				      u32 current_pip_type,
+				      u32 current_pip_trust,
+				      u32 *exec_pip_type,
+				      u32 *exec_pip_trust);
 
 /*
  * Called from kernel/umh.c on a usermodehelper child immediately before it

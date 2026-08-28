@@ -235,7 +235,9 @@ DEFINE_EVENT(kacs_process_access, kacs_process_access,
 	{ KACS_EXEC_INTEGRITY_INVALID_SD,	"integrity-invalid-sd" }, \
 	{ KACS_EXEC_IMPERSONATION_REVERT_FAIL,	"impersonation-revert-fail" }, \
 	{ KACS_EXEC_PIP_COMMITTED,		"pip-committed" },	\
-	{ KACS_EXEC_UMH_NOT_TCB,		"umh-not-tcb" }
+	{ KACS_EXEC_UMH_NOT_TCB,		"umh-not-tcb" },	\
+	{ KACS_EXEC_SIGNATURE_UNVERIFIABLE,	"signature-unverifiable" }, \
+	{ KACS_EXEC_PIP_CAPPED_UNSAFE,		"pip-capped-unsafe" }
 
 /*
  * An exec/bprm credential or PIP transition. exec_pip fields are 0 when unknown

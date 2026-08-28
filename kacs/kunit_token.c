@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include <linux/binfmts.h>
 #include <linux/fsnotify_backend.h>
 #include <linux/ipc.h>
 #include <linux/msg.h>
@@ -9,6 +10,7 @@
 #include <uapi/linux/shm.h>
 #include <linux/stat.h>
 #include <pkm/ipc.h>
+#include "exec.h"
 #include "ipc.h"
 #include "lsm_internal.h"
 
@@ -6612,6 +6614,39 @@ static void pkm_kunit_path_notify_maps_to_read_class_rights(struct kunit *test)
 			-EACCES);
 }
 
+static void pkm_kunit_exec_pip_capped_under_tracer_or_no_new_privs(struct kunit *test)
+{
+	u32 type, trust;
+
+	/* untraced: the raise stands */
+	type = 2; trust = 3;
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_exec_pip_cap_for_unsafe(0, 1, 1, &type, &trust));
+	KUNIT_EXPECT_EQ(test, type, 2U);
+	KUNIT_EXPECT_EQ(test, trust, 3U);
+	/* traced: capped at the current label */
+	type = 2; trust = 3;
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_exec_pip_cap_for_unsafe(LSM_UNSAFE_PTRACE, 1, 1, &type, &trust));
+	KUNIT_EXPECT_EQ(test, type, 1U);
+	KUNIT_EXPECT_EQ(test, trust, 1U);
+	/* no_new_privs from an unlabelled process: stays unlabelled */
+	type = 2; trust = 3;
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_exec_pip_cap_for_unsafe(LSM_UNSAFE_NO_NEW_PRIVS, 0, 0, &type, &trust));
+	KUNIT_EXPECT_EQ(test, type, 0U);
+	KUNIT_EXPECT_EQ(test, trust, 0U);
+	/* traced but not a raise (current dominates): untouched */
+	type = 1; trust = 1;
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_exec_pip_cap_for_unsafe(LSM_UNSAFE_PTRACE, 2, 3, &type, &trust));
+	KUNIT_EXPECT_EQ(test, type, 1U);
+	KUNIT_EXPECT_EQ(test, trust, 1U);
+	/* unsigned target under a tracer: nothing to cap */
+	type = 0; trust = 0;
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_exec_pip_cap_for_unsafe(LSM_UNSAFE_PTRACE, 1, 1, &type, &trust));
+	/* other unsafe bits (share, setuid-in-namespace) do not cap */
+	type = 2; trust = 3;
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_exec_pip_cap_for_unsafe(LSM_UNSAFE_SHARE, 1, 1, &type, &trust));
+	KUNIT_EXPECT_EQ(test, type, 2U);
+}
+
 static void pkm_kunit_ipc_operations_map_to_rights(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_flag_access(S_IRUGO),
@@ -12743,6 +12778,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_ipc_default_sd_grants_creator_denies_stranger),
 	KUNIT_CASE(pkm_kunit_ipc_operations_map_to_rights),
 	KUNIT_CASE(pkm_kunit_path_notify_maps_to_read_class_rights),
+	KUNIT_CASE(pkm_kunit_exec_pip_capped_under_tracer_or_no_new_privs),
 	KUNIT_CASE(pkm_kunit_token_impersonate_rejects_primary_token),
 	KUNIT_CASE(pkm_kunit_token_query_user_probe_and_payload),
 	KUNIT_CASE(pkm_kunit_token_query_groups_payload),

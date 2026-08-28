@@ -14,6 +14,7 @@
 #include "copy_up.h"
 #include "cred_lifecycle.h"
 #include "exec.h"
+#include "process_access.h"
 #include "file_access.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
@@ -193,7 +194,8 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 					const struct cred *old,
 					bool require_file_for_npm,
 					bool stage_exec_pip,
-					bool usermodehelper)
+					bool usermodehelper,
+					unsigned int bprm_unsafe)
 {
 	bool uid_changed;
 	bool gid_changed;
@@ -264,6 +266,33 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 		return -EACCES;
 	}
 
+	/*
+	 * Trust raising under a tracer or a seccomp supervisor.
+	 *
+	 * PIP dominance is checked when a tracer attaches and when a seccomp
+	 * filter is installed (no_new_privs, or SeTcb), never again. If the
+	 * traced or supervised process then execs a binary whose signature
+	 * would raise its label, the controller would keep full control of a
+	 * process it no longer dominates. Linux flags exactly these execs as
+	 * LSM_UNSAFE_PTRACE / LSM_UNSAFE_NO_NEW_PRIVS and drops setuid gains
+	 * under them; the same rule applies to the PIP label: the exec goes
+	 * ahead, but the label is capped at the current one. A TCB tracer
+	 * dominates everything already, so no privilege exception is needed.
+	 */
+	if (stage_exec_pip) {
+		const struct pkm_kacs_process_state *state =
+			pkm_kacs_current_process_state();
+
+		if (state &&
+		    pkm_kacs_exec_pip_cap_for_unsafe(
+			    bprm_unsafe, READ_ONCE(state->pip_type),
+			    READ_ONCE(state->pip_trust), &exec_pip_type,
+			    &exec_pip_trust))
+			trace_kacs_exec(false, false, exec_pip_type,
+					exec_pip_trust,
+					KACS_EXEC_PIP_CAPPED_UNSAFE, 0);
+	}
+
 	uid_changed = !uid_eq(new->euid, old->euid);
 	gid_changed = !gid_eq(new->egid, old->egid);
 
@@ -316,6 +345,25 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 	return 0;
 }
 
+bool pkm_kacs_exec_pip_cap_for_unsafe(unsigned int bprm_unsafe,
+				      u32 current_pip_type,
+				      u32 current_pip_trust,
+				      u32 *exec_pip_type,
+				      u32 *exec_pip_trust)
+{
+	if (!exec_pip_type || !exec_pip_trust)
+		return false;
+	if ((bprm_unsafe & (LSM_UNSAFE_PTRACE | LSM_UNSAFE_NO_NEW_PRIVS)) == 0)
+		return false;
+	/* not a raise: the current label already dominates the new one */
+	if (pkm_kacs_pip_dominates(current_pip_type, current_pip_trust,
+				   *exec_pip_type, *exec_pip_trust))
+		return false;
+	*exec_pip_type = current_pip_type;
+	*exec_pip_trust = current_pip_trust;
+	return true;
+}
+
 int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 				  const struct file *file)
 {
@@ -326,7 +374,7 @@ int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 		pkm_kacs_current_effective_token_ptr(),
 		pkm_kacs_current_primary_token_ptr(), file, bprm->cred,
 		current_cred(), true, true,
-		pkm_kacs_current_is_usermodehelper());
+		pkm_kacs_current_is_usermodehelper(), bprm->unsafe);
 }
 
 /*

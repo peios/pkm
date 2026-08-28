@@ -96,6 +96,7 @@
 #define KACS_EXEC_PIP_COMMITTED			14U /* pending exec PIP committed at commit */
 #define KACS_EXEC_UMH_NOT_TCB			15U /* usermodehelper exec below PeiosTcb trust */
 #define KACS_EXEC_SIGNATURE_UNVERIFIABLE	16U /* exec refused: signature could not be verified */
+#define KACS_EXEC_PIP_CAPPED_UNSAFE		17U /* exec PIP label capped at the current one: traced or no_new_privs */
 
 /*
  * kacs_signing reason — code-signature verification outcomes and the distinct
