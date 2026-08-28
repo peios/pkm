@@ -312,6 +312,10 @@ long pkm_kacs_unlink_delete_on_close_file(struct file *file);
 struct pkm_kacs_inode_sd_cache *pkm_kacs_inode_sd_cache_get_current(
 	const struct inode *inode, const struct pkm_kacs_inode_security *sec);
 void pkm_kacs_inode_sd_cache_free(struct pkm_kacs_inode_sd_cache *cache);
+u32 pkm_kacs_path_notify_required_access(const struct inode *inode,
+					 unsigned int obj_type);
+int pkm_kacs_path_notify(const struct path *path, u64 mask,
+			 unsigned int obj_type);
 int pkm_kacs_authorize_path_metadata_access(const struct path *path,
 					    u32 desired_access);
 int pkm_kacs_authorize_dentry_metadata_access(struct dentry *dentry,

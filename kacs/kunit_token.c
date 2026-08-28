@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include <linux/fsnotify_backend.h>
 #include <linux/ipc.h>
 #include <linux/msg.h>
 #include <linux/sem.h>
@@ -9,6 +10,7 @@
 #include <linux/stat.h>
 #include <pkm/ipc.h>
 #include "ipc.h"
+#include "lsm_internal.h"
 
 
 static void pkm_kunit_validate_sd_rejects_oversized_descriptor(
@@ -6579,6 +6581,37 @@ static void pkm_kunit_ipc_default_sd_grants_creator_denies_stranger(
 }
 
 
+static void pkm_kunit_path_notify_maps_to_read_class_rights(struct kunit *test)
+{
+	struct inode dir = { .i_mode = S_IFDIR | 0700 };
+	struct inode reg = { .i_mode = S_IFREG | 0600 };
+	struct inode fifo = { .i_mode = S_IFIFO | 0600 };
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_path_notify_required_access(
+				&dir, FSNOTIFY_OBJ_TYPE_INODE),
+			(u32)KACS_FILE_LIST_DIRECTORY);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_path_notify_required_access(
+				&reg, FSNOTIFY_OBJ_TYPE_INODE),
+			(u32)KACS_FILE_READ_DATA);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_path_notify_required_access(
+				&fifo, FSNOTIFY_OBJ_TYPE_INODE),
+			(u32)KACS_FILE_READ_DATA);
+	/* mount / filesystem / mount-namespace marks are CAP_SYS_ADMIN-gated upstream */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_path_notify_required_access(
+				&dir, FSNOTIFY_OBJ_TYPE_VFSMOUNT),
+			0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_path_notify_required_access(
+				&dir, FSNOTIFY_OBJ_TYPE_SB),
+			0U);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_path_notify(NULL, 0, FSNOTIFY_OBJ_TYPE_INODE),
+			-EACCES);
+}
+
 static void pkm_kunit_ipc_operations_map_to_rights(struct kunit *test)
 {
 	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_flag_access(S_IRUGO),
@@ -12709,6 +12742,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_socket_connect_fills_client_register),
 	KUNIT_CASE(pkm_kunit_ipc_default_sd_grants_creator_denies_stranger),
 	KUNIT_CASE(pkm_kunit_ipc_operations_map_to_rights),
+	KUNIT_CASE(pkm_kunit_path_notify_maps_to_read_class_rights),
 	KUNIT_CASE(pkm_kunit_token_impersonate_rejects_primary_token),
 	KUNIT_CASE(pkm_kunit_token_query_user_probe_and_payload),
 	KUNIT_CASE(pkm_kunit_token_query_groups_payload),

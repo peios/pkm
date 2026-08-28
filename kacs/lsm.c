@@ -80,6 +80,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_alloc_security, pkm_kacs_inode_alloc_security),
 	LSM_HOOK_INIT(inode_free_security_rcu, pkm_kacs_inode_free_security_rcu),
 	LSM_HOOK_INIT(inode_getattr, pkm_kacs_inode_getattr),
+	LSM_HOOK_INIT(path_notify, pkm_kacs_path_notify),
 	LSM_HOOK_INIT(inode_setattr, pkm_kacs_inode_setattr),
 	LSM_HOOK_INIT(inode_file_getattr, pkm_kacs_inode_file_getattr),
 	LSM_HOOK_INIT(inode_file_setattr, pkm_kacs_inode_file_setattr),

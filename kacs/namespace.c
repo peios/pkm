@@ -7,6 +7,7 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/fsnotify_backend.h>
 #include <linux/kernel.h>
 #include <linux/kacs_stratafs.h>
 #include <linux/lsm_hooks.h>
@@ -1014,6 +1015,46 @@ int pkm_kacs_authorize_path_metadata_access(const struct path *path,
 
 	return (int)pkm_kacs_authorize_path_file_access_core(
 		subject_token, path, desired_access);
+}
+
+/*
+ * Watch placement (inotify_add_watch, fanotify_mark, dnotify F_NOTIFY).
+ *
+ * Linux gates an inode watch on path_permission(MAY_READ), but under KACS a
+ * bare MAY_READ never reaches a descriptor check -- read rights are decided at
+ * open, and inode_permission only handles traverse and pathname-socket write.
+ * So the read-class right is checked here, live, against the object's own
+ * descriptor: a watch on a directory reveals the names of its children and is
+ * FILE_LIST_DIRECTORY; a watch on anything else reports its activity and is
+ * FILE_READ_DATA, the same right Linux's MAY_READ stands for.
+ *
+ * Mount, filesystem and mount-namespace marks (obj_type other than INODE) are
+ * not object watches: Linux requires CAP_SYS_ADMIN for them before this hook
+ * runs, which the capability switchboard resolves to SeTcbPrivilege, and
+ * there is no single descriptor to check them against.
+ */
+u32 pkm_kacs_path_notify_required_access(const struct inode *inode,
+					 unsigned int obj_type)
+{
+	if (obj_type != FSNOTIFY_OBJ_TYPE_INODE)
+		return 0;
+	if (inode && S_ISDIR(inode->i_mode))
+		return KACS_FILE_LIST_DIRECTORY;
+	return KACS_FILE_READ_DATA;
+}
+
+int pkm_kacs_path_notify(const struct path *path, u64 mask,
+			 unsigned int obj_type)
+{
+	u32 desired_access;
+
+	if (!path || !path->dentry)
+		return -EACCES;
+	desired_access = pkm_kacs_path_notify_required_access(
+		d_inode(path->dentry), obj_type);
+	if (desired_access == 0)
+		return 0;
+	return pkm_kacs_authorize_path_metadata_access(path, desired_access);
 }
 
 int pkm_kacs_authorize_dentry_metadata_access(struct dentry *dentry,
