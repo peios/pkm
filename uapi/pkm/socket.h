@@ -19,9 +19,10 @@
  * per new protocol, so it cannot collide with a future Linux level.
  *
  * Errors: -ENOPROTOOPT for an option this level does not define (or a
- * get-only option passed to setsockopt); -EOPNOTSUPP on a socket family or
- * type KACS does not capture identity for; -EINVAL for a short optlen or an
- * out-of-range value; -EFAULT for an unreadable/unwritable optval.
+ * get-only option passed to setsockopt); -EOPNOTSUPP on a socket family KACS
+ * does not carry identity on (and, for the register, on a socket type that
+ * has none); -EINVAL for a short optlen or an out-of-range value; -EFAULT
+ * for an unreadable/unwritable optval.
  */
 #define SOL_KACS			4096
 

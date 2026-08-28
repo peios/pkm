@@ -5817,17 +5817,18 @@ static void pkm_kunit_peer_socket_set_level_connected_bounds_later_sends(
 }
 
 
-static void pkm_kunit_peer_socket_set_level_unsupported_type_fails_closed(
+static void pkm_kunit_peer_socket_set_level_bounds_datagram_sends(
 	struct kunit *test)
 {
 	struct pkm_kacs_kunit_socket_view view = { };
 	long ret;
 
+	/* A datagram socket conveys identity per message; the level bounds it. */
 	ret = pkm_kacs_kunit_set_socket_impersonation_level(
 		SOCK_DGRAM, 0, KACS_IMLEVEL_IDENTIFICATION, &view);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, view.max_impersonation,
-			(u32)KACS_IMLEVEL_IMPERSONATION);
+			(u32)KACS_IMLEVEL_IDENTIFICATION);
 }
 
 
@@ -6481,7 +6482,7 @@ static void pkm_kunit_peer_socket_unsupported_or_uncaptured_fail_closed(
 	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
 		pkm_kacs_current_effective_token_ptr(), SOCK_DGRAM,
 		KACS_IMLEVEL_IMPERSONATION, 0, 0, NULL, NULL, NULL);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_open_peer_token_for_socket(0, NULL),
 			(long)-ENOTCONN);
@@ -12555,7 +12556,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_updates_unconnected),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_invalid_fails_closed),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_connected_bounds_later_sends),
-	KUNIT_CASE(pkm_kunit_peer_socket_set_level_unsupported_type_fails_closed),
+	KUNIT_CASE(pkm_kunit_peer_socket_set_level_bounds_datagram_sends),
 	KUNIT_CASE(pkm_kunit_peer_socket_capture_identification_on_seqpacket),
 	KUNIT_CASE(pkm_kunit_peer_socket_capture_anonymous_shape),
 	KUNIT_CASE(pkm_kunit_peer_socket_anonymous_capture_uses_boot_token),

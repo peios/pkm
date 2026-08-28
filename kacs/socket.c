@@ -256,8 +256,7 @@ static long pkm_kacs_set_socket_impersonation_level_core(
 						KACS_SOCK_BAD_ARGS, -EACCES);
 		return -EACCES;
 	}
-	if (sock->sk->sk_family != AF_UNIX ||
-	    !pkm_kacs_socket_type_supported(sock->type)) {
+	if (sock->sk->sk_family != AF_UNIX) {
 		trace_kacs_socket_set_imp_level(sock->sk->sk_family, sock->type,
 						sock->state, level, 0,
 						KACS_SOCK_NOT_UNIX, -EOPNOTSUPP);
@@ -503,6 +502,23 @@ static long pkm_kacs_sockopt_socket(struct socket *sock,
 		return -EACCES;
 	if (sock->sk->sk_family != AF_UNIX ||
 	    !pkm_kacs_socket_type_supported(sock->type))
+		return -EOPNOTSUPP;
+
+	*sec_out = pkm_kacs_sock(sock->sk);
+	return 0;
+}
+
+/*
+ * The level and pass-token options bound and drive identity leaving an end,
+ * which every AF_UNIX type does — a datagram conveys identity per message.
+ * Only the register (KACS_SO_PEER_TOKEN) needs a connection-oriented type.
+ */
+static long pkm_kacs_sockopt_unix(struct socket *sock,
+				  struct pkm_kacs_socket_security **sec_out)
+{
+	if (!sock || !sock->sk || !sock->sk->sk_security)
+		return -EACCES;
+	if (sock->sk->sk_family != AF_UNIX)
 		return -EOPNOTSUPP;
 
 	*sec_out = pkm_kacs_sock(sock->sk);
@@ -799,7 +815,7 @@ int pkm_kacs_sock_setsockopt(struct socket *sock, int optname,
 	if (copy_from_sockptr(&val, optval, sizeof(val)))
 		return -EFAULT;
 
-	ret = pkm_kacs_sockopt_socket(sock, &sec);
+	ret = pkm_kacs_sockopt_unix(sock, &sec);
 	if (ret)
 		return ret;
 
@@ -859,7 +875,7 @@ int pkm_kacs_sock_getsockopt(struct socket *sock, int optname,
 
 		if (len < sizeof(val))
 			return -EINVAL;
-		ret = pkm_kacs_sockopt_socket(sock, &sec);
+		ret = pkm_kacs_sockopt_unix(sock, &sec);
 		if (ret)
 			return ret;
 		val = optname == KACS_SO_PASS_TOKEN ?
@@ -1074,6 +1090,9 @@ long pkm_kacs_kunit_capture_peer_socket_for_subject(
 		*captured_token_out = NULL;
 	if (!client_token)
 		return -EINVAL;
+	/* The connect hook only fires for the connection-oriented types. */
+	if (!pkm_kacs_socket_type_supported(socket_type))
+		return -EACCES;
 
 	state = kzalloc(sizeof(*state), GFP_KERNEL);
 	if (!state)

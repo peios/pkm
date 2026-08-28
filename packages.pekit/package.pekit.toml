@@ -19,7 +19,7 @@
 format = "peipkg"
 
 [package]
-version      = "{{version}}-3"
+version      = "{{version}}-4"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"
