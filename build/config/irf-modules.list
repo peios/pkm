@@ -61,4 +61,12 @@ arch
 # defined to include them and dropping them is a decision about which root
 # types Peios intends to support, not a tidy-up.
 drivers/net
+# Not a network driver, but Intel's wired drivers (e1000e, igb, ixgbe, ice) all
+# import ptp_clock_register from it, and a module whose symbols are missing
+# fails to load with "Unknown symbol" — found when the initramfs coldplug hook
+# (PEI-58) tried e1000e on q35's emulated NIC. depmod over a subset cannot
+# catch this: it drops the unresolvable dependency instead of naming a missing
+# file, so install-modules-irf.sh's dangling-reference check passes. If the
+# network block above ever goes, this line goes with it.
+drivers/ptp
 net
