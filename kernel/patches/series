@@ -56,5 +56,6 @@ net/sock-peercred-projection.patch
 net/socket-sol-kacs-dispatch.patch
 net/scm-kacs-token.patch
 net/af_unix-kacs-token.patch
+ipc/util-lsm-with-object.patch
 arch/x86-prctl-shadow-stack.patch
 arch/syscall-table-pkm.patch

@@ -199,6 +199,12 @@ struct pkm_kacs_socket_security {
 	u32 convey_level;
 };
 
+/* One System V IPC object (message queue, shm segment, semaphore array). */
+struct pkm_kacs_ipc_security {
+	struct pkm_kacs_process_sd *sd;
+	spinlock_t lock;
+};
+
 struct pkm_kacs_process_state {
 	refcount_t refs;
 	spinlock_t mitigation_lock;
@@ -329,6 +335,14 @@ static inline struct pkm_kacs_socket_security *pkm_kacs_sock(
 {
 	return (struct pkm_kacs_socket_security *)((char *)sk->sk_security +
 						   pkm_blob_sizes.lbs_sock);
+}
+
+struct kern_ipc_perm;
+static inline struct pkm_kacs_ipc_security *pkm_kacs_ipc(
+	const struct kern_ipc_perm *ipcp)
+{
+	return (struct pkm_kacs_ipc_security *)((char *)ipcp->security +
+						pkm_blob_sizes.lbs_ipc);
 }
 
 static inline struct pkm_kacs_inode_security *pkm_kacs_inode(

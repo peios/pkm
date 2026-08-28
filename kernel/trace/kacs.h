@@ -1832,6 +1832,32 @@ DEFINE_EVENT(kacs_tlp, kacs_tlp,
 	TP_PROTO(u32 path_len, u32 prefix_count, bool allowed, u8 reason,
 		 long ret),
 	TP_ARGS(path_len, prefix_count, allowed, reason, ret));
+
+/* System V IPC object decisions (ipc.c): kind 0=sem 1=msg 2=shm (ipc_ids index) */
+TRACE_EVENT(kacs_ipc,
+	TP_PROTO(u32 kind, int id, u32 cmd, u32 desired, u8 reason, long ret),
+	TP_ARGS(kind, id, cmd, desired, reason, ret),
+	TP_STRUCT__entry(
+		__field(u32, kind)
+		__field(int, id)
+		__field(u32, cmd)
+		__field(u32, desired)
+		__field(u8, reason)
+		__field(long, ret)
+	),
+	TP_fast_assign(
+		__entry->kind = kind;
+		__entry->id = id;
+		__entry->cmd = cmd;
+		__entry->desired = desired;
+		__entry->reason = reason;
+		__entry->ret = ret;
+	),
+	TP_printk("kind=%u id=%d cmd=%u desired=0x%x reason=%u verdict=%s ret=%ld",
+		__entry->kind, __entry->id, __entry->cmd, __entry->desired,
+		__entry->reason, __entry->ret ? "deny" : "allow", __entry->ret)
+);
+
 #endif /* _TRACE_KACS_H */
 
 /* This part must be outside protection */

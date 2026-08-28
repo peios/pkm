@@ -5,7 +5,7 @@ obj-$(CONFIG_SECURITY_PKM) += pkm.o
 pkm-y := kacs/lsm.o kacs/pkm_trace.o kacs/securityfs.o kacs/kmes_rate.o kacs/tlp.o \
 	kacs/capability.o kacs/cred_lifecycle.o kacs/cred_projection.o \
 	kacs/file_sd_cache.o kacs/signing.o kacs/process_sd.o kacs/process_access.o \
-	kacs/primary_token.o kacs/process_state.o kacs/process_token.o kacs/runtime.o kacs/socket.o \
+	kacs/primary_token.o kacs/process_state.o kacs/process_token.o kacs/runtime.o kacs/socket.o kacs/ipc.o \
 	kacs/exec.o kacs/psb.o kacs/object_lifecycle.o kacs/file_access.o \
 	kacs/file_metadata.o kacs/mount_policy.o kacs/namespace.o kacs/sd_access.o \
 	kacs/access_check.o kacs/native_open.o kacs/copy_up.o \

@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include <linux/ipc.h>
+#include <linux/msg.h>
+#include <linux/sem.h>
+#include <linux/shm.h>
+#include <uapi/linux/shm.h>
+#include <linux/stat.h>
+#include <pkm/ipc.h>
+#include "ipc.h"
 
 
 static void pkm_kunit_validate_sd_rejects_oversized_descriptor(
@@ -6534,6 +6542,70 @@ static void pkm_kunit_socket_connect_fills_client_register(
 }
 
 
+static void pkm_kunit_ipc_default_sd_grants_creator_denies_stranger(
+	struct kunit *test)
+{
+	const void *creator = pkm_kacs_current_effective_token_ptr();
+	const void *stranger;
+	u32 pip_type = 0, pip_trust = 0;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_ASSERT_NOT_NULL(test, creator);
+	KUNIT_ASSERT_EQ(test, pkm_kacs_current_pip_context(&pip_type, &pip_trust), 0);
+
+	/* the creator (the stamping subject) holds GENERIC_ALL */
+	ret = pkm_kacs_kunit_ipc_check(creator, KACS_IPC_READ | KACS_IPC_WRITE,
+				       pip_type, pip_trust);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	ret = pkm_kacs_kunit_ipc_check(creator, KACS_ACCESS_DELETE, pip_type,
+				       pip_trust);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	ret = pkm_kacs_kunit_ipc_check(creator,
+				       KACS_ACCESS_WRITE_DAC |
+					       KACS_ACCESS_WRITE_OWNER,
+				       pip_type, pip_trust);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+
+	/* a different, unprivileged user is denied even read */
+	stranger = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_MEDIUM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, stranger);
+	ret = pkm_kacs_kunit_ipc_check(stranger, KACS_IPC_READ, pip_type,
+				       pip_trust);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	kacs_rust_token_drop(stranger);
+}
+
+
+static void pkm_kunit_ipc_operations_map_to_rights(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_flag_access(S_IRUGO),
+			(u32)KACS_IPC_READ);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_flag_access(S_IWUGO),
+			(u32)KACS_IPC_WRITE);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_flag_access(S_IRUGO | S_IWUGO),
+			(u32)(KACS_IPC_READ | KACS_IPC_WRITE));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_flag_access(0), 0U);
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_ctl_access(PKM_KACS_IPC_SHM, IPC_RMID),
+			(u32)KACS_ACCESS_DELETE);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_ctl_access(PKM_KACS_IPC_MSG, IPC_SET),
+			(u32)(KACS_ACCESS_WRITE_DAC | KACS_ACCESS_WRITE_OWNER));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_ctl_access(PKM_KACS_IPC_SEM, IPC_STAT),
+			(u32)KACS_IPC_QUERY_INFORMATION);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_ctl_access(PKM_KACS_IPC_SHM, SHM_LOCK),
+			(u32)KACS_IPC_SET_INFORMATION);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_ctl_access(PKM_KACS_IPC_SEM, GETVAL),
+			(u32)KACS_IPC_READ);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_ctl_access(PKM_KACS_IPC_SEM, SETALL),
+			(u32)KACS_IPC_WRITE);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_ipc_ctl_access(PKM_KACS_IPC_SHM, IPC_INFO),
+			0U);
+}
+
+
 static void pkm_kunit_peer_socket_unsupported_or_uncaptured_fail_closed(
 	struct kunit *test)
 {
@@ -12635,6 +12707,8 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_socket_register_follows_read_position),
 	KUNIT_CASE(pkm_kunit_socket_listener_conveys_itself_at_identification),
 	KUNIT_CASE(pkm_kunit_socket_connect_fills_client_register),
+	KUNIT_CASE(pkm_kunit_ipc_default_sd_grants_creator_denies_stranger),
+	KUNIT_CASE(pkm_kunit_ipc_operations_map_to_rights),
 	KUNIT_CASE(pkm_kunit_token_impersonate_rejects_primary_token),
 	KUNIT_CASE(pkm_kunit_token_query_user_probe_and_payload),
 	KUNIT_CASE(pkm_kunit_token_query_groups_payload),

@@ -23,8 +23,8 @@ OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
 
 # Headers making up the KACS ABI. kmes.h and lcs.h belong to their own
 # chapters; trace.h is generated separately.
-KACS_HEADERS = ["syscall.h", "token.h", "socket.h", "access.h", "file.h",
-                "process.h", "psb.h", "sd.h", "sid.h", "trace.h"]
+KACS_HEADERS = ["syscall.h", "token.h", "socket.h", "ipc.h", "access.h",
+                "file.h", "process.h", "psb.h", "sd.h", "sid.h", "trace.h"]
 
 # The page's own identity, not prose about the ABI. learn CI fails a deploy
 # on an article with no description (learn 3362f6d), so this cannot be left

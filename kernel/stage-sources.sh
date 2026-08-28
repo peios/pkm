@@ -45,7 +45,7 @@ install -m 0644 "$pkm"/kmes/* "$pkm_dir/kmes/"
 #     header (incl. psb.h), so the whole set must be staged together; staging
 #     pkm.h without psb.h leaves <pkm/pkm.h> unbuildable (an old-installer bug
 #     this list fixes). ---
-for h in pkm psb syscall sid sd token socket access file process kmes lcs trace; do
+for h in pkm psb syscall sid sd token socket ipc access file process kmes lcs trace; do
 	install -m 0644 "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
 done
 

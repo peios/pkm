@@ -18,6 +18,7 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
+#include <pkm/ipc.h>
 #include <pkm/sd.h>
 #include <pkm/token.h>
 
@@ -28,6 +29,7 @@
 #include "mount_policy.h"
 #include "process_access.h"
 #include "process_state.h"
+#include "ipc.h"
 #include "sd_access.h"
 #include "token_fd.h"
 #include "token_runtime.h"
@@ -1050,6 +1052,22 @@ static long pkm_kacs_get_sd_impl(int dirfd, const char __user *path,
 #ifndef CONFIG_SECURITY_PKM_KUNIT
 	(void)kernel_copy;
 #endif
+	/* A System V IPC object addressed by (kind, id): <pkm/ipc.h>. */
+	if (flags & KACS_SD_AT_SYSV_MASK) {
+		int kind = pkm_kacs_ipc_kind_from_sd_flags(flags);
+
+		if (kind < 0 || path || (flags & ~KACS_SD_AT_SYSV_MASK))
+			return -EINVAL;
+		subject_token = pkm_kacs_current_effective_token_ptr();
+		if (!subject_token)
+			return -EACCES;
+		ret = pkm_kacs_ipc_sd_query(kind, dirfd, subject_token,
+					    security_info, &result_sd,
+					    &result_len);
+		if (ret)
+			return ret;
+		goto copyout;
+	}
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 	if (kernel_copy)
 		ret = pkm_kacs_resolve_tokenfd_target_kernel(
@@ -1178,6 +1196,24 @@ SYSCALL_DEFINE6(kacs_set_sd, int, dirfd, const char __user *, path,
 
 	if (!sd_buf || sd_len == 0 || sd_len > PKM_KACS_MAX_SD_BYTES)
 		return -EINVAL;
+
+	/* A System V IPC object addressed by (kind, id): <pkm/ipc.h>. */
+	if (flags & KACS_SD_AT_SYSV_MASK) {
+		int kind = pkm_kacs_ipc_kind_from_sd_flags(flags);
+
+		if (kind < 0 || path || (flags & ~KACS_SD_AT_SYSV_MASK))
+			return -EINVAL;
+		subject_token = pkm_kacs_current_effective_token_ptr();
+		if (!subject_token)
+			return -EACCES;
+		input_sd = memdup_user(sd_buf, sd_len);
+		if (IS_ERR(input_sd))
+			return PTR_ERR(input_sd);
+		ret = pkm_kacs_ipc_sd_set(kind, dirfd, subject_token,
+					  security_info, input_sd, sd_len);
+		kfree(input_sd);
+		return ret;
+	}
 
 	ret = pkm_kacs_resolve_tokenfd_target(dirfd, path, flags, &subject_token,
 					      &target_token);

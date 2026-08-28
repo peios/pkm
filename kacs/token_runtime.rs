@@ -23,7 +23,8 @@ use crate::access_check::{access_check_core, AccessCheckMode};
 use crate::access_check_abi::{own_audit_events, AccessCheckAbiResolved};
 use crate::access_mask::{
     GenericMapping, ACCESS_SYSTEM_SECURITY, FILE_GENERIC_MAPPING, FILE_READ_DATA,
-    FILE_WRITE_DATA, GENERIC_ALL, PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION,
+    FILE_WRITE_DATA, GENERIC_ALL, IPC_GENERIC_MAPPING, PROCESS_GENERIC_MAPPING,
+    PROCESS_QUERY_INFORMATION,
     PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use crate::audit::evaluate_sacl;
@@ -8548,6 +8549,71 @@ fn socket_sd_access_check_errno(
     })
 }
 
+fn ipc_sd_access_check_errno(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    pip: PipContext,
+) -> Result<u32, i32> {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return Err(-EACCES);
+    };
+    let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
+    let normalized = match IPC_GENERIC_MAPPING.normalize_desired_access(desired) {
+        Ok(normalized) => normalized,
+        Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
+        Err(_) => return Err(-EINVAL),
+    };
+
+    subject.with_access_token(|access_token| {
+        let conditional_context = subject.access_check_conditional_context();
+
+        match access_check_core(
+            Some(&target_sd),
+            &access_token,
+            pip,
+            desired,
+            &IPC_GENERIC_MAPPING,
+            AccessCheckMode::Scalar,
+            None,
+            &conditional_context,
+            None,
+            0,
+            EMPTY_POLICIES,
+        ) {
+            Ok(result) => {
+                subject.mark_privileges_used(result.updated_privileges.used);
+                emit_internal_access_check_events(
+                    subject,
+                    &access_token,
+                    &result,
+                    pip,
+                    EMPTY_POLICIES,
+                )?;
+                let granted = result
+                    .object_granted_list
+                    .as_ref()
+                    .and_then(|list| list.first().copied())
+                    .unwrap_or(result.granted);
+                let allowed = result.mapped_desired == 0
+                    || (granted & result.mapped_desired) == result.mapped_desired;
+
+                if !allowed {
+                    return Err(-EACCES);
+                }
+                if normalized.maximum_allowed {
+                    Ok(granted)
+                } else {
+                    Ok(granted & normalized.mapped)
+                }
+            }
+            Err(KacsError::AllocationFailure) => Err(-ENOMEM),
+            Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
+            Err(_) => Err(-EACCES),
+        }
+    })
+}
+
 #[no_mangle]
 /// Creates the boot SYSTEM token object described by Appendix A step 3.
 pub extern "C" fn kacs_rust_create_boot_system_token() -> *const c_void {
@@ -11074,6 +11140,59 @@ pub extern "C" fn kacs_rust_check_socket_sd(
         }
         Err(err) => err,
     }
+}
+
+#[no_mangle]
+/// Evaluates a System V IPC object's security descriptor for `subject`.
+pub extern "C" fn kacs_rust_check_ipc_sd(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match ipc_sd_access_check_errno(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        pip_context_from_abi(pip_type, pip_trust),
+    ) {
+        Ok(granted) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Builds the default security descriptor for a System V IPC object created
+/// by `token`: owner and group from the token; the creator's user,
+/// Administrators and SYSTEM at GENERIC_ALL.
+pub extern "C" fn kacs_rust_create_default_ipc_sd(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_default_socket_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
 }
 
 #[no_mangle]

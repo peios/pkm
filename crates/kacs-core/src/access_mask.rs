@@ -83,6 +83,30 @@ pub const PROCESS_GENERIC_MAPPING: GenericMapping = GenericMapping {
         | WRITE_OWNER,
 };
 
+/// System V IPC object rights (`<pkm/ipc.h>`).
+pub const IPC_READ: u32 = peios_uapi::KACS_IPC_READ;
+/// System V IPC object rights (`<pkm/ipc.h>`).
+pub const IPC_WRITE: u32 = peios_uapi::KACS_IPC_WRITE;
+/// System V IPC object rights (`<pkm/ipc.h>`).
+pub const IPC_QUERY_INFORMATION: u32 = peios_uapi::KACS_IPC_QUERY_INFORMATION;
+/// System V IPC object rights (`<pkm/ipc.h>`).
+pub const IPC_SET_INFORMATION: u32 = peios_uapi::KACS_IPC_SET_INFORMATION;
+
+/// Generic mapping for System V IPC object security descriptors.
+pub const IPC_GENERIC_MAPPING: GenericMapping = GenericMapping {
+    read: IPC_READ | IPC_QUERY_INFORMATION | READ_CONTROL,
+    write: IPC_WRITE | IPC_SET_INFORMATION | READ_CONTROL,
+    execute: IPC_QUERY_INFORMATION | READ_CONTROL,
+    all: IPC_READ
+        | IPC_WRITE
+        | IPC_QUERY_INFORMATION
+        | IPC_SET_INFORMATION
+        | DELETE
+        | READ_CONTROL
+        | WRITE_DAC
+        | WRITE_OWNER,
+};
+
 /// Generic mapping for file and directory security descriptors.
 pub const FILE_GENERIC_MAPPING: GenericMapping = GenericMapping {
     read: FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | READ_CONTROL | SYNCHRONIZE,

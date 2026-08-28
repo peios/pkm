@@ -158,6 +158,14 @@
 #define KACS_SOCK_LISTEN		21U /* listener identity captured at listen() */
 #define KACS_SOCK_RESTAMP		22U /* listener identity replaced by KACS_SO_RESTAMP */
 
+/* kacs_ipc reason — a System V IPC object SD decision (ipc.c). */
+#define KACS_IPC_ALLOC			0U  /* default SD stamped at *get creation */
+#define KACS_IPC_PERMISSION		1U  /* ipc_permission: read/write access to the object */
+#define KACS_IPC_CTL			2U  /* *ctl command gate (RMID/SET/STAT/...) */
+#define KACS_IPC_SD_QUERY		3U  /* kacs_get_sd on the object */
+#define KACS_IPC_SD_SET			4U  /* kacs_set_sd on the object */
+#define KACS_IPC_NO_SD			5U  /* object carries no SD; fail closed */
+
 /*
  * kacs_namespace stage — which sub-decision of a namespace-mutation hook a
  * record describes. Single-decision ops report PRIMARY; multi-stage ops (link,

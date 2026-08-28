@@ -42,6 +42,7 @@
 #include "sd_access.h"
 #include "signing.h"
 #include "socket.h"
+#include "ipc.h"
 #include "task_lifecycle.h"
 #include "tlp.h"
 #include "token_fd.h"
@@ -61,6 +62,7 @@ struct lsm_blob_sizes pkm_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct pkm_kacs_cred_security),
 	.lbs_task = sizeof(struct pkm_kacs_task_security),
 	.lbs_sock = sizeof(struct pkm_kacs_socket_security),
+	.lbs_ipc = sizeof(struct pkm_kacs_ipc_security),
 	.lbs_file = sizeof(struct pkm_kacs_file_security),
 	.lbs_backing_file = sizeof(struct pkm_kacs_backing_file_security),
 	.lbs_inode = sizeof(struct pkm_kacs_inode_security),
@@ -125,6 +127,16 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(unix_stream_connect, pkm_kacs_unix_stream_connect),
 	LSM_HOOK_INIT(unix_may_send, pkm_kacs_unix_may_send),
 	LSM_HOOK_INIT(socket_listen, pkm_kacs_socket_listen),
+	LSM_HOOK_INIT(ipc_permission, pkm_kacs_ipc_permission),
+	LSM_HOOK_INIT(msg_queue_alloc_security, pkm_kacs_ipc_alloc_security),
+	LSM_HOOK_INIT(msg_queue_free_security, pkm_kacs_ipc_free_security),
+	LSM_HOOK_INIT(msg_queue_msgctl, pkm_kacs_msg_queue_msgctl),
+	LSM_HOOK_INIT(shm_alloc_security, pkm_kacs_ipc_alloc_security),
+	LSM_HOOK_INIT(shm_free_security, pkm_kacs_ipc_free_security),
+	LSM_HOOK_INIT(shm_shmctl, pkm_kacs_shm_shmctl),
+	LSM_HOOK_INIT(sem_alloc_security, pkm_kacs_ipc_alloc_security),
+	LSM_HOOK_INIT(sem_free_security, pkm_kacs_ipc_free_security),
+	LSM_HOOK_INIT(sem_semctl, pkm_kacs_sem_semctl),
 	LSM_HOOK_INIT(task_kill, pkm_kacs_task_kill),
 	LSM_HOOK_INIT(ptrace_access_check, pkm_kacs_ptrace_access_check),
 	LSM_HOOK_INIT(ptrace_traceme, pkm_kacs_ptrace_traceme),

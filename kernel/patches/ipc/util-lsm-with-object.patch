@@ -1,0 +1,63 @@
+diff --git a/ipc/util.c b/ipc/util.c
+--- a/ipc/util.c
++++ b/ipc/util.c
+@@ -657,6 +657,46 @@
+ 	return out;
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++/**
++ * ipc_lsm_with_object - run @fn on one object under RCU and its lock
++ * @kind: ipc_ids index (IPC_SEM_IDS, IPC_MSG_IDS or IPC_SHM_IDS)
++ * @id: the object's ipc id, in the caller's ipc namespace
++ * @fn: called with the object locked; must not sleep
++ * @arg: passed through to @fn
++ *
++ * For the LSM's security-descriptor syscalls, which address System V objects
++ * by id rather than through an operation the subsystem authorises itself.
++ * Returns @fn's result, -EINVAL for an unknown id, -EIDRM for a removed one.
++ */
++int ipc_lsm_with_object(int kind, int id,
++			int (*fn)(struct kern_ipc_perm *, void *), void *arg)
++{
++	struct ipc_namespace *ns = current->nsproxy->ipc_ns;
++	struct kern_ipc_perm *ipcp;
++	int ret;
++
++	if (kind < 0 || kind > IPC_SHM_IDS || !fn)
++		return -EINVAL;
++
++	rcu_read_lock();
++	ipcp = ipc_obtain_object_check(&ns->ids[kind], id);
++	if (IS_ERR(ipcp)) {
++		rcu_read_unlock();
++		return PTR_ERR(ipcp);
++	}
++	ipc_lock_object(ipcp);
++	if (!ipc_valid_object(ipcp))
++		ret = -EIDRM;
++	else
++		ret = fn(ipcp, arg);
++	ipc_unlock_object(ipcp);
++	rcu_read_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(ipc_lsm_with_object);
++#endif
++
+ /**
+  * ipcget - Common sys_*get() code
+  * @ns: namespace
+diff --git a/include/linux/ipc.h b/include/linux/ipc.h
+--- a/include/linux/ipc.h
++++ b/include/linux/ipc.h
+@@ -28,4 +28,9 @@
+ 	refcount_t refcount;
+ } ____cacheline_aligned_in_smp __randomize_layout;
+ 
++#ifdef CONFIG_SECURITY_PKM
++int ipc_lsm_with_object(int kind, int id,
++			int (*fn)(struct kern_ipc_perm *ipcp, void *arg), void *arg);
++#endif
++
+ #endif /* _LINUX_IPC_H */

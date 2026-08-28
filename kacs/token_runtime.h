@@ -678,6 +678,11 @@ const u8 *kacs_rust_create_default_process_sd(const void *token_ptr,
 					      size_t *len_out);
 const u8 *kacs_rust_create_default_socket_sd(const void *token_ptr,
 					     size_t *len_out);
+const u8 *kacs_rust_create_default_ipc_sd(const void *token_ptr,
+					  size_t *len_out);
+int kacs_rust_check_ipc_sd(const void *subject_token_ptr, const u8 *sd_ptr,
+			   size_t sd_len, u32 desired, u32 pip_type,
+			   u32 pip_trust, u32 *granted_out);
 const u8 *kacs_rust_create_lcs_base_layer_default_sd(size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
 							  size_t *len_out);
@@ -1191,6 +1196,10 @@ long pkm_kacs_kunit_socket_attach_fd(int fd, u32 socket_level,
 long pkm_kacs_kunit_socket_listen_stamp(u32 level_set, u32 level, u32 restamp,
 					const void **first_out,
 					const void **second_out);
+long pkm_kacs_kunit_ipc_check(const void *subject_token, u32 desired,
+			      u32 pip_type, u32 pip_trust);
+u32 pkm_kacs_kunit_ipc_ctl_access(int kind, int cmd);
+u32 pkm_kacs_kunit_ipc_flag_access(short flag);
 long pkm_kacs_kunit_socket_register_flow(u32 socket_type, const void *initial,
 					 const void *conveyed, u32 *deliver_out,
 					 u32 *boundary_out,
