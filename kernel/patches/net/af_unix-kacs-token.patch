@@ -1,0 +1,100 @@
+diff --git a/net/unix/af_unix.h b/net/unix/af_unix.h
+--- a/net/unix/af_unix.h
++++ b/net/unix/af_unix.h
+@@ -18,6 +18,9 @@
+ #ifdef CONFIG_SECURITY_NETWORK
+ 	u32			secid;		/* Security ID		*/
+ #endif
++#ifdef CONFIG_SECURITY_PKM
++	const void		*kacs_token;	/* KACS identity (counted ref) */
++#endif
+ 	u32			consumed;
+ } __randomize_layout;
+ 
+diff --git a/net/unix/af_unix.c b/net/unix/af_unix.c
+--- a/net/unix/af_unix.c
++++ b/net/unix/af_unix.c
+@@ -1962,12 +1962,22 @@
+ 	unix_peek_fpl(scm->fp);
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++const void *pkm_kacs_token_get(const void *token);
++bool pkm_kacs_unix_read_boundary(struct sock *sk, const void *skb_token,
++				 struct scm_cookie *scm, int copied);
++void pkm_kacs_unix_consumed(struct sock *sk, const void *skb_token);
++#endif
++
+ static void unix_destruct_scm(struct sk_buff *skb)
+ {
+ 	struct scm_cookie scm;
+ 
+ 	memset(&scm, 0, sizeof(scm));
+ 	scm.pid = UNIXCB(skb).pid;
++#ifdef CONFIG_SECURITY_PKM
++	scm.kacs_token = UNIXCB(skb).kacs_token;
++#endif
+ 	if (UNIXCB(skb).fp)
+ 		unix_detach_fds(&scm, skb);
+ 
+@@ -1986,6 +1996,9 @@
+ 	UNIXCB(skb).gid = scm->creds.gid;
+ 	UNIXCB(skb).fp = NULL;
+ 	unix_get_secdata(scm, skb);
++#ifdef CONFIG_SECURITY_PKM
++	UNIXCB(skb).kacs_token = pkm_kacs_token_get(scm->kacs_token);
++#endif
+ 	if (scm->fp && send_fds)
+ 		err = unix_attach_fds(scm, skb);
+ 
+@@ -1997,6 +2010,10 @@
+ {
+ 	scm_set_cred(scm, UNIXCB(skb).pid, UNIXCB(skb).uid, UNIXCB(skb).gid);
+ 	unix_set_secdata(scm, skb);
++#ifdef CONFIG_SECURITY_PKM
++	if (!scm->kacs_token)
++		scm->kacs_token = pkm_kacs_token_get(UNIXCB(skb).kacs_token);
++#endif
+ }
+ 
+ /**
+@@ -2622,8 +2639,14 @@
+ 	memset(&scm, 0, sizeof(scm));
+ 
+ 	unix_skb_to_scm(skb, &scm);
++#ifdef CONFIG_SECURITY_PKM
++	pkm_kacs_unix_read_boundary(sk, UNIXCB(skb).kacs_token, &scm, 0);
++#endif
+ 
+ 	if (!(flags & MSG_PEEK)) {
++#ifdef CONFIG_SECURITY_PKM
++		pkm_kacs_unix_consumed(sk, UNIXCB(skb).kacs_token);
++#endif
+ 		if (UNIXCB(skb).fp)
+ 			unix_detach_fds(&scm, skb);
+ 
+@@ -3014,6 +3037,13 @@
+ 			check_creds = true;
+ 		}
+ 
++#ifdef CONFIG_SECURITY_PKM
++		/* Never glue data conveyed under different KACS identities */
++		if (pkm_kacs_unix_read_boundary(sk, UNIXCB(skb).kacs_token,
++						&scm, copied))
++			break;
++#endif
++
+ 		/* Copy address just once */
+ 		if (msg && msg->msg_name) {
+ 			DECLARE_SOCKADDR(struct sockaddr_un *, sunaddr, msg->msg_name);
+@@ -3039,6 +3069,10 @@
+ 		if (!(flags & MSG_PEEK)) {
+ 			UNIXCB(skb).consumed += chunk;
+ 
++#ifdef CONFIG_SECURITY_PKM
++			/* The reader's position now covers this identity */
++			pkm_kacs_unix_consumed(sk, UNIXCB(skb).kacs_token);
++#endif
+ 			sk_peek_offset_bwd(sk, chunk);
+ 
+ 			if (UNIXCB(skb).fp) {

@@ -5802,17 +5802,18 @@ static void pkm_kunit_peer_socket_set_level_invalid_fails_closed(
 }
 
 
-static void pkm_kunit_peer_socket_set_level_connected_fails_closed(
+static void pkm_kunit_peer_socket_set_level_connected_bounds_later_sends(
 	struct kunit *test)
 {
 	struct pkm_kacs_kunit_socket_view view = { };
 	long ret;
 
+	/* The level bounds captures from now on, so it may change after connect. */
 	ret = pkm_kacs_kunit_set_socket_impersonation_level(
 		SOCK_STREAM, 1, KACS_IMLEVEL_DELEGATION, &view);
-	KUNIT_EXPECT_EQ(test, ret, (long)-EISCONN);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, view.max_impersonation,
-			(u32)KACS_IMLEVEL_IMPERSONATION);
+			(u32)KACS_IMLEVEL_DELEGATION);
 }
 
 
@@ -6321,6 +6322,154 @@ static void pkm_kunit_peer_socket_restricted_mismatch_hard_denies(
 	kacs_rust_token_drop(captured_token);
 	kacs_rust_token_drop(client_token);
 	kacs_rust_token_drop(server_token);
+}
+
+
+static void pkm_kunit_socket_pass_token_conveys_cached_identity(
+	struct kunit *test)
+{
+	const void *first = NULL, *second = NULL;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	ret = pkm_kacs_kunit_socket_pass_token_send(
+		SOCK_STREAM, KACS_IMLEVEL_IDENTIFICATION, 1, &first, &second);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, first);
+	/* the same effective token reuses the derived peer token */
+	KUNIT_EXPECT_PTR_EQ(test, first, second);
+	KUNIT_EXPECT_FALSE(test, kacs_rust_token_is_primary(first));
+	KUNIT_EXPECT_EQ(test, kacs_rust_token_impersonation_level(first),
+			(u32)KACS_IMLEVEL_IDENTIFICATION);
+	kacs_rust_token_drop(first);
+	kacs_rust_token_drop(second);
+
+	first = second = NULL;
+	ret = pkm_kacs_kunit_socket_pass_token_send(
+		SOCK_STREAM, KACS_IMLEVEL_IMPERSONATION, 0, &first, &second);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_NULL(test, first);
+	KUNIT_EXPECT_NULL(test, second);
+}
+
+
+static void pkm_kunit_socket_attach_gates_like_impersonation(
+	struct kunit *test)
+{
+	const void *primary = pkm_kacs_current_primary_token_ptr();
+	const void *client, *attached = NULL;
+	const void *capped_server;
+	long fd, ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_ASSERT_NOT_NULL(test, primary);
+	client = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client);
+
+	/* an fd without TOKEN_IMPERSONATE cannot be attached */
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(primary, client,
+						      KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	ret = pkm_kacs_kunit_socket_attach_fd((int)fd, KACS_IMLEVEL_IMPERSONATION,
+					      NULL, &attached);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_NULL(test, attached);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	/* with it, the token attaches at its own level */
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary, client, KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	ret = pkm_kacs_kunit_socket_attach_fd((int)fd, KACS_IMLEVEL_IMPERSONATION,
+					      NULL, &attached);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, attached);
+	KUNIT_EXPECT_EQ(test, kacs_rust_token_impersonation_level(attached),
+			(u32)KACS_IMLEVEL_IMPERSONATION);
+	kacs_rust_token_drop(attached);
+	attached = NULL;
+
+	/*
+	 * A server whose gates would cap the token to Identification may not
+	 * attach it at Impersonation: an explicit attach fails loudly rather
+	 * than downgrading.
+	 */
+	capped_server = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, capped_server);
+	ret = pkm_kacs_kunit_socket_attach_fd((int)fd, KACS_IMLEVEL_IMPERSONATION,
+					      capped_server, &attached);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EPERM);
+	KUNIT_EXPECT_NULL(test, attached);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(capped_server);
+	kacs_rust_token_drop(client);
+
+	/* a primary token is derived at the socket's level */
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		primary, primary, KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	ret = pkm_kacs_kunit_socket_attach_fd((int)fd, KACS_IMLEVEL_IDENTIFICATION,
+					      NULL, &attached);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, attached);
+	KUNIT_EXPECT_FALSE(test, kacs_rust_token_is_primary(attached));
+	KUNIT_EXPECT_EQ(test, kacs_rust_token_impersonation_level(attached),
+			(u32)KACS_IMLEVEL_IDENTIFICATION);
+	kacs_rust_token_drop(attached);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+}
+
+
+static void pkm_kunit_socket_register_follows_read_position(
+	struct kunit *test)
+{
+	const void *a, *b, *reg = NULL;
+	u32 deliver = 7, boundary = 7;
+	long ret;
+
+	a = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	b = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IDENTIFICATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, a);
+	KUNIT_ASSERT_NOT_NULL(test, b);
+
+	/* register A, data conveyed under B: delivered, register moves to B,
+	 * and data under A afterwards is a boundary */
+	ret = pkm_kacs_kunit_socket_register_flow(SOCK_STREAM, a, b, &deliver,
+						  &boundary, &reg);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, deliver, 1U);
+	KUNIT_EXPECT_PTR_EQ(test, reg, b);
+	KUNIT_EXPECT_EQ(test, boundary, 1U);
+	kacs_rust_token_drop(reg);
+	reg = NULL;
+
+	/* data conveyed under the identity already in the register: nothing
+	 * to deliver, register unchanged */
+	ret = pkm_kacs_kunit_socket_register_flow(SOCK_STREAM, a, a, &deliver,
+						  &boundary, &reg);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, deliver, 0U);
+	KUNIT_EXPECT_PTR_EQ(test, reg, a);
+	kacs_rust_token_drop(reg);
+	reg = NULL;
+
+	/* a datagram socket has no register: delivered every time, never kept */
+	ret = pkm_kacs_kunit_socket_register_flow(SOCK_DGRAM, NULL, b, &deliver,
+						  &boundary, &reg);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, deliver, 1U);
+	KUNIT_EXPECT_NULL(test, reg);
+
+	kacs_rust_token_drop(a);
+	kacs_rust_token_drop(b);
 }
 
 
@@ -12405,7 +12554,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_peer_socket_abstract_default_sd_shape),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_updates_unconnected),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_invalid_fails_closed),
-	KUNIT_CASE(pkm_kunit_peer_socket_set_level_connected_fails_closed),
+	KUNIT_CASE(pkm_kunit_peer_socket_set_level_connected_bounds_later_sends),
 	KUNIT_CASE(pkm_kunit_peer_socket_set_level_unsupported_type_fails_closed),
 	KUNIT_CASE(pkm_kunit_peer_socket_capture_identification_on_seqpacket),
 	KUNIT_CASE(pkm_kunit_peer_socket_capture_anonymous_shape),
@@ -12420,6 +12569,9 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_peer_socket_impersonate_caps_identification_without_privilege),
 	KUNIT_CASE(pkm_kunit_peer_socket_restricted_mismatch_hard_denies),
 	KUNIT_CASE(pkm_kunit_peer_socket_unsupported_or_uncaptured_fail_closed),
+	KUNIT_CASE(pkm_kunit_socket_pass_token_conveys_cached_identity),
+	KUNIT_CASE(pkm_kunit_socket_attach_gates_like_impersonation),
+	KUNIT_CASE(pkm_kunit_socket_register_follows_read_position),
 	KUNIT_CASE(pkm_kunit_token_impersonate_rejects_primary_token),
 	KUNIT_CASE(pkm_kunit_token_query_user_probe_and_payload),
 	KUNIT_CASE(pkm_kunit_token_query_groups_payload),

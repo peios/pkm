@@ -318,6 +318,7 @@ const (
 	KACS_PTO_OPEN_OK                                    = 0
 	KACS_PTO_SELF                                       = 5
 	KACS_RESTORE_INTENT                                 = 2
+	KACS_SCM_TOKEN                                      = 1
 	KACS_SDC_CORRUPT_EMPTY_OR_OVERSIZE                  = 4
 	KACS_SDC_CORRUPT_VALIDATE_FAIL                      = 5
 	KACS_SDC_HIT                                        = 0
@@ -434,10 +435,13 @@ const (
 	KACS_SIG_XATTR_BAD_BLOB                             = 20
 	KACS_SIG_XATTR_HASH_FAIL                            = 21
 	KACS_SOCK_ALREADY_BOUND                             = 11
+	KACS_SOCK_ATTACH                                    = 17
 	KACS_SOCK_BAD_ARGS                                  = 0
 	KACS_SOCK_BAD_LEVEL                                 = 4
 	KACS_SOCK_BIND                                      = 12
 	KACS_SOCK_CONNECT                                   = 13
+	KACS_SOCK_DELIVER                                   = 20
+	KACS_SOCK_GATE                                      = 18
 	KACS_SOCK_HAVE_SD                                   = 10
 	KACS_SOCK_LEVEL_SET                                 = 14
 	KACS_SOCK_NOT_UNIX                                  = 1
@@ -447,9 +451,11 @@ const (
 	KACS_SOCK_NO_TOKEN                                  = 3
 	KACS_SOCK_OPEN_TOKEN                                = 15
 	KACS_SOCK_PIP_CONTEXT                               = 7
+	KACS_SOCK_REGISTER                                  = 19
 	KACS_SOCK_SD_DECISION                               = 8
 	KACS_SOCK_WRONG_STATE                               = 5
 	KACS_SO_IMPERSONATION_LEVEL                         = 2
+	KACS_SO_PASS_TOKEN                                  = 3
 	KACS_SO_PEER_TOKEN                                  = 1
 	KACS_STATUS_CREATED                                 = 2
 	KACS_STATUS_OPENED                                  = 1

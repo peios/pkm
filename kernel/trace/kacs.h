@@ -410,7 +410,11 @@ DEFINE_EVENT(kacs_signing_probe, kacs_signing_probe,
 	{ KACS_SOCK_BIND,		"bind" },			\
 	{ KACS_SOCK_CONNECT,		"connect" },			\
 	{ KACS_SOCK_LEVEL_SET,		"level-set" },			\
-	{ KACS_SOCK_OPEN_TOKEN,		"open-token" }
+	{ KACS_SOCK_OPEN_TOKEN,		"open-token" },			\
+	{ KACS_SOCK_ATTACH,		"attach" },			\
+	{ KACS_SOCK_GATE,		"gate" },			\
+	{ KACS_SOCK_REGISTER,		"register" },			\
+	{ KACS_SOCK_DELIVER,		"deliver" }
 
 /*
  * One AF_UNIX socket SD / impersonation decision. Socket-shape fields are 0 at
@@ -491,6 +495,13 @@ DEFINE_EVENT(kacs_socket, kacs_socket_set_imp_level,
 
 /* Open-peer-token core (socket.c) */
 DEFINE_EVENT(kacs_socket, kacs_socket_open_peer_token,
+	TP_PROTO(u16 sock_family, u16 sock_type, u8 sock_state,
+		 u32 max_impersonation, u32 desired_access, u8 reason, long ret),
+	TP_ARGS(sock_family, sock_type, sock_state, max_impersonation,
+		desired_access, reason, ret));
+
+/* Per-message identity: attach, gate, register, deliver (socket.c) */
+DEFINE_EVENT(kacs_socket, kacs_socket_token,
 	TP_PROTO(u16 sock_family, u16 sock_type, u8 sock_state,
 		 u32 max_impersonation, u32 desired_access, u8 reason, long ret),
 	TP_ARGS(sock_family, sock_type, sock_state, max_impersonation,

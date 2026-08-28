@@ -26,19 +26,54 @@
 #define SOL_KACS			4096
 
 /*
- * getsockopt only. optval: int — a new token fd for the peer identity
- * captured at connect(), carrying fixed TOKEN_QUERY | TOKEN_IMPERSONATE
- * access. The fd is opened O_CLOEXEC. -ENOTCONN if the socket is not
- * connected; -ENODATA if it is connected but carries no captured identity.
+ * getsockopt only. optval: int — a new token fd, carrying fixed
+ * TOKEN_QUERY | TOKEN_IMPERSONATE access and opened O_CLOEXEC, for this
+ * end's conveyed-identity register: the peer identity associated with the
+ * data this end has consumed so far. The register is initialised by the
+ * identity captured at connect() and advanced by each KACS_SCM_TOKEN the
+ * reader's position passes (a token still queued but unread is not yet
+ * visible). Every call returns a fresh fd to an immutable snapshot; two
+ * calls may name different tokens, but no token ever changes. -ENOTCONN if
+ * the socket is not connected; -ENODATA if nothing has been conveyed yet.
  */
 #define KACS_SO_PEER_TOKEN		1
 
 /*
  * getsockopt / setsockopt. optval: __u32 KACS_IMLEVEL_* — the maximum
- * impersonation level at which this end's identity may be captured by the
- * peer. Set by the client before connect(); the default is
- * KACS_IMLEVEL_IMPERSONATION. -EISCONN once the socket is connected.
+ * impersonation level at which identity leaving this end may be captured:
+ * at connect(), and at each send that conveys identity. The default is
+ * KACS_IMLEVEL_IMPERSONATION. May be changed at any time; a change bounds
+ * captures from then on and never rewrites one already made.
  */
 #define KACS_SO_IMPERSONATION_LEVEL	2
+
+/*
+ * getsockopt / setsockopt. optval: int (0/1) — sender-side automation: while
+ * set, every send from this end carries the sender's effective identity as
+ * a KACS_SCM_TOKEN, derived at this end's impersonation level. Costs
+ * nothing at the trust level: the sender can always attest to what it is.
+ * Default 0.
+ */
+#define KACS_SO_PASS_TOKEN		3
+
+/*
+ * Ancillary message type, at cmsg_level SOL_KACS. Data: one int.
+ *
+ * Received: a token fd (TOKEN_QUERY | TOKEN_IMPERSONATE, O_CLOEXEC) for the
+ * identity the kernel attests sent the accompanying data. Delivered when the
+ * receive buffer has room for it and the conveyed identity differs from the
+ * reader's register; a receiver that reads no ancillary data still has the
+ * register (KACS_SO_PEER_TOKEN).
+ *
+ * Sent: a token fd the sender wishes to attach to the data. The kernel
+ * gates the send as if the sender were impersonating that token: the
+ * two-gate model runs with the sender as installer, and an attach that would
+ * lower the token's level fails with -EPERM rather than downgrading. A
+ * primary token is derived to an impersonation token at this end's level.
+ * The fd must carry TOKEN_IMPERSONATE (-EACCES otherwise); at most one per
+ * message (-EINVAL). Attaching is exactly equivalent to impersonating the
+ * token for the duration of the send.
+ */
+#define KACS_SCM_TOKEN			1
 
 #endif /* _UAPI_PKM_SOCKET_H */

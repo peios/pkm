@@ -151,6 +151,10 @@
 #define KACS_SOCK_LEVEL_SET		14U /* impersonation level updated */
 #define KACS_SOCK_OPEN_TOKEN		15U /* open peer-token fd result */
 /* 16 was KACS_SOCK_IMPERSONATE (kacs_impersonate_peer); retired, not reused. */
+#define KACS_SOCK_ATTACH		17U /* identity attached to a send */
+#define KACS_SOCK_GATE			18U /* explicit KACS_SCM_TOKEN send-gate verdict */
+#define KACS_SOCK_REGISTER		19U /* conveyed-identity register advanced */
+#define KACS_SOCK_DELIVER		20U /* KACS_SCM_TOKEN delivered to a receiver */
 
 /*
  * kacs_namespace stage — which sub-decision of a namespace-mutation hook a

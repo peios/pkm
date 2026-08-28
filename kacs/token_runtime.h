@@ -628,6 +628,7 @@ const void *kacs_rust_token_clone(const void *token);
 const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
 bool kacs_rust_token_is_primary(const void *token);
+u32 kacs_rust_token_impersonation_level(const void *token);
 bool kacs_rust_token_same_user_sid(const void *lhs, const void *rhs);
 bool kacs_rust_token_same_logon_session(const void *lhs, const void *rhs);
 int kacs_rust_token_user_sid(const void *token, const u8 **out_sid_ptr,
@@ -1180,6 +1181,16 @@ long pkm_kacs_kunit_impersonate_peer_for_socket_type(u32 socket_type,
 						     const void *peer_token);
 long pkm_kacs_kunit_impersonate_peer_for_socket(u32 connected,
 						const void *peer_token);
+long pkm_kacs_kunit_socket_pass_token_send(u32 socket_type, u32 level,
+					   u32 pass, const void **first_out,
+					   const void **second_out);
+long pkm_kacs_kunit_socket_attach_fd(int fd, u32 socket_level,
+				     const void *server_primary,
+				     const void **token_out);
+long pkm_kacs_kunit_socket_register_flow(u32 socket_type, const void *initial,
+					 const void *conveyed, u32 *deliver_out,
+					 u32 *boundary_out,
+					 const void **register_out);
 int pkm_kacs_kunit_check_no_child_process(u32 mitigation_bits,
 					  u64 clone_flags);
 int pkm_kacs_kunit_check_wxp_mmap(u32 mitigation_bits, unsigned long prot);

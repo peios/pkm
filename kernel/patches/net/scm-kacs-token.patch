@@ -1,0 +1,99 @@
+diff --git a/include/net/scm.h b/include/net/scm.h
+--- a/include/net/scm.h
++++ b/include/net/scm.h
+@@ -48,8 +48,17 @@
+ #ifdef CONFIG_SECURITY_NETWORK
+ 	u32			secid;		/* Passed security ID 	*/
+ #endif
++#ifdef CONFIG_SECURITY_PKM
++	const void		*kacs_token;	/* KACS identity (counted ref) */
++	u8			kacs_deliver;	/* deliver it as KACS_SCM_TOKEN */
++#endif
+ };
+ 
++#ifdef CONFIG_SECURITY_PKM
++int pkm_kacs_scm_send(struct socket *sock, struct scm_cookie *scm);
++void pkm_kacs_scm_token_drop(struct scm_cookie *scm);
++#endif
++
+ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm);
+ void scm_detach_fds_compat(struct msghdr *msg, struct scm_cookie *scm);
+ int __scm_send(struct socket *sock, struct msghdr *msg, struct scm_cookie *scm);
+@@ -83,6 +92,10 @@
+ 
+ static __inline__ void scm_destroy(struct scm_cookie *scm)
+ {
++#ifdef CONFIG_SECURITY_PKM
++	if (scm->kacs_token)
++		pkm_kacs_scm_token_drop(scm);
++#endif
+ 	scm_destroy_cred(scm);
+ 	if (scm->fp)
+ 		__scm_destroy(scm);
+@@ -97,9 +110,24 @@
+ 	if (forcecreds)
+ 		scm_set_cred(scm, task_tgid(current), current_uid(), current_gid());
+ 	unix_get_peersec_dgram(sock, scm);
++#ifdef CONFIG_SECURITY_PKM
++	{
++		int err = 0;
++
++		if (msg->msg_controllen > 0)
++			err = __scm_send(sock, msg, scm);
++		if (!err) {
++			err = pkm_kacs_scm_send(sock, scm);
++			if (err)
++				scm_destroy(scm);
++		}
++		return err;
++	}
++#else
+ 	if (msg->msg_controllen <= 0)
+ 		return 0;
+ 	return __scm_send(sock, msg, scm);
++#endif
+ }
+ 
+ void scm_recv(struct socket *sock, struct msghdr *msg,
+diff --git a/net/core/scm.c b/net/core/scm.c
+--- a/net/core/scm.c
++++ b/net/core/scm.c
+@@ -40,6 +40,14 @@
+ #include <net/cls_cgroup.h>
+ #include <net/af_unix.h>
+ 
++#ifdef CONFIG_SECURITY_PKM
++#include <pkm/socket.h>
++int pkm_kacs_scm_cmsg(struct socket *sock, struct cmsghdr *cmsg,
++		      struct scm_cookie *scm);
++void pkm_kacs_scm_recv(struct socket *sock, struct msghdr *msg,
++		       struct scm_cookie *scm);
++#endif
++
+ 
+ /*
+  *	Only allow a user to send credentials, that they could set with
+@@ -183,6 +191,14 @@
+ 		if (!CMSG_OK(msg, cmsg))
+ 			goto error;
+ 
++#ifdef CONFIG_SECURITY_PKM
++		if (cmsg->cmsg_level == SOL_KACS) {
++			err = pkm_kacs_scm_cmsg(sock, cmsg, p);
++			if (err)
++				goto error;
++			continue;
++		}
++#endif
+ 		if (cmsg->cmsg_level != SOL_SOCKET)
+ 			continue;
+ 
+@@ -544,5 +560,8 @@
+ 	if (sock->sk->sk_scm_pidfd)
+ 		scm_pidfd_recv(msg, scm);
+ 
++#ifdef CONFIG_SECURITY_PKM
++	pkm_kacs_scm_recv(sock, msg, scm);
++#endif
+ 	scm_destroy_cred(scm);
+ }

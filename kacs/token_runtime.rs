@@ -8685,6 +8685,15 @@ pub extern "C" fn kacs_rust_token_is_primary(token: *const c_void) -> bool {
 }
 
 #[no_mangle]
+/// Returns the ABI impersonation level of a live token object (Anonymous for
+/// a primary token, which carries no impersonation level of its own).
+pub extern "C" fn kacs_rust_token_impersonation_level(token: *const c_void) -> u32 {
+    unsafe { PkmKacsBootToken::from_ptr(token) }
+        .map(|value| impersonation_level_abi(value.impersonation_level))
+        .unwrap_or(IMPERSONATION_LEVEL_ANONYMOUS_ABI)
+}
+
+#[no_mangle]
 /// Returns whether two live tokens carry the same user SID bytes.
 pub extern "C" fn kacs_rust_token_same_user_sid(lhs: *const c_void, rhs: *const c_void) -> bool {
     let Some(lhs) = (unsafe { PkmKacsBootToken::from_ptr(lhs) }) else {

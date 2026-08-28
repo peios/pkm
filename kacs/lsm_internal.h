@@ -168,9 +168,27 @@ struct pkm_kacs_process_sd {
 };
 
 struct pkm_kacs_socket_security {
+	/*
+	 * The conveyed-identity register: the peer identity associated with
+	 * the data this end has consumed. Initialised at connect(), advanced
+	 * as the reader's position passes each conveyed token. Guarded by
+	 * register_lock; readers clone under the lock.
+	 */
 	const void *peer_token;
+	spinlock_t register_lock;
 	struct pkm_kacs_process_sd *socket_sd;
 	u32 max_impersonation;
+	/*
+	 * KACS_SO_PASS_TOKEN sender-side cache: the effective token the last
+	 * derivation was made from (pinned, so its address cannot be reused)
+	 * and the derived peer token attached to every send. Guarded by
+	 * convey_lock, a mutex because derivation allocates.
+	 */
+	bool pass_token;
+	struct mutex convey_lock;
+	const void *convey_src;
+	const void *convey_token;
+	u32 convey_level;
 };
 
 struct pkm_kacs_process_state {
