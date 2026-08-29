@@ -138,6 +138,7 @@ const EACCES: i32 = 13;
 const EPERM: i32 = 1;
 const ENOENT: i32 = 2;
 const EINVAL: i32 = 22;
+const ENODATA: i32 = 61;
 const EBUSY: i32 = 16;
 const EIO: i32 = 5;
 const ENOMEM: i32 = 12;
@@ -10163,6 +10164,12 @@ pub extern "C" fn kacs_rust_file_sd_integrity_label(
 
 #[no_mangle]
 /// Extracts the v0.20 file-object integrity label from a cached file SD.
+///
+/// A file with no mandatory label ACE is **unlabelled**, reported as
+/// `-ENODATA` with nothing written: the exec path (NEW_PROCESS_MIN) must not
+/// lower a process to a level the file never claimed. "Unlabelled means
+/// Medium" is the access-check rule for objects, and lives in the access
+/// check, not here.
 pub extern "C" fn kacs_rust_cached_file_sd_integrity_label(
     sd_ptr: *const u8,
     sd_len: usize,
@@ -10181,33 +10188,29 @@ pub extern "C" fn kacs_rust_cached_file_sd_integrity_label(
         Ok(sd) => sd,
         Err(err) => return err,
     };
-    let integrity_level = match sd.sacl() {
-        Some(sacl) => {
-            let mut level = IntegrityLevel::MEDIUM;
-            for ace in sacl.entries() {
-                let ace = match ace {
-                    Ok(ace) => ace,
-                    Err(_) => return -EINVAL,
-                };
-                if ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
-                    continue;
-                }
-                if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
-                    continue;
-                }
-                level = match label_integrity_from_ace(ace.bytes()) {
-                    Ok(level) => level,
-                    Err(err) => return err,
-                };
-                break;
-            }
-            level
-        }
-        None => IntegrityLevel::MEDIUM,
+    let Some(sacl) = sd.sacl() else {
+        return -ENODATA;
     };
-
-    *integrity_level_out = integrity_level.0;
-    0
+    for ace in sacl.entries() {
+        let ace = match ace {
+            Ok(ace) => ace,
+            Err(_) => return -EINVAL,
+        };
+        if ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+            continue;
+        }
+        if (ace.ace_flags() & INHERIT_ONLY_ACE) != 0 {
+            continue;
+        }
+        return match label_integrity_from_ace(ace.bytes()) {
+            Ok(level) => {
+                *integrity_level_out = level.0;
+                0
+            }
+            Err(err) => err,
+        };
+    }
+    -ENODATA
 }
 
 #[no_mangle]

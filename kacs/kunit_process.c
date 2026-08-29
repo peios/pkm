@@ -1415,20 +1415,28 @@ static void pkm_kunit_exec_new_process_min_lowers_to_file_label(
 }
 
 
-static void pkm_kunit_exec_new_process_min_unlabeled_defaults_medium(
+/*
+ * An executable with no mandatory label does not lower the process: the
+ * token survives exec unchanged (PEI-530). The alternative -- unlabelled
+ * means Medium -- demoted PID 1 and the whole TCB on an image that labels
+ * nothing.
+ */
+static void pkm_kunit_exec_new_process_min_unlabeled_inherits_parent(
 	struct kunit *test)
 {
 	struct pkm_kacs_kunit_exec_new_process_min_args args = { };
+	struct pkm_kacs_boot_snapshot before = { };
 	struct pkm_kacs_boot_snapshot after = { };
 	const void *token;
 	const u8 *file_sd;
 	size_t file_sd_len = 0;
-	u32 changed = 0;
+	u32 changed = 1;
 
 	token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
 		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
 	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &before));
 
 	file_sd = kacs_rust_kunit_create_file_sd(
 		token, PKM_KUNIT_FILE_SD_ADMIN_MASK,
@@ -1445,9 +1453,10 @@ static void pkm_kunit_exec_new_process_min_unlabeled_defaults_medium(
 			pkm_kacs_kunit_check_exec_new_process_min(
 				&args, &after, &changed),
 			0L);
-	KUNIT_EXPECT_EQ(test, changed, 1U);
-	KUNIT_EXPECT_EQ(test, after.integrity_level, PKM_KUNIT_IL_MEDIUM);
-	KUNIT_EXPECT_EQ(test, after.modified_id, after.token_id);
+	KUNIT_EXPECT_EQ(test, changed, 0U);
+	KUNIT_EXPECT_EQ(test, after.token_id, before.token_id);
+	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id);
+	KUNIT_EXPECT_EQ(test, after.integrity_level, PKM_KUNIT_IL_SYSTEM);
 
 	pkm_kacs_free((void *)file_sd);
 	kacs_rust_token_drop(token);
@@ -10026,7 +10035,7 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_exec_setid_without_token_fails_closed),
 	KUNIT_CASE(pkm_kunit_exec_setid_privileged_path_fails_closed),
 	KUNIT_CASE(pkm_kunit_exec_new_process_min_lowers_to_file_label),
-	KUNIT_CASE(pkm_kunit_exec_new_process_min_unlabeled_defaults_medium),
+	KUNIT_CASE(pkm_kunit_exec_new_process_min_unlabeled_inherits_parent),
 	KUNIT_CASE(pkm_kunit_exec_new_process_min_equal_label_noops),
 	KUNIT_CASE(pkm_kunit_exec_new_process_min_corrupt_sd_fails_closed),
 	KUNIT_CASE(pkm_kunit_process_state_clone_thread_shares_live_object),

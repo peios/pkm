@@ -69,6 +69,13 @@ int pkm_kacs_bprm_check_security(struct linux_binprm *bprm)
 		(const u8 *)bprm->buf, sizeof(bprm->buf));
 }
 
+/*
+ * The executable's explicit mandatory label. -ENODATA means the file has
+ * none: NEW_PROCESS_MIN then leaves the token alone, so a process is only
+ * ever lowered to a level its image actually claims. Treating an unlabelled
+ * image as Medium here would demote every process on an image that labels
+ * nothing -- prelude's exec of peinit first, and the whole TCB below it.
+ */
 static long pkm_kacs_exec_file_integrity_label(const struct file *file,
 					       u32 *integrity_out)
 {
@@ -136,17 +143,21 @@ static long pkm_kacs_apply_exec_primary_token(const void *primary_token,
 		} else {
 			ret = pkm_kacs_exec_file_integrity_label(
 				file, &file_integrity);
-			if (ret)
+			if (ret && ret != -ENODATA)
 				return ret;
 
-			ret = kacs_rust_token_new_process_min_exec(
-				primary_token, file_integrity, &exec_token);
-			if (ret) {
-				trace_kacs_exec(false, false, 0, 0,
-						KACS_EXEC_NPM_DERIVE_FAIL, ret);
-				return ret;
+			if (!ret) {
+				ret = kacs_rust_token_new_process_min_exec(
+					primary_token, file_integrity,
+					&exec_token);
+				if (ret) {
+					trace_kacs_exec(false, false, 0, 0,
+							KACS_EXEC_NPM_DERIVE_FAIL,
+							ret);
+					return ret;
+				}
+				npm_derived = true;
 			}
-			npm_derived = true;
 		}
 	}
 
