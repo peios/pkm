@@ -469,11 +469,11 @@ static void pkm_kunit_file_permission_sysfs_write_uses_live_gate(
 
 	system_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	admin_token = kacs_rust_kunit_create_local_administrator_token();
 	local_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, system_token);
 	KUNIT_ASSERT_NOT_NULL(test, admin_token);
 	KUNIT_ASSERT_NOT_NULL(test, local_token);
@@ -1848,7 +1848,7 @@ static void pkm_kunit_namespace_symlink_requires_privilege(
 
 	privileged_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, privileged_token);
 	KUNIT_ASSERT_TRUE(test,
@@ -3263,7 +3263,7 @@ static void pkm_kunit_securityfs_logon_sessions_denies_non_admin_user(
 
 	local_service_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
 	KUNIT_ASSERT_NOT_NULL(test, local_service_token);
 
 	KUNIT_EXPECT_EQ(test,
@@ -3607,7 +3607,7 @@ static void pkm_kunit_file_open_read_stamps_granted_subset(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	expected = PKM_KUNIT_FILE_READ_DATA | PKM_KUNIT_FILE_READ_ATTRIBUTES |
@@ -3645,7 +3645,7 @@ static void pkm_kunit_file_open_read_accepts_null_group_sd(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	expected = PKM_KUNIT_FILE_READ_DATA | PKM_KUNIT_FILE_READ_ATTRIBUTES |
@@ -3863,7 +3863,7 @@ static void pkm_kunit_file_open_cached_grant_survives_sd_change(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	initial_sd = pkm_kunit_create_precise_file_sd(
@@ -3955,7 +3955,7 @@ static void pkm_kunit_file_open_append_trunc_stamps_expected_core(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	expected = PKM_KUNIT_FILE_APPEND_DATA | PKM_KUNIT_FILE_WRITE_DATA |
@@ -4019,7 +4019,7 @@ static void pkm_kunit_file_open_append_modifier_core_matrix(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -4091,7 +4091,7 @@ static void pkm_kunit_file_open_core_mode_matrix(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -4139,7 +4139,7 @@ static void pkm_kunit_file_open_data_without_attributes_denies(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(
@@ -4180,7 +4180,7 @@ static void pkm_kunit_file_open_compat_subset_matrix(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	args.subject_token = subject_token;
 
@@ -4258,7 +4258,7 @@ static void pkm_kunit_file_open_special_node_core_matrix(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -4314,7 +4314,7 @@ static void pkm_kunit_file_open_special_node_read_core_matrix(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	for (i = 0; i < ARRAY_SIZE(inode_modes); i++) {
@@ -4425,7 +4425,7 @@ static void pkm_kunit_file_open_directory_read_stamps_expected_subset(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	expected = PKM_KUNIT_FILE_READ_ATTRIBUTES |
@@ -4462,7 +4462,7 @@ static void pkm_kunit_file_open_core_denial_fails_closed(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
@@ -4557,11 +4557,11 @@ static void pkm_kunit_file_open_sysfs_write_uses_live_gate(struct kunit *test)
 
 	system_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	admin_token = kacs_rust_kunit_create_local_administrator_token();
 	local_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, system_token);
 	KUNIT_ASSERT_NOT_NULL(test, admin_token);
 	KUNIT_ASSERT_NOT_NULL(test, local_token);
@@ -4613,7 +4613,7 @@ static void pkm_kunit_native_open_read_success(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
@@ -4656,7 +4656,7 @@ static void pkm_kunit_native_open_append_only_sets_write_mode(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
@@ -4700,7 +4700,7 @@ static void pkm_kunit_native_open_caches_exact_requested_mask(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	broad_grant = PKM_KUNIT_FILE_READ_DATA | PKM_KUNIT_FILE_WRITE_DATA |
@@ -4747,7 +4747,7 @@ static void pkm_kunit_native_open_maximum_allowed_with_read_success(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	expected = PKM_KUNIT_FILE_READ_DATA | PKM_KUNIT_FILE_WRITE_DATA |
@@ -4805,7 +4805,7 @@ static void pkm_kunit_native_open_maximum_allowed_mode_bit_denied(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(
@@ -4842,7 +4842,7 @@ static void pkm_kunit_native_open_execute_only_sets_exec_mode(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
@@ -4886,7 +4886,7 @@ static void pkm_kunit_native_open_directory_read_success(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
@@ -4933,7 +4933,7 @@ static void pkm_kunit_native_open_special_nodes_use_file_rights(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -4989,7 +4989,7 @@ static void pkm_kunit_native_open_special_nodes_fail_closed(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(
@@ -5068,7 +5068,7 @@ static void pkm_kunit_native_open_partial_denial_fails_closed(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(
@@ -5691,7 +5691,7 @@ static void pkm_kunit_native_open_if_existing_success(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
@@ -6437,7 +6437,7 @@ static void pkm_kunit_native_create_owner_self_success(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	pkm_kunit_expect_native_create_owner_success(
@@ -6473,7 +6473,7 @@ static void pkm_kunit_native_create_owner_restore_privilege_success(
 	subject_token =
 		kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
 			PKM_KUNIT_USER_KIND_LOCAL_SERVICE,
-			KACS_TOKEN_TYPE_PRIMARY, KACS_IMLEVEL_ANONYMOUS,
+			KACS_TOKEN_TYPE_PRIMARY, KACS_IMLEVEL_DELEGATION,
 			PKM_KUNIT_IL_SYSTEM, 0,
 			PKM_KUNIT_SE_RESTORE_PRIVILEGE,
 			PKM_KUNIT_SE_RESTORE_PRIVILEGE,
@@ -6719,11 +6719,11 @@ static void pkm_kunit_native_create_invalid_owner_denies(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	foreign_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, foreign_token);
 
 	parent_sd = pkm_kunit_create_precise_file_sd(
@@ -6774,7 +6774,7 @@ static void pkm_kunit_native_create_sacl_without_security_denies(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
 	parent_sd = pkm_kunit_create_precise_file_sd(
@@ -6875,7 +6875,7 @@ static void pkm_kunit_native_create_label_requires_relabel(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0,
 		PKM_KUNIT_SE_SECURITY_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
@@ -6937,7 +6937,7 @@ static void pkm_kunit_native_create_creator_label_success(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0,
 		PKM_KUNIT_SE_SECURITY_PRIVILEGE | PKM_KUNIT_SE_RELABEL_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 
@@ -9756,7 +9756,7 @@ static void pkm_kunit_get_file_sd_denied_without_read_control(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	target_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	KUNIT_ASSERT_NOT_NULL(test, target_token);
@@ -9835,7 +9835,7 @@ static void pkm_kunit_default_process_sd_golden_shape(struct kunit *test)
 
 	token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, token);
 	KUNIT_ASSERT_TRUE(test,
 			  kacs_rust_kunit_token_snapshot(token, &snapshot));
@@ -9971,7 +9971,7 @@ static void pkm_kunit_get_process_sd_denied_by_process_sd(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	target_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	KUNIT_ASSERT_NOT_NULL(test, target_token);
@@ -10013,7 +10013,7 @@ static void pkm_kunit_get_process_sd_debug_does_not_bypass(
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_DEBUG_PRIVILEGE);
 	target_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
@@ -10172,7 +10172,7 @@ static void pkm_kunit_get_token_sd_denied_by_token_sd(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	target_token = kacs_rust_token_deep_copy(
 		pkm_kacs_current_primary_token_ptr());
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
@@ -10210,7 +10210,7 @@ static void pkm_kunit_get_token_sd_debug_does_not_bypass(struct kunit *test)
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_DEBUG_PRIVILEGE);
 	target_token = kacs_rust_token_deep_copy(
 		pkm_kacs_current_primary_token_ptr());

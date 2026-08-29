@@ -31,7 +31,7 @@
 
 #define PKM_KACS_SOCKET_FILE_WRITE_DATA 0x00000002U
 #define PKM_KACS_PEER_TOKEN_ACCESS_MASK \
-	(KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE)
+	(KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE | KACS_TOKEN_DUPLICATE)
 
 static long pkm_kacs_create_captured_peer_token(
 	const void *client_token, u32 max_impersonation,

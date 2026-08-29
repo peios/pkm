@@ -4909,7 +4909,7 @@ impl PkmKacsBootToken {
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::SYSTEM,
             TokenType::Primary,
-            ImpersonationLevel::Anonymous,
+            ImpersonationLevel::Delegation,
             false,
             BOOT_SYSTEM_TOKEN_ID,
             BOOT_SYSTEM_MODIFIED_ID,
@@ -5016,7 +5016,7 @@ impl PkmKacsBootToken {
             mandatory_policy: TOKEN_MANDATORY_POLICY_NO_WRITE_UP
                 | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
             token_type: TokenType::Primary,
-            impersonation_level: ImpersonationLevel::Anonymous,
+            impersonation_level: ImpersonationLevel::Delegation,
             elevation_type: AtomicU32::new(TOKEN_ELEVATION_DEFAULT_ABI),
             restricted: false,
             user_deny_only: false,
@@ -5066,7 +5066,7 @@ impl PkmKacsBootToken {
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::SYSTEM,
             TokenType::Primary,
-            ImpersonationLevel::Anonymous,
+            ImpersonationLevel::Delegation,
             false,
             BOOT_SYSTEM_TOKEN_ID,
             BOOT_SYSTEM_MODIFIED_ID,
@@ -5090,7 +5090,7 @@ impl PkmKacsBootToken {
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::SYSTEM,
             TokenType::Primary,
-            ImpersonationLevel::Anonymous,
+            ImpersonationLevel::Delegation,
             false,
             BOOT_SYSTEM_TOKEN_ID,
             BOOT_SYSTEM_MODIFIED_ID,
@@ -5115,7 +5115,7 @@ impl PkmKacsBootToken {
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::SYSTEM,
             TokenType::Primary,
-            ImpersonationLevel::Anonymous,
+            ImpersonationLevel::Delegation,
             false,
             token_id,
             token_id,
@@ -5139,7 +5139,7 @@ impl PkmKacsBootToken {
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::SYSTEM,
             TokenType::Primary,
-            ImpersonationLevel::Anonymous,
+            ImpersonationLevel::Delegation,
             false,
             BOOT_SYSTEM_TOKEN_ID,
             BOOT_SYSTEM_MODIFIED_ID,
@@ -5163,7 +5163,7 @@ impl PkmKacsBootToken {
             Sid::parse(SYSTEM_SID_BYTES).ok()?,
             IntegrityLevel::SYSTEM,
             TokenType::Primary,
-            ImpersonationLevel::Anonymous,
+            ImpersonationLevel::Delegation,
             false,
             BOOT_SYSTEM_TOKEN_ID,
             BOOT_SYSTEM_MODIFIED_ID,
@@ -5277,7 +5277,7 @@ impl PkmKacsBootToken {
             creator_sid,
             IntegrityLevel::SYSTEM,
             TokenType::Primary,
-            ImpersonationLevel::Anonymous,
+            ImpersonationLevel::Delegation,
             false,
             token_id,
             token_id,
@@ -5565,8 +5565,19 @@ impl PkmKacsBootToken {
         if (privileges_enabled & !privileges_present) != 0 {
             return Err(-EINVAL);
         }
+        // The impersonation level is a ratchet on every token: identity derived
+        // from this token may act at no more than this level. A primary sets the
+        // ceiling for everything captured from, conveyed by, or duplicated out
+        // of the process that carries it (PEI-524).
+        //
+        // Migration guard: a primary below Impersonation is a coherent shape
+        // ("peers may identify me but never act as me") but it is also what an
+        // un-migrated caller that still passes the old conventional Anonymous
+        // would mint — an identity nobody can ever impersonate. Refuse it until
+        // every minter passes a deliberate level.
         if token_type == TokenType::Primary
-            && impersonation_level != ImpersonationLevel::Anonymous
+            && impersonation_level_abi(impersonation_level)
+                < IMPERSONATION_LEVEL_IMPERSONATION_ABI
         {
             return Err(-EINVAL);
         }
@@ -6131,9 +6142,10 @@ impl PkmKacsBootToken {
 
         let lowered = copy as *mut Self;
         unsafe {
+            // integrity_level is the only identity field that changes; the
+            // impersonation level ratchet is carried across unchanged.
             (*lowered).integrity_level = file_integrity;
             (*lowered).token_type = TokenType::Primary;
-            (*lowered).impersonation_level = ImpersonationLevel::Anonymous;
             (*lowered)
                 .elevation_type
                 .store(TOKEN_ELEVATION_DEFAULT_ABI, Ordering::Release);
@@ -6153,12 +6165,31 @@ impl PkmKacsBootToken {
         // Anonymous token matching the boot Anonymous shape (user SID S-1-5-7, no
         // privileges, Untrusted integrity); the source's user SID, groups,
         // privileges, claims, restricted SIDs, and confinement are NOT carried
-        // forward. A duplicate to a Primary token keeps identity (its level is
-        // Anonymous only by convention), so this only fires for Impersonation.
+        // forward. A duplicate to a Primary token keeps identity, so this only
+        // fires for Impersonation.
         if new_type == TokenType::Impersonation
             && requested_level == ImpersonationLevel::Anonymous
         {
             return Self::create_anonymous(Some(creator.user_sid.sid)).ok_or(-ENOMEM);
+        }
+        // The level is a ratchet in every direction (PEI-524): a duplicate may
+        // never carry a higher level than its source, whatever the types
+        // involved. Asking for more is a caller bug and fails loudly; the socket
+        // paths, which clamp instead, do so before reaching here.
+        if impersonation_level_abi(requested_level)
+            > impersonation_level_abi(self.impersonation_level)
+        {
+            return Err(-EINVAL);
+        }
+        // A primary needs a level at which it can act: Identification cannot
+        // pass AccessCheck and Anonymous is the singleton identity, so a
+        // process could never be either. This is also what stops an
+        // Identification-level client token becoming a process (Windows:
+        // ERROR_BAD_IMPERSONATION_LEVEL).
+        if new_type == TokenType::Primary
+            && impersonation_level_abi(requested_level) < IMPERSONATION_LEVEL_IMPERSONATION_ABI
+        {
+            return Err(-EINVAL);
         }
         let _guard = self.lock_mutation();
         let privileges = self.privileges_snapshot_locked();
@@ -6186,18 +6217,7 @@ impl PkmKacsBootToken {
             build_sid_and_attributes_views(confinement_capabilities.as_slice())?;
         let token_id = allocate_dynamic_token_id()?;
         let modified_id = token_id;
-        let impersonation_level = match new_type {
-            TokenType::Primary => ImpersonationLevel::Anonymous,
-            TokenType::Impersonation => {
-                if self.token_type == TokenType::Impersonation
-                    && impersonation_level_abi(requested_level)
-                        > impersonation_level_abi(self.impersonation_level)
-                {
-                    return Err(-EINVAL);
-                }
-                requested_level
-            }
-        };
+        let impersonation_level = requested_level;
         // KC-14: build every fallible leaf-Vec clone BEFORE committing any raw
         // allocation (default_dacl_ptr / own_sd_ptr / session ref / token_ptr) so
         // a clone failure unwinds via `?` while only owned Vecs are live — nothing
@@ -9292,10 +9312,17 @@ pub extern "C" fn kacs_rust_create_peer_impersonation_token(
     let Some(out_token) = (unsafe { out_token.as_mut() }) else {
         return -EINVAL;
     };
-    let impersonation_level = match impersonation_level_from_abi(impersonation_level) {
+    let requested_level = match impersonation_level_from_abi(impersonation_level) {
         Ok(value) => value,
         Err(err) => return err,
     };
+    // Socket conveyance clamps rather than refuses (PEI-524): what leaves an
+    // end is derived at min(the end's level, the source token's own level).
+    // A process whose primary sits at Impersonation cannot convey Delegation
+    // however it sets the socket option, and a thread impersonating at
+    // Identification conveys no more than Identification onward.
+    let impersonation_level =
+        min_impersonation_level(requested_level, source_token.impersonation_level);
 
     if impersonation_level == ImpersonationLevel::Anonymous {
         return kacs_rust_create_anonymous_impersonation_token(out_token);

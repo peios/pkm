@@ -330,7 +330,7 @@ static void pkm_kunit_allow_caps_survive_token_lifecycle(struct kunit *test)
 
 	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE |
 			PKM_KUNIT_SE_IMPERSONATE_PRIVILEGE |
 			PKM_KUNIT_SE_TCB_PRIVILEGE);

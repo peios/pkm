@@ -994,7 +994,7 @@ int pkm_kunit_create_link_candidates(struct kunit *test,
 	struct kacs_duplicate_args duplicate = {
 		.access_mask = KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE,
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.result_fd = -1,
 	};
 	struct pkm_kacs_boot_snapshot snapshot = { };
@@ -1010,7 +1010,7 @@ int pkm_kunit_create_link_candidates(struct kunit *test,
 
 	source_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
 	if (!source_token)
 		return -ENOMEM;
 	if (!kacs_rust_kunit_token_snapshot(source_token, &snapshot)) {
@@ -1078,7 +1078,7 @@ int pkm_kunit_create_dynamic_linked_pair(struct kunit *test,
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -2809,7 +2809,7 @@ long pkm_kunit_create_confined_access_check_token(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_SYSTEM,
 		.mandatory_policy = 0x00000003U,
 		.privileges_present = privileges,
@@ -3206,7 +3206,7 @@ int pkm_kunit_check_path_metadata_with_foreign_everyone_mask(
 
 	owner_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0U, 0ULL);
 	if (!owner_token)
 		return -ENOMEM;
 
@@ -3978,7 +3978,7 @@ long pkm_kunit_create_condition_token_ex(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_SYSTEM,
 		.owner_sid_index = 1U,
 		.primary_group_index = 1U,
@@ -4427,7 +4427,7 @@ void pkm_kunit_expect_impersonation_gate(
 	server_token =
 		kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
 			gate_case->server_user_kind, KACS_TOKEN_TYPE_PRIMARY,
-			KACS_IMLEVEL_ANONYMOUS, gate_case->server_integrity,
+			KACS_IMLEVEL_DELEGATION, gate_case->server_integrity,
 			gate_case->server_restricted,
 			gate_case->server_privileges_present,
 			gate_case->server_privileges_enabled,

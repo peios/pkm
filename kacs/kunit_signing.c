@@ -107,7 +107,8 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 	 */
 	KUNIT_EXPECT_EQ(test, snapshot.integrity_level, 16384U);
 	KUNIT_EXPECT_EQ(test, snapshot.token_type, 1U);
-	KUNIT_EXPECT_EQ(test, snapshot.impersonation_level, 0U);
+	/* Delegation: the top of the ratchet (PEI-524). */
+	KUNIT_EXPECT_EQ(test, snapshot.impersonation_level, 3U);
 	KUNIT_EXPECT_EQ(test, snapshot.mandatory_policy, 0x00000003U);
 	KUNIT_EXPECT_EQ(test, snapshot.interactivity_scope, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.projected_uid, 0U);

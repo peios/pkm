@@ -394,7 +394,7 @@ static void pkm_kunit_create_token_success(struct kunit *test)
 	struct kacs_query_args args = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.privileges_present = PKM_KUNIT_SE_DEBUG_PRIVILEGE,
@@ -478,7 +478,7 @@ static void pkm_kunit_create_token_success(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snapshot.integrity_level, PKM_KUNIT_IL_MEDIUM);
 	KUNIT_EXPECT_EQ(test, snapshot.token_type, KACS_TOKEN_TYPE_PRIMARY);
 	KUNIT_EXPECT_EQ(test, snapshot.impersonation_level,
-			KACS_IMLEVEL_ANONYMOUS);
+			KACS_IMLEVEL_DELEGATION);
 	KUNIT_EXPECT_EQ(test, snapshot.privileges_present,
 			PKM_KUNIT_SE_DEBUG_PRIVILEGE);
 	KUNIT_EXPECT_EQ(test, snapshot.privileges_enabled,
@@ -649,7 +649,7 @@ static void pkm_kunit_create_token_rejects_uid0_non_system_projection(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0U,
 		.projected_uid = 0U,
@@ -736,7 +736,7 @@ static void pkm_kunit_create_token_administrators_group_adds_no_privileges(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.projected_uid = 1234U,
@@ -838,7 +838,7 @@ static void pkm_kunit_create_token_default_enabled_derives_live_groups(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 1U,
@@ -913,7 +913,7 @@ static void pkm_kunit_create_token_preserves_resource_group_metadata(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 1U,
@@ -983,7 +983,7 @@ static void pkm_kunit_create_token_requires_privilege(struct kunit *test)
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.logon_session_id = 0,
@@ -1037,7 +1037,7 @@ static void pkm_kunit_create_token_invalid_logon_session_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.logon_session_id = 0x8877665544332211ULL,
@@ -1080,7 +1080,7 @@ static void pkm_kunit_create_token_write_restricted_requires_user_deny_only(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -1141,7 +1141,7 @@ static void pkm_kunit_create_token_malformed_claims_fail_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -1196,7 +1196,7 @@ static void pkm_kunit_create_token_malformed_claims_fail_closed(
 }
 
 
-static void pkm_kunit_create_token_primary_non_anonymous_denies(
+static void pkm_kunit_create_token_primary_below_impersonation_denies(
 	struct kunit *test)
 {
 	static const u8 source_name[8] = {
@@ -1320,7 +1320,7 @@ static void pkm_kunit_create_token_invalid_mandatory_policy_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000004U,
 		.source_name = source_name,
@@ -1376,7 +1376,7 @@ static void pkm_kunit_create_token_invalid_audit_policy_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.audit_policy = 0x00000010U,
@@ -1433,7 +1433,7 @@ static void pkm_kunit_create_token_invalid_default_dacl_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.default_dacl = pkm_kunit_invalid_default_dacl,
@@ -1491,7 +1491,7 @@ static void pkm_kunit_create_token_enabled_privilege_subset_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.privileges_present = PKM_KUNIT_SE_DEBUG_PRIVILEGE,
@@ -1550,7 +1550,7 @@ static void pkm_kunit_create_token_isolation_requires_confinement(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -1626,7 +1626,7 @@ static void pkm_kunit_create_token_invalid_owner_index_denies(
 	u8 token_spec[256] = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 3U,
@@ -1684,7 +1684,7 @@ static void pkm_kunit_create_token_owner_group_requires_owner_attr(
 	u8 token_spec[256] = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 1U,
@@ -1743,7 +1743,7 @@ static void pkm_kunit_create_token_primary_group_excludes_injected_logon(
 	u8 token_spec[256] = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 1U,
@@ -1793,7 +1793,7 @@ static void pkm_kunit_create_token_reserved_elevation_denies(
 	u8 token_spec[256] = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -1880,7 +1880,7 @@ static void pkm_kunit_create_token_wire_format_edge_vectors(struct kunit *test)
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -2091,7 +2091,7 @@ static void pkm_kunit_create_token_malformed_sid_sections_fail_closed(
 	for (i = 0; i < ARRAY_SIZE(cases); i++) {
 		struct pkm_kunit_token_spec_args spec_args = {
 			.token_type = KACS_TOKEN_TYPE_PRIMARY,
-			.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+			.impersonation_level = KACS_IMLEVEL_DELEGATION,
 			.integrity_level = PKM_KUNIT_IL_MEDIUM,
 			.mandatory_policy = 0x00000003U,
 			.logon_session_id = logon_session_id,
@@ -2155,7 +2155,7 @@ static void pkm_kunit_create_token_caller_logon_sid_denies(
 	u8 logon_sid[20] = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -2207,7 +2207,7 @@ static void pkm_kunit_create_token_max_groups_succeeds(struct kunit *test)
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 0,
@@ -2281,7 +2281,7 @@ static void pkm_kunit_create_token_over_max_groups_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 0,
@@ -2342,7 +2342,7 @@ static void pkm_kunit_logon_session_destroy_last_token_emits_kmes(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -2459,7 +2459,7 @@ static void pkm_kunit_logon_session_destroyed_msgpack_schema(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -2647,7 +2647,7 @@ static void pkm_kunit_destroy_empty_logon_session_busy_with_live_token(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -2811,7 +2811,7 @@ static void pkm_kunit_token_projection_sets_linux_cred_fields(
 	struct pkm_kacs_token_fd_view view = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0U,
 		.projected_uid = 4321U,
@@ -2900,7 +2900,7 @@ static void pkm_kunit_token_install_projection_preserves_impersonation_split(
 
 	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE |
 			PKM_KUNIT_SE_TCB_PRIVILEGE);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
@@ -3046,7 +3046,7 @@ static void pkm_kunit_token_created_at_preserved_by_derivations(
 
 	source = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
 	KUNIT_ASSERT_NOT_NULL(test, source);
 	KUNIT_ASSERT_TRUE(test,
 			  kacs_rust_kunit_token_snapshot(source,
@@ -3142,7 +3142,7 @@ static void pkm_kunit_token_expiration_not_enforced_by_access_check(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_SYSTEM,
 		.mandatory_policy = 0x00000003U,
 		.expiration = 1ULL,
@@ -3236,7 +3236,7 @@ static void pkm_kunit_logon_session_metadata_not_enforced_by_access_check(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_SYSTEM,
 		.mandatory_policy = 0x00000003U,
 		.expiration = 0x0102030405060708ULL,
@@ -3325,7 +3325,7 @@ static void pkm_kunit_create_token_same_sid_creator_keeps_self_limited(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_SYSTEM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 0U,
@@ -3348,7 +3348,7 @@ static void pkm_kunit_create_token_same_sid_creator_keeps_self_limited(
 
 	creator_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0U,
 		PKM_KUNIT_SE_TCB_PRIVILEGE |
 			PKM_KUNIT_SE_CREATE_TOKEN_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, creator_token);
@@ -3434,7 +3434,7 @@ static void pkm_kunit_create_token_distinct_sid_default_sd_template(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_SYSTEM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 0U,
@@ -3456,7 +3456,7 @@ static void pkm_kunit_create_token_distinct_sid_default_sd_template(
 
 	creator_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0U,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0U,
 		PKM_KUNIT_SE_TCB_PRIVILEGE |
 			PKM_KUNIT_SE_CREATE_TOKEN_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, creator_token);
@@ -4082,7 +4082,7 @@ static void pkm_kunit_token_duplicate_new_handle_checks_new_token_sd_against_sub
 
 	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	creator_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, subject_token);
 	KUNIT_ASSERT_NOT_NULL(test, creator_token);
@@ -4156,7 +4156,7 @@ static void pkm_kunit_token_duplicate_primary_to_impersonation_all_levels(
 }
 
 
-static void pkm_kunit_token_duplicate_impersonation_to_primary_forces_anonymous(
+static void pkm_kunit_token_duplicate_impersonation_to_primary_carries_level(
 	struct kunit *test)
 {
 	struct kacs_duplicate_args args = {
@@ -4206,7 +4206,7 @@ static void pkm_kunit_token_duplicate_impersonation_to_primary_forces_anonymous(
 	KUNIT_EXPECT_EQ(test, duplicate.token_type,
 			(u32)KACS_TOKEN_TYPE_PRIMARY);
 	KUNIT_EXPECT_EQ(test, duplicate.impersonation_level,
-			(u32)KACS_IMLEVEL_ANONYMOUS);
+			(u32)KACS_IMLEVEL_DELEGATION);
 	KUNIT_EXPECT_TRUE(test, duplicate.token_id != source_before.token_id);
 	KUNIT_EXPECT_EQ(test, duplicate.modified_id, duplicate.token_id);
 
@@ -4221,6 +4221,272 @@ static void pkm_kunit_token_duplicate_impersonation_to_primary_forces_anonymous(
 }
 
 
+/*
+ * PEI-524: the level is a ratchet on every token. A primary at Impersonation
+ * cannot be duplicated to a Delegation-level impersonation token, and a
+ * Primary result honours the requested level rather than a conventional
+ * Anonymous.
+ */
+static void pkm_kunit_token_duplicate_primary_ratchets_level(
+	struct kunit *test)
+{
+	struct kacs_duplicate_args up = {
+		.access_mask = KACS_TOKEN_QUERY,
+		.token_type = KACS_TOKEN_TYPE_IMPERSONATION,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
+		.result_fd = -1,
+	};
+	struct kacs_duplicate_args level = {
+		.access_mask = KACS_TOKEN_QUERY,
+		.token_type = KACS_TOKEN_TYPE_IMPERSONATION,
+		.impersonation_level = KACS_IMLEVEL_IMPERSONATION,
+		.result_fd = -1,
+	};
+	struct kacs_duplicate_args lower_primary = {
+		.access_mask = KACS_TOKEN_QUERY,
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_IMLEVEL_IMPERSONATION,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_token_fd_view view = { };
+	struct pkm_kacs_boot_snapshot duplicate = { };
+	const void *source_token;
+	const void *subject_token;
+	const void *creator_token;
+	long source_fd;
+
+	source_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	creator_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, source_token);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, creator_token);
+
+	source_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, source_token, KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, source_fd, 0L);
+
+	/* above the source's level: refused loudly, whatever the type */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				(int)source_fd, subject_token,
+				creator_token, &up),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, up.result_fd, -1);
+
+	/* at the source's level: an impersonation token at that level */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				(int)source_fd, subject_token,
+				creator_token, &level),
+			0);
+	KUNIT_ASSERT_GE(test, (long)level.result_fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot(level.result_fd, &view),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, view.token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(view.token, &duplicate));
+	KUNIT_EXPECT_EQ(test, duplicate.impersonation_level,
+			(u32)KACS_IMLEVEL_IMPERSONATION);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)level.result_fd), 0);
+
+	/* a Primary result honours the requested level too */
+	memset(&view, 0, sizeof(view));
+	memset(&duplicate, 0, sizeof(duplicate));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				(int)source_fd, subject_token,
+				creator_token, &lower_primary),
+			0);
+	KUNIT_ASSERT_GE(test, (long)lower_primary.result_fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot(lower_primary.result_fd,
+							 &view),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, view.token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(view.token, &duplicate));
+	KUNIT_EXPECT_EQ(test, duplicate.token_type,
+			(u32)KACS_TOKEN_TYPE_PRIMARY);
+	KUNIT_EXPECT_EQ(test, duplicate.impersonation_level,
+			(u32)KACS_IMLEVEL_IMPERSONATION);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)lower_primary.result_fd),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)source_fd), 0);
+	kacs_rust_token_drop(source_token);
+}
+
+
+/*
+ * PEI-524: an Identification-level token cannot become a process. Neither a
+ * Primary at Identification nor one at a level above the source is created.
+ */
+static void pkm_kunit_token_duplicate_identification_to_primary_denies(
+	struct kunit *test)
+{
+	struct kacs_duplicate_args same = {
+		.access_mask = KACS_TOKEN_QUERY,
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_IMLEVEL_IDENTIFICATION,
+		.result_fd = -1,
+	};
+	struct kacs_duplicate_args up = {
+		.access_mask = KACS_TOKEN_QUERY,
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_IMLEVEL_IMPERSONATION,
+		.result_fd = -1,
+	};
+	const void *source_token;
+	const void *subject_token;
+	const void *creator_token;
+	long source_fd;
+
+	source_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IDENTIFICATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	creator_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, source_token);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, creator_token);
+
+	source_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+		subject_token, source_token, KACS_TOKEN_DUPLICATE);
+	KUNIT_ASSERT_GE(test, source_fd, 0L);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				(int)source_fd, subject_token,
+				creator_token, &same),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, same.result_fd, -1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				(int)source_fd, subject_token,
+				creator_token, &up),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, up.result_fd, -1);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)source_fd), 0);
+	kacs_rust_token_drop(source_token);
+}
+
+
+/*
+ * PEI-524: socket capture clamps to the source token's own level. A process
+ * whose primary sits at Impersonation conveys no more than Impersonation
+ * however high it sets the socket option.
+ */
+static void pkm_kunit_peer_socket_capture_clamps_to_source_level(
+	struct kunit *test)
+{
+	struct pkm_kacs_boot_snapshot captured = { };
+	const void *client_token;
+	const void *captured_token = NULL;
+	long ret;
+
+	client_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client_token);
+
+	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
+		client_token, SOCK_STREAM, KACS_IMLEVEL_DELEGATION, 0, 0,
+		&captured_token, NULL, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, captured_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(captured_token,
+							 &captured));
+	KUNIT_EXPECT_EQ(test, captured.token_type,
+			(u32)KACS_TOKEN_TYPE_IMPERSONATION);
+	KUNIT_EXPECT_EQ(test, captured.impersonation_level,
+			(u32)KACS_IMLEVEL_IMPERSONATION);
+
+	kacs_rust_token_drop(captured_token);
+	kacs_rust_token_drop(client_token);
+}
+
+
+/*
+ * PEI-524: the escalation chain the ratchet exists to close. A peer token
+ * captured at Impersonation now carries TOKEN_DUPLICATE, so it can become a
+ * primary — but that primary is capped at Impersonation, and nothing
+ * duplicated from it can reach Delegation.
+ */
+static void pkm_kunit_peer_token_cannot_reach_delegation(struct kunit *test)
+{
+	struct kacs_duplicate_args to_primary = {
+		.access_mask = KACS_TOKEN_DUPLICATE,
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_IMLEVEL_IMPERSONATION,
+		.result_fd = -1,
+	};
+	struct kacs_duplicate_args to_delegation = {
+		.access_mask = KACS_TOKEN_QUERY,
+		.token_type = KACS_TOKEN_TYPE_IMPERSONATION,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
+		.result_fd = -1,
+	};
+	struct pkm_kacs_token_fd_view view = { };
+	struct pkm_kacs_boot_snapshot primary = { };
+	const void *captured_token = NULL;
+	const void *subject_token;
+	const void *creator_token;
+	long peer_fd;
+	long ret;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	creator_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, creator_token);
+
+	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
+		subject_token, SOCK_STREAM, KACS_IMLEVEL_IMPERSONATION, 0, 0,
+		&captured_token, NULL, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, captured_token);
+
+	peer_fd = pkm_kacs_kunit_open_peer_token_for_socket(1, captured_token);
+	KUNIT_ASSERT_GE(test, peer_fd, 0L);
+
+	/* the peer fd carries DUPLICATE, so a primary can be made from it */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				(int)peer_fd, subject_token, creator_token,
+				&to_primary),
+			0);
+	KUNIT_ASSERT_GE(test, (long)to_primary.result_fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot(to_primary.result_fd,
+							 &view),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, view.token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(view.token, &primary));
+	KUNIT_EXPECT_EQ(test, primary.token_type,
+			(u32)KACS_TOKEN_TYPE_PRIMARY);
+	KUNIT_EXPECT_EQ(test, primary.impersonation_level,
+			(u32)KACS_IMLEVEL_IMPERSONATION);
+
+	/* but the primary is capped: Delegation is out of reach */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_duplicate(
+				to_primary.result_fd, subject_token,
+				creator_token, &to_delegation),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, to_delegation.result_fd, -1);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)to_primary.result_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)peer_fd), 0);
+	kacs_rust_token_drop(captured_token);
+}
+
+
 static void pkm_kunit_token_duplicate_linked_elevation_resets_default(
 	struct kunit *test)
 {
@@ -4231,7 +4497,7 @@ static void pkm_kunit_token_duplicate_linked_elevation_resets_default(
 	struct kacs_duplicate_args args = {
 		.access_mask = KACS_TOKEN_QUERY,
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.result_fd = -1,
 	};
 	const void *caller_token;
@@ -4361,7 +4627,7 @@ static void pkm_kunit_token_duplicate_copies_field_matrix(struct kunit *test)
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.privileges_present = PKM_KUNIT_SE_DEBUG_PRIVILEGE,
@@ -4579,7 +4845,7 @@ static void pkm_kunit_token_duplicate_mutations_are_independent(
 	struct kacs_duplicate_args duplicate = {
 		.access_mask = KACS_TOKEN_QUERY | KACS_TOKEN_ADJUST_PRIVS,
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.result_fd = -1,
 	};
 	struct kacs_adjust_privs_args source_adjust = {
@@ -4696,7 +4962,7 @@ static void pkm_kunit_token_impersonate_caps_identification_without_privilege(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	server_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
 		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
@@ -4747,7 +5013,7 @@ static void pkm_kunit_token_impersonate_integrity_ceiling_caps_identification(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	server_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0,
 		PKM_KUNIT_SE_IMPERSONATE_PRIVILEGE);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
@@ -4793,7 +5059,7 @@ static void pkm_kunit_token_impersonate_integrity_cap_preserves_label(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	server_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0,
 		PKM_KUNIT_SE_IMPERSONATE_PRIVILEGE);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
@@ -4984,7 +5250,7 @@ static void pkm_kunit_token_impersonation_gate_uses_primary_token(
 	new_primary_token =
 		kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
 			PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-			KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+			KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0,
 			PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
 			PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
 			PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
@@ -5105,7 +5371,7 @@ static void pkm_kunit_double_impersonation_replaces_effective_token(
 	new_primary_token =
 		kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
 			PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-			KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_MEDIUM, 0,
+			KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_MEDIUM, 0,
 			PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
 			PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
 			PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
@@ -5233,7 +5499,7 @@ static void pkm_kunit_token_impersonate_same_user_restriction_mismatch_denies(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	server_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 1, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 1, 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_IMPERSONATION,
 		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
@@ -5270,7 +5536,7 @@ static void pkm_kunit_token_impersonate_anonymous_bypasses_gates(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	server_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_LOW, 1, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_LOW, 1, 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
 		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_HIGH, 0, 0);
@@ -5382,7 +5648,7 @@ static void pkm_kunit_token_install_requires_assign_primary_handle(
 
 	target_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, target_token);
 
@@ -5422,12 +5688,12 @@ static void pkm_kunit_token_install_requires_assign_primary_privilege(
 
 	target_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
 	caller_without_privilege =
 		kacs_rust_kunit_create_impersonation_variant_token(
 			PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-			KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+			KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, target_token);
 	KUNIT_ASSERT_NOT_NULL(test, caller_without_privilege);
 
@@ -5511,7 +5777,7 @@ static void pkm_kunit_token_install_same_user_preserves_process_sd(
 
 	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, new_primary_token);
 
@@ -5587,7 +5853,7 @@ static void pkm_kunit_token_install_different_user_regenerates_process_sd(
 
 	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE |
 			PKM_KUNIT_SE_TCB_PRIVILEGE);
 	KUNIT_ASSERT_NOT_NULL(test, new_primary_token);
@@ -5659,7 +5925,7 @@ static void pkm_kunit_token_install_under_impersonation_revert_lands_on_new_prim
 
 	new_primary_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
@@ -6032,7 +6298,8 @@ static void pkm_kunit_peer_socket_open_token_fixed_rights(struct kunit *test)
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_snapshot((int)fd, &view), 0);
 	KUNIT_EXPECT_EQ(test, view.access_mask,
-			KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE);
+			KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE |
+			KACS_TOKEN_DUPLICATE);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	kacs_rust_token_drop(captured_token);
@@ -6051,7 +6318,7 @@ static void pkm_kunit_peer_socket_impersonate_success_and_revert(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	primary_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, client_token);
 	KUNIT_ASSERT_NOT_NULL(test, primary_token);
@@ -6097,7 +6364,7 @@ static void pkm_kunit_peer_socket_seqpacket_impersonate_success_and_revert(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	primary_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, client_token);
 	KUNIT_ASSERT_NOT_NULL(test, primary_token);
@@ -6201,9 +6468,14 @@ out_restore:
 }
 
 
-static void pkm_kunit_peer_socket_capture_cannot_raise_effective_level(
+/*
+ * PEI-524: a socket option above the impersonating thread's own level does
+ * not fail the capture; the capture clamps to the effective token's level.
+ */
+static void pkm_kunit_peer_socket_capture_clamps_to_effective_level(
 	struct kunit *test)
 {
+	struct pkm_kacs_boot_snapshot captured = { };
 	const void *captured_token = NULL;
 	const void *client_token;
 	const void *primary_token;
@@ -6229,8 +6501,15 @@ static void pkm_kunit_peer_socket_capture_cannot_raise_effective_level(
 	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
 		pkm_kacs_current_effective_token_ptr(), SOCK_STREAM,
 		KACS_IMLEVEL_DELEGATION, 0, 0, &captured_token, NULL, NULL);
-	KUNIT_EXPECT_LT(test, ret, 0L);
-	KUNIT_EXPECT_PTR_EQ(test, captured_token, NULL);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_ASSERT_NOT_NULL(test, captured_token);
+	KUNIT_ASSERT_TRUE(test,
+			  kacs_rust_kunit_token_snapshot(captured_token,
+							 &captured));
+	KUNIT_EXPECT_EQ(test, captured.impersonation_level,
+			(u32)KACS_IMLEVEL_IDENTIFICATION);
+	kacs_rust_token_drop(captured_token);
+	captured_token = NULL;
 
 	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
 		pkm_kacs_current_effective_token_ptr(), SOCK_STREAM,
@@ -6262,10 +6541,10 @@ static void pkm_kunit_peer_socket_impersonate_caps_identification_without_privil
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	server_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, server_token);
 	KUNIT_ASSERT_NOT_NULL(test, client_token);
 
@@ -6281,7 +6560,8 @@ static void pkm_kunit_peer_socket_impersonate_caps_identification_without_privil
 			pkm_kacs_kunit_token_fd_snapshot((int)token_fd, &view),
 			0);
 	KUNIT_EXPECT_EQ(test, view.access_mask,
-			KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE);
+			KACS_TOKEN_QUERY | KACS_TOKEN_IMPERSONATE |
+			KACS_TOKEN_DUPLICATE);
 
 	ret = pkm_kacs_kunit_token_fd_impersonate((int)token_fd, server_token);
 	KUNIT_EXPECT_EQ(test, ret, 0L);
@@ -6312,10 +6592,10 @@ static void pkm_kunit_peer_socket_restricted_mismatch_hard_denies(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	server_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 1, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 1, 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, server_token);
 	KUNIT_ASSERT_NOT_NULL(test, client_token);
 
@@ -6411,7 +6691,7 @@ static void pkm_kunit_socket_attach_gates_like_impersonation(
 	 */
 	capped_server = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, capped_server);
 	ret = pkm_kacs_kunit_socket_attach_fd((int)fd, KACS_IMLEVEL_IMPERSONATION,
 					      capped_server, &attached);
@@ -6719,7 +6999,7 @@ static void pkm_kunit_token_impersonate_rejects_primary_token(
 	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	client_token = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	primary_token = pkm_kacs_current_primary_token_ptr();
 	KUNIT_ASSERT_NOT_NULL(test, client_token);
 	KUNIT_ASSERT_NOT_NULL(test, primary_token);
@@ -6937,7 +7217,7 @@ static void pkm_kunit_token_query_public_tail_payload(struct kunit *test)
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.projected_uid = 1200U,
@@ -7136,7 +7416,7 @@ static void pkm_kunit_token_query_public_tail_short_buffers(struct kunit *test)
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.projected_uid = 1400U,
@@ -7340,7 +7620,7 @@ static void pkm_kunit_token_query_boolean_preserves_raw_u64(struct kunit *test)
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.source_name = "KBOOLRAW",
 		.user_sid = pkm_kunit_local_service_sid,
@@ -7756,7 +8036,7 @@ static void pkm_kunit_token_own_sd_constructor_matrix(struct kunit *test)
 	struct pkm_kacs_boot_snapshot source_snapshot = { };
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 0,
@@ -8145,7 +8425,7 @@ static void pkm_kunit_token_link_replacement_invalidates_old_partner(
 	struct kacs_duplicate_args duplicate = {
 		.access_mask = KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE,
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.result_fd = -1,
 	};
 	struct kacs_link_tokens_args link;
@@ -8200,7 +8480,7 @@ static void pkm_kunit_token_link_replacement_invalidates_old_elevated(
 	struct kacs_duplicate_args duplicate = {
 		.access_mask = KACS_TOKEN_QUERY | KACS_TOKEN_DUPLICATE,
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.result_fd = -1,
 	};
 	struct kacs_link_tokens_args link;
@@ -9263,7 +9543,7 @@ static void pkm_kunit_token_adjust_groups_preserves_projected_gids(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.projected_uid = 1200U,
@@ -9813,7 +10093,7 @@ static void pkm_kunit_token_adjust_groups_mandatory_non_logon_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 0,
@@ -9916,7 +10196,7 @@ pkm_kunit_token_adjust_groups_mandatory_non_logon_enable_fails_closed(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.owner_sid_index = 0,
@@ -11446,7 +11726,7 @@ static void pkm_kunit_token_restrict_preserves_source_user_deny_only(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -11854,7 +12134,7 @@ static void pkm_kunit_token_restrict_copies_extended_field_matrix(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.privileges_present = PKM_KUNIT_SE_DEBUG_PRIVILEGE,
@@ -12359,7 +12639,7 @@ static void pkm_kunit_create_token_mandatory_policy_zero_disables_mic(
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
 		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_ANONYMOUS,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.source_name = source_name,
 		.user_sid = pkm_kunit_local_service_sid,
@@ -12547,7 +12827,7 @@ static void pkm_kunit_token_install_rejects_mismatched_identity(
 
 	caller = kacs_rust_kunit_create_impersonation_variant_token_with_privileges(
 		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE,
 		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
@@ -12555,7 +12835,7 @@ static void pkm_kunit_token_install_rejects_mismatched_identity(
 
 	target = kacs_rust_kunit_create_impersonation_variant_token(
 		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_ANONYMOUS, PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
 	KUNIT_ASSERT_NOT_NULL(test, target);
 
 	fd = pkm_kacs_kunit_open_token_fd_for_subject(
@@ -12683,7 +12963,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_create_token_invalid_logon_session_fails_closed),
 	KUNIT_CASE(pkm_kunit_create_token_write_restricted_requires_user_deny_only),
 	KUNIT_CASE(pkm_kunit_create_token_malformed_claims_fail_closed),
-	KUNIT_CASE(pkm_kunit_create_token_primary_non_anonymous_denies),
+	KUNIT_CASE(pkm_kunit_create_token_primary_below_impersonation_denies),
 	KUNIT_CASE(pkm_kunit_create_token_impersonation_levels_query),
 	KUNIT_CASE(pkm_kunit_create_token_invalid_mandatory_policy_fails_closed),
 	KUNIT_CASE(pkm_kunit_create_token_invalid_audit_policy_fails_closed),
@@ -12729,7 +13009,9 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_token_duplicate_impersonation_lowers_level),
 	KUNIT_CASE(pkm_kunit_token_duplicate_new_handle_checks_new_token_sd_against_subject),
 	KUNIT_CASE(pkm_kunit_token_duplicate_primary_to_impersonation_all_levels),
-	KUNIT_CASE(pkm_kunit_token_duplicate_impersonation_to_primary_forces_anonymous),
+	KUNIT_CASE(pkm_kunit_token_duplicate_impersonation_to_primary_carries_level),
+	KUNIT_CASE(pkm_kunit_token_duplicate_primary_ratchets_level),
+	KUNIT_CASE(pkm_kunit_token_duplicate_identification_to_primary_denies),
 	KUNIT_CASE(pkm_kunit_token_duplicate_linked_elevation_resets_default),
 	KUNIT_CASE(pkm_kunit_token_duplicate_copies_field_matrix),
 	KUNIT_CASE(pkm_kunit_token_duplicate_mutations_are_independent),
@@ -12763,10 +13045,12 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_peer_socket_abstract_connect_denied_without_write_data),
 	KUNIT_CASE(pkm_kunit_peer_socket_dgram_send_checks_abstract_sd),
 	KUNIT_CASE(pkm_kunit_peer_socket_open_token_fixed_rights),
+	KUNIT_CASE(pkm_kunit_peer_socket_capture_clamps_to_source_level),
+	KUNIT_CASE(pkm_kunit_peer_token_cannot_reach_delegation),
 	KUNIT_CASE(pkm_kunit_peer_socket_impersonate_success_and_revert),
 	KUNIT_CASE(pkm_kunit_peer_socket_seqpacket_impersonate_success_and_revert),
 	KUNIT_CASE(pkm_kunit_peer_socket_impersonation_cascades_identity),
-	KUNIT_CASE(pkm_kunit_peer_socket_capture_cannot_raise_effective_level),
+	KUNIT_CASE(pkm_kunit_peer_socket_capture_clamps_to_effective_level),
 	KUNIT_CASE(pkm_kunit_peer_socket_impersonate_caps_identification_without_privilege),
 	KUNIT_CASE(pkm_kunit_peer_socket_restricted_mismatch_hard_denies),
 	KUNIT_CASE(pkm_kunit_peer_socket_unsupported_or_uncaptured_fail_closed),
