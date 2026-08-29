@@ -158,6 +158,8 @@
 #define KACS_SOCK_DELIVER		20U /* KACS_SCM_TOKEN delivered to a receiver */
 #define KACS_SOCK_LISTEN		21U /* listener identity captured at listen() */
 #define KACS_SOCK_RESTAMP		22U /* listener identity replaced by KACS_SO_RESTAMP */
+#define KACS_SOCK_PORT_BIND		23U /* inet bind: port reservation SD verdict */
+#define KACS_SOCK_PORT_TABLE		24U /* port reservation table load result */
 
 /* kacs_ipc reason — a System V IPC object SD decision (ipc.c). */
 #define KACS_IPC_ALLOC			0U  /* default SD stamped at *get creation */

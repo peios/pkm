@@ -24,7 +24,7 @@ u64 pkm_kacs_allow_cap_mask_u64(void)
 	       (1ULL << CAP_FSETID) | (1ULL << CAP_KILL) |
 	       (1ULL << CAP_SETGID) | (1ULL << CAP_SETUID) |
 	       (1ULL << CAP_NET_BROADCAST) | (1ULL << CAP_IPC_OWNER) |
-	       (1ULL << CAP_LEASE);
+	       (1ULL << CAP_LEASE) | (1ULL << CAP_NET_BIND_SERVICE);
 }
 
 static void pkm_kacs_raise_allow_kernel_caps(kernel_cap_t *caps)
@@ -43,6 +43,12 @@ static void pkm_kacs_raise_allow_kernel_caps(kernel_cap_t *caps)
 	cap_raise(*caps, CAP_NET_BROADCAST);
 	cap_raise(*caps, CAP_IPC_OWNER);
 	cap_raise(*caps, CAP_LEASE);
+	/*
+	 * The Linux privileged-port floor never refuses a bind: every claim
+	 * on a port reaches the reservation check in socket_bind, where the
+	 * port's security descriptor decides (<pkm/net.h>).
+	 */
+	cap_raise(*caps, CAP_NET_BIND_SERVICE);
 }
 
 void pkm_kacs_raise_allow_compat_caps(struct cred *cred)
@@ -121,7 +127,8 @@ bool pkm_kacs_allow_caps_present(const kernel_cap_t *caps)
 	       cap_raised(*caps, CAP_SETUID) &&
 	       cap_raised(*caps, CAP_NET_BROADCAST) &&
 	       cap_raised(*caps, CAP_IPC_OWNER) &&
-	       cap_raised(*caps, CAP_LEASE);
+	       cap_raised(*caps, CAP_LEASE) &&
+	       cap_raised(*caps, CAP_NET_BIND_SERVICE);
 }
 
 u64 pkm_kacs_kernel_cap_to_u64(const kernel_cap_t *caps)
@@ -167,6 +174,7 @@ static bool pkm_kacs_cap_is_allow(int cap)
 	case CAP_NET_BROADCAST:
 	case CAP_IPC_OWNER:
 	case CAP_LEASE:
+	case CAP_NET_BIND_SERVICE:
 		return true;
 	default:
 		return false;
@@ -191,8 +199,6 @@ static u64 pkm_kacs_cap_required_privilege(int cap)
 	case CAP_BPF:
 	case CAP_CHECKPOINT_RESTORE:
 		return KACS_SE_TCB_PRIVILEGE;
-	case CAP_NET_BIND_SERVICE:
-		return KACS_SE_BIND_PRIVILEGED_PORT_PRIVILEGE;
 	case CAP_IPC_LOCK:
 		return KACS_SE_LOCK_MEMORY_PRIVILEGE;
 	case CAP_SYS_MODULE:

@@ -193,6 +193,13 @@ struct pkm_kacs_socket_security {
 	 * Guarded by register_lock.
 	 */
 	const void *listener_token;
+	/*
+	 * The effective token that last passed the port reservation check on
+	 * this socket (inet bind). Guarded by register_lock. Recorded for the
+	 * rebind rule (<pkm/net.h>): a later binder onto the same port must
+	 * share this token's user SID or hold SeTcbPrivilege.
+	 */
+	const void *binder_token;
 	struct mutex convey_lock;
 	const void *convey_src;
 	const void *convey_token;

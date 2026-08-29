@@ -1,0 +1,66 @@
+--- machine\system\network\tcpip\portreservations
+canonical: Machine\System\Network\TcpIp\PortReservations
+
+Port reservations: who may claim a TCP or UDP port. Every value under
+this key is one reservation — its **name** is a selector naming a
+protocol set and a port range, its **data** is a self-relative security
+descriptor — and the key's unnamed default value (`@`) is the default
+reservation, consulted when no selector contains the port being bound.
+
+At `bind(2)` to a non-zero port, KACS finds the most specific selector
+containing `(protocol, port)` — the one covering the fewest ports —
+and evaluates the caller's effective token against that descriptor for
+`PORT_BIND` (`0x00000001`). Binding port 0 (ephemeral allocation) is
+never checked. `CAP_NET_BIND_SERVICE` is in the always-allow set, so the
+Linux privileged-port floor never refuses a bind first: this key decides
+for every port, including those below 1024.
+
+**Selector grammar.** `<proto>[,<proto>]:<lo>[-<hi>]` — `proto` is
+`tcp`, `udp` or `*` (both), case-insensitive; ports are decimal
+1–65535 with no leading zeros; `lo <= hi`. Examples: `tcp:80`,
+`udp:53`, `tcp,udp:1-1023`, `*:8080`. A protocol may not repeat, so
+every selector has exactly one spelling. The address family is
+deliberately absent: one reservation covers IPv4 and IPv6, or dual-stack
+squatting would bypass it.
+
+**Descriptor.** A port descriptor carries only `PORT_BIND` and
+`READ_CONTROL`. **Editing** a reservation is a write to this key,
+governed by the key's own descriptor; `WRITE_DAC` or `WRITE_OWNER`
+inside a port descriptor mean nothing and are never honoured. Write with
+`sd set` against the value, or ship as a `.reg` seed.
+
+**The table is loaded whole and rejected whole.** The kernel reads every
+value under this key, validates all of them, and swaps the new table in
+atomically. If any name is malformed, any descriptor does not parse, the
+default is missing or duplicated, or two selectors of equal width
+overlap (so no most-specific match would exist), the load is rejected
+with an audit event and the previous table stays in force. Nested and
+differing-width overlap is fine — it is how specificity works. The
+registry still shows what was written; the audit log shows what the
+kernel is using.
+
+**Before the registry.** Until the first successful load — during early
+boot, or if the registry is unavailable — a compiled-in table answers:
+`@` grants `PORT_BIND` to SYSTEM and nobody else. It is replaced, never
+merged, by the first load.
+
+**Rebinding.** Binding onto a port that is already bound (with
+`SO_REUSEADDR` / `SO_REUSEPORT`) is still a `bind(2)` and still meets
+this check; the kernel additionally records the permitted binder on the
+socket for the rebind rule (same user SID, or SeTcbPrivilege).
+
+Security on this key: inherits the Machine hive root descriptor (SYSTEM
+and Administrators: KEY_ALL_ACCESS; Authenticated Users: KEY_READ).
+Reading reservations is harmless; writing them is administration.
+
+--- machine\system\network\tcpip\portreservations @
+canonical: Machine\System\Network\TcpIp\PortReservations @
+type: REG_BINARY
+default: (shipped seed) Everyone: PORT_BIND
+applies: live
+
+The default reservation: the descriptor governing every port no
+selector contains. The shipped seed grants `PORT_BIND` to Everyone —
+an unreserved port is anyone's to claim, as on Windows. Absent this
+value the whole table is rejected and the previous table (or the
+compiled-in SYSTEM-only default) stays in force.

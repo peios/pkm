@@ -42,6 +42,13 @@ pub enum KacsError {
     },
     /// AccessCheck was called with no security descriptor.
     NullSecurityDescriptor,
+    /// A port reservation selector name was malformed.
+    InvalidPortSelector(&'static str),
+    /// A port reservation's descriptor did not parse.
+    InvalidPortReservationSd,
+    /// Two port reservations of equal width overlap, so no most-specific
+    /// match exists.
+    AmbiguousPortReservation,
     /// An input buffer ended before the required bytes were available.
     Truncated(&'static str),
     /// A claim structure was malformed.

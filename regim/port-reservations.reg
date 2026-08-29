@@ -1,0 +1,55 @@
+{
+  "_comment": [
+    "Port reservations (<pkm/net.h>): who may bind a TCP or UDP port. Every",
+    "value under the key is one reservation -- name = selector, data = a",
+    "self-relative security descriptor; @ is the default reservation. The",
+    "kernel reads the key whole at registryd's registration and re-reads it on",
+    "change. Until it loads, a compiled-in table admits SYSTEM alone.",
+    "",
+    "  @                Everyone: PORT_BIND. An unreserved port is anyone's to",
+    "                   claim, as on Windows.",
+    "  tcp,udp:1-1023   SYSTEM and the bindLowPorts capability: PORT_BIND. The",
+    "                   Linux privileged-port convention restated as policy.",
+    "                   S-1-15-3-3533757010-1431273012-2931739651-3997941505-1291078915-1448554638-2293412035-2927022690 is the derived capability SID for the name",
+    "                   'bindLowPorts' (PCDS: eight LE u32 sub-authorities from",
+    "                   SHA-256 of the UTF-8 name); it reaches a token by",
+    "                   confinement -- peinit for a service, authd at logon for a",
+    "                   principal. Until tokens carry it the ACE matches nobody",
+    "                   and only SYSTEM binds below 1024.",
+    "",
+    "Descriptors: owner and group SYSTEM; DACL of ACCESS_ALLOWED ACEs carrying",
+    "PORT_BIND (0x1) | READ_CONTROL (0x20000). Editing is governed by the key's",
+    "own SD (Machine hive default: Administrators/SYSTEM full, Authenticated",
+    "Users read). Regenerate with tools/gen-port-reservations-seed.py; do not",
+    "hand-edit the hex.",
+    "",
+    "Shipped by the kernel package into /usr/share/regim/; inert until an image",
+    "names it in [registry] autoapply."
+  ],
+  "keys": [
+    {
+      "path": "Machine\\System"
+    },
+    {
+      "path": "Machine\\System\\Network"
+    },
+    {
+      "path": "Machine\\System\\Network\\TcpIp"
+    },
+    {
+      "path": "Machine\\System\\Network\\TcpIp\\PortReservations",
+      "values": [
+        {
+          "name": "@",
+          "type": "binary",
+          "data": "010004801400000020000000000000002c00000001010000000000051200000001010000000000051200000002001c00010000000000140001000200010100000000000100000000"
+        },
+        {
+          "name": "tcp,udp:1-1023",
+          "type": "binary",
+          "data": "010004801400000020000000000000002c000000010100000000000512000000010100000000000512000000020050000200000000001400010002000101000000000005120000000000340001000200010900000000000f0300000052daa0d2347e4f5503ccbeae01bf4bee034df44c8e305756c3b0b28862d276ae"
+        }
+      ]
+    }
+  ]
+}

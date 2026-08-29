@@ -27,3 +27,7 @@ linux-kernel = "7.0.9"
 "kernel:arch/x86/boot/bzImage" = "usr/lib/modules/7.0.9-peios-{{version}}/vmlinuz-7.0.9-peios-{{version}}"
 "kernel:System.map"            = "usr/lib/modules/7.0.9-peios-{{version}}/System.map-7.0.9-peios-{{version}}"
 "kernel:.config"               = "usr/lib/modules/7.0.9-peios-{{version}}/config-7.0.9-peios-{{version}}"
+# Registry seed for port reservations (<pkm/net.h>) — inert until an image
+# names it in [registry] autoapply. Regenerate with
+# tools/gen-port-reservations-seed.py.
+"@source:regim/port-reservations.reg" = "usr/share/regim/port-reservations.reg"

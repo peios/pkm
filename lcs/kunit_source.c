@@ -2324,6 +2324,11 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		{ .expected_child = "Registry", .guid = registry_guid },
 		{ .expected_child = "Layers", .guid = layers_root_guid },
 	};
+	/* No Machine\System\Network: port reservations stay on the fallback. */
+	static const struct pkm_lcs_kunit_walk_source_step port_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Network", .empty = true },
+	};
 	static const u8 owner_only_sd[] = {
 		0x01, 0x00, 0x00, 0x80,
 		0x14, 0x00, 0x00, 0x00,
@@ -2364,6 +2369,10 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 			.data_len = sizeof(kmes_data),
 			.value_type = REG_DWORD,
 			.query_all = true,
+		},
+		.port_walk = {
+			.steps = port_steps,
+			.step_count = ARRAY_SIZE(port_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -2425,8 +2434,8 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 14U);
-	KUNIT_EXPECT_EQ(test, script.writes, 14U);
+	KUNIT_EXPECT_EQ(test, script.reads, 16U);
+	KUNIT_EXPECT_EQ(test, script.writes, 16U);
 	KUNIT_EXPECT_TRUE(test, result.registry_root_present);
 	KUNIT_EXPECT_EQ(test, result.self_config.applied_count, 1U);
 	KUNIT_EXPECT_TRUE(test, result.kmes_root_present);
@@ -2435,9 +2444,10 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	KUNIT_EXPECT_EQ(test, result.layers.enumerated_child_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.layers.refreshed_child_count, 1U);
 	KUNIT_EXPECT_EQ(test, result.layers.effective_changed_count, 1U);
+	/* No PortReservations key in the scripted hive: fallback armed. */
 	KUNIT_EXPECT_EQ(test, result.self_watch.mode,
-			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, result.self_watch.watch_count, 3U);
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
+	KUNIT_EXPECT_EQ(test, result.self_watch.watch_count, 4U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.self_watch.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -2455,8 +2465,8 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 				&watch_snapshot),
 			0L);
 	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
-			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 3U);
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 4U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
 	KUNIT_ASSERT_EQ(test,
@@ -2505,6 +2515,11 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		{ .expected_child = "Registry", .guid = registry_guid },
 		{ .expected_child = "Layers", .guid = layers_root_guid },
 	};
+	/* No Machine\System\Network: port reservations stay on the fallback. */
+	static const struct pkm_lcs_kunit_walk_source_step port_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Network", .empty = true },
+	};
 	static const u8 owner_only_sd[] = {
 		0x01, 0x00, 0x00, 0x80,
 		0x14, 0x00, 0x00, 0x00,
@@ -2549,6 +2564,10 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 			.data_len = sizeof(kmes_data),
 			.value_type = REG_DWORD,
 			.query_all = true,
+		},
+		.port_walk = {
+			.steps = port_steps,
+			.step_count = ARRAY_SIZE(port_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -2617,8 +2636,8 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 14U);
-	KUNIT_EXPECT_EQ(test, script.writes, 14U);
+	KUNIT_EXPECT_EQ(test, script.reads, 16U);
+	KUNIT_EXPECT_EQ(test, script.writes, 16U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
 	KUNIT_ASSERT_EQ(test,
@@ -2634,8 +2653,8 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 			0L);
 	KUNIT_EXPECT_EQ(test, watch_snapshot.source_id, 1U);
 	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
-			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 3U);
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 4U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(watch_snapshot.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -2745,6 +2764,40 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_bad_inputs_fail_closed(
 			pkm_lcs_source_bootstrap_refresh_machine_hive(
 				1, machine_root_guid, NULL),
 			(long)-EINVAL);
+}
+
+
+/*
+ * PEI-510: a stage failing before the self-watch is armed must not leave the
+ * kernel with no watch at all. With no registered source every walk fails
+ * with -EIO; the refresh reports that and arms the machine-root fallback so
+ * the next mutation under Machine retries the whole refresh.
+ */
+static void pkm_lcs_kunit_source_bootstrap_failure_arms_fallback(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0x93 };
+	struct pkm_lcs_source_bootstrap_refresh_result result = { };
+	struct pkm_lcs_internal_self_watch_snapshot snapshot = { };
+
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_internal_self_watch_disarm();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_bootstrap_refresh_machine_hive(
+				7, machine_root_guid, &result),
+			(long)-EIO);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_internal_self_watch_snapshot(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.source_id, 7U);
+	KUNIT_EXPECT_EQ(test, snapshot.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MACHINE_ROOT_FALLBACK);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 1U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.fallback_guid, machine_root_guid,
+			       sizeof(machine_root_guid)),
+			0);
+	pkm_lcs_internal_self_watch_disarm();
 }
 
 
@@ -11724,6 +11777,7 @@ static struct kunit_case pkm_lcs_kunit_source_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish),
 	KUNIT_CASE(pkm_lcs_kunit_source_registration_bootstrap_ignores_non_machine),
 	KUNIT_CASE(pkm_lcs_kunit_source_bootstrap_refresh_bad_inputs_fail_closed),
+	KUNIT_CASE(pkm_lcs_kunit_source_bootstrap_failure_arms_fallback),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_limits),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_runtime_limit),
 	KUNIT_CASE(pkm_lcs_kunit_source_bound_transaction_counter_raised_runtime_limit),

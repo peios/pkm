@@ -401,6 +401,5 @@ struct kacs_get_linked_token_args {
 #define KACS_SE_IMPERSONATE_PRIVILEGE			(1ULL << 29)
 #define KACS_SE_RELABEL_PRIVILEGE			(1ULL << 32)
 #define KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE		(1ULL << 35)
-#define KACS_SE_BIND_PRIVILEGED_PORT_PRIVILEGE		(1ULL << 63)
 
 #endif /* _UAPI_PKM_TOKEN_H */

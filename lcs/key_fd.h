@@ -137,6 +137,7 @@ enum pkm_lcs_internal_watch_target {
 	PKM_LCS_INTERNAL_WATCH_LAYER_METADATA = 2,
 	PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK = 3,
 	PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION = 4,
+	PKM_LCS_INTERNAL_WATCH_PORT_RESERVATIONS = 5,
 };
 
 enum pkm_lcs_internal_self_watch_mode {
@@ -154,6 +155,7 @@ struct pkm_lcs_internal_self_watch_arm_result {
 	u8 layers_guid[PKM_LCS_GUID_BYTES];
 	u8 kmes_guid[PKM_LCS_GUID_BYTES];
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
+	u8 port_guid[PKM_LCS_GUID_BYTES];
 };
 
 struct pkm_lcs_internal_self_watch_snapshot {
@@ -164,6 +166,7 @@ struct pkm_lcs_internal_self_watch_snapshot {
 	u8 layers_guid[PKM_LCS_GUID_BYTES];
 	u8 kmes_guid[PKM_LCS_GUID_BYTES];
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
+	u8 port_guid[PKM_LCS_GUID_BYTES];
 };
 
 struct pkm_lcs_watch_dispatch_input {
@@ -236,13 +239,34 @@ long pkm_lcs_key_fd_publish_late_mutation_effects(
 	const struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_key_fd_dispatch_watch_event(
 	const struct pkm_lcs_watch_dispatch_input *input);
-long pkm_lcs_internal_self_watch_arm(
+long pkm_lcs_internal_self_watch_arm_full(
 	u32 source_id, const u8 machine_root_guid[PKM_LCS_GUID_BYTES],
 	bool registry_present,
 	const u8 registry_guid[PKM_LCS_GUID_BYTES],
 	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
 	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
+	bool port_present, const u8 port_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out);
+/*
+ * The three-key form, kept for callers that predate port reservations. A
+ * missing port-reservation key arms the machine-root fallback watch like any
+ * other missing key, so a seed applied after the first source registered
+ * (first boot's autoapply) is discovered and loaded without a reboot.
+ */
+static inline long pkm_lcs_internal_self_watch_arm(
+	u32 source_id, const u8 machine_root_guid[PKM_LCS_GUID_BYTES],
+	bool registry_present,
+	const u8 registry_guid[PKM_LCS_GUID_BYTES],
+	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
+	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
+	struct pkm_lcs_internal_self_watch_arm_result *result_out)
+{
+	return pkm_lcs_internal_self_watch_arm_full(
+		source_id, machine_root_guid, registry_present, registry_guid,
+		layers_present, layers_guid, kmes_present, kmes_guid, false,
+		NULL, result_out);
+}
+
 void pkm_lcs_internal_self_watch_disarm(void);
 long pkm_lcs_key_fd_mark_orphaned_and_dispatch_deleted(
 	u32 source_id, const u8 guid[PKM_LCS_GUID_BYTES], u32 *marked_out);

@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "lsm_internal.h"
+#include "capability.h"
+#include "socket.h"
+
+#include <linux/in.h>
+#include <linux/in6.h>
+#include <pkm/net.h>
 
 
 static void pkm_kunit_probe_smoke(struct kunit *test)
@@ -314,7 +321,222 @@ static void pkm_kunit_lcs_private_credentials_accessors(struct kunit *test)
 	kacs_rust_token_drop(token);
 }
 
+
+/*
+ * Port reservations (<pkm/net.h>): the inet socket_bind path against the
+ * compiled-in fallback, a published table, and a rejected table. The KUnit
+ * context runs as SYSTEM, which is exactly who the fallback admits.
+ */
+
+struct pkm_kunit_port_fixture {
+	struct sock sk;
+	struct socket sock;
+	void *blob;
+};
+
+static int pkm_kunit_port_fixture_init(struct kunit *test,
+				       struct pkm_kunit_port_fixture *f,
+				       u16 family, u16 protocol)
+{
+	memset(f, 0, sizeof(*f));
+	f->blob = kzalloc(pkm_blob_sizes.lbs_sock +
+				  sizeof(struct pkm_kacs_socket_security),
+			  GFP_KERNEL);
+	if (!f->blob)
+		return -ENOMEM;
+	f->sk.sk_security = f->blob;
+	f->sk.sk_family = family;
+	f->sk.sk_protocol = protocol;
+	f->sock.sk = &f->sk;
+	f->sock.type = protocol == IPPROTO_TCP ? SOCK_STREAM : SOCK_DGRAM;
+	f->sock.state = SS_UNCONNECTED;
+	return pkm_kacs_sk_alloc_security(&f->sk, family, GFP_KERNEL);
+}
+
+static void pkm_kunit_port_fixture_exit(struct pkm_kunit_port_fixture *f)
+{
+	pkm_kacs_sk_free_security(&f->sk);
+	kfree(f->blob);
+}
+
+static int pkm_kunit_port_bind4(struct pkm_kunit_port_fixture *f, u16 port)
+{
+	struct sockaddr_in sin = {
+		.sin_family = AF_INET,
+		.sin_port = htons(port),
+		.sin_addr.s_addr = htonl(INADDR_ANY),
+	};
+
+	return pkm_kacs_socket_bind(&f->sock, (struct sockaddr *)&sin,
+				    sizeof(sin));
+}
+
+static int pkm_kunit_port_bind6(struct pkm_kunit_port_fixture *f, u16 port)
+{
+	struct sockaddr_in6 sin6 = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(port),
+	};
+
+	return pkm_kacs_socket_bind(&f->sock, (struct sockaddr *)&sin6,
+				    sizeof(sin6));
+}
+
+/* Appends one (name, sd) value to a serialised table blob. */
+static size_t pkm_kunit_port_blob_append(u8 *blob, size_t at, const char *name,
+					 const u8 *sd, size_t sd_len)
+{
+	u16 name_len = strlen(name);
+	u32 len32 = sd_len;
+
+	memcpy(blob + at, &name_len, 2);
+	at += 2;
+	memcpy(blob + at, name, name_len);
+	at += name_len;
+	memcpy(blob + at, &len32, 4);
+	at += 4;
+	memcpy(blob + at, sd, sd_len);
+	return at + sd_len;
+}
+
+/*
+ * The fallback SD with its one ACE removed: owner/group SYSTEM, DACL present
+ * and empty — grants nobody anything. 20 header + 12 + 12 + 8 ACL header.
+ */
+static size_t pkm_kunit_port_empty_dacl_sd(u8 *out, size_t cap)
+{
+	const u8 *fallback;
+	size_t fallback_len;
+
+	fallback = kacs_rust_port_fallback_sd(&fallback_len);
+	if (!fallback || fallback_len < 52 || cap < 52)
+		return 0;
+	memcpy(out, fallback, 52);
+	out[44 + 2] = 8;	/* acl size lo */
+	out[44 + 3] = 0;
+	out[44 + 4] = 0;	/* ace count lo */
+	out[44 + 5] = 0;
+	return 52;
+}
+
+static void pkm_kunit_port_fallback_admits_system_only_shape(struct kunit *test)
+{
+	struct pkm_kunit_port_fixture tcp, udp, six;
+	const u8 *fallback;
+	size_t fallback_len = 0;
+
+	KUNIT_ASSERT_EQ(test, kacs_rust_port_table_reset(), 0);
+	KUNIT_EXPECT_FALSE(test, kacs_rust_port_table_loaded());
+	fallback = kacs_rust_port_fallback_sd(&fallback_len);
+	KUNIT_ASSERT_NOT_NULL(test, fallback);
+	KUNIT_EXPECT_EQ(test, fallback_len, (size_t)72);
+
+	KUNIT_ASSERT_EQ(test, pkm_kunit_port_fixture_init(test, &tcp, AF_INET,
+							  IPPROTO_TCP), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_port_fixture_init(test, &udp, AF_INET,
+							  IPPROTO_UDP), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_port_fixture_init(test, &six, AF_INET6,
+							  IPPROTO_TCP), 0);
+
+	/* SYSTEM may claim anything under the fallback. */
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&tcp, 80), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&tcp, 65535), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&udp, 53), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind6(&six, 443), 0);
+	/* A permitted bind records the binder. */
+	KUNIT_EXPECT_NOT_NULL(test, pkm_kacs_sock(&tcp.sk)->binder_token);
+	/* Port 0 is never checked and records nothing. */
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&udp, 0), 0);
+
+	pkm_kunit_port_fixture_exit(&tcp);
+	pkm_kunit_port_fixture_exit(&udp);
+	pkm_kunit_port_fixture_exit(&six);
+}
+
+static void pkm_kunit_port_published_table_decides(struct kunit *test)
+{
+	struct pkm_kunit_port_fixture tcp, udp, six;
+	const u8 *fallback;
+	size_t fallback_len = 0;
+	u8 empty[64];
+	size_t empty_len;
+	u8 *blob;
+	size_t at = 0;
+
+	fallback = kacs_rust_port_fallback_sd(&fallback_len);
+	KUNIT_ASSERT_NOT_NULL(test, fallback);
+	empty_len = pkm_kunit_port_empty_dacl_sd(empty, sizeof(empty));
+	KUNIT_ASSERT_EQ(test, empty_len, (size_t)52);
+
+	blob = kzalloc(512, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, blob);
+	/* @ -> fallback (SYSTEM), tcp:80 -> nobody, udp:1-1023 -> nobody. */
+	at = pkm_kunit_port_blob_append(blob, at, "@", fallback, fallback_len);
+	at = pkm_kunit_port_blob_append(blob, at, "tcp:80", empty, empty_len);
+	at = pkm_kunit_port_blob_append(blob, at, "udp:1-1023", empty,
+					empty_len);
+	KUNIT_ASSERT_EQ(test, kacs_rust_port_table_replace(blob, at), 0);
+	KUNIT_EXPECT_TRUE(test, kacs_rust_port_table_loaded());
+
+	KUNIT_ASSERT_EQ(test, pkm_kunit_port_fixture_init(test, &tcp, AF_INET,
+							  IPPROTO_TCP), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_port_fixture_init(test, &udp, AF_INET,
+							  IPPROTO_UDP), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_port_fixture_init(test, &six, AF_INET6,
+							  IPPROTO_TCP), 0);
+
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&tcp, 80), -EACCES);
+	KUNIT_EXPECT_NULL(test, pkm_kacs_sock(&tcp.sk)->binder_token);
+	/* Same port, other family: the selector has no address family. */
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind6(&six, 80), -EACCES);
+	/* Same port, other protocol: only tcp:80 is reserved. */
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&udp, 80), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&udp, 1024), 0);
+	/* Neighbouring port falls to the default. */
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&tcp, 81), 0);
+	KUNIT_EXPECT_NOT_NULL(test, pkm_kacs_sock(&tcp.sk)->binder_token);
+
+	/* A malformed publish leaves the live table in place. */
+	KUNIT_EXPECT_EQ(test, kacs_rust_port_table_replace(blob, at - 3),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, kacs_rust_port_table_replace(NULL, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&tcp, 80), -EACCES);
+
+	/* No default value: rejected whole. */
+	at = pkm_kunit_port_blob_append(blob, 0, "tcp:80", empty, empty_len);
+	KUNIT_EXPECT_EQ(test, kacs_rust_port_table_replace(blob, at), -EINVAL);
+	/* Equal-width overlap: rejected whole. */
+	at = pkm_kunit_port_blob_append(blob, 0, "@", fallback, fallback_len);
+	at = pkm_kunit_port_blob_append(blob, at, "tcp:80", empty, empty_len);
+	at = pkm_kunit_port_blob_append(blob, at, "*:80", empty, empty_len);
+	KUNIT_EXPECT_EQ(test, kacs_rust_port_table_replace(blob, at), -EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&tcp, 80), -EACCES);
+
+	/* Reset: the fallback answers again, never merged. */
+	KUNIT_ASSERT_EQ(test, kacs_rust_port_table_reset(), 0);
+	KUNIT_EXPECT_FALSE(test, kacs_rust_port_table_loaded());
+	KUNIT_EXPECT_EQ(test, pkm_kunit_port_bind4(&tcp, 80), 0);
+
+	pkm_kunit_port_fixture_exit(&tcp);
+	pkm_kunit_port_fixture_exit(&udp);
+	pkm_kunit_port_fixture_exit(&six);
+	kfree(blob);
+}
+
+static void pkm_kunit_net_bind_service_is_allow(struct kunit *test)
+{
+	/* The Linux privileged-port floor never refuses; the SD decides. */
+	KUNIT_EXPECT_TRUE(test, capable(CAP_NET_BIND_SERVICE));
+	KUNIT_EXPECT_NE(test,
+			pkm_kacs_allow_cap_mask_u64() &
+				(1ULL << CAP_NET_BIND_SERVICE),
+			0ULL);
+}
+
 static struct kunit_case pkm_kunit_misc_cases[] = {
+	KUNIT_CASE(pkm_kunit_port_fallback_admits_system_only_shape),
+	KUNIT_CASE(pkm_kunit_port_published_table_decides),
+	KUNIT_CASE(pkm_kunit_net_bind_service_is_allow),
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege),
 	KUNIT_CASE(pkm_kunit_internal_file_access_sees_device_groups),

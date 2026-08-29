@@ -34,6 +34,7 @@
 
 #include <trace/events/lcs.h>
 
+#include "../kacs/port_reservations.h"
 #include "../kacs/token_runtime.h"
 #include "key_fd.h"
 #include "rsi.h"
@@ -137,6 +138,7 @@ struct pkm_lcs_internal_self_watch_state {
 	struct pkm_lcs_internal_watch registry;
 	struct pkm_lcs_internal_watch layers;
 	struct pkm_lcs_internal_watch kmes;
+	struct pkm_lcs_internal_watch port;
 	struct pkm_lcs_internal_watch fallback;
 	u32 source_id;
 	enum pkm_lcs_internal_self_watch_mode mode;
@@ -11082,6 +11084,7 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 	switch (watch->target) {
 	case PKM_LCS_INTERNAL_WATCH_SELF_CONFIGURATION:
 	case PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION:
+	case PKM_LCS_INTERNAL_WATCH_PORT_RESERVATIONS:
 		return relative_path_count == 0 &&
 		       (event_type == REG_WATCH_VALUE_SET ||
 			event_type == REG_WATCH_VALUE_DELETED);
@@ -11335,6 +11338,14 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 			 */
 			pkm_kmes_runtime_config_refresh_from_key(
 				event->source_id, event->guid, NULL);
+		} else if (event->target ==
+			   PKM_LCS_INTERNAL_WATCH_PORT_RESERVATIONS) {
+			/*
+			 * KACS keeps its last known-good table if the re-read
+			 * fails or the values do not form a valid table.
+			 */
+			pkm_kacs_port_reservations_refresh_from_key(
+				event->source_id, event->guid);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
 			pkm_lcs_internal_watch_deliver_layer_event(
@@ -11979,6 +11990,7 @@ static void pkm_lcs_internal_self_watch_disarm_locked(void)
 		&pkm_lcs_internal_self_watch.registry);
 	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.layers);
 	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.kmes);
+	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.port);
 	pkm_lcs_internal_watch_remove_locked(
 		&pkm_lcs_internal_self_watch.fallback);
 	pkm_lcs_internal_self_watch.source_id = 0;
@@ -12028,14 +12040,19 @@ static void pkm_lcs_internal_self_watch_fill_result_locked(
 		memcpy(out->fallback_guid,
 		       pkm_lcs_internal_self_watch.fallback.registry.guid,
 		       sizeof(out->fallback_guid));
+	if (pkm_lcs_internal_self_watch.port.registry.linked)
+		memcpy(out->port_guid,
+		       pkm_lcs_internal_self_watch.port.registry.guid,
+		       sizeof(out->port_guid));
 }
 
-long pkm_lcs_internal_self_watch_arm(
+long pkm_lcs_internal_self_watch_arm_full(
 	u32 source_id, const u8 machine_root_guid[PKM_LCS_GUID_BYTES],
 	bool registry_present,
 	const u8 registry_guid[PKM_LCS_GUID_BYTES],
 	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
 	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
+	bool port_present, const u8 port_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out)
 {
 	bool fallback_needed;
@@ -12052,6 +12069,8 @@ long pkm_lcs_internal_self_watch_arm(
 	if (layers_present && !pkm_lcs_internal_watch_guid_valid(layers_guid))
 		return -EINVAL;
 	if (kmes_present && !pkm_lcs_internal_watch_guid_valid(kmes_guid))
+		return -EINVAL;
+	if (port_present && !pkm_lcs_internal_watch_guid_valid(port_guid))
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
@@ -12085,7 +12104,17 @@ long pkm_lcs_internal_self_watch_arm(
 		watch_count++;
 	}
 
-	fallback_needed = !registry_present || !layers_present || !kmes_present;
+	if (port_present) {
+		ret = pkm_lcs_internal_watch_add_locked(
+			&pkm_lcs_internal_self_watch.port, source_id,
+			port_guid, PKM_LCS_INTERNAL_WATCH_PORT_RESERVATIONS);
+		if (ret)
+			goto out_rollback;
+		watch_count++;
+	}
+
+	fallback_needed = !registry_present || !layers_present ||
+			  !kmes_present || !port_present;
 	if (fallback_needed) {
 		ret = pkm_lcs_internal_watch_add_locked(
 			&pkm_lcs_internal_self_watch.fallback, source_id,
@@ -13207,6 +13236,10 @@ long pkm_lcs_kunit_internal_self_watch_snapshot(
 		memcpy(out->fallback_guid,
 		       pkm_lcs_internal_self_watch.fallback.registry.guid,
 		       sizeof(out->fallback_guid));
+	if (pkm_lcs_internal_self_watch.port.registry.linked)
+		memcpy(out->port_guid,
+		       pkm_lcs_internal_self_watch.port.registry.guid,
+		       sizeof(out->port_guid));
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return 0;
 }

@@ -86,7 +86,7 @@ use crate::lcs_core::{
     SourceSlotStatus, SourceSlotView, ValueEntry, ValueLayerAdmissionInput, ValueResolution,
     EffectiveValueWatchEvent, EnumeratedValue, WatchEventRecordPlan,
     WatchEventRecordRequest,
-    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_DWORD, REG_QWORD,
+    WatchEventRecordWritePlan, WatchNotifyArgs, WatchNotifyPlan, REG_BINARY, REG_DWORD, REG_QWORD,
     REG_TOMBSTONE,
     RSI_DELETE_LAYER, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
     select_layer_owner, write_watch_event_record,
@@ -9613,4 +9613,167 @@ where
         }
     }
     emit(&path[start..])
+}
+
+#[no_mangle]
+/// Serialises the effective values of the port reservation key
+/// (`Machine\System\Network\TcpIp\PortReservations`) from an
+/// `RSI_QUERY_VALUES` response into the table blob `kacs_rust_port_table_replace`
+/// consumes: `(u16 name_len, name, u32 sd_len, sd)*`. The registry's default
+/// value has the empty name, which the KACS side reads as `@`.
+///
+/// Every value must be `REG_BINARY` — any other type makes the table
+/// malformed and the load is rejected whole (`-EINVAL`), matching the
+/// reject-or-keep rule for every other kernel-read key. The blob is never
+/// larger than the frame it came from, so a caller buffer of `frame_len`
+/// bytes always suffices; `-E2BIG` reports a smaller one.
+pub unsafe extern "C" fn lcs_rust_port_reservations_blob_from_query_values(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    layers: *const PkmLcsRsiLayerViewCopy,
+    layer_count: usize,
+    private_layers: *const PkmLcsRsiPrivateLayerViewCopy,
+    private_layer_count: usize,
+    out: *mut u8,
+    out_cap: usize,
+    written_out: *mut usize,
+) -> c_int {
+    const E2BIG: c_int = -7;
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+    if frame.is_null()
+        || out.is_null()
+        || (layer_count != 0 && layers.is_null())
+        || (private_layer_count != 0 && private_layers.is_null())
+    {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let frame_bytes = unsafe { slice::from_raw_parts(frame, frame_len) };
+    let out_bytes = unsafe { slice::from_raw_parts_mut(out, out_cap) };
+    let layer_views = match parse_layer_views(layers, layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let private_layer_views = match parse_private_layer_views(private_layers, private_layer_count) {
+        Ok(layer_views) => layer_views,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+
+    let payload = match parse_rsi_query_values_success_response_payload(
+        frame_bytes,
+        RsiRetainedRequest {
+            request_id,
+            op_code: RSI_QUERY_VALUES,
+        },
+    ) {
+        Ok(payload) => payload,
+        Err(err) => return rsi_query_values_response_error_return(err),
+    };
+
+    let limits = LcsLimits::DEFAULT;
+    if let Err(err) = validate_rsi_query_values_response_names(&payload, &limits) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_value_payloads(&payload, &limits) {
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = validate_rsi_query_values_response_sequences(&payload, next_sequence) {
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let mut value_storage =
+        match PkmVec::<NamedValueEntry<'_>>::with_capacity(payload.entry_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut blanket_storage =
+        match PkmVec::<BlanketTombstoneEntry<'_>>::with_capacity(payload.blanket_count as usize) {
+            Ok(storage) => storage,
+            Err(_) => return LinuxErrno::Enomem.negated_return() as c_int,
+        };
+    let mut allocation_failed = false;
+    if let Err(err) = for_each_rsi_query_values_source_value_entry(&payload, &limits, |entry| {
+        if value_storage.push(entry).is_err() {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+    if let Err(err) = for_each_rsi_query_values_source_blanket_entry(&payload, &limits, |entry| {
+        if blanket_storage.push(entry).is_err() {
+            allocation_failed = true;
+            return Err(LcsError::RsiPayloadLengthOverflow);
+        }
+        Ok(())
+    }) {
+        if allocation_failed {
+            return LinuxErrno::Enomem.negated_return() as c_int;
+        }
+        return rsi_query_values_response_error_return(err);
+    }
+
+    let context = LayerResolutionContext {
+        layers: layer_views.as_slice(),
+        private_layers: private_layer_views.as_slice(),
+        limits: &limits,
+        next_sequence,
+    };
+    let mut written = 0usize;
+    let mut too_big = false;
+    let mut wrong_type = false;
+    if let Err(err) = for_each_effective_value(
+        &context,
+        value_storage.as_slice(),
+        blanket_storage.as_slice(),
+        |value| {
+            if value.value.value_type.code() != REG_BINARY {
+                wrong_type = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            let name = value.name.as_bytes();
+            let data = value.value.data;
+            let Ok(name_len) = u16::try_from(name.len()) else {
+                wrong_type = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            };
+            let Ok(data_len) = u32::try_from(data.len()) else {
+                wrong_type = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            };
+            let need = 2 + name.len() + 4 + data.len();
+            if out_bytes.len() - written < need {
+                too_big = true;
+                return Err(LcsError::RsiPayloadLengthOverflow);
+            }
+            out_bytes[written..written + 2].copy_from_slice(&name_len.to_le_bytes());
+            written += 2;
+            out_bytes[written..written + name.len()].copy_from_slice(name);
+            written += name.len();
+            out_bytes[written..written + 4].copy_from_slice(&data_len.to_le_bytes());
+            written += 4;
+            out_bytes[written..written + data.len()].copy_from_slice(data);
+            written += data.len();
+            Ok(())
+        },
+    ) {
+        if too_big {
+            return E2BIG;
+        }
+        if wrong_type {
+            return LinuxErrno::Einval.negated_return() as c_int;
+        }
+        return rsi_lookup_materialization_error_return(err);
+    }
+
+    *written_out = written;
+    0
 }

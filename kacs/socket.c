@@ -13,10 +13,13 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/un.h>
+#include <linux/in.h>
+#include <linux/in6.h>
 
 #include <net/scm.h>
 #include <net/sock.h>
 
+#include <pkm/net.h>
 #include <pkm/socket.h>
 
 #include "lsm_internal.h"
@@ -33,6 +36,8 @@
 static long pkm_kacs_create_captured_peer_token(
 	const void *client_token, u32 max_impersonation,
 	const void **out_token);
+static void pkm_kacs_binder_set(struct pkm_kacs_socket_security *sec,
+				const void *token);
 
 /*
  * The conveyed-identity register. Readers clone under the lock; a writer
@@ -378,6 +383,7 @@ int pkm_kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 	sec->pass_token = false;
 	sec->level_set = false;
 	sec->listener_token = NULL;
+	sec->binder_token = NULL;
 	mutex_init(&sec->convey_lock);
 	sec->convey_src = NULL;
 	sec->convey_token = NULL;
@@ -395,11 +401,126 @@ void pkm_kacs_sk_free_security(struct sock *sk)
 	sec = pkm_kacs_sock(sk);
 	pkm_kacs_socket_peer_token_drop(sec);
 	pkm_kacs_listener_set(sec, NULL);
+	pkm_kacs_binder_set(sec, NULL);
 	pkm_kacs_socket_convey_drop(sec);
 	pkm_kacs_process_sd_put(sec->socket_sd);
 	sec->socket_sd = NULL;
 	sec->max_impersonation = KACS_IMLEVEL_IMPERSONATION;
 	sec->pass_token = false;
+}
+
+/* Installs @token (counted, consumed) as the socket's recorded binder. */
+static void pkm_kacs_binder_set(struct pkm_kacs_socket_security *sec,
+				const void *token)
+{
+	const void *old;
+
+	spin_lock(&sec->register_lock);
+	old = sec->binder_token;
+	sec->binder_token = token;
+	spin_unlock(&sec->register_lock);
+	if (old)
+		kacs_rust_token_drop(old);
+}
+
+/*
+ * The port a bind(2) claims, in host order, or 0 when the address names no
+ * port (ephemeral allocation) or is too short to carry one.
+ */
+static u16 pkm_kacs_inet_bind_port(const struct sockaddr *address, int addrlen)
+{
+	if (!address)
+		return 0;
+	if (address->sa_family == AF_INET) {
+		const struct sockaddr_in *sin =
+			(const struct sockaddr_in *)address;
+
+		if (addrlen < (int)sizeof(*sin))
+			return 0;
+		return ntohs(sin->sin_port);
+	}
+	if (address->sa_family == AF_INET6) {
+		const struct sockaddr_in6 *sin6 =
+			(const struct sockaddr_in6 *)address;
+
+		/* The RFC 2133 length: everything up to and including the address. */
+		if (addrlen < (int)offsetofend(struct sockaddr_in6, sin6_addr))
+			return 0;
+		return ntohs(sin6->sin6_port);
+	}
+	return 0;
+}
+
+/* The reservation protocol bit for an inet socket, or 0 if none applies. */
+static u32 pkm_kacs_inet_bind_protocol(const struct sock *sk)
+{
+	switch (sk->sk_protocol) {
+	case IPPROTO_TCP:
+		return KACS_PORT_PROTO_TCP;
+	case IPPROTO_UDP:
+	case IPPROTO_UDPLITE:
+		return KACS_PORT_PROTO_UDP;
+	default:
+		return 0;
+	}
+}
+
+/*
+ * Port reservation check for AF_INET / AF_INET6 (<pkm/net.h>). The caller's
+ * effective token is evaluated for KACS_PORT_BIND against the most specific
+ * reservation containing (protocol, port). Port 0 and protocols no
+ * reservation covers pass untouched. A permitted binder is recorded on the
+ * socket for the rebind rule.
+ */
+static int pkm_kacs_inet_bind(struct socket *sock,
+			      const struct sockaddr *address, int addrlen)
+{
+	struct pkm_kacs_socket_security *sec;
+	const void *subject_token;
+	const void *binder;
+	u32 pip_type = 0, pip_trust = 0;
+	u32 protocol;
+	u16 port;
+	long ret;
+
+	protocol = pkm_kacs_inet_bind_protocol(sock->sk);
+	if (!protocol)
+		return 0;
+	port = pkm_kacs_inet_bind_port(address, addrlen);
+	if (!port)
+		return 0;
+
+	sec = pkm_kacs_sock(sock->sk);
+	if (!sec) {
+		trace_kacs_socket_bind(sock->sk->sk_family, sock->type,
+				       sock->state, 0, KACS_PORT_BIND,
+				       KACS_SOCK_NO_SECURITY, -EACCES);
+		return -EACCES;
+	}
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	if (!subject_token) {
+		trace_kacs_socket_bind(sock->sk->sk_family, sock->type,
+				       sock->state, 0, KACS_PORT_BIND,
+				       KACS_SOCK_NO_TOKEN, -EACCES);
+		return -EACCES;
+	}
+	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
+	if (ret) {
+		trace_kacs_socket_bind(sock->sk->sk_family, sock->type,
+				       sock->state, 0, KACS_PORT_BIND,
+				       KACS_SOCK_PIP_CONTEXT, ret);
+		return ret;
+	}
+	ret = kacs_rust_port_bind_check(subject_token, protocol, port,
+					pip_type, pip_trust);
+	if (!ret) {
+		binder = kacs_rust_token_clone(subject_token);
+		if (binder)
+			pkm_kacs_binder_set(sec, binder);
+	}
+	trace_kacs_socket_bind(sock->sk->sk_family, sock->type, sock->state,
+			       port, KACS_PORT_BIND, KACS_SOCK_PORT_BIND, ret);
+	return ret;
 }
 
 int pkm_kacs_socket_bind(struct socket *sock, struct sockaddr *address,
@@ -414,6 +535,8 @@ int pkm_kacs_socket_bind(struct socket *sock, struct sockaddr *address,
 				       -EACCES);
 		return -EACCES;
 	}
+	if (sock->sk->sk_family == AF_INET || sock->sk->sk_family == AF_INET6)
+		return pkm_kacs_inet_bind(sock, address, addrlen);
 	if (sock->sk->sk_family != AF_UNIX ||
 	    !pkm_kacs_sockaddr_is_abstract_unix(address, addrlen))
 		return 0;

@@ -597,6 +597,8 @@ struct pkm_lcs_kunit_source_bootstrap_source_script {
 	struct pkm_lcs_kunit_query_values_source_script self_config_query;
 	struct pkm_lcs_kunit_walk_source_script kmes_walk;
 	struct pkm_lcs_kunit_query_values_source_script kmes_query;
+	/* Port reservations: the discovery walk that follows the KMES stage. */
+	struct pkm_lcs_kunit_walk_source_script port_walk;
 	struct pkm_lcs_kunit_walk_source_script layers_walk;
 	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script layers_refresh;
 	bool expect_kmes_query;

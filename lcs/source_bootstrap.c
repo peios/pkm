@@ -9,6 +9,7 @@
 
 #include <trace/events/lcs.h>
 
+#include "../kacs/port_reservations.h"
 #include "source_device.h"
 
 long pkm_lcs_source_bootstrap_refresh_machine_hive(
@@ -19,9 +20,11 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	u8 registry_guid[RSI_GUID_SIZE] = { };
 	u8 kmes_guid[RSI_GUID_SIZE] = { };
 	u8 layers_root_guid[RSI_GUID_SIZE] = { };
+	u8 port_guid[RSI_GUID_SIZE] = { };
 	bool registry_root_present = false;
 	bool kmes_root_present = false;
 	bool layers_root_present = false;
+	bool port_root_present = false;
 	u8 stage = LCS_BOOT_REGISTRY;
 	long ret;
 
@@ -82,11 +85,28 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 			goto out;
 	}
 
+	/*
+	 * Port reservations (kacs/port_reservations.c) the fourth kernel-read
+	 * key, discovered after the three LCS/KMES keys so nothing about it
+	 * can delay or fail their refresh. Only its discovery walk may fail
+	 * the bootstrap; a rejected table is not a failure — KACS keeps its
+	 * fallback and the audit trail says why.
+	 */
+	ret = pkm_kacs_port_reservations_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &port_root_present, port_guid);
+	if (ret)
+		goto out;
+	result->port_root_present = port_root_present;
+	if (port_root_present)
+		pkm_kacs_port_reservations_refresh_from_key(source_id,
+							    port_guid);
+
 	stage = LCS_BOOT_SELF_WATCH;
-	ret = pkm_lcs_internal_self_watch_arm(
+	ret = pkm_lcs_internal_self_watch_arm_full(
 		source_id, machine_root_guid, registry_root_present,
 		registry_guid, layers_root_present, layers_root_guid,
-		kmes_root_present, kmes_guid, &result->self_watch);
+		kmes_root_present, kmes_guid, port_root_present, port_guid,
+		&result->self_watch);
 	if (ret)
 		goto out;
 
@@ -97,6 +117,26 @@ out:
 	trace_lcs_bootstrap_refresh(source_id, registry_root_present,
 				    kmes_root_present, layers_root_present,
 				    stage, ret);
+	if (ret && stage != LCS_BOOT_SELF_WATCH) {
+		/*
+		 * A stage failed before the self-watch was armed — typically a
+		 * transient source error while Phase-1.5 autoapply is mutating
+		 * the same source (PEI-510). Without a watch nothing would ever
+		 * retry, and no kernel-read key would load for the life of the
+		 * boot. Arm the machine-root fallback alone: the next subkey
+		 * creation under Machine re-runs this refresh, which re-arms
+		 * targeted watches once it completes. Best effort — if even
+		 * this fails there is nothing left to do but report.
+		 */
+		struct pkm_lcs_internal_self_watch_arm_result fallback = { };
+		long arm_ret;
+
+		arm_ret = pkm_lcs_internal_self_watch_arm_full(
+			source_id, machine_root_guid, false, NULL, false, NULL,
+			false, NULL, false, NULL, &fallback);
+		trace_lcs_bootstrap_refresh(source_id, 0, 0, 0,
+					    LCS_BOOT_SELF_WATCH, arm_ret);
+	}
 	kfree(result);
 	return ret;
 }

@@ -402,7 +402,7 @@ struct pkm_lcs_source_bootstrap_refresh_result {
 	bool registry_root_present;
 	bool kmes_root_present;
 	bool layers_root_present;
-	u8 _pad;
+	bool port_root_present;
 };
 
 struct pkm_lcs_path_validation_result {

@@ -21,6 +21,10 @@
 
 use crate::access_check::{access_check_core, AccessCheckMode};
 use crate::access_check_abi::{own_audit_events, AccessCheckAbiResolved};
+use crate::port_reservation::{
+    lookup_values, PortProtocol, PortReservationTable, PORT_BIND, PORT_DEFAULT_SELECTOR,
+    PORT_FALLBACK_DEFAULT_SD, PORT_GENERIC_MAPPING, PORT_PROTO_TCP, PORT_PROTO_UDP,
+};
 use crate::access_mask::{
     GenericMapping, ACCESS_SYSTEM_SECURITY, FILE_GENERIC_MAPPING, FILE_READ_DATA,
     FILE_WRITE_DATA, GENERIC_ALL, IPC_GENERIC_MAPPING, PROCESS_GENERIC_MAPPING,
@@ -138,6 +142,7 @@ const EBUSY: i32 = 16;
 const EIO: i32 = 5;
 const ENOMEM: i32 = 12;
 const ERANGE: i32 = 34;
+const E2BIG: i32 = 7;
 const EOPNOTSUPP: i32 = 95;
 
 const SE_GROUP_MANDATORY: u32 = 0x0000_0001;
@@ -8555,11 +8560,24 @@ fn ipc_sd_access_check_errno(
     desired: u32,
     pip: PipContext,
 ) -> Result<u32, i32> {
+    object_sd_access_check_errno(subject_token, sd_bytes, desired, &IPC_GENERIC_MAPPING, pip)
+}
+
+/// AccessCheck of `subject_token` against a standalone object descriptor
+/// (System V IPC objects, port reservations) for `desired` under `mapping`.
+/// Emits the internal audit events and marks privilege use on the token.
+fn object_sd_access_check_errno(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    mapping: &GenericMapping,
+    pip: PipContext,
+) -> Result<u32, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
     let target_sd = SecurityDescriptor::parse(sd_bytes).map_err(sd_parse_errno)?;
-    let normalized = match IPC_GENERIC_MAPPING.normalize_desired_access(desired) {
+    let normalized = match mapping.normalize_desired_access(desired) {
         Ok(normalized) => normalized,
         Err(KacsError::ReservedAccessMaskBits(_)) => return Err(-EINVAL),
         Err(_) => return Err(-EINVAL),
@@ -8573,7 +8591,7 @@ fn ipc_sd_access_check_errno(
             &access_token,
             pip,
             desired,
-            &IPC_GENERIC_MAPPING,
+            mapping,
             AccessCheckMode::Scalar,
             None,
             &conditional_context,
@@ -11659,4 +11677,291 @@ pub extern "C" fn kacs_rust_kunit_create_impersonation_variant_token_with_privil
         privileges_enabled_by_default,
     )
     .unwrap_or(null())
+}
+
+// ---------------------------------------------------------------------------
+// Port reservations (<pkm/net.h>)
+//
+// The live table is one owned byte blob — the registry key's values,
+// serialised as (u16 name_len, name, u32 sd_len, sd)* — published under the
+// same seqlock + RCU discipline as a token's own SD (own_sd_rcu_copy): odd
+// sequence while a swap is in flight, readers copy the winning descriptor out
+// under rcu_read_lock and evaluate outside it, and the old blob is freed after
+// a grace period. A null blob means "never loaded": the compiled-in fallback
+// table answers, and keeps answering until a load succeeds — the two are
+// never merged.
+// ---------------------------------------------------------------------------
+
+/// Upper bound on a serialised table: ~thousands of reservations.
+const PORT_TABLE_MAX_BLOB_BYTES: usize = 1 << 20;
+
+static PORT_TABLE_PTR: AtomicPtr<u8> = AtomicPtr::new(null_mut());
+static PORT_TABLE_LEN: AtomicUsize = AtomicUsize::new(0);
+static PORT_TABLE_SEQ: AtomicU64 = AtomicU64::new(0);
+static PORT_TABLE_WRITE_LOCK: AtomicBool = AtomicBool::new(false);
+
+struct PortTableWriteGuard;
+
+impl PortTableWriteGuard {
+    fn acquire() -> Self {
+        while PORT_TABLE_WRITE_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        Self
+    }
+}
+
+impl Drop for PortTableWriteGuard {
+    fn drop(&mut self) {
+        PORT_TABLE_WRITE_LOCK.store(false, Ordering::Release);
+    }
+}
+
+/// Walks a serialised table blob, yielding `(name, sd)` borrowed slices.
+struct PortTableBlobIter<'a> {
+    rest: &'a [u8],
+    failed: bool,
+}
+
+impl<'a> Iterator for PortTableBlobIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed || self.rest.is_empty() {
+            return None;
+        }
+        let rest = self.rest;
+        if rest.len() < 2 {
+            self.failed = true;
+            return None;
+        }
+        let name_len = usize::from(u16::from_le_bytes([rest[0], rest[1]]));
+        let rest = &rest[2..];
+        if rest.len() < name_len + 4 {
+            self.failed = true;
+            return None;
+        }
+        let (name, rest) = rest.split_at(name_len);
+        let sd_len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+        let rest = &rest[4..];
+        if rest.len() < sd_len {
+            self.failed = true;
+            return None;
+        }
+        let (sd, rest) = rest.split_at(sd_len);
+        self.rest = rest;
+        Some((name, sd))
+    }
+}
+
+/// Parses and validates a serialised table blob into a table borrowing it.
+fn port_table_from_blob(blob: &[u8]) -> Result<PortReservationTable<'_>, i32> {
+    let mut iter = PortTableBlobIter {
+        rest: blob,
+        failed: false,
+    };
+    let table = PortReservationTable::from_values(&mut iter).map_err(|err| match err {
+        KacsError::AllocationFailure => -ENOMEM,
+        _ => -EINVAL,
+    })?;
+    if iter.failed {
+        return Err(-EINVAL);
+    }
+    Ok(table)
+}
+
+fn port_protocol_from_abi(protocol: u32) -> Option<PortProtocol> {
+    match protocol as u8 {
+        PORT_PROTO_TCP => Some(PortProtocol::Tcp),
+        PORT_PROTO_UDP => Some(PortProtocol::Udp),
+        _ => None,
+    }
+}
+
+/// Streams the live blob (or the fallback) for the descriptor governing
+/// `(protocol, port)`. Allocation-free: safe under rcu_read_lock.
+fn port_blob_lookup(blob: &[u8], protocol: PortProtocol, port: u16) -> Option<&[u8]> {
+    let iter = PortTableBlobIter {
+        rest: blob,
+        failed: false,
+    };
+    lookup_values(iter, protocol, port)
+}
+
+fn port_live_lookup(protocol: PortProtocol, port: u16) -> Option<&'static [u8]> {
+    let blob_ptr = PORT_TABLE_PTR.load(Ordering::Acquire);
+    if blob_ptr.is_null() {
+        return lookup_values(
+            [(PORT_DEFAULT_SELECTOR, PORT_FALLBACK_DEFAULT_SD)],
+            protocol,
+            port,
+        );
+    }
+    let blob_len = PORT_TABLE_LEN.load(Ordering::Acquire);
+    // SAFETY: the blob is published under PORT_TABLE_SEQ and freed only after
+    // an RCU grace period; the caller holds rcu_read_lock and re-checks the
+    // sequence before trusting anything derived from this slice.
+    let blob = unsafe { core::slice::from_raw_parts(blob_ptr.cast_const(), blob_len) };
+    port_blob_lookup(blob, protocol, port)
+}
+
+/// Copies the descriptor governing `(protocol, port)` out of the live table
+/// (or the fallback table when nothing has loaded).
+///
+/// Two passes, as own_sd_rcu_copy: learn the length under RCU, allocate
+/// outside it (GFP_KERNEL may sleep), re-enter and copy, and retry if the
+/// sequence moved under either pass.
+fn port_reservation_sd_copy(protocol: PortProtocol, port: u16) -> Result<DefaultDaclCopy, i32> {
+    loop {
+        let sequence = PORT_TABLE_SEQ.load(Ordering::Acquire);
+        if (sequence & 1) != 0 {
+            core::hint::spin_loop();
+            continue;
+        }
+
+        let len = {
+            let _guard = RcuReadGuard::new();
+            if PORT_TABLE_SEQ.load(Ordering::Acquire) != sequence {
+                continue;
+            }
+            // A table with no default cannot be published; fail closed if
+            // the invariant is ever broken.
+            let Some(sd) = port_live_lookup(protocol, port) else {
+                return Err(-EACCES);
+            };
+            sd.len()
+        };
+        let copy_ptr = alloc_bytes(len)?;
+
+        let mut ok = false;
+        {
+            let _guard = RcuReadGuard::new();
+            if PORT_TABLE_SEQ.load(Ordering::Acquire) == sequence {
+                if let Some(sd) = port_live_lookup(protocol, port) {
+                    if sd.len() == len {
+                        unsafe { copy_nonoverlapping(sd.as_ptr(), copy_ptr, len) };
+                        ok = PORT_TABLE_SEQ.load(Ordering::Acquire) == sequence;
+                    }
+                }
+            }
+        }
+        if ok {
+            return Ok(DefaultDaclCopy::from_raw(copy_ptr, len));
+        }
+        free_allocated_bytes(copy_ptr);
+    }
+}
+
+#[no_mangle]
+/// Decides a `bind(2)` to `port` over `protocol` (a `KACS_PORT_PROTO_*` bit)
+/// for `subject_token_ptr`: 0 to allow, `-EACCES` to deny, `-EINVAL` for a
+/// protocol no reservation covers or port 0.
+pub extern "C" fn kacs_rust_port_bind_check(
+    subject_token_ptr: *const c_void,
+    protocol: u32,
+    port: u32,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(protocol) = port_protocol_from_abi(protocol) else {
+        return -EINVAL;
+    };
+    let Ok(port) = u16::try_from(port) else {
+        return -EINVAL;
+    };
+    if port == 0 {
+        return -EINVAL;
+    }
+    let sd = match port_reservation_sd_copy(protocol, port) {
+        Ok(sd) => sd,
+        Err(err) => return err,
+    };
+    match object_sd_access_check_errno(
+        subject_token_ptr,
+        sd.as_slice(),
+        PORT_BIND,
+        &PORT_GENERIC_MAPPING,
+        pip_context_from_abi(pip_type, pip_trust),
+    ) {
+        Ok(_) => 0,
+        Err(err) => err,
+    }
+}
+
+fn port_table_publish(new_ptr: *mut u8, new_len: usize) -> Result<(), i32> {
+    let old_ptr;
+    {
+        let _guard = PortTableWriteGuard::acquire();
+        let sequence = PORT_TABLE_SEQ.load(Ordering::Relaxed);
+        let Some(next_sequence) = sequence.checked_add(2) else {
+            return Err(-ERANGE);
+        };
+        PORT_TABLE_SEQ.store(sequence + 1, Ordering::Release);
+        old_ptr = PORT_TABLE_PTR.swap(new_ptr, Ordering::AcqRel);
+        PORT_TABLE_LEN.store(new_len, Ordering::Release);
+        PORT_TABLE_SEQ.store(next_sequence, Ordering::Release);
+    }
+    if !old_ptr.is_null() {
+        free_allocated_bytes_after_rcu(old_ptr);
+    }
+    Ok(())
+}
+
+#[no_mangle]
+/// Replaces the live port reservation table with the serialised registry
+/// values in `blob` — `(u16 name_len, name, u32 sd_len, sd)*`, the key's
+/// unnamed default value spelled `@`. The blob is validated whole first
+/// (every descriptor parses; exactly one default; no equal-width overlap);
+/// on any failure the previous table stays and `-EINVAL` is returned.
+pub extern "C" fn kacs_rust_port_table_replace(blob_ptr: *const u8, blob_len: usize) -> i32 {
+    if blob_ptr.is_null() || blob_len == 0 {
+        return -EINVAL;
+    }
+    let blob = unsafe { core::slice::from_raw_parts(blob_ptr, blob_len) };
+    if let Err(err) = port_table_from_blob(blob) {
+        return err;
+    }
+    if blob_len > PORT_TABLE_MAX_BLOB_BYTES {
+        return -E2BIG;
+    }
+    let new_ptr = unsafe { pkm_kacs_zalloc(blob_len) } as *mut u8;
+    if new_ptr.is_null() {
+        return -ENOMEM;
+    }
+    unsafe { copy_nonoverlapping(blob_ptr, new_ptr, blob_len) };
+    match port_table_publish(new_ptr, blob_len) {
+        Ok(()) => 0,
+        Err(err) => {
+            free_allocated_bytes(new_ptr);
+            err
+        }
+    }
+}
+
+#[no_mangle]
+/// Drops the live table so the compiled-in fallback answers again. Test and
+/// registry-unavailable path; never merges.
+pub extern "C" fn kacs_rust_port_table_reset() -> i32 {
+    match port_table_publish(null_mut(), 0) {
+        Ok(()) => 0,
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Whether a registry table is live (as opposed to the compiled-in fallback).
+pub extern "C" fn kacs_rust_port_table_loaded() -> bool {
+    !PORT_TABLE_PTR.load(Ordering::Acquire).is_null()
+}
+
+#[no_mangle]
+/// Exposes the compiled-in fallback descriptor for tests and diagnostics.
+pub extern "C" fn kacs_rust_port_fallback_sd(len_out: *mut usize) -> *const u8 {
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = PORT_FALLBACK_DEFAULT_SD.len();
+    }
+    PORT_FALLBACK_DEFAULT_SD.as_ptr()
 }

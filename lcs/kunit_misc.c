@@ -82,20 +82,24 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 	static const u8 registry_guid[RSI_GUID_SIZE] = { 0xa2 };
 	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xa3 };
 	static const u8 replacement_root_guid[RSI_GUID_SIZE] = { 0xa4 };
+	static const u8 port_guid[RSI_GUID_SIZE] = { 0xa5 };
 	struct pkm_lcs_internal_self_watch_arm_result result = { };
 	struct pkm_lcs_internal_self_watch_snapshot snapshot = { };
 
 	pkm_lcs_internal_self_watch_disarm();
 	KUNIT_ASSERT_EQ(test,
-			pkm_lcs_internal_self_watch_arm(
+			pkm_lcs_internal_self_watch_arm_full(
 				7, machine_root_guid, true, registry_guid, true,
 				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
-				&result),
+				true, port_guid, &result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.source_id, 7U);
 	KUNIT_EXPECT_EQ(test, result.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, result.watch_count, 3U);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.port_guid, port_guid, sizeof(port_guid)),
+			0);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -111,14 +115,14 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 			0);
 
 	KUNIT_ASSERT_EQ(test,
-			pkm_lcs_internal_self_watch_arm(
+			pkm_lcs_internal_self_watch_arm_full(
 				7, machine_root_guid, true, registry_guid, true,
-				layers_guid, false, NULL, &result),
+				layers_guid, false, NULL, true, port_guid, &result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.source_id, 7U);
 	KUNIT_EXPECT_EQ(test, result.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
-	KUNIT_EXPECT_EQ(test, result.watch_count, 3U);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 4U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -166,6 +170,69 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 	pkm_lcs_internal_self_watch_disarm();
 }
 
+
+static void pkm_lcs_kunit_internal_self_watch_arms_port_reservations(
+	struct kunit *test)
+{
+	static const u8 machine_root_guid[RSI_GUID_SIZE] = { 0xc1 };
+	static const u8 registry_guid[RSI_GUID_SIZE] = { 0xc2 };
+	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xc3 };
+	static const u8 port_guid[RSI_GUID_SIZE] = { 0xc5 };
+	static const u8 nil_guid[RSI_GUID_SIZE] = { 0 };
+	struct pkm_lcs_internal_self_watch_arm_result result = { };
+	struct pkm_lcs_internal_self_watch_snapshot snapshot = { };
+
+	pkm_lcs_internal_self_watch_disarm();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm_full(
+				11, machine_root_guid, true, registry_guid, true,
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				true, port_guid, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.port_guid, port_guid, sizeof(port_guid)),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_internal_self_watch_snapshot(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(snapshot.port_guid, port_guid, sizeof(port_guid)),
+			0);
+
+	/*
+	 * Absent port key: the machine-root fallback is armed so a seed
+	 * applied later is discovered — mixed mode, four watches, no guid.
+	 */
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm_full(
+				11, machine_root_guid, true, registry_guid, true,
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				false, NULL, &result),
+			0L);
+	KUNIT_EXPECT_EQ(test, result.mode,
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.fallback_guid, machine_root_guid,
+			       sizeof(machine_root_guid)),
+			0);
+	KUNIT_EXPECT_FALSE(test,
+			   memchr_inv(result.port_guid, 0,
+				      sizeof(result.port_guid)));
+
+	/* A nil port guid with port_present fails closed. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_internal_self_watch_arm_full(
+				11, machine_root_guid, true, registry_guid, true,
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				true, nil_guid, NULL),
+			(long)-EINVAL);
+	pkm_lcs_internal_self_watch_disarm();
+}
 
 static void pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed(
 	struct kunit *test)
@@ -218,9 +285,10 @@ static void pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed(
 			pkm_lcs_kunit_internal_self_watch_snapshot(&snapshot),
 			0L);
 	KUNIT_EXPECT_EQ(test, snapshot.source_id, 9U);
+	/* Three-key form: the port key is absent, so the fallback is armed. */
 	KUNIT_EXPECT_EQ(test, snapshot.mode,
-			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 3U);
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 4U);
 	pkm_lcs_internal_self_watch_disarm();
 }
 
@@ -470,6 +538,11 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 		{ .expected_child = "Registry", .guid = registry_guid },
 		{ .expected_child = "Layers", .guid = layers_root_guid },
 	};
+	/* No Machine\System\Network: port reservations stay on the fallback. */
+	static const struct pkm_lcs_kunit_walk_source_step port_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Network", .empty = true },
+	};
 	u8 data[sizeof(u32)];
 	u8 kmes_data[sizeof(u32)];
 	struct pkm_lcs_watch_dispatch_context context = {
@@ -509,6 +582,10 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 			.data_len = sizeof(kmes_data),
 			.value_type = REG_DWORD,
 			.query_all = true,
+		},
+		.port_walk = {
+			.steps = port_steps,
+			.step_count = ARRAY_SIZE(port_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -572,16 +649,17 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 14U);
-	KUNIT_EXPECT_EQ(test, script.writes, 14U);
+	KUNIT_EXPECT_EQ(test, script.reads, 16U);
+	KUNIT_EXPECT_EQ(test, script.writes, 16U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_internal_self_watch_snapshot(
 				&watch_snapshot),
 			0L);
 	KUNIT_EXPECT_EQ(test, watch_snapshot.source_id, 1U);
+	/* The scripted hive has no PortReservations key: fallback armed. */
 	KUNIT_EXPECT_EQ(test, watch_snapshot.mode,
-			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 3U);
+			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
+	KUNIT_EXPECT_EQ(test, watch_snapshot.watch_count, 4U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(watch_snapshot.registry_guid, registry_guid,
 			       sizeof(registry_guid)),
@@ -756,6 +834,8 @@ static void pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop(
 		{ 1 }, { 0xe5, 0x10 }, { 0xe5, 0x11 },
 		{ 0xe5, 0x12 }, { 0xe5 },
 	};
+	/* All four keys present, so the lifecycle event is a true no-op. */
+	static const u8 port_guid[RSI_GUID_SIZE] = { 0xe9 };
 	static const char value_name[] = "Child";
 	struct pkm_lcs_watch_dispatch_context context = {
 		.changed_key_guid = ancestors[4],
@@ -789,10 +869,10 @@ static void pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop(
 	pkm_lcs_internal_self_watch_disarm();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	KUNIT_ASSERT_EQ(test,
-			pkm_lcs_internal_self_watch_arm(
+			pkm_lcs_internal_self_watch_arm_full(
 				1, ancestors[0], true, ancestors[2], true,
 				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
-				NULL),
+				true, port_guid, NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
@@ -1518,6 +1598,7 @@ static struct kunit_case pkm_lcs_kunit_misc_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_rust_probe_links_lcs_core),
 	KUNIT_CASE(pkm_lcs_kunit_private_hive_route_uses_scope_order_live),
 	KUNIT_CASE(pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback),
+	KUNIT_CASE(pkm_lcs_kunit_internal_self_watch_arms_port_reservations),
 	KUNIT_CASE(pkm_lcs_kunit_internal_self_watch_bad_inputs_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_internal_self_watch_value_event_refreshes_config),
 	KUNIT_CASE(pkm_lcs_kunit_internal_kmes_watch_value_event_refreshes_config),

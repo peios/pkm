@@ -10,7 +10,7 @@
  *   KACS  tokens, security descriptors, access checks
  *         (<pkm/token.h>, <pkm/socket.h>, <pkm/sd.h>, <pkm/sid.h>,
  *          <pkm/access.h>, <pkm/file.h>, <pkm/process.h>, <pkm/psb.h>,
- *          <pkm/ipc.h>)
+ *          <pkm/ipc.h>, <pkm/net.h>)
  *   KMES  the kernel-mediated event stream (<pkm/kmes.h>)
  *   LCS   the registry (<pkm/lcs.h>)
  * share one wire-format vocabulary (SIDs, security descriptors, access
@@ -34,6 +34,7 @@
 #include <pkm/token.h>
 #include <pkm/socket.h>
 #include <pkm/ipc.h>
+#include <pkm/net.h>
 #include <pkm/psb.h>
 #include <pkm/access.h>
 #include <pkm/file.h>

@@ -7520,12 +7520,22 @@ int pkm_lcs_kunit_source_bootstrap_source_thread(void *raw_script)
 	ret = pkm_lcs_kunit_walk_source_thread(&script->layers_walk);
 	script->reads += script->layers_walk.reads;
 	script->writes += script->layers_walk.writes;
-	if (ret || !script->expect_layers_refresh)
+	if (ret)
 		goto out;
+	if (script->expect_layers_refresh) {
+		ret = pkm_lcs_kunit_source_bootstrap_handle_layer_refresh_all(
+			script);
+		script->reads += script->layers_refresh.reads;
+		script->writes += script->layers_refresh.writes;
+		if (ret)
+			goto out;
+	}
 
-	ret = pkm_lcs_kunit_source_bootstrap_handle_layer_refresh_all(script);
-	script->reads += script->layers_refresh.reads;
-	script->writes += script->layers_refresh.writes;
+	/* Port reservations are discovered last, after the layers stage. */
+	script->port_walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->port_walk);
+	script->reads += script->port_walk.reads;
+	script->writes += script->port_walk.writes;
 
 out:
 	script->result = ret;

@@ -10,13 +10,14 @@ See `peios/regman-design.md` for the format and lookup model.
 |---|---|---|
 | `kmes.regman` | `Machine\System\KMES` | PSD-003 §6; `pkm/uapi/pkm/kmes.h` constants |
 | `lcs.regman` | `Machine\System\Registry` | PSD-005 §11.4 / §8.2; `pkm/crates/lcs-core/src/config.rs` (`LCS_CONFIG_RANGES`) |
+| `net.regman` | `Machine\System\Network\TcpIp\PortReservations` | Kernel TRM, KACS → Network objects; `pkm/uapi/pkm/net.h`; `pkm/crates/kacs-core/src/port_reservation.rs` |
 
 Every documented default / min / max was cross-checked against both the
 spec table and the compiled-in constant; they agree exactly. Keep them in
 sync when a knob's range changes — the constant is authoritative for
 behaviour, this file for the prose.
 
-KACS has no registry-configuration surface and so has no fragment here.
+Port reservations are KACS's one registry surface; the rest of KACS has none.
 
 ## Authoring
 

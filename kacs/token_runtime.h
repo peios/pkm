@@ -683,6 +683,12 @@ const u8 *kacs_rust_create_default_ipc_sd(const void *token_ptr,
 int kacs_rust_check_ipc_sd(const void *subject_token_ptr, const u8 *sd_ptr,
 			   size_t sd_len, u32 desired, u32 pip_type,
 			   u32 pip_trust, u32 *granted_out);
+int kacs_rust_port_bind_check(const void *subject_token_ptr, u32 protocol,
+			      u32 port, u32 pip_type, u32 pip_trust);
+int kacs_rust_port_table_replace(const u8 *blob_ptr, size_t blob_len);
+int kacs_rust_port_table_reset(void);
+bool kacs_rust_port_table_loaded(void);
+const u8 *kacs_rust_port_fallback_sd(size_t *len_out);
 const u8 *kacs_rust_create_lcs_base_layer_default_sd(size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
 							  size_t *len_out);

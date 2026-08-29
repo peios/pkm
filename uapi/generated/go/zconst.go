@@ -267,6 +267,12 @@ const (
 	KACS_PA_PIP_DENIED                                  = 5
 	KACS_PA_PIP_DOMINANCE                               = 8
 	KACS_PA_SD_ERROR                                    = 4
+	KACS_PORT_ALL_ACCESS                                = 131073
+	KACS_PORT_BIND                                      = 1
+	KACS_PORT_PROTO_ALL                                 = 3
+	KACS_PORT_PROTO_TCP                                 = 1
+	KACS_PORT_PROTO_UDP                                 = 2
+	KACS_PORT_SELECTOR_MAX_LEN                          = 19
 	KACS_PRIM_APPLY_COMMIT                              = 3
 	KACS_PRIM_IMPERSONATE_INSTALL                       = 4
 	KACS_PRIM_IMPERSONATE_REVERT                        = 5
@@ -391,7 +397,6 @@ const (
 	KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE              = 8
 	KACS_SE_AUDIT_PRIVILEGE                             = 2097152
 	KACS_SE_BACKUP_PRIVILEGE                            = 131072
-	KACS_SE_BIND_PRIVILEGED_PORT_PRIVILEGE              = 9223372036854775808
 	KACS_SE_CHANGE_NOTIFY_PRIVILEGE                     = 8388608
 	KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE              = 34359738368
 	KACS_SE_CREATE_TOKEN_PRIVILEGE                      = 4
@@ -468,6 +473,8 @@ const (
 	KACS_SOCK_NO_TOKEN                                  = 3
 	KACS_SOCK_OPEN_TOKEN                                = 15
 	KACS_SOCK_PIP_CONTEXT                               = 7
+	KACS_SOCK_PORT_BIND                                 = 23
+	KACS_SOCK_PORT_TABLE                                = 24
 	KACS_SOCK_REGISTER                                  = 19
 	KACS_SOCK_RESTAMP                                   = 22
 	KACS_SOCK_SD_DECISION                               = 8
