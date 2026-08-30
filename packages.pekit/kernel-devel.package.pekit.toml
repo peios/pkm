@@ -17,10 +17,22 @@
 # production shape — the current monolithic build is a temporary dev
 # simplification) the modules tree lands directly alongside this build kit.
 #
-# No modules ship yet (the kernel is monolithic for now), so the kit has no consumer
-# today, but it is producible now and so is built rather than left as rework.
-# The exact file set should be validated against a real out-of-tree module build
-# once one exists.
+# No modules ship yet (the kernel is monolithic for now), so the kit has no
+# consumer on a booted system today. The file set has now been exercised by a
+# real out-of-tree module build -- kmod's testsuite compiles a playground of
+# dummy modules against this kit -- and it is INCOMPLETE by one file:
+#
+#   tools/objtool/objtool
+#
+# CONFIG_OBJTOOL is on, so Kbuild runs objtool over every object an external
+# module builds; without it the build dies with "objtool: not found" on the
+# first .o. It is deliberately not added yet, because it cannot ship from a
+# CONTAINER-built kernel: that objtool links Debian binutils
+# (libopcodes-2.44-system.so), pekit derives that soname as a dependency, and
+# nothing in the pool provides it -- which makes the whole package
+# unresolvable. Add the line the first time build.kernel is staged on the
+# peipkg rung, where objtool links our own binutils. Until then kmod's
+# testsuite stays off for exactly this reason.
 
 excludes = [
   "kernel:**/*.o",
