@@ -393,11 +393,56 @@ command = """
 ./build/test-modsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root"
 """
 
+# What the script shells out to. Under --env peipkg the composed root is
+# fsbase plus exactly this list — no implicit shell, so without `dash` (for
+# pekit's /usr/bin/sh) and `bash` (the script's own interpreter) bwrap cannot
+# even start it (PEI-489). QEMU is not packaged in the farm yet, so under
+# --env peipkg the stage gets as far as "qemu not found"; the docker env and
+# --env none supply the host's QEMU.
+[test.modsig.dependencies.peipkg]
+dash               = "*"
+bash               = "*"
+coreutils-gnu      = "*"
+findutils          = "*"
+grep               = "*"
+gawk               = "*"
+cpio               = "*"
+build-essentials-c = "*"
+
+[test.modsig.dependencies.apt]
+bash            = "*"
+coreutils       = "*"
+findutils       = "*"
+grep            = "*"
+gawk            = "*"
+cpio            = "*"
+build-essential = "*"
+qemu-system-x86 = "*"
+
 [test.stratafs]
 needs = ["kunit"]
 command = """
 ./build/test-stratafs.sh "$PEKIT_KUNIT_OUT"
 """
+
+# Same shape as test.modsig, for the same reason.
+[test.stratafs.dependencies.peipkg]
+dash               = "*"
+bash               = "*"
+coreutils-gnu      = "*"
+findutils          = "*"
+grep               = "*"
+cpio               = "*"
+build-essentials-c = "*"
+
+[test.stratafs.dependencies.apt]
+bash            = "*"
+coreutils       = "*"
+findutils       = "*"
+grep            = "*"
+cpio            = "*"
+build-essential = "*"
+qemu-system-x86 = "*"
 
 # Regenerate the language bindings under uapi/generated/{go,lua,rust} from the
 # canonical uapi/pkm headers, in place (each gen.sh runs the codegen-safe lint
