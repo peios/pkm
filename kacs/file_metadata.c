@@ -6,7 +6,8 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/kacs_stratafs.h>
-#include <linux/mnt_idmap.h>
+#include <linux/mnt_idmapping.h>
+#include <linux/mount.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/slab.h>

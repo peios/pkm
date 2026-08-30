@@ -9,6 +9,7 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -27,6 +28,7 @@
 #include <linux/xattr.h>
 
 #include "copy_up.h"
+#include "cred_lifecycle.h"
 #include "file_access.h"
 #include "file_metadata.h"
 #include "file_sd_cache.h"
@@ -2927,6 +2929,167 @@ static void pkm_kunit_copy_up_publish_identity_matches_vfs_semantics(
 		pkm_kacs_copy_up_published_object_matches(&context, &published));
 }
 
+/*
+ * The overlayfs path: a descriptor left on the cred by
+ * pkm_kacs_inode_copy_up() is what the created inode gets, in both the xattr
+ * and the SD cache -- not one inherited from the parent directory.
+ *
+ * No StrataFS context is armed here, so this exercises the branch that fires
+ * for a plain overlayfs copy-up.
+ */
+static void pkm_kunit_overlay_copy_up_sd_is_installed_and_cached(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kacs_cred_security *cred_sec;
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_inode_security *inode_sec;
+	struct super_block sb = { .s_magic = TMPFS_MAGIC };
+	struct inode parent_inode = { .i_mode = S_IFDIR, .i_sb = &sb };
+	struct inode created_inode = { .i_mode = S_IFREG, .i_sb = &sb };
+	struct dentry parent;
+	struct dentry target;
+	struct xattr xattrs[2] = {};
+	u8 *saved_sd;
+	size_t saved_len;
+	void *inode_blob;
+	int xattr_count = 0;
+	int ret;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_NOT_NULL(test, current_cred());
+	KUNIT_ASSERT_NOT_NULL(test, current_cred()->security);
+	cred_sec = pkm_kacs_cred(current_cred());
+
+	inode_blob = kunit_kzalloc(
+		test, pkm_blob_sizes.lbs_inode +
+			      sizeof(struct pkm_kacs_inode_security), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, inode_blob);
+	created_inode.i_security = inode_blob;
+	atomic_set(&created_inode.i_count, 1);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_inode_alloc_security(&created_inode), 0);
+
+	pkm_kacs_kunit_init_copy_up_dentry(&parent, &parent_inode, NULL,
+					   "parent");
+	pkm_kacs_kunit_init_copy_up_dentry(&target, NULL, &parent, "target");
+
+	saved_sd = cred_sec->copy_up_sd;
+	saved_len = cred_sec->copy_up_sd_len;
+	cred_sec->copy_up_sd = (u8 *)pkm_kunit_system_read_sd;
+	cred_sec->copy_up_sd_len = sizeof(pkm_kunit_system_read_sd);
+
+	ret = pkm_kacs_inode_init_security(
+		&created_inode, &parent_inode, &target.d_name,
+		xattrs, &xattr_count);
+
+	/*
+	 * Restored before any assertion can abort the test: the borrowed bytes
+	 * are static and must not reach pkm_kacs_cred_free().
+	 */
+	cred_sec->copy_up_sd = saved_sd;
+	cred_sec->copy_up_sd_len = saved_len;
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto out;
+	KUNIT_EXPECT_EQ(test, xattr_count, 1);
+	if (xattr_count != 1)
+		goto out;
+	KUNIT_EXPECT_STREQ(test, xattrs[0].name, "peios.sd");
+	KUNIT_EXPECT_EQ(test, xattrs[0].value_len,
+			(size_t)sizeof(pkm_kunit_system_read_sd));
+	if (xattrs[0].value_len == sizeof(pkm_kunit_system_read_sd))
+		KUNIT_EXPECT_MEMEQ(test, xattrs[0].value,
+				   pkm_kunit_system_read_sd,
+				   sizeof(pkm_kunit_system_read_sd));
+
+	inode_sec = pkm_kacs_inode(&created_inode);
+	cache = pkm_kacs_inode_sd_cache_get_current(&created_inode, inode_sec);
+	KUNIT_EXPECT_NOT_NULL(test, cache);
+	if (cache) {
+		KUNIT_EXPECT_EQ(test, cache->state,
+				(u8)PKM_KACS_INODE_SD_VALID);
+		KUNIT_EXPECT_EQ(test, cache->len,
+				(size_t)sizeof(pkm_kunit_system_read_sd));
+		if (cache->len == sizeof(pkm_kunit_system_read_sd))
+			KUNIT_EXPECT_MEMEQ(test, cache->bytes,
+					   pkm_kunit_system_read_sd,
+					   sizeof(pkm_kunit_system_read_sd));
+		pkm_kacs_inode_sd_cache_free(cache);
+	}
+out:
+	kfree(xattrs[0].value);
+	pkm_kacs_inode_free_security_rcu(created_inode.i_security);
+	created_inode.i_security = NULL;
+}
+
+/*
+ * The guard that keeps the above from leaking. A cred derived from one
+ * carrying a pending copy-up descriptor must not inherit it -- otherwise the
+ * next unrelated create in that task would be stamped with a descriptor lifted
+ * off the file being copied up.
+ */
+static void pkm_kunit_overlay_copy_up_sd_is_not_inherited(struct kunit *test)
+{
+	struct pkm_kacs_cred_security *old_sec;
+	struct pkm_kacs_cred_security *new_sec;
+	struct cred new_cred = {};
+	void *cred_blob;
+	u8 *saved_sd;
+	size_t saved_len;
+	int ret;
+
+	KUNIT_ASSERT_NOT_NULL(test, current_cred());
+	KUNIT_ASSERT_NOT_NULL(test, current_cred()->security);
+	old_sec = pkm_kacs_cred(current_cred());
+
+	cred_blob = kunit_kzalloc(
+		test, pkm_blob_sizes.lbs_cred +
+			      sizeof(struct pkm_kacs_cred_security), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, cred_blob);
+	new_cred.security = cred_blob;
+
+	saved_sd = old_sec->copy_up_sd;
+	saved_len = old_sec->copy_up_sd_len;
+	old_sec->copy_up_sd = (u8 *)pkm_kunit_system_read_sd;
+	old_sec->copy_up_sd_len = sizeof(pkm_kunit_system_read_sd);
+
+	/*
+	 * Poison the destination first. The blob arrives zeroed, so without
+	 * this the assertions below would hold even if cred_prepare touched
+	 * the field not at all -- the test would pass while proving nothing.
+	 * Only an active clear survives a non-NULL start.
+	 */
+	new_sec = pkm_kacs_cred(&new_cred);
+	new_sec->copy_up_sd = (u8 *)pkm_kunit_system_read_sd;
+	new_sec->copy_up_sd_len = sizeof(pkm_kunit_system_read_sd);
+
+	ret = pkm_kacs_cred_prepare(&new_cred, current_cred(), GFP_KERNEL);
+
+	old_sec->copy_up_sd = saved_sd;
+	old_sec->copy_up_sd_len = saved_len;
+
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		return;
+
+	KUNIT_EXPECT_NULL(test, new_sec->copy_up_sd);
+	KUNIT_EXPECT_EQ(test, new_sec->copy_up_sd_len, (size_t)0);
+
+	/*
+	 * Drop the poison rather than let cred_free see it. If the guard above
+	 * has regressed the field still points at static bytes, and kfree()
+	 * on those would crash the run -- burying the assertion that just told
+	 * us exactly what broke.
+	 */
+	new_sec->copy_up_sd = NULL;
+	new_sec->copy_up_sd_len = 0;
+
+	/* cred_prepare cloned the token; release what it took. */
+	pkm_kacs_cred_free(&new_cred);
+}
+
 static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_copy_up_scope_is_exact),
 	KUNIT_CASE(pkm_kunit_copy_up_exact_sd_is_installed_and_cached),
@@ -2936,6 +3099,8 @@ static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_copy_up_context_is_non_nesting),
 	KUNIT_CASE(pkm_kunit_copy_up_adopts_outer_descriptor_snapshot),
 	KUNIT_CASE(pkm_kunit_copy_up_publish_identity_matches_vfs_semantics),
+	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_installed_and_cached),
+	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_not_inherited),
 	{}
 };
 
