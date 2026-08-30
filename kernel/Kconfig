@@ -30,6 +30,22 @@ config SECURITY_PKM
 	  unsigned kernel modules both bypass process-isolation guarantees by
 	  entering the kernel trust boundary directly.
 
+config SECURITY_PKM_FIRMWARE_SIG_ENFORCE
+	bool "Refuse firmware that does not carry a PeiosTcb PIP signature"
+	depends on SECURITY_PKM
+	default n
+	help
+	  KACS verifies the PIP signature (security.peios.sig) of every file
+	  the kernel reads as firmware and requires the PeiosTcb tier. With
+	  this option the load is refused (-EPERM) when that fails; without
+	  it the verdict is logged and traced (kacs:kacs_firmware_load) and
+	  the load proceeds. Either way the boot command line can override
+	  the choice for one boot with kacs_fwsig=enforce or kacs_fwsig=log.
+
+	  Leave this off until every firmware package in the release is
+	  signed; a missed blob under enforcement is a device that silently
+	  stops probing. PEI-493.
+
 config SECURITY_PKM_KUNIT
 	bool "PKM KUnit scaffold"
 	depends on SECURITY_PKM

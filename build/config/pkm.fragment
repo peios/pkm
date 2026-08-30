@@ -84,6 +84,22 @@ CONFIG_PKCS7_WAIVE_AUTHATTRS_REJECTION_FOR_MLDSA=y
 # Microchip firmware driver and pse-pd all `select` it. It stays =y. A
 # load-time firmware check (PEI-493) does not cover this path; the drivers
 # that expose it are the place to gate it if that ever matters.
+#
+# Firmware signature verification (PEI-493): KACS checks the PIP signature of
+# every file the kernel reads as firmware and requires the PeiosTcb tier.
+# 2026.8 ships in LOG mode -- the verdict goes to dmesg and the
+# kacs:kacs_firmware_load tracepoint and the load proceeds -- because the
+# farm is being signed for the first time and a blob the packaging missed
+# must show up as a warning, not as a device that silently stops probing.
+# Flip to =y (or boot with kacs_fwsig=enforce) once a release has run clean.
+# CONFIG_SECURITY_PKM_FIRMWARE_SIG_ENFORCE is not set
+#
+# The loader's self-test module: /sys/devices/virtual/misc/test_firmware/
+# trigger_request pulls a named file through the real request_firmware()
+# path with no hardware, which is how test.fwsig proves the check above
+# without a device. A module, so it costs nothing until a test loads it; it
+# is not in the initramfs set (build/config/irf-modules.list).
+CONFIG_TEST_FIRMWARE=m
 
 # --- request_module()'s helper ---
 # The upstream default is /sbin/modprobe, which does not exist on Peios: kmod's

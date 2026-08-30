@@ -2,6 +2,8 @@
 
 #include "kunit_common.h"
 #include "kunit_mldsa_vectors.h"
+#include "firmware.h"
+#include "signing.h"
 
 
 static void pkm_kunit_boot_system_defaults(struct kunit *test)
@@ -1354,6 +1356,80 @@ static void pkm_kunit_builtin_signing_key_table_has_one_tcb_key(
 	KUNIT_EXPECT_EQ(test, terminated, 1U);
 }
 
+/*
+ * Firmware verdict (firmware.c, PEI-493): only a signature verified at the
+ * PeiosTcb tier allows; every other outcome -- unsigned, no key, a lower
+ * tier, and crucially "could not verify" -- refuses under enforce and is
+ * reported but allowed under log. Table-driven so the two modes are
+ * checked against the same reasons.
+ */
+static void pkm_kunit_firmware_verdict_requires_tcb(struct kunit *test)
+{
+	const struct pkm_kacs_signing_trust_result tcb = {
+		.verified = 1, .pip_type = PKM_KUNIT_SIGNING_PIP_PROTECTED,
+		.pip_trust = PKM_KUNIT_SIGNING_TRUST_TCB,
+	};
+	const struct pkm_kacs_signing_trust_result low = {
+		.verified = 1, .pip_type = PKM_KUNIT_SIGNING_PIP_PROTECTED,
+		.pip_trust = PKM_KUNIT_PIP_TRUST_TEST,
+	};
+	const struct pkm_kacs_signing_trust_result unverified = {};
+	const struct {
+		int probe_ret;
+		u32 source;
+		int verify_ret;
+		const struct pkm_kacs_signing_trust_result *result;
+		u8 reason;
+	} cases[] = {
+		{ 0, PKM_KACS_SIGNING_SOURCE_XATTR, 0, &tcb,
+		  KACS_FW_ALLOWED },
+		{ 0, PKM_KACS_SIGNING_SOURCE_ELF, 0, &tcb,
+		  KACS_FW_ALLOWED },
+		{ 0, PKM_KACS_SIGNING_SOURCE_NONE, 0, &unverified,
+		  KACS_FW_UNSIGNED },
+		{ 0, PKM_KACS_SIGNING_SOURCE_XATTR, 0, &unverified,
+		  KACS_FW_NO_KEY_MATCH },
+		{ 0, PKM_KACS_SIGNING_SOURCE_XATTR, 0, &low,
+		  KACS_FW_BELOW_TCB },
+		{ 0, PKM_KACS_SIGNING_SOURCE_XATTR, -ENOENT, &tcb,
+		  KACS_FW_UNVERIFIABLE },
+		{ 0, PKM_KACS_SIGNING_SOURCE_XATTR, 0, NULL,
+		  KACS_FW_UNVERIFIABLE },
+		{ -EIO, PKM_KACS_SIGNING_SOURCE_NONE, 0, &tcb,
+		  KACS_FW_PROBE_FAILED },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		int expect = cases[i].reason == KACS_FW_ALLOWED ? 0 : -EPERM;
+		u8 reason = 0xff;
+
+		KUNIT_EXPECT_EQ_MSG(test,
+				    pkm_kacs_firmware_verdict(
+					    cases[i].probe_ret, cases[i].source,
+					    cases[i].verify_ret,
+					    cases[i].result, true, &reason),
+				    expect, "case %zu enforce", i);
+		KUNIT_EXPECT_EQ_MSG(test, reason, cases[i].reason,
+				    "case %zu enforce reason", i);
+
+		reason = 0xff;
+		KUNIT_EXPECT_EQ_MSG(test,
+				    pkm_kacs_firmware_verdict(
+					    cases[i].probe_ret, cases[i].source,
+					    cases[i].verify_ret,
+					    cases[i].result, false, &reason),
+				    0, "case %zu log", i);
+		KUNIT_EXPECT_EQ_MSG(test, reason, cases[i].reason,
+				    "case %zu log reason", i);
+	}
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_firmware_verdict(0, PKM_KACS_SIGNING_SOURCE_XATTR,
+						  0, &tcb, true, NULL),
+			-EINVAL);
+}
+
 static struct kunit_case pkm_kunit_signing_cases[] = {
 	KUNIT_CASE(pkm_kunit_boot_system_defaults),
 	KUNIT_CASE(pkm_kunit_boot_anonymous_defaults),
@@ -1392,6 +1468,7 @@ static struct kunit_case pkm_kunit_signing_cases[] = {
 	KUNIT_CASE(pkm_kunit_signing_verify_missing_terminator_fails_closed),
 	KUNIT_CASE(pkm_kunit_signing_verify_terminator_stops_iteration),
 	KUNIT_CASE(pkm_kunit_builtin_signing_key_table_has_one_tcb_key),
+	KUNIT_CASE(pkm_kunit_firmware_verdict_requires_tcb),
 	{}
 };
 

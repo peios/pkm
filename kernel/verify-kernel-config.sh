@@ -36,6 +36,14 @@ require_unset() {
 	fi
 }
 
+require_enabled() {
+	local key=$1
+
+	if ! grep -Eq "^${key}=[ym]\$" "$config"; then
+		die "required config ${key} is neither =y nor =m"
+	fi
+}
+
 require_config_file
 
 require_set CONFIG_SECURITY_PKM y
@@ -49,6 +57,13 @@ require_set CONFIG_LSM '"landlock,lockdown,yama,integrity,pkm"'
 require_set CONFIG_STRICT_DEVMEM y
 require_set CONFIG_MODULE_SIG_FORCE y
 require_unset CONFIG_SECURITY_LOADPIN
+
+# Firmware signature verification (PEI-493) ships in log mode for 2026.8;
+# enforcement is a deliberate flip, made here and in pkm.fragment together.
+require_unset CONFIG_SECURITY_PKM_FIRMWARE_SIG_ENFORCE
+# test.fwsig needs the loader's self-test module. The kunit profile flattens
+# modules to built-in, so either form is acceptable.
+require_enabled CONFIG_TEST_FIRMWARE
 
 # Module signing must be ML-DSA-65, matching KACS binary signing, and the
 # authattrs waiver must accompany it. Dropping the waiver without moving to

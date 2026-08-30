@@ -270,7 +270,7 @@ static int pkm_kacs_signing_probe_elf_buffer(
 	return 0;
 }
 
-static int __maybe_unused pkm_kacs_signing_probe_buffer(
+static int pkm_kacs_signing_probe_buffer(
 	const u8 *file_bytes, size_t file_len, const u8 *xattr_sig,
 	size_t xattr_sig_len, struct pkm_kacs_signing_material *out)
 {
@@ -783,6 +783,44 @@ int pkm_kacs_signing_probe_file(
 	};
 
 	return pkm_kacs_signing_probe_reader(&reader, out);
+}
+
+int pkm_kacs_signing_probe_file_buffer(struct file *file, const u8 *buf,
+				       size_t len,
+				       struct pkm_kacs_signing_material *out)
+{
+	u8 *xattr;
+	size_t actual_len = 0;
+	int ret;
+
+	if (!file || !out || (len != 0 && !buf))
+		return -EINVAL;
+
+	xattr = kmalloc(PKM_KACS_SIGNING_BLOB_LEN, GFP_KERNEL);
+	if (!xattr)
+		return -ENOMEM;
+
+	/*
+	 * A present-but-wrong-sized xattr is reported as "no xattr" here,
+	 * exactly as the reader probe treats it: the buffer probe validates
+	 * the blob it is given, and an unreadable attribute is a probe
+	 * failure rather than an unsigned file.
+	 */
+	ret = pkm_kacs_signing_file_xattr(file, xattr,
+					  PKM_KACS_SIGNING_BLOB_LEN,
+					  &actual_len);
+	if (ret) {
+		kfree(xattr);
+		return ret;
+	}
+	if (actual_len != PKM_KACS_SIGNING_BLOB_LEN)
+		actual_len = 0;
+
+	ret = pkm_kacs_signing_probe_buffer(buf, len,
+					    actual_len ? xattr : NULL,
+					    actual_len, out);
+	kfree(xattr);
+	return ret;
 }
 
 struct pkm_kacs_signing_key_entry {

@@ -130,6 +130,21 @@
 #define KACS_SIG_SIZE_CHANGED			22U /* file size changed during probe (TOCTOU) */
 
 /*
+ * kacs_firmware reason — why a kernel-initiated firmware read was allowed or
+ * refused (kacs/firmware.c, PEI-493). Firmware is code that runs on a device
+ * with DMA into host memory, so it is held to the PeiosTcb tier: the same
+ * bar as a usermodehelper exec. `ret` is the verdict handed to the loader;
+ * under log mode it is 0 whatever the reason. Emitted by
+ * kacs:kacs_firmware_load. No path, key, or signature bytes are recorded.
+ */
+#define KACS_FW_ALLOWED			0U  /* verified at PeiosTcb */
+#define KACS_FW_UNSIGNED			1U  /* no signature material on the file */
+#define KACS_FW_NO_KEY_MATCH			2U  /* signed, but no built-in key verified it */
+#define KACS_FW_BELOW_TCB			3U  /* verified, but the key's tier is below PeiosTcb */
+#define KACS_FW_UNVERIFIABLE			4U  /* verification could not run (crypto unavailable) */
+#define KACS_FW_PROBE_FAILED			5U  /* reading the signature material failed */
+
+/*
  * kacs_socket reason — the outcome of an AF_UNIX socket SD / impersonation hook.
  * Distinguishes the guard, not-applicable, and verdict paths that otherwise
  * collapse into an indistinguishable -EACCES. Verdict is the `ret` field. No

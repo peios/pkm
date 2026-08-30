@@ -28,6 +28,7 @@
 #include "file_access.h"
 #include "file_metadata.h"
 #include "file_sd_cache.h"
+#include "firmware.h"
 #include "kmes_rate.h"
 #include "lsm_internal.h"
 #include "mount_policy.h"
@@ -120,6 +121,8 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(file_lock, pkm_kacs_file_lock),
 	LSM_HOOK_INIT(file_fcntl, pkm_kacs_file_fcntl),
 	LSM_HOOK_INIT(file_truncate, pkm_kacs_file_truncate),
+	LSM_HOOK_INIT(kernel_read_file, pkm_kacs_kernel_read_file),
+	LSM_HOOK_INIT(kernel_post_read_file, pkm_kacs_kernel_post_read_file),
 	LSM_HOOK_INIT(task_alloc, pkm_kacs_task_alloc),
 	LSM_HOOK_INIT(task_free, pkm_kacs_task_free),
 	LSM_HOOK_INIT(sk_alloc_security, pkm_kacs_sk_alloc_security),

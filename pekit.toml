@@ -421,6 +421,42 @@ cpio            = "*"
 build-essential = "*"
 qemu-system-x86 = "*"
 
+# Prove firmware signature verification (PEI-493) on the modular kernel: boot
+# it with an initramfs carrying blobs signed on the host with the keyring's
+# TCB key, stamp them into security.peios.sig, and pull each through the
+# loader's self-test module (CONFIG_TEST_FIRMWARE). Booted twice: under
+# kacs_fwsig=enforce the unsigned and tampered blobs are refused, under
+# kacs_fwsig=log they load with a warning. Signed blobs load either way.
+[test.fwsig]
+needs = ["kernel"]
+command = """
+./build/test-fwsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root"
+"""
+
+# Same shape as test.modsig, plus openssl (ML-DSA-65 signing) and zstd (a
+# compressed blob, to show the signature covers the on-disk bytes).
+[test.fwsig.dependencies.peipkg]
+dash               = "*"
+bash               = "*"
+coreutils-gnu      = "*"
+findutils          = "*"
+grep               = "*"
+cpio               = "*"
+openssl            = "*"
+zstd               = "*"
+build-essentials-c = "*"
+
+[test.fwsig.dependencies.apt]
+bash            = "*"
+coreutils       = "*"
+findutils       = "*"
+grep            = "*"
+cpio            = "*"
+openssl         = "*"
+zstd            = "*"
+build-essential = "*"
+qemu-system-x86 = "*"
+
 [test.stratafs]
 needs = ["kunit"]
 command = """

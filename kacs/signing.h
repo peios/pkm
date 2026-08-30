@@ -57,6 +57,17 @@ struct pkm_kacs_signing_trust_result {
 
 int pkm_kacs_signing_probe_file(struct file *file,
 				struct pkm_kacs_signing_material *out);
+/*
+ * Like pkm_kacs_signing_probe_file(), but hashes the bytes the caller was
+ * handed rather than re-reading the file. For a loader that already holds
+ * the whole file in memory (firmware), verifying that buffer is verifying
+ * what the device will get; a second read would reopen the TOCTOU window
+ * the reader probe's size check only narrows. The signature blob itself
+ * still comes from the file (ELF section within the buffer, or the xattr).
+ */
+int pkm_kacs_signing_probe_file_buffer(struct file *file, const u8 *buf,
+				       size_t len,
+				       struct pkm_kacs_signing_material *out);
 int pkm_kacs_signing_crypto_probe(void);
 int pkm_kacs_signing_verify_builtin(
 	const struct pkm_kacs_signing_material *material,

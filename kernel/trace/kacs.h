@@ -396,6 +396,56 @@ DEFINE_EVENT(kacs_signing_probe, kacs_signing_probe,
 	TP_PROTO(u32 source, u64 file_len, u8 reason, long ret),
 	TP_ARGS(source, file_len, reason, ret));
 
+#define kacs_firmware_reason_symbols					\
+	{ KACS_FW_ALLOWED,		"allowed" },			\
+	{ KACS_FW_UNSIGNED,		"unsigned" },			\
+	{ KACS_FW_NO_KEY_MATCH,		"no-key-match" },		\
+	{ KACS_FW_BELOW_TCB,		"below-tcb" },			\
+	{ KACS_FW_UNVERIFIABLE,		"unverifiable" },		\
+	{ KACS_FW_PROBE_FAILED,		"probe-failed" }
+
+/*
+ * A kernel-initiated firmware read reaching the PIP check (firmware.c).
+ * `enforce` says whether a refusal was handed to the loader or only logged;
+ * `ret` is what the loader actually got. Only lengths and codes.
+ */
+DECLARE_EVENT_CLASS(kacs_firmware,
+
+	TP_PROTO(u64 file_len, u32 source, u32 pip_trust, u32 enforce,
+		 u8 reason, long ret),
+
+	TP_ARGS(file_len, source, pip_trust, enforce, reason, ret),
+
+	TP_STRUCT__entry(
+		__field(	u64,	file_len	)
+		__field(	long,	ret		)
+		__field(	u32,	source		)
+		__field(	u32,	pip_trust	)
+		__field(	u32,	enforce		)
+		__field(	u8,	reason		)
+	),
+
+	TP_fast_assign(
+		__entry->file_len = file_len;
+		__entry->ret = ret;
+		__entry->source = source;
+		__entry->pip_trust = pip_trust;
+		__entry->enforce = enforce;
+		__entry->reason = reason;
+	),
+
+	TP_printk("reason=%s file_len=%llu source=%u pip_trust=%u enforce=%u ret=%ld",
+		__print_symbolic(__entry->reason, kacs_firmware_reason_symbols),
+		__entry->file_len, __entry->source, __entry->pip_trust,
+		__entry->enforce, __entry->ret)
+);
+
+/* Firmware load verdict (firmware.c) */
+DEFINE_EVENT(kacs_firmware, kacs_firmware_load,
+	TP_PROTO(u64 file_len, u32 source, u32 pip_trust, u32 enforce,
+		 u8 reason, long ret),
+	TP_ARGS(file_len, source, pip_trust, enforce, reason, ret));
+
 #define kacs_socket_reason_symbols					\
 	{ KACS_SOCK_BAD_ARGS,		"bad-args" },			\
 	{ KACS_SOCK_NOT_UNIX,		"not-unix" },			\

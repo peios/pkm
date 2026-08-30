@@ -120,6 +120,9 @@ drivers/input
 fs
 crypto
 lib
+# The firmware loader's self-test module (CONFIG_TEST_FIRMWARE, for
+# test.fwsig) lives under lib/ but has no business in an initramfs.
+-lib/test_firmware.ko.zst
 arch
 # dm-crypt imports the trusted and encrypted key types from security/keys,
 # and the trusted type can be backed by a TEE.
