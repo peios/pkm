@@ -1369,6 +1369,14 @@ int pkm_kacs_kunit_check_inode_permission_live_mode(
 	const void *subject_token, u32 mode, int mask);
 int pkm_kacs_kunit_check_open_by_handle_for_subject(
 	const void *subject_token);
+long pkm_kacs_kunit_build_created_sd_for_parent(
+	const void *subject_token, const u8 *parent_sd_ptr,
+	size_t parent_sd_len, bool directory, const u8 **created_sd_out,
+	size_t *created_sd_len_out);
+int pkm_kacs_kunit_overlay_create_files_as(
+	const void *subject_token, const u8 *parent_sd_ptr,
+	size_t parent_sd_len, bool directory, const u8 **pending_sd_out,
+	size_t *pending_sd_len_out);
 int pkm_kacs_kunit_check_namespace_live(
 	const struct pkm_kacs_kunit_namespace_args *args,
 	const u8 **created_sd_out, size_t *created_sd_len_out);

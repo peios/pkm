@@ -19,13 +19,13 @@
 format = "peipkg"
 
 [package]
-# -13: kernel-devel ships tools/objtool/objtool, so an out-of-tree module can
-# actually be built against the kit (PEI-535). Also KACS: a copied-up file keeps
-# its own security descriptor instead of inheriting one from the overlay's
-# workdir (PEI-548), and a CREATOR OWNER ACE inherited by a directory now
-# carries the rule onward rather than freezing that directory's creator into
-# every descendant (PEI-546).
-version      = "{{version}}-13"
+# -14: KACS resolves an overlay create in the overlay's own terms (PEI-564).
+# A file or directory created on the live root now inherits from the directory
+# the caller named, as the caller -- not from a backing upper or work directory
+# as the mounter -- so CREATOR OWNER resolves to the principal that made the
+# object and a runtime `sd set` governs the children that follow it. An explicit
+# creator descriptor from a native create is honoured on an overlay too.
+version      = "{{version}}-14"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"

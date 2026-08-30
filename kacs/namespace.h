@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/types.h>
 
+struct cred;
 struct dentry;
 struct inode;
 struct qstr;
@@ -57,6 +58,9 @@ long pkm_kacs_authorize_namespace_rename_for_subject(
 	const void *subject_token, struct inode *old_dir,
 	struct dentry *old_dentry, struct inode *new_dir,
 	struct dentry *new_dentry);
+int pkm_kacs_dentry_create_files_as(struct dentry *dentry, int mode,
+				    const struct qstr *name,
+				    const struct cred *old, struct cred *new);
 long pkm_kacs_build_legacy_created_file_sd_for_subject(
 	const void *subject_token, struct inode *parent_inode,
 	struct dentry *parent_dentry, bool directory, const u8 **out_sd_ptr,

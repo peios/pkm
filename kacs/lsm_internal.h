@@ -53,26 +53,43 @@ struct pkm_kacs_cred_security {
 	u32 projected_uid;
 	u32 projected_gid;
 	/*
-	 * The security descriptor an overlayfs copy-up must stamp on the upper
-	 * inode it is about to create, in place of the one inheritance would
-	 * compute for it.
+	 * The security descriptor overlayfs must stamp on the real inode it is
+	 * about to create, in place of the one inheritance would compute for
+	 * it. One meaning, two producers:
+	 *
+	 *   - a copy-up, where the descriptor is the copied object's own
+	 *     (pkm_kacs_inode_copy_up), and
+	 *   - an ordinary create, where it is what inheritance yields from the
+	 *     *overlay* parent for the *calling* principal
+	 *     (pkm_kacs_dentry_create_files_as).
+	 *
+	 * Both exist because overlayfs performs the real create on the upper
+	 * filesystem, under the mounter's credentials, in a directory that is
+	 * not the one the caller named -- the workdir for a copy-up or a create
+	 * over a whiteout. Left to itself, inode_init_security would inherit
+	 * from the wrong directory as the wrong subject.
 	 *
 	 * It lives on a cred because that is the lifetime the kernel already
-	 * gives us. security_inode_copy_up() hands an LSM a cred to fill in;
-	 * overlayfs installs it with override_creds() and reverts it on every
-	 * exit path through a scope guard (fs/overlayfs/copy_up.c,
-	 * DEFINE_CLASS(copy_up_creds)), and the put_cred that follows lands in
-	 * pkm_kacs_cred_free() below. So there is nothing to disarm and nothing
-	 * that can leak: outside that scope the cred is simply not current.
+	 * gives us. security_inode_copy_up() and security_dentry_create_files_as()
+	 * each hand an LSM a cred to fill in; overlayfs installs it with
+	 * override_creds() and reverts it on every exit path through a scope
+	 * guard (DEFINE_CLASS(copy_up_creds) in fs/overlayfs/copy_up.c,
+	 * DEFINE_CLASS(ovl_override_creator_creds) in fs/overlayfs/dir.c), and
+	 * the put_cred that follows lands in pkm_kacs_cred_free() below. So
+	 * there is nothing to disarm and nothing that can leak: outside that
+	 * scope the cred is simply not current.
 	 *
-	 * Both overlayfs scopes wrap exactly one create call, and the hook runs
-	 * once per copied-up object, so an intermediate directory carries its
-	 * own descriptor rather than the file's.
+	 * Every one of those scopes wraps exactly one create -- ovl_create_upper,
+	 * ovl_create_over_whiteout (which creates one temp and then *renames*
+	 * over the existing whiteout rather than making a second object),
+	 * ovl_create_tmpfile, and one copied-up object per copy-up -- so the
+	 * descriptor is consumed by the inode it was computed for, and an
+	 * intermediate directory carries its own rather than the file's.
 	 *
 	 * NOT inherited by a derived cred -- see pkm_kacs_cred_prepare().
 	 */
-	u8 *copy_up_sd;
-	size_t copy_up_sd_len;
+	u8 *pending_create_sd;
+	size_t pending_create_sd_len;
 };
 
 enum pkm_kacs_inode_sd_state {

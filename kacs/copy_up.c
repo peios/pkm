@@ -2974,10 +2974,10 @@ static void pkm_kunit_overlay_copy_up_sd_is_installed_and_cached(
 					   "parent");
 	pkm_kacs_kunit_init_copy_up_dentry(&target, NULL, &parent, "target");
 
-	saved_sd = cred_sec->copy_up_sd;
-	saved_len = cred_sec->copy_up_sd_len;
-	cred_sec->copy_up_sd = (u8 *)pkm_kunit_system_read_sd;
-	cred_sec->copy_up_sd_len = sizeof(pkm_kunit_system_read_sd);
+	saved_sd = cred_sec->pending_create_sd;
+	saved_len = cred_sec->pending_create_sd_len;
+	cred_sec->pending_create_sd = (u8 *)pkm_kunit_system_read_sd;
+	cred_sec->pending_create_sd_len = sizeof(pkm_kunit_system_read_sd);
 
 	ret = pkm_kacs_inode_init_security(
 		&created_inode, &parent_inode, &target.d_name,
@@ -2987,8 +2987,8 @@ static void pkm_kunit_overlay_copy_up_sd_is_installed_and_cached(
 	 * Restored before any assertion can abort the test: the borrowed bytes
 	 * are static and must not reach pkm_kacs_cred_free().
 	 */
-	cred_sec->copy_up_sd = saved_sd;
-	cred_sec->copy_up_sd_len = saved_len;
+	cred_sec->pending_create_sd = saved_sd;
+	cred_sec->pending_create_sd_len = saved_len;
 
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	if (ret)
@@ -3050,10 +3050,10 @@ static void pkm_kunit_overlay_copy_up_sd_is_not_inherited(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, cred_blob);
 	new_cred.security = cred_blob;
 
-	saved_sd = old_sec->copy_up_sd;
-	saved_len = old_sec->copy_up_sd_len;
-	old_sec->copy_up_sd = (u8 *)pkm_kunit_system_read_sd;
-	old_sec->copy_up_sd_len = sizeof(pkm_kunit_system_read_sd);
+	saved_sd = old_sec->pending_create_sd;
+	saved_len = old_sec->pending_create_sd_len;
+	old_sec->pending_create_sd = (u8 *)pkm_kunit_system_read_sd;
+	old_sec->pending_create_sd_len = sizeof(pkm_kunit_system_read_sd);
 
 	/*
 	 * Poison the destination first. The blob arrives zeroed, so without
@@ -3062,20 +3062,20 @@ static void pkm_kunit_overlay_copy_up_sd_is_not_inherited(struct kunit *test)
 	 * Only an active clear survives a non-NULL start.
 	 */
 	new_sec = pkm_kacs_cred(&new_cred);
-	new_sec->copy_up_sd = (u8 *)pkm_kunit_system_read_sd;
-	new_sec->copy_up_sd_len = sizeof(pkm_kunit_system_read_sd);
+	new_sec->pending_create_sd = (u8 *)pkm_kunit_system_read_sd;
+	new_sec->pending_create_sd_len = sizeof(pkm_kunit_system_read_sd);
 
 	ret = pkm_kacs_cred_prepare(&new_cred, current_cred(), GFP_KERNEL);
 
-	old_sec->copy_up_sd = saved_sd;
-	old_sec->copy_up_sd_len = saved_len;
+	old_sec->pending_create_sd = saved_sd;
+	old_sec->pending_create_sd_len = saved_len;
 
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	if (ret)
 		return;
 
-	KUNIT_EXPECT_NULL(test, new_sec->copy_up_sd);
-	KUNIT_EXPECT_EQ(test, new_sec->copy_up_sd_len, (size_t)0);
+	KUNIT_EXPECT_NULL(test, new_sec->pending_create_sd);
+	KUNIT_EXPECT_EQ(test, new_sec->pending_create_sd_len, (size_t)0);
 
 	/*
 	 * Drop the poison rather than let cred_free see it. If the guard above
@@ -3083,11 +3083,119 @@ static void pkm_kunit_overlay_copy_up_sd_is_not_inherited(struct kunit *test)
 	 * on those would crash the run -- burying the assertion that just told
 	 * us exactly what broke.
 	 */
-	new_sec->copy_up_sd = NULL;
-	new_sec->copy_up_sd_len = 0;
+	new_sec->pending_create_sd = NULL;
+	new_sec->pending_create_sd_len = 0;
 
 	/* cred_prepare cloned the token; release what it took. */
 	pkm_kacs_cred_free(&new_cred);
+}
+
+/*
+ * An ordinary create through an overlay: the descriptor must come out of the
+ * *overlay* parent, computed for the *calling* principal -- not for the
+ * mounter whose credentials overlayfs has already installed by the time the
+ * real create runs.
+ *
+ * The parent descriptor here grants FILE_ALL to a token the KUnit task does
+ * not hold, so the hook only succeeds if it took its subject from the cred it
+ * was handed. Reading current instead would fail the FILE_ADD_FILE check.
+ *
+ * The bytes are then compared against what the inheritance builder yields for
+ * that same subject and parent, which is what inode_init_security would have
+ * produced had overlayfs not stood between the caller and the create.
+ */
+static void pkm_kunit_overlay_create_takes_caller_and_overlay_parent(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd = NULL;
+	const u8 *pending_sd = NULL;
+	const u8 *expected_sd = NULL;
+	size_t parent_sd_len = 0;
+	size_t pending_sd_len = 0;
+	size_t expected_sd_len = 0;
+	int ret;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_PTR_NE(test, subject_token,
+			    pkm_kacs_current_effective_token_ptr());
+
+	parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     PKM_KUNIT_FILE_ADD_FILE |
+						     PKM_KUNIT_FILE_ADD_SUBDIRECTORY,
+						     &parent_sd_len);
+	if (!parent_sd) {
+		kacs_rust_token_drop(subject_token);
+		KUNIT_FAIL(test, "parent SD allocation failed");
+		return;
+	}
+	pkm_kunit_make_first_file_ace_inheritable((u8 *)parent_sd, 0x03);
+
+	ret = pkm_kacs_kunit_overlay_create_files_as(
+		subject_token, parent_sd, parent_sd_len, false, &pending_sd,
+		&pending_sd_len);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_NOT_NULL(test, pending_sd);
+	if (ret || !pending_sd)
+		goto out;
+
+	ret = (int)pkm_kacs_kunit_build_created_sd_for_parent(
+		subject_token, parent_sd, parent_sd_len, false, &expected_sd,
+		&expected_sd_len);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_NOT_NULL(test, expected_sd);
+	if (ret || !expected_sd)
+		goto out;
+
+	KUNIT_EXPECT_EQ(test, pending_sd_len, expected_sd_len);
+	if (pending_sd_len == expected_sd_len)
+		KUNIT_EXPECT_MEMEQ(test, pending_sd, expected_sd,
+				   expected_sd_len);
+out:
+	kfree((void *)pending_sd);
+	if (expected_sd)
+		pkm_kacs_free((void *)expected_sd);
+	pkm_kacs_free((void *)parent_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+/*
+ * A caller with no token leaves the cred untouched, so inode_init_security
+ * still reaches its own NO_TOKEN denial. Two places must not decide the same
+ * thing differently.
+ */
+static void pkm_kunit_overlay_create_without_a_token_defers(struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd = NULL;
+	const u8 *pending_sd = NULL;
+	size_t parent_sd_len = 0;
+	size_t pending_sd_len = 0;
+	int ret;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     PKM_KUNIT_FILE_ADD_FILE |
+						     PKM_KUNIT_FILE_ADD_SUBDIRECTORY,
+						     &parent_sd_len);
+	kacs_rust_token_drop(subject_token);
+	if (!parent_sd) {
+		KUNIT_FAIL(test, "parent SD allocation failed");
+		return;
+	}
+	pkm_kunit_make_first_file_ace_inheritable((u8 *)parent_sd, 0x03);
+
+	ret = pkm_kacs_kunit_overlay_create_files_as(
+		NULL, parent_sd, parent_sd_len, false, &pending_sd,
+		&pending_sd_len);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_NULL(test, pending_sd);
+	KUNIT_EXPECT_EQ(test, pending_sd_len, (size_t)0);
+
+	kfree((void *)pending_sd);
+	pkm_kacs_free((void *)parent_sd);
 }
 
 static struct kunit_case pkm_kunit_copy_up_cases[] = {
@@ -3101,6 +3209,8 @@ static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_copy_up_publish_identity_matches_vfs_semantics),
 	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_installed_and_cached),
 	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_not_inherited),
+	KUNIT_CASE(pkm_kunit_overlay_create_takes_caller_and_overlay_parent),
+	KUNIT_CASE(pkm_kunit_overlay_create_without_a_token_defers),
 	{}
 };
 

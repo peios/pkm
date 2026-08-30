@@ -4694,6 +4694,136 @@ static int pkm_kacs_kunit_namespace_maybe_build_created_sd(
 	return (int)ret;
 }
 
+/*
+ * What inheritance yields for @subject_token from a parent carrying
+ * @parent_sd_ptr -- the answer the overlay hook above has to match, since it
+ * exists to reproduce it from the right inode and the right subject.
+ */
+long pkm_kacs_kunit_build_created_sd_for_parent(
+	const void *subject_token, const u8 *parent_sd_ptr,
+	size_t parent_sd_len, bool directory, const u8 **created_sd_out,
+	size_t *created_sd_len_out)
+{
+	struct pkm_kacs_kunit_file_mount_state parent = {};
+	long ret;
+
+	if (!subject_token || !parent_sd_ptr || parent_sd_len == 0 ||
+	    !created_sd_out || !created_sd_len_out)
+		return -EINVAL;
+
+	*created_sd_out = NULL;
+	*created_sd_len_out = 0;
+
+	ret = pkm_kacs_kunit_init_namespace_state(
+		&parent, parent_sd_ptr, parent_sd_len,
+		PKM_KACS_KUNIT_FILE_SD_VALID, TMPFS_MAGIC,
+		KACS_MOUNT_POLICY_DENY_MISSING, S_IFDIR);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_build_legacy_created_file_sd_for_subject(
+		subject_token, &parent.inode, &parent.dentry, directory,
+		created_sd_out, created_sd_len_out);
+	pkm_kacs_kunit_cleanup_file_mount_state(&parent);
+	return ret;
+}
+
+/*
+ * Drive pkm_kacs_dentry_create_files_as() the way overlayfs does: a negative
+ * child dentry below a parent whose descriptor is primed, a cred for the
+ * *calling* principal, and a separate cred for overlayfs to install.
+ *
+ * The subject deliberately arrives on @old only. The KUnit task has an
+ * effective token of its own, and the parent descriptor callers prime here
+ * grants that token nothing, so a hook that read current instead of @old
+ * fails the FILE_ADD_FILE check and this returns an error rather than bytes.
+ * That is the whole point of the test: on an overlay the two differ, and the
+ * caller's is the right one.
+ */
+int pkm_kacs_kunit_overlay_create_files_as(
+	const void *subject_token, const u8 *parent_sd_ptr,
+	size_t parent_sd_len, bool directory, const u8 **pending_sd_out,
+	size_t *pending_sd_len_out)
+{
+	struct pkm_kacs_kunit_file_mount_state parent = {};
+	struct pkm_kacs_cred_security *old_sec;
+	struct pkm_kacs_cred_security *new_sec;
+	struct cred old_cred = {};
+	struct cred new_cred = {};
+	struct dentry child = {};
+	struct qstr *child_name;
+	void *old_blob = NULL;
+	void *new_blob = NULL;
+	size_t cred_blob_len;
+	u8 *copy = NULL;
+	umode_t mode;
+	bool parent_ready = false;
+	int ret;
+
+	if (!pending_sd_out || !pending_sd_len_out || !parent_sd_ptr ||
+	    parent_sd_len == 0)
+		return -EINVAL;
+
+	*pending_sd_out = NULL;
+	*pending_sd_len_out = 0;
+
+	mode = directory ? (S_IFDIR | 0700) : (S_IFREG | 0600);
+	ret = pkm_kacs_kunit_init_namespace_state(
+		&parent, parent_sd_ptr, parent_sd_len,
+		PKM_KACS_KUNIT_FILE_SD_VALID, TMPFS_MAGIC,
+		KACS_MOUNT_POLICY_DENY_MISSING, S_IFDIR);
+	if (ret)
+		return ret;
+	parent_ready = true;
+
+	child.d_parent = &parent.dentry;
+	child.d_sb = parent.dentry.d_sb;
+	child_name = (struct qstr *)&child.d_name;
+	child_name->name = (const u8 *)"child";
+	child_name->len = 5;
+
+	cred_blob_len = pkm_blob_sizes.lbs_cred +
+			sizeof(struct pkm_kacs_cred_security);
+	old_blob = kzalloc(cred_blob_len, GFP_KERNEL);
+	new_blob = kzalloc(cred_blob_len, GFP_KERNEL);
+	if (!old_blob || !new_blob) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	old_cred.security = old_blob;
+	new_cred.security = new_blob;
+	old_sec = pkm_kacs_cred(&old_cred);
+	new_sec = pkm_kacs_cred(&new_cred);
+	old_sec->token = subject_token;
+
+	ret = pkm_kacs_dentry_create_files_as(&child, (int)mode, &child.d_name,
+					      &old_cred, &new_cred);
+	if (ret)
+		goto out;
+	if (!new_sec->pending_create_sd || new_sec->pending_create_sd_len == 0)
+		goto out;
+
+	copy = kmemdup(new_sec->pending_create_sd,
+		       new_sec->pending_create_sd_len, GFP_KERNEL);
+	if (!copy) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	*pending_sd_out = copy;
+	*pending_sd_len_out = new_sec->pending_create_sd_len;
+
+out:
+	if (new_blob) {
+		new_sec = pkm_kacs_cred(&new_cred);
+		kfree(new_sec->pending_create_sd);
+	}
+	kfree(new_blob);
+	kfree(old_blob);
+	if (parent_ready)
+		pkm_kacs_kunit_cleanup_file_mount_state(&parent);
+	return ret;
+}
+
 int pkm_kacs_kunit_check_namespace_live(
 	const struct pkm_kacs_kunit_namespace_args *args,
 	const u8 **created_sd_out, size_t *created_sd_len_out)

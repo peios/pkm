@@ -1091,6 +1091,116 @@ int pkm_kacs_authorize_dentry_metadata_access(struct dentry *dentry,
 		subject_token, &file, desired_access);
 }
 
+/*
+ * Resolve, in the overlay's own terms, the descriptor the object about to be
+ * created below @dentry must carry -- and leave it on @new for
+ * inode_init_security to stamp.
+ *
+ * overlayfs performs the real create on the upper filesystem: under the
+ * mounter's credentials rather than the caller's, and in an upper or work
+ * directory that is not the one the caller named. By the time
+ * inode_init_security runs, both of the inputs inheritance needs are wrong:
+ *
+ *   - the subject is the mounter (SYSTEM on the live root), so every object
+ *     came out owned by Local System and CREATOR OWNER never resolved to the
+ *     principal that made it; and
+ *   - the parent is a backing inode -- the upper directory, or the workdir
+ *     for a create over a whiteout -- and not the directory the caller named.
+ *     It is a distinct inode with its own descriptor and its own SD cache, so
+ *     what a create inherited bore no fixed relation to what `sd show` and
+ *     kacs_set_sd operate on through the overlay.
+ *
+ * This hook is the one point where both are still right. overlayfs calls it
+ * from ovl_override_creator_creds() with @old being the caller's credentials,
+ * captured before the override, and @dentry being the *overlay* dentry -- so
+ * d_inode(dentry->d_parent) is the directory the caller actually named, whose
+ * cached descriptor is the one kacs_set_sd and `sd show` both operate on.
+ *
+ * An explicit creator SD from a native kacs_open create is picked up here for
+ * the same reason: the request records the overlay parent inode, so the match
+ * in inode_init_security -- which sees the backing inode -- could never fire,
+ * and the descriptor the caller asked for was silently replaced by
+ * inheritance. StrataFS solves this by rebinding the request to the provider
+ * parent (pkm_kacs_stratafs_rebind_native_create_request); overlayfs has no
+ * equivalent, and does not need one now that the answer is computed here.
+ *
+ * Failing here fails the create. That is deliberate: the alternative is to
+ * fall through to inheritance from the wrong directory as the wrong subject,
+ * which is the defect this exists to remove and which leaves no trace once
+ * the object is on disk.
+ */
+int pkm_kacs_dentry_create_files_as(struct dentry *dentry, int mode,
+				    const struct qstr *name,
+				    const struct cred *old, struct cred *new)
+{
+	const struct pkm_kacs_cred_security *old_sec;
+	struct dentry *parent_dentry;
+	struct inode *parent_inode;
+	const u8 *sd_bytes = NULL;
+	size_t sd_len = 0;
+	bool allocated_sd = false;
+	bool directory;
+	u8 *copied_bytes;
+	int ret;
+
+	/* StrataFS records its own outer-create transition on this hook. */
+	ret = pkm_kacs_copy_up_dentry_create_files_as(dentry, mode, name, old,
+						      new);
+	if (ret)
+		return ret;
+
+	if (!dentry || !old || !new || !old->security)
+		return 0;
+	parent_dentry = dentry->d_parent;
+	if (!parent_dentry)
+		return 0;
+	parent_inode = d_inode(parent_dentry);
+	if (!parent_inode || !parent_inode->i_security)
+		return 0;
+	if (pkm_kacs_inode_on_unmanaged_mount(parent_inode))
+		return 0;
+	if (pkm_kacs_inode_is_ntfs(parent_inode))
+		return 0;
+
+	old_sec = pkm_kacs_cred(old);
+	if (!old_sec->token) {
+		/*
+		 * Nothing to compute from. Leave it to inode_init_security,
+		 * which denies a tokenless create with its own audit record
+		 * rather than having two places decide the same thing.
+		 */
+		return 0;
+	}
+
+	directory = S_ISDIR(mode);
+	if (!pkm_kacs_current_native_create_request_matches(
+		    parent_inode, directory, &sd_bytes, &sd_len)) {
+		ret = (int)pkm_kacs_build_legacy_created_file_sd_for_subject(
+			old_sec->token, parent_inode, parent_dentry, directory,
+			&sd_bytes, &sd_len);
+		if (ret) {
+			pr_debug(
+				"kacs: deny dentry_create_files_as BUILD_FAIL parent_ino=%lu sb_magic=0x%lx mode=0%o comm=%s pid=%d ret=%d\n",
+				parent_inode->i_ino,
+				(unsigned long)parent_inode->i_sb->s_magic,
+				mode, current->comm, current->pid, ret);
+			return ret;
+		}
+		allocated_sd = true;
+	}
+	if (!sd_bytes || sd_len == 0)
+		return allocated_sd ? -EACCES : 0;
+
+	copied_bytes = kmemdup(sd_bytes, sd_len, GFP_NOFS);
+	if (allocated_sd)
+		pkm_kacs_free((void *)sd_bytes);
+	if (!copied_bytes)
+		return -ENOMEM;
+
+	/* Takes ownership of copied_bytes on every path. */
+	return pkm_kacs_cred_set_pending_create_sd(new, copied_bytes, sd_len);
+}
+
 int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 				 const struct qstr *qstr,
 				 struct xattr *xattrs,
@@ -1102,10 +1212,10 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 	size_t sd_len = 0;
 	u8 *copied_bytes;
 	u8 *cache_bytes = NULL;
-	struct pkm_kacs_inode_sd_cache *copy_up_cache = NULL;
+	struct pkm_kacs_inode_sd_cache *seed_cache = NULL;
 	struct pkm_kacs_inode_security *inode_sec;
 	bool allocated_sd = false;
-	bool copy_up_sd = false;
+	bool cred_sd = false;
 	int copy_up_match;
 	long ret;
 
@@ -1119,17 +1229,19 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 	if (copy_up_match < 0)
 		return copy_up_match;
 	if (copy_up_match > 0) {
-		copy_up_sd = true;
-	} else if (pkm_kacs_copy_up_cred_sd(&sd_bytes, &sd_len)) {
+		cred_sd = true;
+	} else if (pkm_kacs_pending_create_cred_sd(&sd_bytes, &sd_len)) {
 		/*
-		 * An overlayfs copy-up: the object being copied brings its own
-		 * descriptor (pkm_kacs_inode_copy_up), and inheriting one from
-		 * the directory overlayfs happens to create the upper in -- the
-		 * workdir -- would silently rewrite what other principals may
-		 * do to it. The bytes belong to the cred, so allocated_sd stays
-		 * false and nothing here frees them.
+		 * overlayfs is performing this create on our behalf and has
+		 * already been told what to stamp -- by pkm_kacs_inode_copy_up
+		 * for a copy-up, or by pkm_kacs_dentry_create_files_as for an
+		 * ordinary create. Either way @dir here is a backing directory
+		 * (the upper, or the workdir) and the subject is the mounter,
+		 * so inheriting from them would rewrite what other principals
+		 * may do to the object. The bytes belong to the cred, so
+		 * allocated_sd stays false and nothing here frees them.
 		 */
-		copy_up_sd = true;
+		cred_sd = true;
 	} else if (!pkm_kacs_current_native_create_request_matches(
 		    dir, S_ISDIR(inode->i_mode), &sd_bytes, &sd_len)) {
 		subject_token = pkm_kacs_current_effective_token_ptr();
@@ -1176,7 +1288,7 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 		pkm_kacs_free((void *)sd_bytes);
 	if (!copied_bytes)
 		return -ENOMEM;
-	if (copy_up_sd) {
+	if (cred_sd) {
 		if (!inode->i_security) {
 			kfree(copied_bytes);
 			return -EACCES;
@@ -1186,9 +1298,9 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 			kfree(copied_bytes);
 			return -ENOMEM;
 		}
-		copy_up_cache = pkm_kacs_inode_sd_cache_alloc(
+		seed_cache = pkm_kacs_inode_sd_cache_alloc(
 			PKM_KACS_INODE_SD_VALID, cache_bytes, sd_len);
-		if (!copy_up_cache) {
+		if (!seed_cache) {
 			kfree(cache_bytes);
 			kfree(copied_bytes);
 			return -EACCES;
@@ -1197,7 +1309,7 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 
 	xattr = lsm_get_xattr_slot(xattrs, xattr_count);
 	if (!xattr) {
-		pkm_kacs_inode_sd_cache_free(copy_up_cache);
+		pkm_kacs_inode_sd_cache_free(seed_cache);
 		kfree(copied_bytes);
 		return -ENOMEM;
 	}
@@ -1205,11 +1317,10 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 	xattr->name = "peios.sd";
 	xattr->value = copied_bytes;
 	xattr->value_len = sd_len;
-	if (copy_up_cache) {
+	if (seed_cache) {
 		inode_sec = pkm_kacs_inode(inode);
 		mutex_lock(&inode_sec->lock);
-		pkm_kacs_inode_replace_sd_cache_locked(inode_sec,
-						       copy_up_cache);
+		pkm_kacs_inode_replace_sd_cache_locked(inode_sec, seed_cache);
 		mutex_unlock(&inode_sec->lock);
 	}
 	trace_kacs_inode_init_security(dir, inode, 0, KACS_NS_PRIMARY, 0);

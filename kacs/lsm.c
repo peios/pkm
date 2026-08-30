@@ -110,7 +110,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_post_create_tmpfile,
 		      pkm_kacs_copy_up_post_create_tmpfile),
 	LSM_HOOK_INIT(dentry_create_files_as,
-		      pkm_kacs_copy_up_dentry_create_files_as),
+		      pkm_kacs_dentry_create_files_as),
 	LSM_HOOK_INIT(file_alloc_security, pkm_kacs_file_alloc_security),
 	LSM_HOOK_INIT(backing_file_alloc, pkm_kacs_backing_file_alloc),
 	LSM_HOOK_INIT(file_release, pkm_kacs_file_release),

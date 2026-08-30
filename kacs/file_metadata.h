@@ -33,7 +33,9 @@ int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
 int pkm_kacs_inode_listxattr(struct dentry *dentry);
 int pkm_kacs_inode_copy_up(struct dentry *src, struct cred **new);
 int pkm_kacs_inode_copy_up_xattr(struct dentry *src, const char *name);
-bool pkm_kacs_copy_up_cred_sd(const u8 **bytes_out, size_t *len_out);
+int pkm_kacs_cred_set_pending_create_sd(struct cred *cred, u8 *sd_bytes,
+					size_t sd_len);
+bool pkm_kacs_pending_create_cred_sd(const u8 **bytes_out, size_t *len_out);
 int pkm_kacs_inode_follow_link(struct dentry *dentry, struct inode *inode,
 			       bool rcu);
 int pkm_kacs_inode_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,

@@ -481,7 +481,6 @@ static int pkm_kacs_copy_up_capture_sd(struct dentry *src, u8 **bytes_out,
  */
 int pkm_kacs_inode_copy_up(struct dentry *src, struct cred **new)
 {
-	struct pkm_kacs_cred_security *sec;
 	struct cred *new_creds;
 	u8 *sd_bytes = NULL;
 	size_t sd_len = 0;
@@ -506,29 +505,52 @@ int pkm_kacs_inode_copy_up(struct dentry *src, struct cred **new)
 		}
 	}
 
-	if (!new_creds->security) {
+	ret = pkm_kacs_cred_set_pending_create_sd(new_creds, sd_bytes, sd_len);
+	if (ret) {
 		if (new_creds != *new)
 			put_cred(new_creds);
-		kfree(sd_bytes);
-		return -EACCES;
+		return ret;
 	}
-
-	sec = pkm_kacs_cred(new_creds);
-	kfree(sec->copy_up_sd);
-	sec->copy_up_sd = sd_bytes;
-	sec->copy_up_sd_len = sd_len;
 	*new = new_creds;
 	return 0;
 }
 
 /*
- * The descriptor pkm_kacs_inode_copy_up() left for the create it is wrapping,
- * or false when this create is not an overlayfs copy-up.
+ * Hand a cred the descriptor the create it is about to wrap must stamp,
+ * taking ownership of the bytes. Called by both producers -- copy-up above
+ * and pkm_kacs_dentry_create_files_as() for an ordinary overlay create.
+ *
+ * The cred is one overlayfs has just prepared for a single create and has not
+ * installed yet, so replacing any existing descriptor is the right thing: a
+ * cred can only ever be carrying one pending create.
+ */
+int pkm_kacs_cred_set_pending_create_sd(struct cred *cred, u8 *sd_bytes,
+					size_t sd_len)
+{
+	struct pkm_kacs_cred_security *sec;
+
+	if (!cred || !sd_bytes || sd_len == 0)
+		return -EINVAL;
+	if (!cred->security) {
+		kfree(sd_bytes);
+		return -EACCES;
+	}
+
+	sec = pkm_kacs_cred(cred);
+	kfree(sec->pending_create_sd);
+	sec->pending_create_sd = sd_bytes;
+	sec->pending_create_sd_len = sd_len;
+	return 0;
+}
+
+/*
+ * The descriptor a producer left for the create it is wrapping, or false when
+ * this create is not one overlayfs is performing on our behalf.
  *
  * The bytes stay owned by the cred, which outlives the create and is freed by
  * pkm_kacs_cred_free().
  */
-bool pkm_kacs_copy_up_cred_sd(const u8 **bytes_out, size_t *len_out)
+bool pkm_kacs_pending_create_cred_sd(const u8 **bytes_out, size_t *len_out)
 {
 	const struct pkm_kacs_cred_security *sec;
 	const struct cred *cred;
@@ -541,11 +563,11 @@ bool pkm_kacs_copy_up_cred_sd(const u8 **bytes_out, size_t *len_out)
 		return false;
 
 	sec = pkm_kacs_cred(cred);
-	if (!sec->copy_up_sd || sec->copy_up_sd_len == 0)
+	if (!sec->pending_create_sd || sec->pending_create_sd_len == 0)
 		return false;
 
-	*bytes_out = sec->copy_up_sd;
-	*len_out = sec->copy_up_sd_len;
+	*bytes_out = sec->pending_create_sd;
+	*len_out = sec->pending_create_sd_len;
 	return true;
 }
 
