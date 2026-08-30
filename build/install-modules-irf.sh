@@ -108,7 +108,22 @@ done
 # it cannot resolve, so e1000e without drivers/ptp, and ptp without drivers/pps,
 # each produced a clean index and an "Unknown symbol" at boot. depmod only
 # warns, so the warnings are the assertion.
-unresolved=$(depmod -e -F "$sysmap" -b "$root" "$release" 2>&1 | grep -i "needs unknown symbol" || true)
+# depmod is machine-facing, so Peios ships it in /usr/libexec rather than on
+# PATH (pkgs ec92d66); prefer whatever is on PATH so the container build is
+# unchanged, and fall back to the Peios location.
+depmod_bin="${PKM_DEPMOD:-}"
+if [[ -z "$depmod_bin" ]]; then
+	if command -v depmod >/dev/null 2>&1; then
+		depmod_bin=depmod
+	elif [[ -x /usr/libexec/depmod ]]; then
+		depmod_bin=/usr/libexec/depmod
+	else
+		echo "depmod not found on PATH or in /usr/libexec" >&2
+		exit 1
+	fi
+fi
+
+unresolved=$("$depmod_bin" -e -F "$sysmap" -b "$root" "$release" 2>&1 | grep -i "needs unknown symbol" || true)
 [[ -z "$unresolved" ]] || {
 	echo "initramfs module set has unresolved symbols — add the providing subtree to irf-modules.list:" >&2
 	echo "$unresolved" | head -20 >&2

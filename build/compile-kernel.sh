@@ -51,7 +51,12 @@ if [[ "$llvm" == 1 ]]; then cc=clang; else cc="clang${llvm}"; fi
 command -v ccache >/dev/null 2>&1 && cc="ccache $cc"
 hostcc=()
 [[ -n "${PKM_HOSTCC:-}" ]] && hostcc=(HOSTCC="$PKM_HOSTCC")
-make LLVM="$llvm" CC="$cc" "${hostcc[@]}" -j"$(nproc)"
+# PKM_JOBS caps parallelism. The default is every core, which is right on a
+# build farm and wrong on a workstation sharing the machine: twelve concurrent
+# clang processes through the vmlinux link and module generation is what took
+# this build out to the OOM killer once, with no error in the log -- the build
+# simply stopped mid-line, because the whole process group was signalled.
+make LLVM="$llvm" CC="$cc" "${hostcc[@]}" -j"${PKM_JOBS:-$(nproc)}"
 
 echo ""
 echo "compile-kernel: built"

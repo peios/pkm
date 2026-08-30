@@ -24,6 +24,22 @@ root=$2
 make=(make LLVM="${PKM_LLVM:--18}")
 [[ -n "${PKM_HOSTCC:-}" ]] && make+=(HOSTCC="$PKM_HOSTCC")
 
+# depmod: the kernel resolves $(DEPMOD) through PATH and only WARNS when it
+# misses -- the index assertion at the bottom of this script is what turns that
+# into an error. Peios ships depmod in /usr/libexec rather than on PATH,
+# because it is machine-facing (pkgs ec92d66), so on a composed build root the
+# default finds nothing. Prefer whatever is on PATH, so the container build is
+# unchanged, and fall back to the Peios location.
+depmod_bin="${PKM_DEPMOD:-}"
+if [[ -z "$depmod_bin" ]]; then
+	if command -v depmod >/dev/null 2>&1; then
+		depmod_bin=depmod
+	elif [[ -x /usr/libexec/depmod ]]; then
+		depmod_bin=/usr/libexec/depmod
+	fi
+fi
+[[ -n "$depmod_bin" ]] && make+=(DEPMOD="$depmod_bin")
+
 mkdir -p "$root"
 root=$(cd "$root" && pwd)
 
