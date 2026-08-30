@@ -2,6 +2,8 @@
 
 #include "kunit_common.h"
 #include "kunit_mldsa_vectors.h"
+#include <pkm/trace.h>
+
 #include "firmware.h"
 #include "signing.h"
 
