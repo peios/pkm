@@ -49,9 +49,10 @@ log() { printf 'build-tools: %s\n' "$*"; }
 # /etc. BPF skeletons + libpfm4 (auto-detected) are on, and the perf binary embeds
 # libpython for `perf script -s *.py` (NO_LIBPYTHON unset).
 #
-# Man pages ARE built by `install` (asciidoc/xmlto in the image). Note: do NOT add
-# an explicit `install-man` goal alongside `install` under -j — the two race on the
-# same .xml temp files and fail; `install` builds the man set on its own.
+# Man pages ARE built by `install`, with asciidoc and xmlto (both in the pool
+# since PEI-535). Note: do NOT add an explicit `install-man` goal alongside
+# `install` under -j — the two race on the same .xml temp files and fail;
+# `install` builds the man set on its own.
 #
 # The importable python module (python3-perf) is the perf.so that `install` builds
 # under python/ (the install-python_ext setup.py path is broken — missing libperf
@@ -66,6 +67,7 @@ log "perf"
 # into the binary as PERF_EXEC_PATH, so it must point at the final install
 # location — under the triplet, since libexec/ is not a PSD-009 destination.
 make -C tools/perf -f Makefile.perf -j"$jobs" \
+	XML_CATALOG_FILES="${XML_CATALOG_FILES:-/usr/etc/xml/catalog}" \
 	prefix=/usr libdir=/usr/lib/$triplet sysconfdir=/etc \
 	perfexecdir=lib/$triplet/perf-core \
 	PYTHON=python3 BUILD_BPF_SKEL=1 WERROR=0 \
@@ -95,12 +97,18 @@ fi
 
 # --- libperf: the perf sampling/eventing library + headers (shipped as libperf
 #     and libperf-devel) ---
-# install_lib + install_headers, NOT install: the umbrella target drags
+# Granular targets, NOT the umbrella `install`, because it drags
 # install_doc (asciidoc), and docs are off per the PEI-158 policy.
 log "libperf"
 make -C tools/lib/perf -j"$jobs" \
 	prefix=/usr libdir=/usr/lib/$triplet \
 	DESTDIR="$dest" install_lib install_headers install_pkgconfig
+# The man pages come from the Documentation makefile directly, not through
+# libperf's install_doc: that target also runs install-html and
+# install-examples, and Peios ships no /usr/share/doc.
+make -C tools/lib/perf/Documentation -j"$jobs" \
+	XML_CATALOG_FILES="${XML_CATALOG_FILES:-/usr/etc/xml/catalog}" \
+	prefix=/usr mandir=/usr/share/man DESTDIR="$dest" install-man
 
 # --- bpftool: BPF program / map / tracing introspection ---
 # doc-install renders the RST man pages with rst2man (python3-docutils, in

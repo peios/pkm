@@ -331,8 +331,10 @@ llvm = "*"
 clang = "*"
 # rst2man for the bpftool/rtla/rv man pages (PEI-535 brought docutils to the pool).
 python3-docutils = "*"
-# a2x for kvm_stat's man page, and the DocBook toolchain it drives.
+# asciidoc + xmlto render the perf, libperf and kvm_stat man pages; the
+# DocBook stylesheets and DTD are what they resolve against.
 asciidoc = "*"
+xmlto = "*"
 "docbook-xsl" = "*"
 "docbook-xml" = "*"
 # setuptools builds perf's importable python module (util/setup.py).

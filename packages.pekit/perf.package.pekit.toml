@@ -13,6 +13,12 @@
 #   libm libz libelf libdw libslang libpython3 libstdc++ liblzma libzstd libnuma
 #   libpfm libtraceevent libcapstone libLLVM libdebuginfod libbabeltrace libgcc_s libc
 
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
+# `man -k` and `apropos` find them instead of falling back to a filesystem
+# scan. Top-level, not inside a table -- TOML would otherwise scope it to
+# whichever table precedes it.
+side_effects = ["man-db"]
+
 [package]
 description = "perf - Linux performance analysis tooling (from Linux 7.0.9 tools/perf)"
 
@@ -29,4 +35,4 @@ description = "perf - Linux performance analysis tooling (from Linux 7.0.9 tools
 # prefix, so only the destination moves.
 "tools:etc/bash_completion.d/perf" = "usr/etc/bash_completion.d/perf"
 "tools:usr/share/doc/perf-tip/tips.txt" = "usr/share/doc/perf-tip/tips.txt"
-# man pages: off with the PEI-158 docs policy (asciidoc/xmlto absent).
+"tools:usr/share/man/man1/perf*.1"      = "usr/share/man/man1"
