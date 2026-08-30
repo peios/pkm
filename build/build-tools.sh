@@ -76,13 +76,21 @@ make -C tools/perf -f Makefile.perf -j"$jobs" \
 # (asciidoc/xmlto) and the setup.py python module are likewise absent in
 # composed roots; perf feature-detection skips what it cannot find.
 
-# python3-perf: copy the perf.so the build already produced under the triplet
-# (Peios CPython uses platlibdir=<triplet>). The cpython-3xx ABI tag stays in the
-# filename; it must be rebuilt against the Peios interpreter to actually load.
+# python3-perf: the importable `perf` module. perf's Makefile builds it with
+# util/setup.py, which needs setuptools -- absent from composed roots until
+# PEI-535, which is why this used to copy a prebuilt .so instead. It is now
+# built here against OUR interpreter, so the extension carries the Peios ABI
+# tag (cpython-314-x86_64-linux-peios) and actually imports on a Peios
+# machine; the copied Debian-tagged one never could.
+#
+# Installed to the interpreter's one site-packages, asked for rather than
+# assumed -- the same rule every Python package in the pool follows.
 perf_pyso=$(find tools/perf/python -maxdepth 1 -name 'perf*.so' 2>/dev/null | head -1)
 if [ -n "$perf_pyso" ]; then
-	install -D -m755 "$perf_pyso" \
-		"$dest/usr/lib/$triplet/python3/site-packages/$(basename "$perf_pyso")"
+	site=$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')
+	install -D -m755 "$perf_pyso" "$dest$site/$(basename "$perf_pyso")"
+else
+	echo "build-tools: perf python module NOT built (no perf*.so under tools/perf/python)" >&2
 fi
 
 # --- libperf: the perf sampling/eventing library + headers (shipped as libperf
@@ -123,20 +131,19 @@ make -C tools/power/x86/turbostat -j"$jobs" \
 	DESTDIR="$dest" prefix=/usr install
 
 # --- rtla: real-time latency analysis (osnoise, timerlat, ...) ---
+# rtla and rv hardcode -flto=auto for gcc builds. That used to fail -- the
+# pool's gcc had no lto1, because its configure matched x86_64-linux-peios
+# against the *-*-pe* Windows-PE pattern and silently disabled LTO -- and
+# carried an FOPTS override here to strip the flag. pkgs c422f88 fixed the
+# match, so the override is gone and these link with LTO as upstream intends.
+#
 # Its `install` target strips the binary; install the binary and the
 # osnoise/hwnoise/timerlat tool symlinks manually, mirroring Makefile.rtla's
 # install rule, and take the man pages through doc_install (rst2man from
 # python3-docutils; Documentation/tools/rtla defaults MANDIR to
 # /usr/share/man).
-# FOPTS override: rtla/rv hardcode -flto=auto for gcc builds, and the
-# pool's gcc is built without LTO support (lto1 absent). Command-line
-# CFLAGS would clobber the pkg-config include flags the Makefile appends,
-# so FOPTS (the hardening/LTO set) is overridden instead — same flags
-# minus the two LTO ones. Real fix on the ledger: enable LTO at gcc's
-# next rebuild, then drop these overrides.
-FOPTS_NO_LTO="-fexceptions -fstack-protector-strong -fasynchronous-unwind-tables -fstack-clash-protection"
 log "rtla"
-make -C tools/tracing/rtla -j"$jobs" FOPTS="$FOPTS_NO_LTO"
+make -C tools/tracing/rtla -j"$jobs"
 install -D -m755 tools/tracing/rtla/rtla "$dest/usr/bin/rtla"
 for t in osnoise hwnoise timerlat; do ln -sfn rtla "$dest/usr/bin/$t"; done
 make -C tools/tracing/rtla DESTDIR="$dest" doc_install
@@ -144,7 +151,7 @@ make -C tools/tracing/rtla DESTDIR="$dest" doc_install
 # --- rv: runtime verification (in-kernel monitors' userspace front-end) ---
 # Same shape as rtla: manual unstripped install, man pages via doc_install.
 log "rv"
-make -C tools/verification/rv -j"$jobs" FOPTS="$FOPTS_NO_LTO"
+make -C tools/verification/rv -j"$jobs"
 install -D -m755 tools/verification/rv/rv "$dest/usr/bin/rv"
 make -C tools/verification/rv DESTDIR="$dest" doc_install
 
@@ -250,12 +257,15 @@ sed -i "s#/usr/libexec/hypervkvpd/#/$hvdir/#" tools/hv/hv_kvp_daemon.c
 make -C tools/hv -j"$jobs"
 make -C tools/hv DESTDIR="$dest" prefix=/usr sbindir=/usr/bin libexecdir="/usr/lib/$triplet" install
 
-# kvm_stat — KVM event monitor (python). Its install target hard-requires
-# asciidoc for the man page, and docs are off per the PEI-158 policy —
-# install the script manually. (The bundled kvm_stat.service systemd unit
-# is not installed/packaged.)
+# kvm_stat — KVM event monitor (python). Its install target renders the man
+# page with a2x, which is in the pool since PEI-535; XML_CATALOG_FILES points
+# libxml2 at the DocBook catalog, which a build root needs explicitly because
+# it has no /etc merge to find it through. (The bundled kvm_stat.service
+# systemd unit is not installed/packaged.)
 log "kvm_stat"
-install -D -m755 tools/kvm/kvm_stat/kvm_stat "$dest/usr/bin/kvm_stat"
+make -C tools/kvm/kvm_stat \
+	XML_CATALOG_FILES="${XML_CATALOG_FILES:-/usr/etc/xml/catalog}" \
+	INSTALL_ROOT="$dest" BINDIR=usr/bin MANDIR=usr/share/man install
 
 # thermal stack: libthermal (public API) + libthermal_tools (private helper) +
 # thermal-engine (daemon) + thermometer (logger). Both libs install via DESTDIR;

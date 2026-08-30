@@ -1,0 +1,23 @@
+# python3-perf — the importable `perf` module: perf's Python bindings, built
+# from tools/perf/python by perf's own util/setup.py (build.tools).
+#
+# It was retired at PEI-158 and returns at PEI-535. The reason is the same
+# both times: the module is a C extension, so it is bound to one interpreter.
+# The old package copied a .so built against the BUILD IMAGE's CPython, whose
+# ABI tag named a Debian interpreter -- it installed and could never import.
+# setuptools is in the pool now, so the extension is built against the Peios
+# interpreter and carries its tag, and the file map globs the version out so
+# it survives a rebuild rather than the tag.
+#
+# The python3 floor is the same feature-version pin every Python package in
+# the pool carries: an extension module does not survive a minor bump.
+
+[package]
+description = "perf - Python bindings (the importable perf module)"
+
+[dependencies]
+perf    = "{{version}}"
+python3 = ">= 3.14, < 3.15"
+
+[files]
+"tools:usr/lib/x86_64-linux-peios/python3*/site-packages/**" = "usr/lib/x86_64-linux-peios"
