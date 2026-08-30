@@ -5,9 +5,15 @@
 # (libbpf.so.1) libc. libbpf is the BPF backend, enabled by the build image's
 # libbpf-dev. (No libcpupower — CPU idle-state control is rtla-specific.)
 
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
+# `man -k` and `apropos` find them instead of falling back to a filesystem
+# scan. Top-level, not inside a table -- TOML would otherwise scope it to
+# whichever table precedes it.
+side_effects = ["man-db"]
+
 [package]
 description = "rv - runtime verification monitor front-end (from Linux 7.0.9 tools/verification/rv)"
 
 [files]
 "tools:usr/bin/rv" = "usr/bin/rv"
-# man pages: off with the PEI-158 docs policy (rst2man absent).
+"tools:usr/share/man/man1/rv*.1" = "usr/share/man/man1"

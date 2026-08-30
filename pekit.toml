@@ -329,6 +329,8 @@ libtool = "*"
 "llvm-devel" = "*"
 llvm = "*"
 clang = "*"
+# rst2man for the bpftool/rtla/rv man pages (PEI-535 brought docutils to the pool).
+python3-docutils = "*"
 
 [build.tools.dependencies.apt]
 build-essential = "*"

@@ -7,6 +7,12 @@
 # backend; libcpupower is for CPU idle-state control during a run — both enabled
 # by the build image's libbpf-dev/libcpupower-dev.
 
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
+# `man -k` and `apropos` find them instead of falling back to a filesystem
+# scan. Top-level, not inside a table -- TOML would otherwise scope it to
+# whichever table precedes it.
+side_effects = ["man-db"]
+
 [package]
 description = "rtla - real-time latency analysis (osnoise, timerlat) (from Linux 7.0.9 tools/tracing/rtla)"
 
@@ -15,4 +21,4 @@ description = "rtla - real-time latency analysis (osnoise, timerlat) (from Linux
 "tools:usr/bin/osnoise"  = "usr/bin/osnoise"
 "tools:usr/bin/hwnoise"  = "usr/bin/hwnoise"
 "tools:usr/bin/timerlat" = "usr/bin/timerlat"
-# man pages: off with the PEI-158 docs policy (rst2man absent).
+"tools:usr/share/man/man1/rtla*.1" = "usr/share/man/man1"

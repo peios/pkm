@@ -95,11 +95,12 @@ make -C tools/lib/perf -j"$jobs" \
 	DESTDIR="$dest" install_lib install_headers install_pkgconfig
 
 # --- bpftool: BPF program / map / tracing introspection ---
-# doc-install (RST man pages via rst2man/python3-docutils) is off per the
-# PEI-158 docs policy; it returns with the python-app packaging design.
+# doc-install renders the RST man pages with rst2man (python3-docutils, in
+# the pool since PEI-535). mandir is passed explicitly: the Documentation
+# Makefile defaults it under /usr/local.
 log "bpftool"
 make -C tools/bpf/bpftool -j"$jobs" \
-	prefix=/usr mandir=/usr/share/man DESTDIR="$dest" install
+	prefix=/usr mandir=/usr/share/man DESTDIR="$dest" install doc-install
 
 # --- cpupower (+ libcpupower): CPU frequency / idle control ---
 # libcpupower.so* lands under the triplet; skip the optional cpufreq-bench.
@@ -122,9 +123,11 @@ make -C tools/power/x86/turbostat -j"$jobs" \
 	DESTDIR="$dest" prefix=/usr install
 
 # --- rtla: real-time latency analysis (osnoise, timerlat, ...) ---
-# Its `install` target hard-depends on doc_install (rst2man), and docs are
-# off per the PEI-158 policy — install the binary and the osnoise/hwnoise/
-# timerlat tool symlinks manually, mirroring Makefile.rtla's install rule.
+# Its `install` target strips the binary; install the binary and the
+# osnoise/hwnoise/timerlat tool symlinks manually, mirroring Makefile.rtla's
+# install rule, and take the man pages through doc_install (rst2man from
+# python3-docutils; Documentation/tools/rtla defaults MANDIR to
+# /usr/share/man).
 # FOPTS override: rtla/rv hardcode -flto=auto for gcc builds, and the
 # pool's gcc is built without LTO support (lto1 absent). Command-line
 # CFLAGS would clobber the pkg-config include flags the Makefile appends,
@@ -136,12 +139,14 @@ log "rtla"
 make -C tools/tracing/rtla -j"$jobs" FOPTS="$FOPTS_NO_LTO"
 install -D -m755 tools/tracing/rtla/rtla "$dest/usr/bin/rtla"
 for t in osnoise hwnoise timerlat; do ln -sfn rtla "$dest/usr/bin/$t"; done
+make -C tools/tracing/rtla DESTDIR="$dest" doc_install
 
 # --- rv: runtime verification (in-kernel monitors' userspace front-end) ---
-# Same doc_install coupling as rtla — manual install, docs off.
+# Same shape as rtla: manual unstripped install, man pages via doc_install.
 log "rv"
 make -C tools/verification/rv -j"$jobs" FOPTS="$FOPTS_NO_LTO"
 install -D -m755 tools/verification/rv/rv "$dest/usr/bin/rv"
+make -C tools/verification/rv DESTDIR="$dest" doc_install
 
 # =========================================================================
 # Phase 2 — power/x86 sibling tools

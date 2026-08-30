@@ -5,6 +5,12 @@
 # Runtime shared-lib deps (TODO — see D4):
 #   libelf libcrypto libz libcap libbfd libopcodes libc
 
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
+# `man -k` and `apropos` find them instead of falling back to a filesystem
+# scan. Top-level, not inside a table -- TOML would otherwise scope it to
+# whichever table precedes it.
+side_effects = ["man-db"]
+
 [package]
 description = "bpftool - eBPF program/map/BTF introspection (from Linux 7.0.9 tools/bpf/bpftool)"
 
@@ -13,5 +19,4 @@ description = "bpftool - eBPF program/map/BTF introspection (from Linux 7.0.9 to
 [files]
 "tools:usr/sbin/bpftool" = "usr/bin/bpftool"
 "tools:usr/share/bash-completion/completions/bpftool" = "usr/share/bash-completion/completions/bpftool"
-# man pages: off with the PEI-158 docs policy (rst2man absent); returns
-# with the python-app packaging design.
+"tools:usr/share/man/man8/bpftool*.8" = "usr/share/man/man8"
