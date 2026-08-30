@@ -18,26 +18,19 @@
 # simplification) the modules tree lands directly alongside this build kit.
 #
 # No modules ship yet (the kernel is monolithic for now), so the kit has no
-# consumer on a booted system today. The file set has now been exercised by a
-# real out-of-tree module build -- kmod's testsuite compiles a playground of
-# dummy modules against this kit -- and it is INCOMPLETE by one file:
-#
-#   tools/objtool/objtool
-#
-# CONFIG_OBJTOOL is on, so Kbuild runs objtool over every object an external
-# module builds; without it the build dies with "objtool: not found" on the
-# first .o. It is deliberately not added yet, because it cannot ship from a
-# CONTAINER-built kernel: that objtool links Debian binutils
-# (libopcodes-2.44-system.so), pekit derives that soname as a dependency, and
-# nothing in the pool provides it -- which makes the whole package
-# unresolvable. Add the line the first time build.kernel is staged on the
-# peipkg rung, where objtool links our own binutils. Until then kmod's
-# testsuite stays off for exactly this reason.
+# consumer on a booted system today. The file set is validated by a real
+# out-of-tree module build: kmod's testsuite compiles a playground of dummy
+# modules against this kit, which is what the note above asked for -- and what
+# added objtool below.
 
+# Object files and Kbuild's command stamps are build residue. C sources are
+# NOT: scripts/module-common.c is compiled into every external module, so
+# excluding it broke the thing this package exists for. The exclusion bought
+# little in any case -- scripts/ is the only mapped subtree with C sources at
+# all (78 files, 1.4M), and they pair with the prebuilt host tools beside them.
 excludes = [
   "kernel:**/*.o",
   "kernel:**/*.cmd",
-  "kernel:**/*.c",
 ]
 
 [package]
@@ -55,5 +48,17 @@ kernel = "{{version}}"
 "kernel:include/**"          = "usr/lib/modules/7.0.9-peios-{{version}}/build/include/"
 "kernel:arch/x86/Makefile"   = "usr/lib/modules/7.0.9-peios-{{version}}/build/arch/x86/Makefile"
 "kernel:arch/x86/include/**" = "usr/lib/modules/7.0.9-peios-{{version}}/build/arch/x86/include/"
+# objtool, the one host tool that lives outside scripts/. CONFIG_OBJTOOL is on,
+# so Kbuild runs it over every object an external module builds; without it the
+# build dies with "objtool: not found" on the first .o.
+#
+# It can only ship from a kernel staged on the peipkg rung. A container-built
+# objtool links Debian binutils (libopcodes-2.44-system.so), pekit derives that
+# soname as a dependency, and nothing in the pool provides it -- publishing one
+# made the package unresolvable, which is how that was established rather than
+# assumed. Built on the rung it needs libelf and libc only: objtool links
+# libopcodes just when -lopcodes links, and build.kernel declares no
+# binutils-devel.
+"kernel:tools/objtool/objtool" = "usr/lib/modules/7.0.9-peios-{{version}}/build/tools/objtool/objtool"
 # Build artifacts and C sources aren't needed to compile external modules; the
 # built host tools in scripts/ (no extension, e.g. modpost) are kept.
