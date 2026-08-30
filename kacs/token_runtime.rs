@@ -2658,12 +2658,32 @@ fn map_file_ace_mask(kind: AceKind<'_>) -> Result<u32, i32> {
     FILE_GENERIC_MAPPING.map_mask(mask).map_err(|_| -EINVAL)
 }
 
+fn ace_sid_names_creator(kind: AceKind<'_>) -> bool {
+    let sid = match kind {
+        AceKind::SingleSid { sid, .. }
+        | AceKind::Object { sid, .. }
+        | AceKind::Callback { sid, .. }
+        | AceKind::CallbackObject { sid, .. }
+        | AceKind::ResourceAttribute { sid, .. } => sid,
+        AceKind::Opaque => return false,
+    };
+
+    sid.as_bytes() == CREATOR_OWNER_SID_BYTES || sid.as_bytes() == CREATOR_GROUP_SID_BYTES
+}
+
+/// `substitute` is false for the copy that keeps propagating down a container
+/// chain: that one must stay CREATOR OWNER so the *next* creator is the one it
+/// resolves to, rather than freezing this object's creator into every
+/// descendant.
 fn resolved_creator_ace_sid<'a>(
     sid: Sid<'a>,
     owner_sid: Sid<'a>,
     group_sid: Option<Sid<'a>>,
+    substitute: bool,
 ) -> Result<&'a [u8], i32> {
-    if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
+    if !substitute {
+        Ok(sid.as_bytes())
+    } else if sid.as_bytes() == CREATOR_OWNER_SID_BYTES {
         Ok(owner_sid.as_bytes())
     } else if sid.as_bytes() == CREATOR_GROUP_SID_BYTES {
         group_sid.map(|sid| sid.as_bytes()).ok_or(-EINVAL)
@@ -2677,6 +2697,7 @@ fn build_rewritten_file_ace_bytes(
     new_flags: u8,
     owner_sid: Sid<'_>,
     group_sid: Option<Sid<'_>>,
+    substitute_creator: bool,
 ) -> Result<Vec<u8>, i32> {
     let mut bytes = Vec::new();
     let mask;
@@ -2692,7 +2713,7 @@ fn build_rewritten_file_ace_bytes(
 
     match ace.kind() {
         AceKind::SingleSid { sid, .. } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid, substitute_creator)?;
             let ace_len = ACE_HEADER_LEN
                 .checked_add(sid_bytes.len())
                 .ok_or(-ERANGE)?;
@@ -2717,7 +2738,7 @@ fn build_rewritten_file_ace_bytes(
             sid,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid, substitute_creator)?;
             let ace_len = 12usize
                 .checked_add(object_type.map_or(0, |_| 16))
                 .and_then(|value| value.checked_add(inherited_object_type.map_or(0, |_| 16)))
@@ -2755,7 +2776,7 @@ fn build_rewritten_file_ace_bytes(
             application_data,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid, substitute_creator)?;
             let ace_len = ACE_HEADER_LEN
                 .checked_add(sid_bytes.len())
                 .and_then(|value| value.checked_add(application_data.len()))
@@ -2785,7 +2806,7 @@ fn build_rewritten_file_ace_bytes(
             application_data,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid, substitute_creator)?;
             let ace_len = 12usize
                 .checked_add(object_type.map_or(0, |_| 16))
                 .and_then(|value| value.checked_add(inherited_object_type.map_or(0, |_| 16)))
@@ -2827,7 +2848,7 @@ fn build_rewritten_file_ace_bytes(
             application_data,
             ..
         } => {
-            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid)?;
+            let sid_bytes = resolved_creator_ace_sid(sid, owner_sid, group_sid, substitute_creator)?;
             let ace_len = ACE_HEADER_LEN
                 .checked_add(sid_bytes.len())
                 .and_then(|value| value.checked_add(application_data.len()))
@@ -2855,25 +2876,86 @@ fn build_rewritten_file_ace_bytes(
     Ok(bytes)
 }
 
+/// The ACEs one parent ACE contributes to one child: the effective ACE, and
+/// for a CREATOR OWNER / CREATOR GROUP ACE inherited by a container, a second
+/// that carries the rule onward.
+///
+/// A creator ACE is a rule rather than a grant — "whoever makes this gets
+/// that" — so it has to be resolved *and* preserved. Emitting only the
+/// resolved ACE would answer the immediate question and destroy the rule: a
+/// subdirectory would come away with a concrete SID holding whatever the ACE
+/// granted over everything beneath it, forever, and nothing further down would
+/// ever resolve against its own creator again. Emitting only the unresolved
+/// ACE would preserve the rule and grant nobody anything.
+///
+/// So a container gets both, which is what MS-DTYP §2.5.3.4.4 specifies: the
+/// resolved ACE, applying to the child and propagating no further, and an
+/// inherit-only copy still naming CREATOR OWNER. An object gets the resolved
+/// ACE alone, having no children for the rule to reach.
 fn build_inherited_ace_bytes(
     ace: crate::ace::Ace<'_>,
     owner_sid: Sid<'_>,
     group_sid: Option<Sid<'_>>,
     child_is_container: bool,
-) -> Result<Option<Vec<u8>>, i32> {
+) -> Result<(Option<Vec<u8>>, Option<Vec<u8>>), i32> {
     let parent_flags = ace.ace_flags();
 
     if !ace_inherits_to_child(parent_flags, child_is_container) {
-        return Ok(None);
+        return Ok((None, None));
     }
 
-    build_rewritten_file_ace_bytes(
-        ace,
-        inherited_ace_flags(parent_flags, child_is_container),
-        owner_sid,
-        group_sid,
-    )
-    .map(Some)
+    let inherited_flags = inherited_ace_flags(parent_flags, child_is_container);
+
+    if !ace_sid_names_creator(ace.kind()) {
+        return build_rewritten_file_ace_bytes(
+            ace,
+            inherited_flags,
+            owner_sid,
+            group_sid,
+            true,
+        )
+        .map(|bytes| (Some(bytes), None));
+    }
+
+    // The resolved ACE, only where the inherited flags say it applies to this
+    // child at all: an INHERIT_ONLY result means the ACE reached here on its
+    // way to something further down (an OI-without-CI ACE meeting a directory),
+    // and resolving it here would grant on an object the parent excluded.
+    let effective = if (inherited_flags & INHERIT_ONLY_ACE) == 0 {
+        let effective_flags = inherited_flags
+            & !(OBJECT_INHERIT_ACE
+                | CONTAINER_INHERIT_ACE
+                | INHERIT_ONLY_ACE
+                | NO_PROPAGATE_INHERIT_ACE);
+        Some(build_rewritten_file_ace_bytes(
+            ace,
+            effective_flags,
+            owner_sid,
+            group_sid,
+            true,
+        )?)
+    } else {
+        None
+    };
+
+    // The rule itself, carried on unresolved. Only a container has anywhere to
+    // carry it to, and only while the inherited flags still propagate --
+    // NO_PROPAGATE_INHERIT_ACE clears them, which ends the rule deliberately.
+    let propagating = if child_is_container
+        && (inherited_flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) != 0
+    {
+        Some(build_rewritten_file_ace_bytes(
+            ace,
+            inherited_flags | INHERIT_ONLY_ACE,
+            owner_sid,
+            group_sid,
+            false,
+        )?)
+    } else {
+        None
+    };
+
+    Ok((effective, propagating))
 }
 
 fn inherit_acl_from_parent(
@@ -2889,12 +2971,14 @@ fn inherit_acl_from_parent(
 
     for ace in parent_acl.entries() {
         let ace = ace.map_err(|_| -EINVAL)?;
-        let Some(ace_bytes) =
-            build_inherited_ace_bytes(ace, owner_sid, group_sid, child_is_container)?
-        else {
-            continue;
-        };
-        inherited_aces.push(ace_bytes).map_err(|_| -ENOMEM)?;
+        let (effective, propagating) =
+            build_inherited_ace_bytes(ace, owner_sid, group_sid, child_is_container)?;
+        if let Some(ace_bytes) = effective {
+            inherited_aces.push(ace_bytes).map_err(|_| -ENOMEM)?;
+        }
+        if let Some(ace_bytes) = propagating {
+            inherited_aces.push(ace_bytes).map_err(|_| -ENOMEM)?;
+        }
     }
 
     if inherited_aces.is_empty() {
@@ -3028,11 +3112,15 @@ fn build_explicit_acl_bytes(
 
     for ace in creator_acl.entries() {
         let ace = ace.map_err(|_| -EINVAL)?;
+        // Substituted: an explicit DACL supplied at create time names
+        // CREATOR OWNER meaning "me", and there is no inheritance here for a
+        // rule to be carried onward by.
         let ace_bytes = build_rewritten_file_ace_bytes(
             ace,
             ace.ace_flags() & !INHERITED_ACE,
             owner_sid,
             group_sid,
+            true,
         )?;
         explicit_aces.push(ace_bytes).map_err(|_| -ENOMEM)?;
     }

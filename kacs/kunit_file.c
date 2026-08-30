@@ -8913,6 +8913,102 @@ static void pkm_kunit_build_created_file_sd_protected_creator_sacl_blocks_parent
 }
 
 
+/*
+ * A directory inheriting a CREATOR OWNER ACE gets two ACEs: the rule's answer
+ * for itself, and the rule carried onward so the next thing created under it
+ * resolves against *its* creator.
+ *
+ * With only the first, a subdirectory would come away holding a concrete SID
+ * with the granted access over everything beneath it, permanently, and nothing
+ * further down would ever resolve against its own creator again.
+ */
+static void pkm_kunit_build_created_dir_sd_carries_the_creator_rule_onward(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd;
+	const u8 *child_sd = NULL;
+	const u8 *resolved_ace;
+	const u8 *rule_ace;
+	size_t parent_sd_len = 0;
+	size_t child_sd_len = 0;
+
+	subject_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	parent_sd = kacs_rust_kunit_create_file_sd(
+		subject_token, PKM_KUNIT_FILE_READ_DATA, 0,
+		PKM_KUNIT_FILE_WRITE_DATA, 0, &parent_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, parent_sd);
+	/* One CREATOR OWNER ACE, inheritable both ways and inherit-only. */
+	pkm_kunit_set_dacl_ace_header(
+		(u8 *)parent_sd, parent_sd_len, 0,
+		PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
+		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_CONTAINER_INHERIT_ACE |
+			PKM_KUNIT_INHERIT_ONLY_ACE,
+		PKM_KUNIT_FILE_READ_DATA);
+	pkm_kunit_set_dacl_ace_sid(
+		test, (u8 *)parent_sd, parent_sd_len, 0,
+		pkm_kunit_creator_owner_sid,
+		sizeof(pkm_kunit_creator_owner_sid));
+	/* The second ACE is an ordinary one; it must stay single. */
+	pkm_kunit_set_dacl_ace_header(
+		(u8 *)parent_sd, parent_sd_len, 1,
+		PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
+		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_CONTAINER_INHERIT_ACE,
+		PKM_KUNIT_FILE_WRITE_DATA);
+
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_build_created_file_sd(subject_token,
+							parent_sd,
+							parent_sd_len, NULL,
+							0, 1, &child_sd,
+							&child_sd_len),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, child_sd);
+
+	/* [0] the rule's answer: resolved, and propagating no further. */
+	pkm_kunit_expect_dacl_ace_header(
+		test, child_sd, child_sd_len, 0,
+		PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
+		PKM_KUNIT_INHERITED_ACE,
+		PKM_KUNIT_FILE_READ_DATA);
+	resolved_ace = pkm_kunit_dacl_ace_const(child_sd, child_sd_len, 0);
+	KUNIT_ASSERT_NOT_NULL(test, resolved_ace);
+	pkm_kunit_expect_bytes_eq(test, resolved_ace + 8,
+				  sizeof(pkm_kunit_local_service_sid),
+				  pkm_kunit_local_service_sid,
+				  sizeof(pkm_kunit_local_service_sid));
+
+	/* [1] the rule itself: still CREATOR OWNER, still inherit-only. */
+	pkm_kunit_expect_dacl_ace_header(
+		test, child_sd, child_sd_len, 1,
+		PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
+		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_CONTAINER_INHERIT_ACE |
+			PKM_KUNIT_INHERIT_ONLY_ACE | PKM_KUNIT_INHERITED_ACE,
+		PKM_KUNIT_FILE_READ_DATA);
+	rule_ace = pkm_kunit_dacl_ace_const(child_sd, child_sd_len, 1);
+	KUNIT_ASSERT_NOT_NULL(test, rule_ace);
+	pkm_kunit_expect_bytes_eq(test, rule_ace + 8,
+				  sizeof(pkm_kunit_creator_owner_sid),
+				  pkm_kunit_creator_owner_sid,
+				  sizeof(pkm_kunit_creator_owner_sid));
+
+	/* [2] the ordinary ACE, emitted once and unchanged in kind. */
+	pkm_kunit_expect_dacl_ace_header(
+		test, child_sd, child_sd_len, 2,
+		PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
+		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_CONTAINER_INHERIT_ACE |
+			PKM_KUNIT_INHERITED_ACE,
+		PKM_KUNIT_FILE_WRITE_DATA);
+	KUNIT_EXPECT_NULL(test,
+			  pkm_kunit_dacl_ace_const(child_sd, child_sd_len, 3));
+
+	pkm_kacs_free((void *)child_sd);
+	pkm_kacs_free((void *)parent_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
 static void pkm_kunit_build_created_file_sd_substitutes_creator_sids(
 	struct kunit *test)
 {
@@ -8967,15 +9063,23 @@ static void pkm_kunit_build_created_file_sd_substitutes_creator_sids(
 					  pkm_kunit_administrators_sid,
 					  sizeof(pkm_kunit_administrators_sid));
 
+	/*
+	 * The resolved ACE carries no inheritance flags. A creator ACE names a
+	 * rule, and the resolved copy is the rule's answer for this one object,
+	 * not the rule -- letting it keep OBJECT_INHERIT would propagate this
+	 * object's creator down as a concrete SID. The rule itself continues on
+	 * a separate inherit-only copy, which only a container receives (see
+	 * pkm_kunit_build_created_dir_sd_carries_the_creator_rule_onward).
+	 */
 	pkm_kunit_expect_dacl_ace_header(
 		test, child_sd, child_sd_len, 0,
 		PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
-		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_INHERITED_ACE,
+		PKM_KUNIT_INHERITED_ACE,
 		PKM_KUNIT_FILE_READ_DATA);
 	pkm_kunit_expect_dacl_ace_header(
 		test, child_sd, child_sd_len, 1,
 		PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
-		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_INHERITED_ACE,
+		PKM_KUNIT_INHERITED_ACE,
 		PKM_KUNIT_FILE_WRITE_DATA);
 	owner_ace = pkm_kunit_dacl_ace_const(child_sd, child_sd_len, 0);
 	group_ace = pkm_kunit_dacl_ace_const(child_sd, child_sd_len, 1);
@@ -10682,6 +10786,7 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_build_created_file_sd_creator_sacl_no_auto_blocks_parent),
 	KUNIT_CASE(pkm_kunit_build_created_file_sd_protected_creator_sacl_blocks_parent),
 	KUNIT_CASE(pkm_kunit_build_created_file_sd_substitutes_creator_sids),
+	KUNIT_CASE(pkm_kunit_build_created_dir_sd_carries_the_creator_rule_onward),
 	KUNIT_CASE(pkm_kunit_build_created_file_sd_creator_without_dacl_inherits_parent),
 	KUNIT_CASE(pkm_kunit_build_created_file_sd_creator_without_dacl_uses_default),
 	KUNIT_CASE(pkm_kunit_build_created_file_sd_without_default_dacl_gets_null_dacl),
