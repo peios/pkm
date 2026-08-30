@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/kacs_stratafs.h>
+#include <linux/mnt_idmap.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/slab.h>
@@ -380,21 +382,193 @@ int pkm_kacs_inode_listxattr(struct dentry *dentry)
 }
 
 /*
- * On overlayfs copy-up, decline to copy the canonical SD xattr. The upper
- * inode's SD is established by KACS inheritance when overlayfs creates it,
- * so replicating the lower's SD is both redundant and impossible: the
- * lower read and upper write would each hit the deny in inode_getxattr /
- * inode_setxattr (canonical SD xattrs are not userspace-writable; SD
- * mutation is the dedicated syscall's job), failing the whole copy-up.
+ * Capture the effective security descriptor of the object being copied up.
  *
- * -ECANCELED is the overlayfs "discard this xattr" signal; -EOPNOTSUPP
- * (the hook default) leaves every other xattr to the normal copy. This is
- * the same pattern SELinux and Smack use for their own label xattrs.
+ * `src` is the overlay dentry, so this reads through to whichever layer
+ * actually answers: the lower's stored xattr, or the descriptor KACS
+ * synthesized for it on an SD-less mount. Either is the descriptor the object
+ * had a moment ago, and therefore the one it must still have afterwards.
+ */
+static int pkm_kacs_copy_up_capture_sd(struct dentry *src, u8 **bytes_out,
+				       size_t *len_out)
+{
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_inode_security *inode_sec;
+	struct vfsmount mnt = {};
+	struct path path = {};
+	struct file anchor = {};
+	struct inode *inode;
+	u8 *copy;
+	long ret;
+
+	if (!src || !bytes_out || !len_out)
+		return -EINVAL;
+	*bytes_out = NULL;
+	*len_out = 0;
+
+	inode = d_inode(src);
+	if (!inode || !inode->i_security)
+		return -EACCES;
+	if (pkm_kacs_inode_on_unmanaged_mount(inode))
+		return -EOPNOTSUPP;
+
+	/*
+	 * Resolving an SD needs a dentry-shaped anchor: the xattr read
+	 * addresses a dentry, and missing-SD synthesis walks d_parent. The hook
+	 * gives us the dentry but not the mount, so the anchor carries a zeroed
+	 * vfsmount -- the same shape
+	 * pkm_kacs_inode_ensure_effective_cache_by_inode() builds for the
+	 * inode-only callers.
+	 */
+	mnt.mnt_root = src;
+	mnt.mnt_sb = inode->i_sb;
+	mnt.mnt_idmap = &nop_mnt_idmap;
+	path.mnt = &mnt;
+	path.dentry = src;
+	pkm_kacs_init_path_anchor_file(&anchor, &path);
+
+	inode_sec = pkm_kacs_inode(inode);
+	ret = pkm_kacs_inode_ensure_effective_cache(&anchor, inode_sec);
+	if (ret)
+		return (int)ret;
+
+	cache = pkm_kacs_inode_sd_cache_get_current(inode, inode_sec);
+	if (!cache)
+		return -EACCES;
+	if (cache->state != PKM_KACS_INODE_SD_VALID || !cache->bytes ||
+	    cache->len == 0 || cache->len > PKM_KACS_MAX_SD_BYTES) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return -EACCES;
+	}
+
+	copy = kmemdup(cache->bytes, cache->len, GFP_NOFS);
+	if (!copy) {
+		pkm_kacs_inode_sd_cache_free(cache);
+		return -ENOMEM;
+	}
+	*bytes_out = copy;
+	*len_out = cache->len;
+	pkm_kacs_inode_sd_cache_free(cache);
+	return 0;
+}
+
+/*
+ * Carry the copied-up object's own descriptor onto the upper inode, instead of
+ * letting it inherit one.
+ *
+ * Without this the upper copy takes whatever inheritance computes from the
+ * directory overlayfs creates it in -- which is the workdir, not even the
+ * destination parent. A file with a deliberately narrow descriptor would be
+ * widened by the act of writing to it, and a deliberately permissive one
+ * narrowed, in both cases changing what *other* principals may do as a side
+ * effect of somebody else's write.
+ *
+ * The descriptor rides on the cred because that is the lifetime the kernel
+ * already provides: overlayfs installs the cred we return with
+ * override_creds() around exactly one create and reverts it through a scope
+ * guard on every exit path (fs/overlayfs/copy_up.c). See the field comment on
+ * struct pkm_kacs_cred_security.
+ *
+ * This is the half of the SELinux pattern that was missing. Its
+ * inode_copy_up hook stashes the source label in the cred (create_sid) and its
+ * inode_copy_up_xattr then discards the label xattr *because* the cred already
+ * carries it. KACS had the discard without the carry.
+ *
+ * A source whose descriptor cannot be read fails the copy-up. Proceeding would
+ * mean silently stamping the workdir's descriptor on it, which is the failure
+ * this exists to prevent, and it would be invisible afterwards.
+ */
+int pkm_kacs_inode_copy_up(struct dentry *src, struct cred **new)
+{
+	struct pkm_kacs_cred_security *sec;
+	struct cred *new_creds;
+	u8 *sd_bytes = NULL;
+	size_t sd_len = 0;
+	int ret;
+
+	if (!src || !new)
+		return -EINVAL;
+
+	ret = pkm_kacs_copy_up_capture_sd(src, &sd_bytes, &sd_len);
+	/* An unmanaged mount has no descriptor to preserve. */
+	if (ret == -EOPNOTSUPP)
+		return 0;
+	if (ret)
+		return ret;
+
+	new_creds = *new;
+	if (!new_creds) {
+		new_creds = prepare_creds();
+		if (!new_creds) {
+			kfree(sd_bytes);
+			return -ENOMEM;
+		}
+	}
+
+	if (!new_creds->security) {
+		if (new_creds != *new)
+			put_cred(new_creds);
+		kfree(sd_bytes);
+		return -EACCES;
+	}
+
+	sec = pkm_kacs_cred(new_creds);
+	kfree(sec->copy_up_sd);
+	sec->copy_up_sd = sd_bytes;
+	sec->copy_up_sd_len = sd_len;
+	*new = new_creds;
+	return 0;
+}
+
+/*
+ * The descriptor pkm_kacs_inode_copy_up() left for the create it is wrapping,
+ * or false when this create is not an overlayfs copy-up.
+ *
+ * The bytes stay owned by the cred, which outlives the create and is freed by
+ * pkm_kacs_cred_free().
+ */
+bool pkm_kacs_copy_up_cred_sd(const u8 **bytes_out, size_t *len_out)
+{
+	const struct pkm_kacs_cred_security *sec;
+	const struct cred *cred;
+
+	if (!bytes_out || !len_out)
+		return false;
+
+	cred = current_cred();
+	if (!cred || !cred->security)
+		return false;
+
+	sec = pkm_kacs_cred(cred);
+	if (!sec->copy_up_sd || sec->copy_up_sd_len == 0)
+		return false;
+
+	*bytes_out = sec->copy_up_sd;
+	*len_out = sec->copy_up_sd_len;
+	return true;
+}
+
+/*
+ * On overlayfs copy-up, decline to copy the canonical SD xattr -- the
+ * descriptor is carried by pkm_kacs_inode_copy_up() above instead, on the cred
+ * overlayfs creates the upper inode under, so copying the xattr as well would
+ * only overwrite it with the same answer.
+ *
+ * It could not be copied here in any case: the lower read and upper write
+ * would each hit the deny in inode_getxattr / inode_setxattr, because
+ * canonical SD xattrs are not userspace-writable and SD mutation is the
+ * dedicated syscall's job. That is a statement about this path, not about the
+ * descriptor being unpreservable.
+ *
+ * -ECANCELED is the overlayfs "discard this xattr" signal; -EOPNOTSUPP (the
+ * hook default) leaves every other xattr to the normal copy. This is the same
+ * pattern SELinux and Smack use for their own label xattrs, and -- since the
+ * cred now carries the descriptor -- for the same reason they do.
  */
 int pkm_kacs_inode_copy_up_xattr(struct dentry *src, const char *name)
 {
 	if (src && pkm_kacs_is_canonical_sd_xattr(d_inode(src), name))
-		return -ECANCELED; /* discard: do not copy the SD up */
+		return -ECANCELED; /* discard: the cred carries it instead */
 
 	return -EOPNOTSUPP;
 }

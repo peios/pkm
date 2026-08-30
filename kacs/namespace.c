@@ -30,6 +30,7 @@
 
 #include "file_access.h"
 #include "copy_up.h"
+#include "file_metadata.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
 #include "mount_policy.h"
@@ -1118,6 +1119,16 @@ int pkm_kacs_inode_init_security(struct inode *inode, struct inode *dir,
 	if (copy_up_match < 0)
 		return copy_up_match;
 	if (copy_up_match > 0) {
+		copy_up_sd = true;
+	} else if (pkm_kacs_copy_up_cred_sd(&sd_bytes, &sd_len)) {
+		/*
+		 * An overlayfs copy-up: the object being copied brings its own
+		 * descriptor (pkm_kacs_inode_copy_up), and inheriting one from
+		 * the directory overlayfs happens to create the upper in -- the
+		 * workdir -- would silently rewrite what other principals may
+		 * do to it. The bytes belong to the cred, so allocated_sd stays
+		 * false and nothing here frees them.
+		 */
 		copy_up_sd = true;
 	} else if (!pkm_kacs_current_native_create_request_matches(
 		    dir, S_ISDIR(inode->i_mode), &sd_bytes, &sd_len)) {

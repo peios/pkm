@@ -6,6 +6,7 @@
 #include <linux/limits.h>
 #include <linux/sched.h>
 #include <linux/sched/user.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/uidgid.h>
 
@@ -128,6 +129,16 @@ int pkm_kacs_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp)
 	else
 		new_sec->process_state = NULL;
 
+	/*
+	 * Deliberately NOT inherited. The pending copy-up descriptor belongs to
+	 * one overlayfs copy-up, and a cred derived from that one would carry
+	 * it into an unrelated create -- stamping some other object with a
+	 * descriptor lifted from the file being copied up. SELinux guards the
+	 * same field the same way, zeroing create_sid on execve.
+	 */
+	new_sec->copy_up_sd = NULL;
+	new_sec->copy_up_sd_len = 0;
+
 	pkm_kacs_stamp_projected_ids(new_sec);
 	pkm_kacs_raise_allow_compat_caps(new);
 	trace_kacs_cred((u64)(uintptr_t)old_sec->token,
@@ -150,6 +161,10 @@ void pkm_kacs_cred_transfer(struct cred *new, const struct cred *old)
 	else
 		new_sec->process_state = NULL;
 
+	/* Not inherited, for the reason given in pkm_kacs_cred_prepare(). */
+	new_sec->copy_up_sd = NULL;
+	new_sec->copy_up_sd_len = 0;
+
 	pkm_kacs_stamp_projected_ids(new_sec);
 	pkm_kacs_raise_allow_compat_caps(new);
 	trace_kacs_cred((u64)(uintptr_t)old_sec->token,
@@ -165,6 +180,8 @@ int pkm_kacs_cred_alloc_blank(struct cred *cred, gfp_t gfp)
 	sec->process_state = NULL;
 	sec->projected_uid = PKM_KACS_UNMAPPED_ID;
 	sec->projected_gid = PKM_KACS_UNMAPPED_ID;
+	sec->copy_up_sd = NULL;
+	sec->copy_up_sd_len = 0;
 	trace_kacs_cred(0, 0, 0, KACS_CRED_ALLOC_BLANK, 0);
 	return 0;
 }
@@ -178,6 +195,14 @@ void pkm_kacs_cred_free(struct cred *cred)
 		kacs_rust_token_drop(sec->token);
 	if (sec->process_state)
 		pkm_kacs_process_state_put(sec->process_state);
+	/*
+	 * Reached for a copy-up cred through the put_cred() in overlayfs's
+	 * scope guard, so the descriptor is released exactly when the copy-up
+	 * ends -- including when it ends in an error.
+	 */
+	kfree(sec->copy_up_sd);
+	sec->copy_up_sd = NULL;
+	sec->copy_up_sd_len = 0;
 }
 
 static bool pkm_kacs_cred_is_current_shared(const struct cred *cred)

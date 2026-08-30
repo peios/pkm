@@ -52,6 +52,27 @@ struct pkm_kacs_cred_security {
 	struct pkm_kacs_process_state *process_state;
 	u32 projected_uid;
 	u32 projected_gid;
+	/*
+	 * The security descriptor an overlayfs copy-up must stamp on the upper
+	 * inode it is about to create, in place of the one inheritance would
+	 * compute for it.
+	 *
+	 * It lives on a cred because that is the lifetime the kernel already
+	 * gives us. security_inode_copy_up() hands an LSM a cred to fill in;
+	 * overlayfs installs it with override_creds() and reverts it on every
+	 * exit path through a scope guard (fs/overlayfs/copy_up.c,
+	 * DEFINE_CLASS(copy_up_creds)), and the put_cred that follows lands in
+	 * pkm_kacs_cred_free() below. So there is nothing to disarm and nothing
+	 * that can leak: outside that scope the cred is simply not current.
+	 *
+	 * Both overlayfs scopes wrap exactly one create call, and the hook runs
+	 * once per copied-up object, so an intermediate directory carries its
+	 * own descriptor rather than the file's.
+	 *
+	 * NOT inherited by a derived cred -- see pkm_kacs_cred_prepare().
+	 */
+	u8 *copy_up_sd;
+	size_t copy_up_sd_len;
 };
 
 enum pkm_kacs_inode_sd_state {

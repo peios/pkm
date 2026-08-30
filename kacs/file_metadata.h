@@ -4,6 +4,7 @@
 
 #include <linux/types.h>
 
+struct cred;
 struct file;
 struct dentry;
 struct file_kattr;
@@ -30,7 +31,9 @@ int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			       const char *name);
 int pkm_kacs_inode_listxattr(struct dentry *dentry);
+int pkm_kacs_inode_copy_up(struct dentry *src, struct cred **new);
 int pkm_kacs_inode_copy_up_xattr(struct dentry *src, const char *name);
+bool pkm_kacs_copy_up_cred_sd(const u8 **bytes_out, size_t *len_out);
 int pkm_kacs_inode_follow_link(struct dentry *dentry, struct inode *inode,
 			       bool rcu);
 int pkm_kacs_inode_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
