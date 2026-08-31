@@ -222,6 +222,64 @@ int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name)
 		dentry, KACS_FILE_READ_EA);
 }
 
+/*
+ * A canonical SD xattr just landed on this inode, so whatever its SD cache
+ * holds predates it. Drop the cache; the next resolution re-reads the
+ * authoritative bytes.
+ *
+ * This exists because a descriptor set through a stacking filesystem reaches
+ * two inodes and only one of them knew. kacs_set_sd updates the cache on the
+ * inode it was given -- the overlay one -- and then writes the xattr, which
+ * overlayfs re-enters on the real inode below (see the comment in
+ * pkm_kacs_inode_write_sd_xattr_dentry_locked). Nothing updated the real
+ * inode's cache, and it is not cold: overlayfs's own post-create work on a
+ * freshly created upper inode -- the ACL sets, the mode change -- resolves and
+ * caches the descriptor microseconds after creation. So the backing inode sat
+ * on the descriptor the object was born with, permanently.
+ *
+ * PEI-564 is what that cost. The create path no longer consults a backing
+ * inode (pkm_kacs_dentry_create_files_as), so this is no longer what decides
+ * inheritance -- but the stale entry is still read by the checks overlayfs's
+ * own vfs_create fires on the upper inode, and leaving a cache that can never
+ * agree with the xattr beneath it is a trap for the next reader.
+ *
+ * Keyed on the xattr rather than on any knowledge of stacking, so it holds for
+ * any path that writes a descriptor to any inode.
+ *
+ * Lock order: this runs under i_rwsem, and both SD-xattr writers drop
+ * sec->lock before writing precisely to keep i_rwsem -> sec->lock. So taking
+ * sec->lock here cannot invert or recurse.
+ *
+ * The synthesized-descriptor write-back (pkm_kacs_inode_run_sd_persist) also
+ * lands here and loses its SYNTHETIC_PENDING entry one cache miss earlier than
+ * it otherwise would. That is the transition it was already waiting for -- the
+ * bytes on disk are the bytes it cached -- so it re-reads them as an ordinary
+ * stored descriptor, which is what it says it wants.
+ */
+void pkm_kacs_inode_post_setxattr(struct dentry *dentry, const char *name,
+				  const void *value, size_t size, int flags)
+{
+	struct pkm_kacs_inode_security *sec;
+	struct inode *inode;
+
+	(void)value;
+	(void)size;
+	(void)flags;
+
+	if (!dentry || !name)
+		return;
+	inode = d_inode(dentry);
+	if (!inode || !inode->i_security)
+		return;
+	if (!pkm_kacs_is_canonical_sd_xattr(inode, name))
+		return;
+
+	sec = pkm_kacs_inode(inode);
+	mutex_lock(&sec->lock);
+	pkm_kacs_inode_replace_sd_cache_locked(sec, NULL);
+	mutex_unlock(&sec->lock);
+}
+
 int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			    const char *name, const void *value, size_t size,
 			    int flags)

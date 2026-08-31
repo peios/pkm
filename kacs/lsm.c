@@ -88,6 +88,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(inode_xattr_skipcap, pkm_kacs_inode_xattr_skipcap),
 	LSM_HOOK_INIT(inode_getxattr, pkm_kacs_inode_getxattr),
 	LSM_HOOK_INIT(inode_setxattr, pkm_kacs_inode_setxattr),
+	LSM_HOOK_INIT(inode_post_setxattr, pkm_kacs_inode_post_setxattr),
 	LSM_HOOK_INIT(inode_removexattr, pkm_kacs_inode_removexattr),
 	LSM_HOOK_INIT(inode_listxattr, pkm_kacs_inode_listxattr),
 	LSM_HOOK_INIT(inode_copy_up, pkm_kacs_inode_copy_up),

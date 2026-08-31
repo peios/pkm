@@ -3198,6 +3198,42 @@ static void pkm_kunit_overlay_create_without_a_token_defers(struct kunit *test)
 	pkm_kacs_free((void *)parent_sd);
 }
 
+/*
+ * A descriptor written through a stacking filesystem reaches two inodes.
+ * kacs_set_sd refreshes the cache on the one it was handed; the write then
+ * re-enters on the real inode below, whose cache nothing else touches. The
+ * post-setxattr hook is what keeps that second inode from serving a
+ * descriptor its own xattr has already contradicted (PEI-564).
+ */
+static void pkm_kunit_post_setxattr_drops_a_superseded_cache(struct kunit *test)
+{
+	bool survived = true;
+	int ret;
+
+	ret = pkm_kacs_kunit_post_setxattr_drops_cache(
+		pkm_kunit_system_read_sd, sizeof(pkm_kunit_system_read_sd),
+		"security.peios.sd", &survived);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		return;
+	KUNIT_EXPECT_FALSE(test, survived);
+}
+
+/* ...and leaves every other xattr's cache alone. */
+static void pkm_kunit_post_setxattr_keeps_an_unrelated_cache(struct kunit *test)
+{
+	bool survived = false;
+	int ret;
+
+	ret = pkm_kacs_kunit_post_setxattr_drops_cache(
+		pkm_kunit_system_read_sd, sizeof(pkm_kunit_system_read_sd),
+		"user.something.else", &survived);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		return;
+	KUNIT_EXPECT_TRUE(test, survived);
+}
+
 static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_copy_up_scope_is_exact),
 	KUNIT_CASE(pkm_kunit_copy_up_exact_sd_is_installed_and_cached),
@@ -3211,6 +3247,8 @@ static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_not_inherited),
 	KUNIT_CASE(pkm_kunit_overlay_create_takes_caller_and_overlay_parent),
 	KUNIT_CASE(pkm_kunit_overlay_create_without_a_token_defers),
+	KUNIT_CASE(pkm_kunit_post_setxattr_drops_a_superseded_cache),
+	KUNIT_CASE(pkm_kunit_post_setxattr_keeps_an_unrelated_cache),
 	{}
 };
 

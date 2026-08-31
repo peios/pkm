@@ -28,6 +28,8 @@ int pkm_kacs_inode_getxattr(struct dentry *dentry, const char *name);
 int pkm_kacs_inode_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			    const char *name, const void *value, size_t size,
 			    int flags);
+void pkm_kacs_inode_post_setxattr(struct dentry *dentry, const char *name,
+				  const void *value, size_t size, int flags);
 int pkm_kacs_inode_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			       const char *name);
 int pkm_kacs_inode_listxattr(struct dentry *dentry);

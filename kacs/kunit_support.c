@@ -4695,6 +4695,52 @@ static int pkm_kacs_kunit_namespace_maybe_build_created_sd(
 }
 
 /*
+ * Prime an inode's SD cache, fire the post-setxattr hook with @name, and
+ * report whether the cache survived.
+ *
+ * The point is the pairing: the canonical name must drop it, anything else
+ * must not. A hook that cleared unconditionally would look correct against the
+ * first half alone and would throw away every cache in the system on every
+ * xattr write.
+ */
+int pkm_kacs_kunit_post_setxattr_drops_cache(const u8 *sd_ptr, size_t sd_len,
+					     const char *name,
+					     bool *survived_out)
+{
+	struct pkm_kacs_kunit_file_mount_state state = {};
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_inode_security *sec;
+	int ret;
+
+	if (!sd_ptr || sd_len == 0 || !name || !survived_out)
+		return -EINVAL;
+
+	ret = pkm_kacs_kunit_init_namespace_state(
+		&state, sd_ptr, sd_len, PKM_KACS_KUNIT_FILE_SD_VALID,
+		TMPFS_MAGIC, KACS_MOUNT_POLICY_DENY_MISSING, S_IFREG);
+	if (ret)
+		return ret;
+
+	sec = pkm_kacs_inode(&state.inode);
+	cache = pkm_kacs_inode_sd_cache_get_current(&state.inode, sec);
+	if (!cache) {
+		pkm_kacs_kunit_cleanup_file_mount_state(&state);
+		return -EACCES;
+	}
+	pkm_kacs_inode_sd_cache_free(cache);
+
+	pkm_kacs_inode_post_setxattr(&state.dentry, name, sd_ptr, sd_len, 0);
+
+	cache = pkm_kacs_inode_sd_cache_get_current(&state.inode, sec);
+	*survived_out = cache != NULL;
+	if (cache)
+		pkm_kacs_inode_sd_cache_free(cache);
+
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return 0;
+}
+
+/*
  * What inheritance yields for @subject_token from a parent carrying
  * @parent_sd_ptr -- the answer the overlay hook above has to match, since it
  * exists to reproduce it from the right inode and the right subject.

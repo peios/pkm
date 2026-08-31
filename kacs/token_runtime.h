@@ -1369,6 +1369,9 @@ int pkm_kacs_kunit_check_inode_permission_live_mode(
 	const void *subject_token, u32 mode, int mask);
 int pkm_kacs_kunit_check_open_by_handle_for_subject(
 	const void *subject_token);
+int pkm_kacs_kunit_post_setxattr_drops_cache(const u8 *sd_ptr, size_t sd_len,
+					     const char *name,
+					     bool *survived_out);
 long pkm_kacs_kunit_build_created_sd_for_parent(
 	const void *subject_token, const u8 *parent_sd_ptr,
 	size_t parent_sd_len, bool directory, const u8 **created_sd_out,

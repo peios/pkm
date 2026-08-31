@@ -19,13 +19,18 @@
 format = "peipkg"
 
 [package]
+# -15: KACS invalidates an inode's cached security descriptor when a canonical
+# descriptor xattr lands on it. A descriptor set through a stacking filesystem
+# reaches a second inode the set-security path never sees, and that inode could
+# keep serving the descriptor the object was created with (PEI-564).
+#
 # -14: KACS resolves an overlay create in the overlay's own terms (PEI-564).
 # A file or directory created on the live root now inherits from the directory
 # the caller named, as the caller -- not from a backing upper or work directory
 # as the mounter -- so CREATOR OWNER resolves to the principal that made the
 # object and a runtime `sd set` governs the children that follow it. An explicit
 # creator descriptor from a native create is honoured on an overlay too.
-version      = "{{version}}-14"
+version      = "{{version}}-15"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"
