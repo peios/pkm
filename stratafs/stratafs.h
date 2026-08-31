@@ -241,4 +241,28 @@ int stratafs_rust_route_existing(size_t provider, bool provider_accepts,
 				 int create_index, bool create_present,
 				 bool copyable, bool mount_read_only);
 
+/*
+ * Test rendezvous and fail points (§4.A.2). Each names one moment on a
+ * mutation path that conformance tests must be able to hold open or make
+ * fail, and that no arrangement of real filesystems can reach. Inert —
+ * a compiled-out constant 0 — unless CONFIG_STRATAFS_FS_TEST_HOOKS is
+ * built and the kernel booted with stratafs.test_hooks=1.
+ */
+enum stratafs_test_hook_point {
+	STRATAFS_HOOK_COPY_UP_BEGIN,
+	STRATAFS_HOOK_COPY_UP_PUBLISH,
+	STRATAFS_HOOK_RENAME_PROVIDER,
+	STRATAFS_HOOK_LINK_INSTALL,
+	STRATAFS_HOOK_POINTS
+};
+
+#ifdef CONFIG_STRATAFS_FS_TEST_HOOKS
+int stratafs_test_hook(enum stratafs_test_hook_point point);
+#else
+static inline int stratafs_test_hook(enum stratafs_test_hook_point point)
+{
+	return 0;
+}
+#endif
+
 #endif /* _STRATAFS_INTERNAL_H */

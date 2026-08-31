@@ -5,6 +5,7 @@
 #include <linux/err.h>
 #include <linux/file.h>
 #include <linux/kacs_stratafs.h>
+#include <trace/events/stratafs.h>
 #include <linux/list.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
@@ -1281,7 +1282,10 @@ create_link:
 	created.mnt = destination_parent.mnt;
 	created.dentry = target;
 	path_get(&created);
-	ret = stratafs_install_created(new_dentry, &created, provider_index);
+	ret = stratafs_test_hook(STRATAFS_HOOK_LINK_INSTALL);
+	if (!ret)
+		ret = stratafs_install_created(new_dentry, &created,
+					       provider_index);
 	path_put(&created);
 	if (ret) {
 		int cleanup_ret = stratafs_rollback_created(
@@ -1570,6 +1574,15 @@ static int stratafs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		ret = -EROFS;
 		goto out_source;
 	}
+	/*
+	 * Rendezvous for the §4.5.5 identity backstop: `source` above is the
+	 * walk-time provider, and nothing re-reads it before the locked
+	 * re-lookup below, so a hold here is the window in which a test can
+	 * change the provider out from under this rename.
+	 */
+	ret = stratafs_test_hook(STRATAFS_HOOK_RENAME_PROVIDER);
+	if (ret)
+		goto out_source;
 	destination_present = d_really_is_positive(new_dentry);
 	if (destination_present) {
 		ret = stratafs_get_provider(new_dentry, &destination,
@@ -1674,6 +1687,11 @@ static int stratafs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	if (ret)
 		goto out_new_parent;
 	if (d_inode(rd.old_dentry) != d_inode(source.dentry)) {
+		trace_stratafs_rename_stale(
+			STRATAFS_SB(old_dir->i_sb)->mount_cookie,
+			d_inode(source.dentry)->i_ino,
+			d_inode(rd.old_dentry) ?
+				d_inode(rd.old_dentry)->i_ino : 0);
 		ret = -ESTALE;
 		goto out_rename;
 	}

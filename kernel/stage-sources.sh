@@ -61,7 +61,7 @@ install -m 0644 "$here/include/linux/kacs_stratafs.h" \
 #     yet are staged; add to this list as the kmes:/lcs: systems land. ---
 trace_events_dir="$tree/include/trace/events"
 mkdir -p "$trace_events_dir"
-for t in kacs kmes lcs; do
+for t in kacs kmes lcs stratafs; do
 	install -m 0644 "$here/trace/$t.h" "$trace_events_dir/$t.h"
 done
 

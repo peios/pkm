@@ -5,6 +5,7 @@
 #include <linux/kacs_stratafs.h>
 #include <linux/namei.h>
 #include <pkm/file.h>
+#include <trace/events/stratafs.h>
 
 #include "../internal.h"
 #include "stratafs.h"
@@ -330,11 +331,17 @@ fail_parent_relative:
 static int stratafs_d_revalidate(struct inode *dir, const struct qstr *name,
 				 struct dentry *dentry, unsigned int flags)
 {
+	struct inode *inode;
+	int ret;
+
 	if (dentry == dentry->d_sb->s_root)
 		return 1;
-	if (flags & LOOKUP_RCU)
-		return -ECHILD;
-	return 0;
+	ret = (flags & LOOKUP_RCU) ? -ECHILD : 0;
+	inode = d_inode_rcu(dentry);
+	trace_stratafs_d_revalidate(STRATAFS_SB(dentry->d_sb)->mount_cookie,
+				    inode ? (u64)inode->i_ino : 0,
+				    flags & LOOKUP_RCU, ret);
+	return ret;
 }
 
 static void stratafs_d_release(struct dentry *dentry)
@@ -460,8 +467,11 @@ int stratafs_check_directory_access(struct mnt_idmap *idmap,
 
 	if (!S_ISDIR(inode->i_mode))
 		return 0;
-	if (mask & MAY_NOT_BLOCK)
+	if (mask & MAY_NOT_BLOCK) {
+		trace_stratafs_rcu_walk_refused(
+			STRATAFS_SB(inode->i_sb)->mount_cookie, inode->i_ino);
 		return -ECHILD;
+	}
 	if (mask & MAY_EXEC)
 		access |= KACS_FILE_TRAVERSE;
 	if (mask & MAY_READ)

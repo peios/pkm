@@ -143,6 +143,10 @@ CONFIG_SQUASHFS=y
 CONFIG_SQUASHFS_ZSTD=y
 CONFIG_OVERLAY_FS=y
 CONFIG_STRATAFS_FS=y
+# Test rendezvous/fail points: compiled in, but inert (nothing registers,
+# hooks read one never-true bool) unless booted with stratafs.test_hooks=1.
+# Only the provium profiles pass that.
+CONFIG_STRATAFS_FS_TEST_HOOKS=y
 # console / display
 CONFIG_VT=y
 CONFIG_VT_CONSOLE=y

@@ -11,6 +11,23 @@ config STRATAFS_FS
 
 	  If unsure, say N.
 
+config STRATAFS_FS_TEST_HOOKS
+	bool "StrataFS test rendezvous and fail points"
+	depends on STRATAFS_FS && SECURITYFS
+	help
+	  Compile in the securityfs hooks conformance tests use to hold a
+	  copy-up open mid-flight or fail an internal step of one syscall
+	  — windows no arrangement of real filesystems can produce.
+	  (securityfs, not debugfs: kernel lockdown in integrity mode
+	  refuses debugfs opens, and this kernel forces that mode.)
+
+	  The hooks are doubly gated: even when built, nothing registers
+	  and every hook site reduces to reading one never-true bool
+	  unless the kernel is booted with stratafs.test_hooks=1. Only a
+	  caller that can reach a mounted securityfs can then arm them.
+
+	  If unsure, say N.
+
 config STRATAFS_KUNIT_TEST
 	bool "StrataFS KUnit tests"
 	depends on STRATAFS_FS && KUNIT

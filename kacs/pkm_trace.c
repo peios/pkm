@@ -7,7 +7,9 @@
  * probes for every PKM trace system (kacs:, kmes:, lcs:) are emitted here
  * exactly once. Every other PKM object includes the same
  * per-system trace headers WITHOUT CREATE_TRACE_POINTS and get only the
- * inline trace_*() call-site stubs.
+ * inline trace_*() call-site stubs. The stratafs: system is defined here
+ * too — fs/stratafs is a separate object tree, but STRATAFS_FS depends
+ * on SECURITY_PKM, so this TU always exists when its call sites do.
  *
  * Include order matters: the headers referenced by the events' TP_fast_assign
  * (e.g. pkm_kacs_superblock_mount_policy) must be visible before the trace
@@ -21,3 +23,6 @@
 #include <trace/events/kacs.h>
 #include <trace/events/kmes.h>
 #include <trace/events/lcs.h>
+#if IS_ENABLED(CONFIG_STRATAFS_FS)
+#include <trace/events/stratafs.h>
+#endif

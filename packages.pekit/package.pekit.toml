@@ -19,6 +19,11 @@
 format = "peipkg"
 
 [package]
+# -16: stratafs gains its conformance-test apparatus: the stratafs: tracepoint
+# system (d_revalidate verdicts) and the test rendezvous/fail points of TRM
+# §4.A.2 (CONFIG_STRATAFS_FS_TEST_HOOKS) — compiled in, registered only when
+# booted with stratafs.test_hooks=1, which only the provium profiles pass.
+#
 # -15: KACS invalidates an inode's cached security descriptor when a canonical
 # descriptor xattr lands on it. A descriptor set through a stacking filesystem
 # reaches a second inode the set-security path never sees, and that inode could
@@ -30,7 +35,7 @@ format = "peipkg"
 # as the mounter -- so CREATOR OWNER resolves to the principal that made the
 # object and a runtime `sd set` governs the children that follow it. An explicit
 # creator descriptor from a native create is honoured on an overlay too.
-version      = "{{version}}-15"
+version      = "{{version}}-16"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"

@@ -1377,6 +1377,9 @@ static int stratafs_copy_up_named(struct dentry *dentry, const char *relative,
 	} else if (ret != -ENOENT) {
 		goto out_source;
 	}
+	ret = stratafs_test_hook(STRATAFS_HOOK_COPY_UP_BEGIN);
+	if (ret)
+		goto out_source;
 	context = pkm_kacs_stratafs_copy_up_begin(&source);
 	if (IS_ERR(context)) {
 		ret = PTR_ERR(context);
@@ -1420,6 +1423,9 @@ static int stratafs_copy_up_named(struct dentry *dentry, const char *relative,
 		if (ret)
 			goto out_stage;
 	}
+	ret = stratafs_test_hook(STRATAFS_HOOK_COPY_UP_PUBLISH);
+	if (ret)
+		goto out_stage;
 	ret = stratafs_publish_named(dentry, context, &source, &stage, &parent,
 				     relative, name, published);
 	if (!ret) {
@@ -1581,6 +1587,9 @@ static int stratafs_copy_up_regular(
 			goto out_source;
 		}
 	}
+	ret = stratafs_test_hook(STRATAFS_HOOK_COPY_UP_BEGIN);
+	if (ret)
+		goto out_source;
 	context = pkm_kacs_stratafs_copy_up_begin(&source);
 	if (IS_ERR(context)) {
 		ret = PTR_ERR(context);
@@ -1644,6 +1653,9 @@ static int stratafs_copy_up_regular(
 		if (ret)
 			goto out_stage;
 	}
+	ret = stratafs_test_hook(STRATAFS_HOOK_COPY_UP_PUBLISH);
+	if (ret)
+		goto out_stage;
 	ret = stratafs_publish_anonymous(dentry, context, &source, &stage,
 					  &parent, relative, name, published);
 	if (!ret && context_out) {
