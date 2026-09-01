@@ -44,6 +44,18 @@ require_enabled() {
 	fi
 }
 
+# Asserts a symbol is not built at all: either explicitly "# not set" or
+# absent (invisible because its dependencies are off). Use for symbols a
+# profile may not even expose — require_unset demands the literal marker
+# and would fail on those.
+require_disabled() {
+	local key=$1
+
+	if grep -Eq "^${key}=" "$config"; then
+		die "required disabled config ${key} is enabled"
+	fi
+}
+
 require_config_file
 
 require_set CONFIG_SECURITY_PKM y
@@ -92,3 +104,18 @@ fi
 # is indistinguishable from absent at runtime.
 require_set CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY y
 require_set CONFIG_SECURITY_LOCKDOWN_LSM_EARLY y
+
+# --- PNP: Peios Network Policy (PEI-598) ---
+# The engine must be in, its machinery built-in (built-in PNP calls these
+# symbols on the packet path), and the replaced policy frontends must stay
+# out — a stray nf_tables would be a second, unratified policy surface.
+require_set CONFIG_PEIOS_PNP y
+require_set CONFIG_NETFILTER y
+require_set CONFIG_NETFILTER_INGRESS y
+require_set CONFIG_NETFILTER_EGRESS y
+require_set CONFIG_NF_CONNTRACK y
+require_disabled CONFIG_NF_TABLES
+require_disabled CONFIG_NETFILTER_XTABLES
+require_disabled CONFIG_NETFILTER_NETLINK_QUEUE
+require_disabled CONFIG_NETFILTER_NETLINK_LOG
+require_disabled CONFIG_BRIDGE_NETFILTER

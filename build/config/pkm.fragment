@@ -181,3 +181,59 @@ CONFIG_USB_UAS=y
 # `default m` symbol that mod2yesconfig won't convert (leaving a stray module).
 # Disabling the parent removes the whole subtree.
 # CONFIG_WATCHDOG_PRETIMEOUT_GOV is not set
+
+# --- PNP: Peios Network Policy packet engine (PEI-598) ---
+# The engine itself. Built-in (bool); its Rust semantics ride the
+# security/pkm Rust island.
+CONFIG_PEIOS_PNP=y
+# Machinery PNP stands on, forced =y: PNP is built-in and calls these
+# symbols on the packet path, so modules won't do — and the kunit profile's
+# localmodconfig would otherwise prune them (this fragment merges after the
+# narrowing precisely so these survive).
+CONFIG_NETFILTER=y
+CONFIG_NETFILTER_ADVANCED=y
+CONFIG_NETFILTER_INGRESS=y
+CONFIG_NETFILTER_EGRESS=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_CONNTRACK_EVENTS=y
+CONFIG_NF_CONNTRACK_ZONES=y
+CONFIG_NF_CONNTRACK_TIMEOUT=y
+CONFIG_NF_CONNTRACK_TIMESTAMP=y
+CONFIG_NETFILTER_NETLINK=y
+CONFIG_NF_CT_NETLINK=y
+CONFIG_NF_DEFRAG_IPV4=y
+CONFIG_NF_DEFRAG_IPV6=y
+# REJECT response emitters (protocol-phrased refusals: RST / ICMP
+# unreachable). Normally selected by the nft/xtables reject targets, which
+# are gone below; PNP is their consumer now.
+CONFIG_NF_REJECT_IPV4=y
+CONFIG_NF_REJECT_IPV6=y
+# NAT engine: kept DORMANT by ratified decision — compiled, no configurator
+# until PNP steers it at router time.
+CONFIG_NF_NAT=y
+
+# --- the clean slate: every netfilter policy frontend, configured out ---
+# Ratified (PEI-598/PEI-28): nf_tables and the whole xtables family are
+# replaced by PNP. Machinery (hooks, conntrack, defrag, reject emitters,
+# dormant NAT) stays above; every policy surface goes. Config-off, not
+# source excision: unbuilt code ships nothing, and this is reversible
+# while PNP grows into the space.
+# CONFIG_NF_TABLES is not set
+# CONFIG_NETFILTER_XTABLES is not set
+# CONFIG_NETFILTER_XTABLES_COMPAT is not set
+# CONFIG_NETFILTER_XTABLES_LEGACY is not set
+# CONFIG_IP_NF_IPTABLES is not set
+# CONFIG_IP_NF_IPTABLES_LEGACY is not set
+# CONFIG_IP6_NF_IPTABLES is not set
+# CONFIG_IP6_NF_IPTABLES_LEGACY is not set
+# CONFIG_BRIDGE_NF_EBTABLES is not set
+# CONFIG_BRIDGE_NF_EBTABLES_LEGACY is not set
+# CONFIG_NF_TABLES_ARP is not set
+# CONFIG_IP_SET is not set
+# CONFIG_NETFILTER_NETLINK_QUEUE is not set
+# CONFIG_NETFILTER_NETLINK_LOG is not set
+# CONFIG_NETFILTER_NETLINK_HOOK is not set
+# CONFIG_NETFILTER_BPF_LINK is not set
+# CONFIG_NF_FLOW_TABLE is not set
+# CONFIG_BRIDGE_NETFILTER is not set
+# CONFIG_IP_VS is not set
