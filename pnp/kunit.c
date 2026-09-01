@@ -7,9 +7,12 @@
  */
 
 #include <kunit/test.h>
+#include <linux/errno.h>
 #include <linux/etherdevice.h>
 #include <linux/if_arp.h>
 #include <linux/ip.h>
+#include <linux/netfilter.h>
+#include <linux/string.h>
 #include <linux/ipv6.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
@@ -64,10 +67,9 @@ static void pnp_kunit_dispatch_predicate(struct kunit *test)
 					 htons(ETH_P_IP), enslaved));
 }
 
-static void pnp_kunit_snapshot_tcp4(struct kunit *test)
+/* An inbound TCP/v4 SYN to the given port; 10.0.0.7 -> 10.0.0.5. */
+static struct sk_buff *pnp_test_tcp4_skb(struct kunit *test, u16 dport)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
-	struct peios_pnp_snapshot snap;
 	struct sk_buff *skb;
 	struct iphdr *iph;
 	struct tcphdr *th;
@@ -88,10 +90,18 @@ static void pnp_kunit_snapshot_tcp4(struct kunit *test)
 
 	th = skb_put_zero(skb, sizeof(*th));
 	th->source = htons(43210);
-	th->dest = htons(22);
+	th->dest = htons(dport);
 	th->syn = 1;
 
 	skb->protocol = htons(ETH_P_IP);
+	return skb;
+}
+
+static void pnp_kunit_snapshot_tcp4(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct peios_pnp_snapshot snap;
+	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
 
 	KUNIT_EXPECT_EQ(test,
 			peios_pnp_snapshot_from_skb(skb, dev,
@@ -202,12 +212,108 @@ static void pnp_kunit_snapshot_udp6(struct kunit *test)
 	kfree_skb(skb);
 }
 
+/* Feed one action list to the builder. */
+static void pnp_test_actions(struct kunit *test, void *b, const char *action)
+{
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_list_begin(b, "Actions", 7), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_list_str(b, action, strlen(action)),
+			0);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_value_list_end(b), 0);
+}
+
+/*
+ * End to end: policy built over the FFI (as the LCS ingestion path will
+ * build it), published under RCU, enforced by the real hook function.
+ * "Drop everything inbound, except SSH" — the design-session tree, live.
+ */
+static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct peios_pnp_snapshot snap;
+	struct peios_pnp_outcome out;
+	struct sk_buff *skb;
+	u64 gen_before = pnp_rust_generation();
+	void *b, *forest = NULL;
+
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_rule_begin(b, "no-inbound", 10), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_str(b, "Direction.Equal", 15,
+						   "in", 2),
+			0);
+	pnp_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "ssh", 3), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_int(b, "DstPort.Equal", 13, 22),
+			0);
+	pnp_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+					       &forest),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, forest);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL), 0);
+	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen_before + 1);
+
+	/* SSH passes through the exception... */
+	skb = pnp_test_tcp4_skb(test, 22);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_hook_local_in(NULL, skb, &state),
+			(unsigned int)NF_ACCEPT);
+	/* ...and its attribution is the path through the tree. */
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_PACKET, &snap,
+					      &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_STREQ(test, out.attributed, "no-inbound/ssh");
+	kfree_skb(skb);
+
+	/* Telnet is dropped by the parent... */
+	skb = pnp_test_tcp4_skb(test, 23);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_hook_local_in(NULL, skb, &state),
+			(unsigned int)NF_DROP);
+	kfree_skb(skb);
+
+	/* ...and the RawPacket layer, with no forest, stayed permissive
+	 * (an unrelated seat judging the same machine's traffic).
+	 */
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_RAWPACKET,
+					      &snap, &out),
+			-ENOENT);
+
+	/* Restore permissiveness for whatever runs after this suite. */
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL), 0);
+}
+
 static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_rust_probe),
 	KUNIT_CASE(pnp_kunit_dispatch_predicate),
 	KUNIT_CASE(pnp_kunit_snapshot_tcp4),
 	KUNIT_CASE(pnp_kunit_snapshot_arp),
 	KUNIT_CASE(pnp_kunit_snapshot_udp6),
+	KUNIT_CASE(pnp_kunit_end_to_end_enforcement),
 	{}
 };
 

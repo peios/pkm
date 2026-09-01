@@ -226,7 +226,15 @@ mod vec_inner {
 mod vec_inner {
     use super::{AllocError, TryClone};
 
-    /// Fallible vector wrapper used by the slow-track core inside the kernel.
+    /// Fallible vector wrapper used inside the kernel.
+    ///
+    /// PNP divergence from the kacs-core original: allocations use
+    /// GFP_ATOMIC, not GFP_KERNEL. Evaluation runs in the netfilter hook
+    /// path (softirq context), where sleeping allocation is illegal; the
+    /// other allocating path, policy ingestion, is rare and its
+    /// allocations are small, so paying the atomic tax there too is
+    /// cheaper than plumbing per-call flags through every signature.
+    /// Evaluation handles AllocError by failing closed (the glue drops).
     pub struct Vec<T>(kernel::alloc::KVec<T>);
 
     impl<T> Vec<T> {
@@ -238,7 +246,7 @@ mod vec_inner {
         /// Creates an empty vector with the requested capacity.
         pub fn with_capacity(capacity: usize) -> Result<Self, AllocError> {
             let inner =
-                kernel::alloc::KVec::with_capacity(capacity, kernel::alloc::flags::GFP_KERNEL)
+                kernel::alloc::KVec::with_capacity(capacity, kernel::alloc::flags::GFP_ATOMIC)
                     .map_err(|_| AllocError)?;
             Ok(Self(inner))
         }
@@ -246,7 +254,7 @@ mod vec_inner {
         /// Appends one element.
         pub fn push(&mut self, value: T) -> Result<(), AllocError> {
             self.0
-                .push(value, kernel::alloc::flags::GFP_KERNEL)
+                .push(value, kernel::alloc::flags::GFP_ATOMIC)
                 .map_err(|_| AllocError)
         }
 
