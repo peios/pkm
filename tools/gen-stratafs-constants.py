@@ -187,7 +187,8 @@ def build():
              "---", "", (
         "Every value below is generated from the source by\n"
         "`pkm/tools/gen-stratafs-constants.py`. Nothing here is transcribed by\n"
-        "hand, and the generator's `--check` mode fails if the two drift apart."
+        "hand, and the generator's `--check` mode fails if the two drift"
+        " apart. [*const.generated-from-source]"
     ), ""]
 
     # --- identity -------------------------------------------------------
@@ -198,7 +199,8 @@ def build():
         "STRATAFS_MAX_STRATA": "Longest stratum stack accepted (§4.2.1)",
     }
     rows = [row(n, dict(hdr)[n], notes[n]) for n in ident_names]
-    parts += ["## Filesystem identity", "",
+    parts += ["## Filesystem identity [*const.magic-alias-shared-with-kacs]",
+              "",
               table(("Constant", "Value", "Meaning"), rows), "", (
         "`STRATAFS_MAGIC` is an alias for `STRATAFS_SUPER_MAGIC`, which is\n"
         "declared in the header stratafs shares with KACS so that the mount\n"
@@ -254,7 +256,7 @@ def build():
         size = LE_SIZES[ctype]
         layout.append((str(off), str(size), f"`{fname}`", f"`{ctype}`"))
         off += size
-    parts += ["### The staging marker", "", (
+    parts += ["### The staging marker [*const.stage-marker-layout]", "", (
         f"`struct stratafs_stage_marker` is packed and {off} bytes, all fields\n"
         "little-endian. It is the value of the staging attribute above."
     ), "", table(("Offset", "Size", "Field", "Type"), layout), ""]
@@ -264,7 +266,7 @@ def build():
     r_route = rust_enum(CORE, "Route")
     rows = [(f"`{c}`", f"`{cv}`", f"`{r}`")
             for (c, cv), (r, _) in zip(c_route, r_route)]
-    parts += ["## Routing", "", (
+    parts += ["## Routing [*const.route-discriminants-match-rust]", "", (
         "The value `route_existing` returns (§4.5.1), as the Rust decision\n"
         "core names it and as the C glue mirrors it. The discriminants match."
     ), "", table(("C enumerator", "Value", "Rust"), rows), ""]
@@ -275,27 +277,37 @@ def build():
     rows = [(f"`{k}`", f"`{resolve(v, rtab)}`") for k, v in rc]
     parts += ["## The decision core", "", (
         "`stratafs-core` holds the stack-wide flag rules, provider selection,\n"
-        "and routing. Its flag bits match the C ones above exactly."
+        "and routing. Its flag bits match the C ones above"
+        " exactly. [*const.core-flag-bits-match-c]"
     ), "", table(("Constant", "Value"), rows), ""]
 
     rows = [(f"`{k}`", f"`{v}`") for k, v in rust_enum(CORE, "ConfigError")]
     parts += [(
         "The crate distinguishes these configuration errors. The C boundary\n"
         "collapses all of them to `EINVAL`, so the distinction is not\n"
-        "observable to a caller (§4.2.1)."
+        "observable to a caller (§4.2.1). [*const.config-errors-collapse-to-einval]"
     ), "", table(("Error", "Discriminant"), rows), ""]
 
     # --- build ----------------------------------------------------------
     cfg = re.findall(r"^config (\w+)", KCONFIG.read_text(), re.M)
+    cfg_notes = {
+        "STRATAFS_KUNIT_TEST":
+            "builds the in-kernel unit tests.",
+        "STRATAFS_FS_TEST_HOOKS":
+            "compiles the test rendezvous and fail points (§4.A.2),\n"
+            "inert unless the kernel is booted with `stratafs.test_hooks=1`.",
+    }
+    unknown = [c for c in cfg[1:] if c not in cfg_notes]
+    if unknown:
+        sys.exit(f"Kconfig option(s) with no cfg_notes entry: {unknown}")
     objs = re.search(r"stratafs-y\s*:=\s*(.+)", MAKEFILE.read_text())
-    parts += ["## Build configuration", "", (
+    parts += ["## Build configuration [*const.build-kconfig-option]", "", (
         f"stratafs is built by `CONFIG_{cfg[0]}`, a boolean option, so what it\n"
         "builds is linked into `vmlinux` rather than loaded. It depends on\n"
         "`CONFIG_SECURITY_PKM` and selects `FS_STACK`. Its sources are staged\n"
         "into the kernel tree as `fs/stratafs`, separate from PKM's own\n"
         "`security/pkm`. " +
-        ", ".join(f"`CONFIG_{c}`" for c in cfg[1:]) +
-        " builds the in-kernel unit tests."
+        " ".join(f"`CONFIG_{c}` {cfg_notes[c]}" for c in cfg[1:])
     ), "", "The translation units are:", "",
         "".join(f"- `{o}`\n" for o in objs.group(1).split()), ""]
 

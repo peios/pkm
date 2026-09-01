@@ -36,6 +36,36 @@ DESCRIPTION = ("Every KMES syscall number, structure layout, ring-buffer "
                "offset and constant, generated from the uapi headers and "
                "measured by compilation.")
 
+# Named-citation anchors for the stable constant groups, keyed by the
+# leading words of each group's heading comment in the header. A retitled
+# group silently drops its anchor — the learn build's citation grep is what
+# surfaces a test left pointing at a retired name — and a group not listed
+# here carries none.
+GROUP_ANCHORS = [
+    ("Event origin class", "abi.origin-class-values"),
+    ("Ring-slot discovery", "abi.ring-slot-discovery"),
+    ("Largest entry count", "abi.batch-max-entries"),
+    ("Runtime configuration registry location", "abi.config-constants"),
+    ("Privilege requirements", "abi.privilege-masks"),
+    ("On-wire event header", "abi.event-header-layout"),
+    ("Byte size of the fixed event header", "abi.header-base-size"),
+    ("Ring-buffer metadata layout", "abi.ring-mapping-layout"),
+    ("Field offsets within the producer metadata page", "abi.producer-page-offsets"),
+    ("Field offset within the consumer metadata page", "abi.consumer-page-offset"),
+    ("kmes_drop reason", "abi.trace.drop-reasons"),
+    ("kmes_swap reason", "abi.trace.swap-reasons"),
+    ("kmes_rate reason", "abi.trace.rate-reasons"),
+    ("kmes_wake reason", "abi.trace.wake-reasons"),
+    ("kmes_ring_lifecycle reason", "abi.trace.ring-lifecycle"),
+    ("kmes_ingress_reject reason", "abi.trace.ingress-reject-reasons"),
+    ("kmes_validate reason", "abi.trace.validate-reasons"),
+]
+
+
+def group_anchor(head):
+    return next((n for k, n in GROUP_ANCHORS if head.startswith(k)), None)
+
+
 DEFINE = re.compile(r"^#define\s+([A-Z_][A-Z0-9_]*)(\([^)]*\))?\s+(.+?)\s*$")
 TRAILING = re.compile(r"/\*\s*(.*?)\s*\*/")
 # The header cites the PSD series, which this manual replaces. Drop those
@@ -297,7 +327,8 @@ def emit_group(w, o, group, rows):
     """Write one group's heading, prose and constant table."""
     head, blocks = shape_group(group)
     if head:
-        w(f"*{md_escape(head)}.*")
+        anchor = group_anchor(head)
+        w(f"*{md_escape(head)}.*" + (f" [*{anchor}]" if anchor else ""))
         w("")
     render_blocks(w, blocks)
     has_note = any(r[3] for r in rows)
@@ -352,7 +383,8 @@ def build():
     w("`pkm/uapi/pkm/kmes.h` by `pkm/tools/gen-kmes-abi.py`, with struct")
     w("layouts measured by compiling a probe against the real header.")
     w("Regenerate it whenever the ABI changes; do not edit it by hand. The")
-    w("names here are the ones a program actually compiles against.")
+    w("names here are the ones a program actually compiles")
+    w("against. [*abi.generated-from-source]")
     w("")
     w("What a compiler cannot measure -- the error vocabulary of each")
     w("syscall, the privilege each requires by name, what the configuration")
@@ -361,7 +393,7 @@ def build():
     w("")
 
     # --- syscalls -------------------------------------------------------
-    w("## Syscall numbers")
+    w("## Syscall numbers [*abi.syscall-numbers]")
     w("")
     w("Signatures are read from the `SYSCALL_DEFINE` sites in `pkm/kmes/`.")
     w("")
@@ -384,7 +416,7 @@ def build():
         for sname, fields in structs:
             if sname not in sizes:
                 continue
-            w(f"### `struct {sname}`")
+            w(f"### `struct {sname}` [*abi.struct-{sname.replace('_', '-')}]")
             w("")
             w(f"Total size {sizes[sname]} bytes.")
             w("")
@@ -416,7 +448,7 @@ def build():
         w("ftrace, perf and eBPF consumers, letting a tool decode a `kmes:`")
         w("event's `reason`, `op` or `state` field without recompiling")
         w("against a specific kernel. No KMES syscall accepts or returns")
-        w("them, and values are append-only.")
+        w("them, and values are append-only. [*abi.trace.diagnostic-contract]")
         w("")
         for group, rows in group_runs(trace_consts):
             emit_group(w, o, group, [(n, a, r, c) for n, a, r, c, _ in rows])
