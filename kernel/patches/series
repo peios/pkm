@@ -59,3 +59,6 @@ net/af_unix-kacs-token.patch
 ipc/util-lsm-with-object.patch
 arch/x86-prctl-shadow-stack.patch
 arch/syscall-table-pkm.patch
+# PNP (PEI-598): wires net/pnp/ (staged by stage-sources.sh) into the net
+# build. Touches only net/{Kconfig,Makefile} one-liners; order-independent.
+net/pnp-wireup.patch

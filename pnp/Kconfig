@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config PEIOS_PNP
+	bool "PNP — Peios Network Policy packet engine"
+	depends on SECURITY_PKM
+	depends on NETFILTER
+	depends on NETFILTER_INGRESS
+	depends on NETFILTER_EGRESS
+	depends on NF_CONNTRACK=y
+	help
+	  The Peios Network Policy packet engine: the packet and RawPacket
+	  rules layers, standing at the netfilter device seats (ingress,
+	  egress) and the IP hooks. Policy is a forest of rule trees read
+	  from the registry; semantics live in the pnp-core Rust crate,
+	  staged into security/pkm and reached over the C ABI.
+
+	  This replaces nf_tables and the xtables family on Peios — the
+	  policy frontends are configured out, the netfilter hook framework
+	  and conntrack machinery stay. Until the first policy generation
+	  ingests, the engine is loudly permissive (generation 0).
+
+	  conntrack must be built-in (=y): PNP itself is built-in and reads
+	  flow facts on the packet path.
+
+	  If unsure, say N.
+
+config PEIOS_PNP_KUNIT
+	bool "PNP KUnit tests"
+	depends on PEIOS_PNP && KUNIT
+	default SECURITY_PKM_KUNIT
+	help
+	  In-kernel tests for PNP's kernel-resident glue: the seat snapshot
+	  builder and the dispatch predicate. Pure rules-engine semantics
+	  remain owned by the pnp-core cargo suite.

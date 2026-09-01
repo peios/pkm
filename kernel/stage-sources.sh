@@ -30,10 +30,11 @@ fi
 
 pkm_dir="$tree/security/pkm"
 stratafs_dir="$tree/fs/stratafs"
+pnp_dir="$tree/net/pnp"
 uapi_dir="$tree/include/uapi/pkm"
 linux_include_dir="$tree/include/linux"
 
-rm -rf "$pkm_dir" "$stratafs_dir" "$uapi_dir"
+rm -rf "$pkm_dir" "$stratafs_dir" "$pnp_dir" "$uapi_dir"
 mkdir -p "$pkm_dir/kacs" "$pkm_dir/lcs" "$pkm_dir/kmes" "$uapi_dir"
 
 # --- flat C / H / Rust sources (these dirs contain exactly the staged set) ---
@@ -73,6 +74,12 @@ install -m 0644 "$here/Makefile" "$pkm_dir/Makefile"
 mkdir -p "$stratafs_dir"
 install -m 0644 "$pkm"/stratafs/* "$stratafs_dir/"
 
+# --- PNP: the network-policy packet engine, staged into net/. Its Rust
+#     semantics live in the security/pkm Rust island (pnp_core below); the
+#     C here reaches them over the pnp_rust_* C ABI. ---
+mkdir -p "$pnp_dir"
+install -m 0644 "$pkm"/pnp/* "$pnp_dir/"
+
 
 # --- generated TCB built-in signing-key header (overwrites the copied stub) ---
 genargs=(--pubkey-hex "$pubkey" --out "$pkm_dir/kacs/builtin_signing_keys.h")
@@ -91,5 +98,7 @@ install -m 0644 "$pkm/uapi/generated/rust/src/zconst.rs" "$pkm_dir/kacs/peios_ua
 "$here/stage-rust-core.sh" "$pkm/crates/lcs-core/src"  "$pkm_dir/lcs/lcs_core" lcs_core
 "$here/stage-rust-core.sh" "$pkm/crates/stratafs-core/src" \
 	"$pkm_dir/stratafs_core" stratafs_core
+"$here/stage-rust-core.sh" "$pkm/crates/pnp-core/src" \
+	"$pkm_dir/pnp_core" pnp_core
 
 echo "stage-sources: staged PKM sources into $tree"
