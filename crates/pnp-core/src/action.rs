@@ -1,8 +1,8 @@
 //! The PNP action language: parsing and representation.
 //!
 //! Six actions, three species (ratified design, PEI-598):
-//! - verdicts (PASS / DROP / REJECT) — dispositions, at most one yielded per
-//!   rule after resolution;
+//! - verdicts (PASS / DROP / REJECT[(Kind)]) — dispositions, at most one
+//!   yielded per rule after resolution;
 //! - facts & noise (TAG / COUNT / REPORT) — side effects, never terminal;
 //! - deferral (PROMPT) plus NULL, the explicit abstention.
 //!
@@ -18,34 +18,77 @@ use crate::strutil::str_to_pkm;
 /// has depth 2. Compiled-in chain cap from the ratified design.
 pub const MAX_PROMPT_CHAIN: usize = 4;
 
-/// A disposition. Strictness order: DROP > REJECT > PASS.
+/// The story a REJECT tells the sender (machinery slice, ratified). Kinds
+/// are semantic: the kernel owns the kind × (family, protocol) → wire
+/// mapping. Routing-failure lies are deliberately unminted — DROP is the
+/// silence option, and when PNP speaks it does not speak falsely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    /// This layer approves; higher layers still judge.
-    Pass,
-    /// Refuse, and tell the sender (protocol-phrased; kinds unminted).
-    Reject,
-    /// Refuse silently.
-    Drop,
+pub enum RejectKind {
+    /// "Nothing is listening": TCP RST, else ICMP port-unreachable. The
+    /// default; bare `REJECT` means this.
+    Refused,
+    /// "Policy refused you": ICMP admin-prohibited for every protocol.
+    Prohibited,
 }
 
-impl Verdict {
-    /// Strictness rank; higher wins a tie at equal priority.
-    pub fn strictness(self) -> u8 {
-        match self {
-            Verdict::Pass => 0,
-            Verdict::Reject => 1,
-            Verdict::Drop => 2,
+impl RejectKind {
+    /// Parses a kind name (case-insensitive ASCII).
+    pub fn from_name(name: &str) -> Option<RejectKind> {
+        if upper_eq(name, "REFUSED") {
+            Some(RejectKind::Refused)
+        } else if upper_eq(name, "PROHIBITED") {
+            Some(RejectKind::Prohibited)
+        } else {
+            None
         }
     }
 
     /// Canonical action-language name.
     pub fn as_str(self) -> &'static str {
         match self {
+            RejectKind::Refused => "Refused",
+            RejectKind::Prohibited => "Prohibited",
+        }
+    }
+}
+
+/// A disposition. Strictness order: DROP > REJECT > PASS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// This layer approves; higher layers still judge.
+    Pass,
+    /// Refuse, and tell the sender the given story.
+    Reject(RejectKind),
+    /// Refuse silently.
+    Drop,
+}
+
+impl Verdict {
+    /// Strictness rank; higher wins a tie at equal priority. Between two
+    /// REJECTs the quieter story (`Refused`, which reveals no policy)
+    /// wins — a deterministic tie-break, since tree order carries no
+    /// meaning.
+    pub fn strictness(self) -> u8 {
+        match self {
+            Verdict::Pass => 0,
+            Verdict::Reject(RejectKind::Prohibited) => 1,
+            Verdict::Reject(RejectKind::Refused) => 2,
+            Verdict::Drop => 3,
+        }
+    }
+
+    /// Canonical action-language name (kind elided).
+    pub fn as_str(self) -> &'static str {
+        match self {
             Verdict::Pass => "PASS",
-            Verdict::Reject => "REJECT",
+            Verdict::Reject(_) => "REJECT",
             Verdict::Drop => "DROP",
         }
+    }
+
+    /// Whether this is a REJECT of any kind.
+    pub fn is_reject(self) -> bool {
+        matches!(self, Verdict::Reject(_))
     }
 
     /// The stricter of two verdicts.
@@ -58,15 +101,44 @@ impl Verdict {
     }
 }
 
-/// A TAG operation on flow-scoped state.
+/// A TAG operation on flow-scoped state (ratified ops: Set / Clear / Add).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagOp {
-    /// Set the tag to a value.
-    Set(i64),
-    /// Increment by an amount (default 1).
-    Increment(i64),
-    /// Decrement by an amount (default 1).
-    Decrement(i64),
+    /// Set the tag to a value (default 1).
+    Set(u64),
+    /// Remove the tag: it reads as absent afterwards.
+    Clear,
+    /// Add to the tag (default 1); an absent tag counts as 0 first.
+    Add(u64),
+}
+
+impl TagOp {
+    /// Wire code for the kernel store: 0 = Set, 1 = Clear, 2 = Add.
+    pub fn code(self) -> u8 {
+        match self {
+            TagOp::Set(_) => 0,
+            TagOp::Clear => 1,
+            TagOp::Add(_) => 2,
+        }
+    }
+
+    /// The operand (0 for Clear).
+    pub fn operand(self) -> u64 {
+        match self {
+            TagOp::Set(v) | TagOp::Add(v) => v,
+            TagOp::Clear => 0,
+        }
+    }
+}
+
+/// What a COUNT contributes: a literal, or the packet's `Length` in bytes
+/// (the one blessed fact — the bandwidth primitive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountAmount {
+    /// A fixed amount (default 1).
+    Literal(u64),
+    /// The packet length at the seat.
+    Length,
 }
 
 /// One parsed action.
@@ -90,12 +162,12 @@ pub enum Action {
         /// Operation to apply.
         op: TagOp,
     },
-    /// Increment a machine-scoped named counter cell.
+    /// Emit into a named counter stream.
     Count {
-        /// Counter name.
+        /// Stream name.
         name: PkmString,
-        /// Amount to add (default 1).
-        amount: u64,
+        /// What to contribute.
+        amount: CountAmount,
     },
     /// Emit an event (fires when level >= CurrentReportingLevel; at most one
     /// emission per rule per evaluation).
@@ -179,12 +251,15 @@ fn parse_one(input: &str, prompt_depth: usize) -> Result<(Action, &str), ParseFa
             Action::Verdict(Verdict::Drop)
         }
         "REJECT" => {
-            // Kinds are unminted: `REJECT(x)` is rejected at ingestion with a
-            // dedicated error so authors learn the slot exists but is closed.
-            if !args.is_empty() {
+            if args.len() > 1 {
                 return Err(ParseFailure::Parse(ActionParseError::BadArity));
             }
-            Action::Verdict(Verdict::Reject)
+            let kind = match args.first() {
+                None => RejectKind::Refused,
+                Some(k) => RejectKind::from_name(k)
+                    .ok_or(ParseFailure::Parse(ActionParseError::UnknownRejectKind))?,
+            };
+            Action::Verdict(Verdict::Reject(kind))
         }
         "PROMPT" => {
             if prompt_depth >= MAX_PROMPT_CHAIN {
@@ -222,17 +297,23 @@ fn parse_one(input: &str, prompt_depth: usize) -> Result<(Action, &str), ParseFa
                 return Err(ParseFailure::Parse(ActionParseError::BadArgument));
             }
             let op_name = args[1];
-            let amount = match args.get(2) {
+            let operand = match args.get(2) {
                 Some(a) => Some(
-                    parse_int(a).ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?,
+                    parse_uint(a).ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?,
                 ),
                 None => None,
             };
-            let op = match (upper_eq(op_name, "SET"), upper_eq(op_name, "INCREMENT"), upper_eq(op_name, "DECREMENT")) {
-                (true, _, _) => TagOp::Set(amount.ok_or(ParseFailure::Parse(ActionParseError::BadArity))?),
-                (_, true, _) => TagOp::Increment(amount.unwrap_or(1)),
-                (_, _, true) => TagOp::Decrement(amount.unwrap_or(1)),
-                _ => return Err(ParseFailure::Parse(ActionParseError::BadArgument)),
+            let op = if upper_eq(op_name, "SET") {
+                TagOp::Set(operand.unwrap_or(1))
+            } else if upper_eq(op_name, "CLEAR") {
+                if operand.is_some() {
+                    return Err(ParseFailure::Parse(ActionParseError::BadArity));
+                }
+                TagOp::Clear
+            } else if upper_eq(op_name, "ADD") {
+                TagOp::Add(operand.unwrap_or(1))
+            } else {
+                return Err(ParseFailure::Parse(ActionParseError::BadArgument));
             };
             Action::Tag { name: tag_name, op }
         }
@@ -245,15 +326,11 @@ fn parse_one(input: &str, prompt_depth: usize) -> Result<(Action, &str), ParseFa
                 return Err(ParseFailure::Parse(ActionParseError::BadArgument));
             }
             let amount = match args.get(1) {
-                Some(a) => {
-                    let v = parse_int(a)
-                        .ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?;
-                    if v < 0 {
-                        return Err(ParseFailure::Parse(ActionParseError::BadArgument));
-                    }
-                    v as u64
-                }
-                None => 1,
+                Some(a) if upper_eq(a, "LENGTH") => CountAmount::Length,
+                Some(a) => CountAmount::Literal(
+                    parse_uint(a).ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?,
+                ),
+                None => CountAmount::Literal(1),
             };
             Action::Count {
                 name: counter,
@@ -326,7 +403,11 @@ fn parse_int(s: &str) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
-fn upper_eq(s: &str, upper: &str) -> bool {
+fn parse_uint(s: &str) -> Option<u64> {
+    s.parse::<u64>().ok()
+}
+
+pub(crate) fn upper_eq(s: &str, upper: &str) -> bool {
     s.len() == upper.len()
         && s.bytes()
             .zip(upper.bytes())
@@ -349,9 +430,26 @@ mod tests {
         ));
         assert!(matches!(
             parse_action("Reject").unwrap(),
-            Action::Verdict(Verdict::Reject)
+            Action::Verdict(Verdict::Reject(RejectKind::Refused))
         ));
         assert!(matches!(parse_action("NULL").unwrap(), Action::Null));
+    }
+
+    #[test]
+    fn reject_kinds_are_the_two_minted_stories() {
+        assert!(matches!(
+            parse_action("REJECT(Refused)").unwrap(),
+            Action::Verdict(Verdict::Reject(RejectKind::Refused))
+        ));
+        assert!(matches!(
+            parse_action("reject( prohibited )").unwrap(),
+            Action::Verdict(Verdict::Reject(RejectKind::Prohibited))
+        ));
+        assert!(matches!(
+            parse_action("REJECT(host-unreachable)"),
+            Err(ParseFailure::Parse(ActionParseError::UnknownRejectKind))
+        ));
+        assert!(parse_action("REJECT(Refused, Prohibited)").is_err());
     }
 
     #[test]
@@ -386,10 +484,10 @@ mod tests {
 
     #[test]
     fn parses_tag_count_report() {
-        match parse_action("TAG(seen, INCREMENT)").unwrap() {
+        match parse_action("TAG(seen, Add)").unwrap() {
             Action::Tag { name, op } => {
                 assert_eq!(name.as_str(), "seen");
-                assert_eq!(op, TagOp::Increment(1));
+                assert_eq!(op, TagOp::Add(1));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -397,11 +495,27 @@ mod tests {
             Action::Tag { op, .. } => assert_eq!(op, TagOp::Set(7)),
             other => panic!("unexpected {other:?}"),
         }
+        match parse_action("TAG(mark, set)").unwrap() {
+            Action::Tag { op, .. } => assert_eq!(op, TagOp::Set(1)),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_action("TAG(mark, Clear)").unwrap() {
+            Action::Tag { op, .. } => assert_eq!(op, TagOp::Clear),
+            other => panic!("unexpected {other:?}"),
+        }
         match parse_action("COUNT(synburst)").unwrap() {
             Action::Count { name, amount } => {
                 assert_eq!(name.as_str(), "synburst");
-                assert_eq!(amount, 1);
+                assert_eq!(amount, CountAmount::Literal(1));
             }
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_action("COUNT(bytes, Length)").unwrap() {
+            Action::Count { amount, .. } => assert_eq!(amount, CountAmount::Length),
+            other => panic!("unexpected {other:?}"),
+        }
+        match parse_action("COUNT(x, 40)").unwrap() {
+            Action::Count { amount, .. } => assert_eq!(amount, CountAmount::Literal(40)),
             other => panic!("unexpected {other:?}"),
         }
         match parse_action("REPORT(3)").unwrap() {
@@ -415,10 +529,13 @@ mod tests {
         assert!(parse_action("").is_err());
         assert!(parse_action("ALLOW").is_err());
         assert!(parse_action("PASS(1)").is_err());
-        assert!(parse_action("TAG(x, SET)").is_err()); // SET needs a value
+        assert!(parse_action("TAG(x, Clear, 1)").is_err()); // Clear takes no operand
+        assert!(parse_action("TAG(x, Set, -1)").is_err()); // unsigned
+        assert!(parse_action("TAG(x, Increment)").is_err()); // unminted op
         assert!(parse_action("REPORT(0)").is_err());
         assert!(parse_action("REPORT(6)").is_err());
         assert!(parse_action("COUNT(x, -1)").is_err());
+        assert!(parse_action("COUNT(x, Ttl)").is_err()); // only Length is blessed
         assert!(parse_action("PROMPT()").is_err());
         assert!(parse_action("DROP)").is_err());
         assert!(parse_action("TAG(x,").is_err());
@@ -427,8 +544,13 @@ mod tests {
 
     #[test]
     fn verdict_strictness_order_is_drop_reject_pass() {
-        assert_eq!(Verdict::Pass.strictest(Verdict::Reject), Verdict::Reject);
-        assert_eq!(Verdict::Reject.strictest(Verdict::Drop), Verdict::Drop);
+        let refused = Verdict::Reject(RejectKind::Refused);
+        let prohibited = Verdict::Reject(RejectKind::Prohibited);
+        assert_eq!(Verdict::Pass.strictest(refused), refused);
+        assert_eq!(refused.strictest(Verdict::Drop), Verdict::Drop);
         assert_eq!(Verdict::Drop.strictest(Verdict::Pass), Verdict::Drop);
+        // The quieter story wins a REJECT-vs-REJECT tie, deterministically.
+        assert_eq!(prohibited.strictest(refused), refused);
+        assert_eq!(refused.strictest(prohibited), refused);
     }
 }

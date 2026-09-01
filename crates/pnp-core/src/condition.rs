@@ -6,8 +6,10 @@
 
 use core::net::IpAddr;
 
+use crate::hash::name_hash;
 use crate::pkm_alloc::{String as PkmString, Vec as PkmVec};
 use crate::snapshot::Snapshot;
+use crate::strutil::str_to_pkm;
 
 /// The packet-layer fact vocabulary (ratified, complete).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,15 +129,145 @@ pub enum FactFamily {
     Flags,
 }
 
+/// Counter key-spec bits: which facts partition a counter view. A packet
+/// lacking any keyed fact has no cell (absent-fact law, both sides).
+pub mod keyspec {
+    /// Keyed by source address.
+    pub const SRC_ADDR: u8 = 1 << 0;
+    /// Keyed by destination address.
+    pub const DST_ADDR: u8 = 1 << 1;
+    /// Keyed by interface.
+    pub const INTERFACE: u8 = 1 << 2;
+
+    /// Parses one key-spec fact name.
+    pub fn from_name(name: &str) -> Option<u8> {
+        match name {
+            "SrcAddr" => Some(SRC_ADDR),
+            "DstAddr" => Some(DST_ADDR),
+            "Interface" => Some(INTERFACE),
+            _ => None,
+        }
+    }
+}
+
+/// Longest window a view may ask for (one day): per-key memory scales with
+/// the number of windows a stream is viewed through, so the horizon is
+/// bounded.
+pub const MAX_WINDOW_SECS: u32 = 86_400;
+
+/// A `Counter.<n>(...)` spec that does not parse as a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadView;
+
+/// A compiled counter view: one way of slicing a stream. Every view the
+/// forest mentions is materialized by the store at publication — windows
+/// and key-specs are compile-time constants, so the hot path never sees
+/// an arbitrary query.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CounterView {
+    /// Stream name.
+    pub name: PkmString,
+    /// `name_hash(name)`: the store's identity for the stream.
+    pub hash: u64,
+    /// Sliding window in seconds; 0 = the cumulative total.
+    pub window_secs: u32,
+    /// `keyspec::*` bits; 0 = one global cell.
+    pub keyspec: u8,
+}
+
+impl CounterView {
+    /// Parses the text after `Counter.`: `Name`, `Name(args)` where args
+    /// are at most one duration (`10s`/`5m`/`2h`/`1d`) and at most one
+    /// key-spec (`SrcAddr`, `DstAddr`, `Interface`, `+`-compounded), in
+    /// any order. `Err(BadView)` for anything else (including a window over
+    /// the horizon).
+    pub fn parse(spec: &str) -> Result<CounterView, BadView> {
+        let (name, args) = match spec.find('(') {
+            Some(i) => {
+                let rest = &spec[i + 1..];
+                let close = rest.rfind(')').ok_or(BadView)?;
+                if !rest[close + 1..].is_empty() {
+                    return Err(BadView);
+                }
+                (&spec[..i], Some(&rest[..close]))
+            }
+            None => (spec, None),
+        };
+        let name = name.trim();
+        if name.is_empty() || name.contains([')', ',', '.']) {
+            return Err(BadView);
+        }
+        let mut window: Option<u32> = None;
+        let mut keyspec: Option<u8> = None;
+        if let Some(args) = args {
+            for arg in args.split(',') {
+                let arg = arg.trim();
+                if arg.is_empty() {
+                    return Err(BadView);
+                }
+                if let Some(secs) = parse_duration(arg) {
+                    if window.replace(secs).is_some() {
+                        return Err(BadView);
+                    }
+                    continue;
+                }
+                let mut bits = 0u8;
+                for part in arg.split('+') {
+                    let bit = keyspec::from_name(part.trim()).ok_or(BadView)?;
+                    if bits & bit != 0 {
+                        return Err(BadView);
+                    }
+                    bits |= bit;
+                }
+                if keyspec.replace(bits).is_some() {
+                    return Err(BadView);
+                }
+            }
+        }
+        Ok(CounterView {
+            name: str_to_pkm(name).map_err(|_| BadView)?,
+            hash: name_hash(name),
+            window_secs: window.unwrap_or(0),
+            keyspec: keyspec.unwrap_or(0),
+        })
+    }
+}
+
+/// `<digits><unit>` with unit s/m/h/d; must be > 0 and <= MAX_WINDOW_SECS.
+fn parse_duration(s: &str) -> Option<u32> {
+    let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = num.parse().ok()?;
+    let mult: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        _ => return None,
+    };
+    let secs = n.checked_mul(mult)?;
+    if secs == 0 || secs > u64::from(MAX_WINDOW_SECS) {
+        return None;
+    }
+    Some(secs as u32)
+}
+
 /// What a condition is keyed on.
 #[derive(Debug)]
 pub enum CondKey {
     /// A vocabulary fact.
     Fact(FactId),
-    /// A flow tag by name.
-    Tag(PkmString),
-    /// A counter cell by name.
-    Counter(PkmString),
+    /// A flow tag, by name and its store hash.
+    Tag {
+        /// Tag name (attribution / diagnostics).
+        name: PkmString,
+        /// `name_hash(name)`.
+        hash: u64,
+    },
+    /// A counter view, by index into the forest's view table.
+    Counter(u32),
 }
 
 /// One element of an integer `Equal` list.
@@ -244,11 +376,11 @@ impl Condition {
     /// unresolvable key is false).
     pub fn matches(&self, snap: &Snapshot) -> bool {
         match &self.key {
-            CondKey::Tag(name) => match snap.tag(name.as_str()) {
-                Some(v) => int_op_matches(&self.op, v),
+            CondKey::Tag { hash, .. } => match snap.tag(*hash) {
+                Some(v) => int_op_matches(&self.op, clamp_u64(v)),
                 None => false,
             },
-            CondKey::Counter(name) => match snap.counter(name.as_str()) {
+            CondKey::Counter(view) => match snap.counter_view(*view) {
                 Some(v) => int_op_matches(&self.op, clamp_u64(v)),
                 None => false,
             },
@@ -352,5 +484,44 @@ fn str_fact(fact: FactId, snap: &Snapshot) -> Option<&str> {
         FactId::FlowState => snap.flow_state.map(|s| s.as_str()),
         FactId::Interface => snap.interface.as_ref().map(|s| s.as_str()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counter_view_grammar_is_typed_and_order_free() {
+        let v = CounterView::parse("SynFlood").unwrap();
+        assert_eq!((v.window_secs, v.keyspec), (0, 0));
+        assert_eq!(v.hash, name_hash("SynFlood"));
+
+        let v = CounterView::parse("SynFlood(100s, SrcAddr+DstAddr)").unwrap();
+        assert_eq!(v.window_secs, 100);
+        assert_eq!(v.keyspec, keyspec::SRC_ADDR | keyspec::DST_ADDR);
+
+        let v = CounterView::parse("x( Interface , 5m )").unwrap();
+        assert_eq!(v.window_secs, 300);
+        assert_eq!(v.keyspec, keyspec::INTERFACE);
+
+        assert_eq!(CounterView::parse("x(2h)").unwrap().window_secs, 7200);
+        assert_eq!(CounterView::parse("x(1d)").unwrap().window_secs, 86_400);
+        assert_eq!(CounterView::parse("x(SrcAddr)").unwrap().window_secs, 0);
+    }
+
+    #[test]
+    fn counter_view_grammar_refuses_nonsense() {
+        assert!(CounterView::parse("").is_err());
+        assert!(CounterView::parse("x(").is_err());
+        assert!(CounterView::parse("x()").is_err());
+        assert!(CounterView::parse("x(10s, 20s)").is_err()); // two windows
+        assert!(CounterView::parse("x(SrcAddr, DstAddr)").is_err()); // two keyspecs
+        assert!(CounterView::parse("x(SrcAddr+SrcAddr)").is_err()); // duplicate key
+        assert!(CounterView::parse("x(2d)").is_err()); // over the horizon
+        assert!(CounterView::parse("x(0s)").is_err());
+        assert!(CounterView::parse("x(10)").is_err()); // unitless
+        assert!(CounterView::parse("x(Ttl)").is_err()); // not a key fact
+        assert!(CounterView::parse("x(10s)y").is_err());
     }
 }

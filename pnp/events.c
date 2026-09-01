@@ -65,6 +65,7 @@ void peios_pnp_event_emit(const struct peios_pnp_snapshot *snap,
 	ev.seat = snap->seat;
 	ev.layer = layer;
 	ev.verdict = out->verdict;
+	ev.reject_kind = out->reject_kind;
 	ev.flags = flags | (out->backstop ? PEIOS_PNP_EV_F_BACKSTOP : 0);
 	ev.direction = snap->direction;
 	ev.addr_family = snap->addr_family;
@@ -189,15 +190,33 @@ static __poll_t peios_pnp_dev_poll(struct file *file, poll_table *wait)
 static long peios_pnp_dev_ioctl(struct file *file, unsigned int cmd,
 				unsigned long arg)
 {
-	struct peios_pnp_status status;
+	void __user *uarg = (void __user *)arg;
 
-	if (cmd != PEIOS_PNP_IOC_STATUS)
+	switch (cmd) {
+	case PEIOS_PNP_IOC_STATUS: {
+		struct peios_pnp_status status;
+
+		peios_pnp_status_fill(&status);
+		if (copy_to_user(uarg, &status, sizeof(status)))
+			return -EFAULT;
+		return 0;
+	}
+	case PEIOS_PNP_IOC_COUNTERS: {
+		struct peios_pnp_counters_query query;
+		long ret;
+
+		if (copy_from_user(&query, uarg, sizeof(query)))
+			return -EFAULT;
+		ret = peios_pnp_counters_dump(&query);
+		if (ret)
+			return ret;
+		if (copy_to_user(uarg, &query, sizeof(query)))
+			return -EFAULT;
+		return 0;
+	}
+	default:
 		return -ENOTTY;
-
-	peios_pnp_status_fill(&status);
-	if (copy_to_user((void __user *)arg, &status, sizeof(status)))
-		return -EFAULT;
-	return 0;
+	}
 }
 
 static const struct file_operations peios_pnp_dev_fops = {

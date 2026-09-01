@@ -8,11 +8,15 @@
 //! The glue that builds a snapshot is responsible for the visibility laws:
 //! a RawPacket-seat snapshot must carry no `flow_state` and no `tags` (they
 //! do not exist there / would be downward reads); a Packet-seat snapshot
-//! carries whatever conntrack and prior packets attached.
+//! carries whatever conntrack and prior packets attached. Machinery facts
+//! (flow tags, counter views) are resolved by the glue against the forest
+//! being evaluated: tags by name hash, counter views by their index in the
+//! forest's view table.
 
 use core::net::IpAddr;
 
-use crate::pkm_alloc::{String as PkmString, Vec as PkmVec};
+use crate::hash::name_hash;
+use crate::pkm_alloc::{AllocError, String as PkmString, Vec as PkmVec};
 
 /// Traversal direction, as attached by the standing seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,28 +173,34 @@ pub struct Snapshot {
     pub flow_state: Option<FlowState>,
     /// Wall-clock facts.
     pub time: Option<TimeFacts>,
-    /// Flow tags visible to this evaluation (written by prior packets /
-    /// layers below, per the visibility laws — the glue enforces those).
-    pub tags: PkmVec<(PkmString, i64)>,
-    /// Resolved counter cells for this packet's key facts: name -> count in
-    /// window. A counter whose key facts the packet lacks is simply absent.
-    pub counters: PkmVec<(PkmString, u64)>,
+    /// Flow tags visible to this evaluation as `(name hash, value)`
+    /// (written by prior packets / layers below, per the visibility laws —
+    /// the glue enforces those).
+    pub tags: PkmVec<(u64, u64)>,
+    /// Resolved counter views for this packet: `(view index, value)`. A
+    /// view whose key facts the packet lacks is simply absent.
+    pub counter_views: PkmVec<(u32, u64)>,
 }
 
 impl Snapshot {
-    /// Looks up a visible flow tag by name.
-    pub fn tag(&self, name: &str) -> Option<i64> {
+    /// Looks up a visible flow tag by its name hash.
+    pub fn tag(&self, hash: u64) -> Option<u64> {
         self.tags
             .iter()
-            .find(|(n, _)| n.as_str() == name)
+            .find(|(h, _)| *h == hash)
             .map(|(_, v)| *v)
     }
 
-    /// Looks up a resolved counter cell by name.
-    pub fn counter(&self, name: &str) -> Option<u64> {
-        self.counters
+    /// Looks up a resolved counter view by index.
+    pub fn counter_view(&self, view: u32) -> Option<u64> {
+        self.counter_views
             .iter()
-            .find(|(n, _)| n.as_str() == name)
+            .find(|(i, _)| *i == view)
             .map(|(_, v)| *v)
+    }
+
+    /// Attaches a flow tag by name (test and glue convenience).
+    pub fn set_tag(&mut self, name: &str, value: u64) -> Result<(), AllocError> {
+        self.tags.push((name_hash(name), value))
     }
 }

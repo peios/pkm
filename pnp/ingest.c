@@ -13,8 +13,9 @@
  *
  * Change notification arrives per-key and uncoalesced from the LCS
  * internal watch dispatcher, so the entry point coalesces into one
- * deferred re-walk (pending flag + workqueue), mirroring the bootstrap
- * workfn pattern.
+ * deferred re-walk (pending flag + delayed work with a short debounce
+ * window — a policy save touches many keys, and boot autoapply once ran
+ * the generation to 31 re-walking after every one).
  */
 
 #include <linux/errno.h>
@@ -169,8 +170,20 @@ static long pnp_feed_value(struct peios_pnp_walk *walk, const char *name,
 	}
 }
 
-/* One RSI_QUERY_VALUES round trip: this key's effective values -> builder. */
-static long pnp_walk_values(struct peios_pnp_walk *walk, const u8 guid[16])
+typedef long (*pnp_value_cb)(struct peios_pnp_walk *walk, void *ctx,
+			     const char *name, u32 name_len, u32 type,
+			     const u8 *data, u32 len);
+
+static long pnp_feed_value_cb(struct peios_pnp_walk *walk, void *ctx,
+			      const char *name, u32 name_len, u32 type,
+			      const u8 *data, u32 len)
+{
+	return pnp_feed_value(walk, name, name_len, type, data, len);
+}
+
+/* One RSI_QUERY_VALUES round trip: this key's effective values -> cb. */
+static long pnp_for_each_value(struct peios_pnp_walk *walk, const u8 guid[16],
+			       pnp_value_cb cb, void *ctx)
 {
 	struct pkm_lcs_rsi_query_values_batch_result batch = { };
 	struct pkm_lcs_source_response_frame frame = { };
@@ -246,8 +259,7 @@ static long pnp_walk_values(struct peios_pnp_walk *walk, const u8 guid[16])
 		data = records + off;
 		off += data_len;
 
-		ret = pnp_feed_value(walk, name, name_len, type, data,
-				     data_len);
+		ret = cb(walk, ctx, name, name_len, type, data, data_len);
 		if (ret)
 			goto out;
 	}
@@ -255,6 +267,54 @@ out:
 	kvfree(records);
 	pkm_lcs_source_response_frame_destroy(&frame);
 	return ret;
+}
+
+static long pnp_walk_values(struct peios_pnp_walk *walk, const u8 guid[16])
+{
+	return pnp_for_each_value(walk, guid, pnp_feed_value_cb, NULL);
+}
+
+/*
+ * CurrentReportingLevel lives on the Rules key itself (ratified:
+ * Machine\System\Network\Rules\CurrentReportingLevel). Absent = 1, so
+ * everything fires — quietness ships as a visible value. Out-of-range
+ * values are refused whole, like any other malformed policy.
+ */
+#define PNP_REPORTING_LEVEL_NAME	"CurrentReportingLevel"
+
+static long pnp_reporting_level_cb(struct peios_pnp_walk *walk, void *ctx,
+				   const char *name, u32 name_len, u32 type,
+				   const u8 *data, u32 len)
+{
+	u8 *level = ctx;
+	s64 v;
+
+	if (name_len != sizeof(PNP_REPORTING_LEVEL_NAME) - 1 ||
+	    memcmp(name, PNP_REPORTING_LEVEL_NAME, name_len))
+		return 0;
+	switch (type) {
+	case PNP_REG_DWORD:
+		if (len != 4)
+			return -EINVAL;
+		v = get_unaligned_le32(data);
+		break;
+	case PNP_REG_DWORD_BIG_ENDIAN:
+		if (len != 4)
+			return -EINVAL;
+		v = get_unaligned_be32(data);
+		break;
+	case PNP_REG_QWORD:
+		if (len != 8)
+			return -EINVAL;
+		v = (s64)get_unaligned_le64(data);
+		break;
+	default:
+		return -EINVAL;
+	}
+	if (v < 1 || v > 6)
+		return -EINVAL;
+	*level = (u8)v;
+	return 0;
 }
 
 /* Walk one rule key: values, then children as exceptions, recursively. */
@@ -416,6 +476,7 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 	u8 packet_guid[16], raw_guid[16];
 	bool packet_present = false, raw_present = false;
 	void *packet_forest = NULL, *raw_forest = NULL;
+	u8 reporting_level = 1;
 	u32 i;
 	long ret;
 
@@ -431,6 +492,11 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 	ret = pkm_lcs_source_layer_snapshot_acquire(&walk.layers);
 	if (ret)
 		return ret;
+
+	ret = pnp_for_each_value(&walk, rules_guid, pnp_reporting_level_cb,
+				 &reporting_level);
+	if (ret)
+		goto out_level;
 
 	/* Find the layer keys under Rules. */
 	pkm_lcs_source_response_frame_init(&frame);
@@ -489,24 +555,29 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 	if (ret)
 		goto out;
 
-	ret = peios_pnp_policy_publish(packet_forest, raw_forest);
+	ret = peios_pnp_policy_publish(packet_forest, raw_forest,
+				       reporting_level);
 	if (!ret) {
 		packet_forest = NULL;
 		raw_forest = NULL;
 	}
 out:
+	pkm_lcs_source_response_frame_destroy(&frame);
+out_level:
 	peios_pnp_policy_note_ingest(ret);
 	if (ret)
 		pr_warn("pnp: rules refresh failed (%ld); keeping the previous generation\n",
 			ret);
 	pnp_rust_forest_free(packet_forest);
 	pnp_rust_forest_free(raw_forest);
-	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_source_layer_snapshot_release(&walk.layers);
 	return ret;
 }
 
 /* --- change-notification coalescing ---------------------------------- */
+
+/* Quiet time after the last change before the re-walk runs. */
+#define PEIOS_PNP_REFRESH_DEBOUNCE_MS	50
 
 static void peios_pnp_refresh_workfn(struct work_struct *work);
 
@@ -515,11 +586,11 @@ static struct {
 	bool pending;
 	u32 source_id;
 	u8 guid[16];
-	struct work_struct work;
+	struct delayed_work work;
 } peios_pnp_refresh = {
 	.lock = __SPIN_LOCK_UNLOCKED(peios_pnp_refresh.lock),
-	.work = __WORK_INITIALIZER(peios_pnp_refresh.work,
-				   peios_pnp_refresh_workfn),
+	.work = __DELAYED_WORK_INITIALIZER(peios_pnp_refresh.work,
+					   peios_pnp_refresh_workfn, 0),
 };
 
 static void peios_pnp_refresh_workfn(struct work_struct *work)
@@ -551,5 +622,9 @@ void peios_pnp_rules_registry_changed(u32 source_id, const u8 rules_guid[16])
 	memcpy(peios_pnp_refresh.guid, rules_guid, 16);
 	peios_pnp_refresh.pending = true;
 	spin_unlock(&peios_pnp_refresh.lock);
-	schedule_work(&peios_pnp_refresh.work);
+	/* mod_delayed_work restarts the window: a burst of changes yields
+	 * one re-walk, after the burst goes quiet.
+	 */
+	mod_delayed_work(system_wq, &peios_pnp_refresh.work,
+			 msecs_to_jiffies(PEIOS_PNP_REFRESH_DEBOUNCE_MS));
 }

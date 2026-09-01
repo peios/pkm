@@ -20,7 +20,12 @@
 #include <linux/skbuff.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
+#include <net/netfilter/nf_conntrack.h>
+#include <net/netfilter/nf_conntrack_zones.h>
 
+#include <pkm/kmes.h>
+
+#include "../../security/pkm/kmes/kmes.h"
 #include "pnp.h"
 
 static struct net_device *pnp_test_dev(struct kunit *test, const char *name,
@@ -268,7 +273,7 @@ static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
 					       &forest),
 			0);
 	KUNIT_ASSERT_NOT_NULL(test, forest);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL), 0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, 1), 0);
 	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen_before + 1);
 
 	/* SSH passes through the exception... */
@@ -306,7 +311,7 @@ static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
 			-ENOENT);
 
 	/* Restore permissiveness for whatever runs after this suite. */
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL), 0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, 1), 0);
 }
 
 /*
@@ -344,6 +349,284 @@ static void pnp_kunit_event_stream(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, status.generation, pnp_rust_generation());
 }
 
+
+/*
+ * The machinery slice: REJECT kinds cross the bridge, the flow tag store
+ * on a real conntrack entry (set/add/clear/lookup, the per-flow tripwire,
+ * the destructor), the counter store (materialized views, keyed cells,
+ * windows, the absent-key law, re-publication), and REPORT landing in
+ * KMES as a network-report event.
+ */
+static void pnp_kunit_reject_kinds_cross_the_bridge(struct kunit *test)
+{
+	struct peios_pnp_snapshot snap = {
+		.seat = PEIOS_PNP_SEAT_LOCAL_IN,
+		.direction = PEIOS_PNP_DIR_IN,
+		.addr_family = 4,
+		.protocol = 6,
+		.length = 60,
+	};
+	struct peios_pnp_outcome out;
+	void *b, *forest = NULL;
+
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "no", 2), 0);
+	pnp_test_actions(test, b, "REJECT(Prohibited)");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+					       &forest),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_evaluate(forest, &snap, PEIOS_PNP_LAYER_PACKET,
+					  1, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_REJECT);
+	KUNIT_EXPECT_EQ(test, out.reject_kind, PEIOS_PNP_REJECT_PROHIBITED);
+	pnp_rust_forest_free(forest);
+
+	/* An unminted kind refuses the forest. */
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "no", 2), 0);
+	pnp_test_actions(test, b, "REJECT(HostUnreachable)");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	forest = NULL;
+	KUNIT_EXPECT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+					       &forest),
+			-EINVAL);
+	KUNIT_EXPECT_NULL(test, forest);
+}
+
+static struct nf_conn *pnp_test_flow(struct kunit *test)
+{
+	struct nf_conntrack_tuple orig = { }, repl = { };
+	struct nf_conn *ct;
+
+	ct = nf_conntrack_alloc(&init_net, &nf_ct_zone_dflt, &orig, &repl,
+				GFP_KERNEL);
+	KUNIT_ASSERT_FALSE(test, IS_ERR_OR_NULL(ct));
+	/* init_conntrack does this for real flows (pnp-conntrack-ext patch);
+	 * a directly allocated entry needs it by hand.
+	 */
+	peios_pnp_ct_ext_add(ct);
+	return ct;
+}
+
+static void pnp_kunit_tag_store(struct kunit *test)
+{
+	struct nf_conn *ct = pnp_test_flow(test);
+	u64 untracked_before = atomic64_read(&peios_pnp_stats.tag_untracked);
+	u64 refused_before = atomic64_read(&peios_pnp_stats.tag_refused);
+	u64 value = 0;
+	u32 i;
+
+	/* Absent until written. */
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 0);
+
+	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_SET, 7);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 1);
+	KUNIT_EXPECT_EQ(test, value, 7ULL);
+
+	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_ADD, 5);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 1);
+	KUNIT_EXPECT_EQ(test, value, 12ULL);
+
+	/* Add on an absent tag starts from zero. */
+	peios_pnp_tag_apply(ct, 0x1002, PEIOS_PNP_TAG_ADD, 3);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1002, &value), 1);
+	KUNIT_EXPECT_EQ(test, value, 3ULL);
+
+	/* Clear reads as absent; the slot is reusable. */
+	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_CLEAR, 0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 0);
+	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_SET, 1);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 1);
+	KUNIT_EXPECT_EQ(test, value, 1ULL);
+
+	/* Growth past the initial table, up to the tripwire, then refusal
+	 * (confessed). Two tags are already present.
+	 */
+	for (i = 0; i < PEIOS_PNP_TAG_MAX_PER_FLOW - 2; i++)
+		peios_pnp_tag_apply(ct, 0x2000 + i, PEIOS_PNP_TAG_SET, i);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x2000, &value), 1);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_tag_lookup(ct, 0x2000 + PEIOS_PNP_TAG_MAX_PER_FLOW - 3,
+					     &value),
+			1);
+	KUNIT_EXPECT_EQ(test, value,
+			(u64)(PEIOS_PNP_TAG_MAX_PER_FLOW - 3));
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.tag_refused),
+			refused_before);
+	peios_pnp_tag_apply(ct, 0x3000, PEIOS_PNP_TAG_SET, 1);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x3000, &value), 0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.tag_refused),
+			refused_before + 1);
+
+	/* Untracked packets have no flow: no-op, confessed. */
+	peios_pnp_tag_apply(NULL, 0x1001, PEIOS_PNP_TAG_SET, 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.tag_untracked),
+			untracked_before + 1);
+	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(NULL, 0x1001, &value), 0);
+
+	/* An unconfirmed entry is born with refcount 0 (confirmation sets
+	 * it to 1), so it is released the way conntrack's own error paths
+	 * do — straight to nf_conntrack_free, which frees the table through
+	 * the destructor hook.
+	 */
+	nf_conntrack_free(ct);
+}
+
+static void pnp_kunit_counter_store(struct kunit *test)
+{
+	struct peios_pnp_view views[2] = {
+		{ .name = "hits", .hash = 0xabc, .window_secs = 10,
+		  .keyspec = PEIOS_PNP_KEY_SRC_ADDR },
+		{ .name = "hits", .hash = 0xabc, .window_secs = 0,
+		  .keyspec = 0 },
+	};
+	struct peios_pnp_snapshot a = {
+		.seat = PEIOS_PNP_SEAT_LOCAL_IN, .addr_family = 4,
+		.src_addr = { 10, 0, 0, 7 }, .dst_addr = { 10, 0, 0, 5 },
+		.ifindex = 7, .length = 60,
+	};
+	struct peios_pnp_snapshot b = a;
+	struct peios_pnp_snapshot arp = {
+		.seat = PEIOS_PNP_SEAT_INGRESS, .ifindex = 7, .length = 42,
+	};
+	u64 absent_before = atomic64_read(&peios_pnp_stats.count_key_absent);
+	u64 cells_before = peios_pnp_counters_cells();
+	u64 v = 0;
+
+	b.src_addr[3] = 8;
+
+	KUNIT_ASSERT_EQ(test, peios_pnp_counters_publish(views, 2), 0);
+
+	/* Nothing counted yet: absent, both views. */
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+					       10, &v),
+			0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xabc, 0, 0, &v), 0);
+
+	peios_pnp_counter_add(&a, 0xabc, 5);
+	peios_pnp_counter_add(&a, 0xabc, 2);
+	peios_pnp_counter_add(&b, 0xabc, 1);
+
+	/* Per-source cells are distinct; the global cell sums everyone. */
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+					       10, &v),
+			1);
+	KUNIT_EXPECT_EQ(test, v, 7ULL);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&b, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+					       10, &v),
+			1);
+	KUNIT_EXPECT_EQ(test, v, 1ULL);
+	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xabc, 0, 0, &v), 1);
+	KUNIT_EXPECT_EQ(test, v, 8ULL);
+	/* A window the table does not answer is absent. */
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+					       99, &v),
+			0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_counters_cells(), cells_before + 3);
+
+	/* A stream nobody materialized: nothing happens. */
+	peios_pnp_counter_add(&a, 0xdef, 1);
+	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xdef, 0, 0, &v), 0);
+
+	/* Absent-fact law: an ARP frame has no SrcAddr for the keyed table
+	 * (confessed), but still lands in the global cell.
+	 */
+	peios_pnp_counter_add(&arp, 0xabc, 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.count_key_absent),
+			absent_before + 1);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&arp, 0xabc,
+					       PEIOS_PNP_KEY_SRC_ADDR, 10, &v),
+			0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&arp, 0xabc, 0, 0, &v),
+			1);
+	KUNIT_EXPECT_EQ(test, v, 9ULL);
+
+	/* Re-publication with a new window migrates cells: totals carry,
+	 * the new window starts empty and converges.
+	 */
+	views[0].window_secs = 60;
+	KUNIT_ASSERT_EQ(test, peios_pnp_counters_publish(views, 2), 0);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+					       10, &v),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+					       60, &v),
+			1);
+	KUNIT_EXPECT_EQ(test, v, 0ULL);
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+					       0, &v),
+			1);
+	KUNIT_EXPECT_EQ(test, v, 7ULL);
+
+	/* No views at all: the store retires its tables. */
+	KUNIT_ASSERT_EQ(test, peios_pnp_counters_publish(NULL, 0), 0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xabc, 0, 0, &v), 0);
+	rcu_barrier();
+	KUNIT_EXPECT_EQ(test, peios_pnp_counters_cells(), cells_before);
+}
+
+static void pnp_kunit_report_lands_in_kmes(struct kunit *test)
+{
+	struct peios_pnp_snapshot snap = {
+		.seat = PEIOS_PNP_SEAT_LOCAL_IN,
+		.direction = PEIOS_PNP_DIR_IN,
+		.addr_family = 4,
+		.protocol = 6,
+		.src_addr = { 192, 0, 2, 9 },
+		.dst_addr = { 10, 0, 0, 5 },
+		.src_port = 4444,
+		.dst_port = 22,
+		.has = PEIOS_PNP_HAS_PORTS,
+		.flow_state = PEIOS_PNP_FLOW_NEW,
+		.length = 60,
+		.ifindex = 7,
+		.ifname = "eth0",
+	};
+	struct pkm_kmes_kunit_snapshot ring;
+	u64 emitted_before = atomic64_read(&peios_pnp_stats.reports_emitted);
+	size_t written = 0;
+	u8 *buf;
+	int ret;
+
+	buf = kunit_kzalloc(test, 4096, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+
+	peios_pnp_report_emit(&snap, "no-inbound/ssh", 14, 4,
+			      PEIOS_PNP_LAYER_PACKET, PEIOS_PNP_VERDICT_REJECT,
+			      PEIOS_PNP_REJECT_PROHIBITED);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.reports_emitted),
+			emitted_before + 1);
+
+	ret = pkm_kmes_kunit_copy_latest_matching_event(
+		KMES_ORIGIN_PNP, "network-report", 14, buf, 4096, &written,
+		&ring);
+	if (ret == -ENODEV || ret == -ENOENT)
+		kunit_skip(test, "KMES ring not available in this run (%d)",
+			   ret);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_GT(test, written, (size_t)0);
+	/* The msgpack payload carries the attribution and the story. */
+	KUNIT_EXPECT_NOT_NULL(test,
+			      strnstr(buf, "no-inbound/ssh", written));
+	KUNIT_EXPECT_NOT_NULL(test, strnstr(buf, "Prohibited", written));
+	KUNIT_EXPECT_NOT_NULL(test, strnstr(buf, "192.0.2.9", written));
+}
+
 static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_rust_probe),
 	KUNIT_CASE(pnp_kunit_dispatch_predicate),
@@ -352,6 +635,10 @@ static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_snapshot_udp6),
 	KUNIT_CASE(pnp_kunit_end_to_end_enforcement),
 	KUNIT_CASE(pnp_kunit_event_stream),
+	KUNIT_CASE(pnp_kunit_reject_kinds_cross_the_bridge),
+	KUNIT_CASE(pnp_kunit_tag_store),
+	KUNIT_CASE(pnp_kunit_counter_store),
+	KUNIT_CASE(pnp_kunit_report_lands_in_kmes),
 	{}
 };
 

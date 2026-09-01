@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use pnp_core::{build_forest, BuildError, Layer, RuleInput, Verdict};
+use pnp_core::{build_forest, BuildError, Layer, RejectKind, RuleInput, Verdict};
 
 fn inbound_drop_with_ssh_exception() -> Vec<Rb> {
     vec![rb("no-inbound")
@@ -164,7 +164,7 @@ fn priority_inherits_down_the_tree() {
         rb("local-pass").actions(&["PASS"]),
     ];
     let ev = judge(roots, &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22));
-    assert_eq!(ev.verdict, Verdict::Reject);
+    assert_eq!(ev.verdict, Verdict::Reject(RejectKind::Refused));
     assert_eq!(ev.attributed_to.as_str(), "org/ssh");
 }
 

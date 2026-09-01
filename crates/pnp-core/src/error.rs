@@ -18,12 +18,13 @@ pub enum BuildError {
     BadOperator { rule: PkmString, key: PkmString },
     /// A match value could not be parsed for its fact's type.
     BadPattern { rule: PkmString, key: PkmString },
+    /// A `Counter.<n>(...)` key does not parse as a view (bad duration,
+    /// unknown key fact, duplicate arguments, window over the horizon).
+    BadCounterView { rule: PkmString, key: PkmString },
     /// The `Actions` value is missing, not a list, or contains a non-string.
     BadActionsValue { rule: PkmString },
     /// One action expression could not be parsed.
     BadAction { rule: PkmString, detail: ActionParseError },
-    /// `REJECT(Kind)` was written with an argument: kinds are unminted.
-    RejectKindUnminted { rule: PkmString },
     /// PROMPT fallbacks nest deeper than the compiled-in chain cap.
     PromptChainTooDeep { rule: PkmString },
     /// `Priority` is present but not an integer.
@@ -32,6 +33,15 @@ pub enum BuildError {
     BadEnabled { rule: PkmString },
     /// A rule name is empty or contains a path separator.
     BadRuleName { rule: PkmString },
+    /// Two distinct tag names hash to the same store identity. Names are
+    /// the author's; refusing the generation keeps the hash a deterministic
+    /// identity within a running policy.
+    TagHashCollision { a: PkmString, b: PkmString },
+    /// Two distinct counter stream names hash alike (same reasoning).
+    StreamHashCollision { a: PkmString, b: PkmString },
+    /// A `Counter.<n>` condition views a stream no rule anywhere writes:
+    /// statically dead (it can only ever read absent), refused loudly.
+    CounterNeverWritten { rule: PkmString, key: PkmString },
 }
 
 impl From<AllocError> for BuildError {
@@ -49,6 +59,8 @@ pub enum ActionParseError {
     BadArity,
     /// An argument has the wrong shape (e.g. non-integer REPORT level).
     BadArgument,
+    /// `REJECT(Kind)` names a kind that is not minted.
+    UnknownRejectKind,
     /// Unbalanced parentheses or trailing garbage.
     Malformed,
 }

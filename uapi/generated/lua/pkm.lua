@@ -722,6 +722,7 @@ M.KMES_METADATA_TOTAL_SIZE = 8192
 M.KMES_ORIGIN_KACS = 2
 M.KMES_ORIGIN_KMES = 1
 M.KMES_ORIGIN_LCS = 3
+M.KMES_ORIGIN_PNP = 4
 M.KMES_ORIGIN_USERSPACE = 0
 M.KMES_PRODUCER_CAPACITY_OFFSET = 16
 M.KMES_PRODUCER_CPU_ID_OFFSET = 12
@@ -848,7 +849,9 @@ M.LCS_TXN_ST_SOURCE_DOWN = 5
 M.LCS_TXN_ST_TIMED_OUT = 4
 M.MAXIMUM_ALLOWED = 33554432
 M.OWNER_SECURITY_INFORMATION = 1
-M.PEIOS_PNP_ABI_VERSION = 1
+M.PEIOS_PNP_ABI_VERSION = 2
+M.PEIOS_PNP_COUNTER_MAX_WINDOWS = 8
+M.PEIOS_PNP_COUNTER_NAME_LEN = 64
 M.PEIOS_PNP_EV_ATTR_LEN = 96
 M.PEIOS_PNP_EV_DIR_IN = 0
 M.PEIOS_PNP_EV_DIR_OUT = 1
@@ -863,15 +866,22 @@ M.PEIOS_PNP_EV_F_FAIL_CLOSED = 2
 M.PEIOS_PNP_EV_F_REJECT_DEGRADED = 4
 M.PEIOS_PNP_EV_LAYER_PACKET = 0
 M.PEIOS_PNP_EV_LAYER_RAWPACKET = 1
+M.PEIOS_PNP_EV_REJECT_PROHIBITED = 1
+M.PEIOS_PNP_EV_REJECT_REFUSED = 0
 M.PEIOS_PNP_EV_SEAT_EGRESS = 2
 M.PEIOS_PNP_EV_SEAT_INGRESS = 1
 M.PEIOS_PNP_EV_SEAT_LOCAL_IN = 3
 M.PEIOS_PNP_EV_VERDICT_DROP = 2
 M.PEIOS_PNP_EV_VERDICT_PASS = 0
 M.PEIOS_PNP_EV_VERDICT_REJECT = 1
-M.PEIOS_PNP_IOC_STATUS = 2162183681
+M.PEIOS_PNP_IOC_COUNTERS = 3222818306
+M.PEIOS_PNP_IOC_COUNTERS_NR = 2
+M.PEIOS_PNP_IOC_STATUS = 2166377985
 M.PEIOS_PNP_IOC_STATUS_NR = 1
 M.PEIOS_PNP_IOC_TYPE = 78
+M.PEIOS_PNP_KEY_DST_ADDR = 2
+M.PEIOS_PNP_KEY_INTERFACE = 4
+M.PEIOS_PNP_KEY_SRC_ADDR = 1
 M.READ_CONTROL = 131072
 M.REG_BACKUP_ARGS_SIZE = 4
 M.REG_BACKUP_BLANKET_TOMBSTONE = 6
@@ -1282,10 +1292,40 @@ M.struct = {
       payload_len = {offset = 24, size = 4, signed = false, kind = "uint"},
     },
   },
+  ["peios_pnp_counter_rec"] = {
+    size = 232,
+    pack = "<I1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI8I1I1xxi4c16c16I8I8I4xxxxI4xxxxxxxxxxxxxxxxxxxxxxxxxxxxI8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"name", "hash", "keyspec", "family", "ifindex", "src_addr", "dst_addr", "total", "last_secs", "n_windows", "window_secs", "window_value"},
+    field = {
+      name = {offset = 0, size = 1, signed = false, kind = "uint"},
+      hash = {offset = 64, size = 8, signed = false, kind = "uint"},
+      keyspec = {offset = 72, size = 1, signed = false, kind = "uint"},
+      family = {offset = 73, size = 1, signed = false, kind = "uint"},
+      ifindex = {offset = 76, size = 4, signed = true, kind = "int"},
+      src_addr = {offset = 80, size = 16, signed = false, kind = "bytes"},
+      dst_addr = {offset = 96, size = 16, signed = false, kind = "bytes"},
+      total = {offset = 112, size = 8, signed = false, kind = "uint"},
+      last_secs = {offset = 120, size = 8, signed = false, kind = "uint"},
+      n_windows = {offset = 128, size = 4, signed = false, kind = "uint"},
+      window_secs = {offset = 136, size = 4, signed = false, kind = "uint"},
+      window_value = {offset = 168, size = 8, signed = false, kind = "uint"},
+    },
+  },
+  ["peios_pnp_counters_query"] = {
+    size = 24,
+    pack = "<I8I4I4I4xxxx",
+    fields = {"buf", "buf_len", "count", "total"},
+    field = {
+      buf = {offset = 0, size = 8, signed = false, kind = "uint"},
+      buf_len = {offset = 8, size = 4, signed = false, kind = "uint"},
+      count = {offset = 12, size = 4, signed = false, kind = "uint"},
+      total = {offset = 16, size = 4, signed = false, kind = "uint"},
+    },
+  },
   ["peios_pnp_event"] = {
     size = 176,
-    pack = "<I8I8I1I1I1I1I1I1I1I1I4I2I2I2xxc16c16I4I4I1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    fields = {"seq", "t_ns", "seat", "layer", "verdict", "flags", "direction", "addr_family", "protocol", "flow_state", "ifindex", "src_port", "dst_port", "ether_type", "src_addr", "dst_addr", "length", "effects", "attributed"},
+    pack = "<I8I8I1I1I1I1I1I1I1I1I4I2I2I2I1xc16c16I4I4I1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"seq", "t_ns", "seat", "layer", "verdict", "flags", "direction", "addr_family", "protocol", "flow_state", "ifindex", "src_port", "dst_port", "ether_type", "reject_kind", "src_addr", "dst_addr", "length", "effects", "attributed"},
     field = {
       seq = {offset = 0, size = 8, signed = false, kind = "uint"},
       t_ns = {offset = 8, size = 8, signed = false, kind = "uint"},
@@ -1301,6 +1341,7 @@ M.struct = {
       src_port = {offset = 28, size = 2, signed = false, kind = "uint"},
       dst_port = {offset = 30, size = 2, signed = false, kind = "uint"},
       ether_type = {offset = 32, size = 2, signed = false, kind = "uint"},
+      reject_kind = {offset = 34, size = 1, signed = false, kind = "uint"},
       src_addr = {offset = 36, size = 16, signed = false, kind = "bytes"},
       dst_addr = {offset = 52, size = 16, signed = false, kind = "bytes"},
       length = {offset = 68, size = 4, signed = false, kind = "uint"},
@@ -1309,9 +1350,9 @@ M.struct = {
     },
   },
   ["peios_pnp_status"] = {
-    size = 224,
-    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns"},
+    size = 288,
+    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns", "tag_writes", "tag_untracked", "tag_refused", "count_writes", "count_key_absent", "count_refused", "reports_emitted", "counter_cells", "reporting_level"},
     field = {
       abi = {offset = 0, size = 8, signed = false, kind = "uint"},
       generation = {offset = 8, size = 8, signed = false, kind = "uint"},
@@ -1336,6 +1377,15 @@ M.struct = {
       fx_prompts = {offset = 160, size = 8, signed = false, kind = "uint"},
       last_ingest_error = {offset = 168, size = 8, signed = false, kind = "uint"},
       last_ingest_t_ns = {offset = 176, size = 8, signed = false, kind = "uint"},
+      tag_writes = {offset = 184, size = 8, signed = false, kind = "uint"},
+      tag_untracked = {offset = 192, size = 8, signed = false, kind = "uint"},
+      tag_refused = {offset = 200, size = 8, signed = false, kind = "uint"},
+      count_writes = {offset = 208, size = 8, signed = false, kind = "uint"},
+      count_key_absent = {offset = 216, size = 8, signed = false, kind = "uint"},
+      count_refused = {offset = 224, size = 8, signed = false, kind = "uint"},
+      reports_emitted = {offset = 232, size = 8, signed = false, kind = "uint"},
+      counter_cells = {offset = 240, size = 8, signed = false, kind = "uint"},
+      reporting_level = {offset = 248, size = 8, signed = false, kind = "uint"},
     },
   },
   ["reg_backup_args"] = {

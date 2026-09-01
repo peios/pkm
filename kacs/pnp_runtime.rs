@@ -3,14 +3,20 @@
 //! PNP kernel bridge: the C ABI between net/pnp's hooks and the staged
 //! `pnp-core` semantic crate.
 //!
-//! Three surfaces:
+//! Four surfaces:
 //! - the policy **builder** (process context): C feeds registry-shaped
 //!   rules in, `build_forest` validates, the finished forest crosses the
-//!   ABI as an opaque pointer that C publishes under RCU;
+//!   ABI as an opaque pointer that C publishes under RCU; the forests'
+//!   counter views are exported so C can materialize the store, and the
+//!   cross-forest checks run before publication;
 //! - **evaluation** (softirq context): C hands a fact snapshot and a
-//!   forest pointer, gets a verdict + effect counts back. All allocation
-//!   is GFP_ATOMIC (see pnp-core's pkm_alloc); allocation failure returns
-//!   -ENOMEM and the glue fails closed;
+//!   forest pointer. The bridge resolves the forest's machinery facts
+//!   against the packet (tags by hash from the flow's table, counter views
+//!   from the store), evaluates, then applies the effects through the C
+//!   stores — after collation, so a COUNT lands after this packet's own
+//!   reads and a REPORT carries the verdict. All allocation is GFP_ATOMIC
+//!   (see pnp-core's pkm_alloc); allocation failure returns -ENOMEM and
+//!   the glue fails closed;
 //! - the **generation** counter: advanced by C at publication; 0 means
 //!   nothing ever ingested (loudly permissive, ratified).
 //!
@@ -21,13 +27,13 @@ use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::pnp_core::eval::{evaluate, Effect, EvalContext};
-use crate::pnp_core::ingest::{build_forest, RuleInput};
+use crate::pnp_core::ingest::{build_forest, check_forests, RuleInput};
 use crate::pnp_core::pkm_alloc::{String as PkmString, Vec as PkmVec};
 use crate::pnp_core::rule::{Forest, Layer};
 use crate::pnp_core::snapshot::{Direction, FlowState, Snapshot, TimeFacts};
 use crate::pnp_core::strutil::str_to_pkm;
 use crate::pnp_core::value::RegValue;
-use crate::pnp_core::Verdict;
+use crate::pnp_core::{RejectKind, Verdict};
 
 const EINVAL: c_int = 22;
 const ENOMEM: c_int = 12;
@@ -100,6 +106,7 @@ pub struct PnpSnapshotC {
     t_hour: u8,
     t_minute: u8,
     t_second: u8,
+    flow: *const c_void,
 }
 
 /// Mirror of `struct peios_pnp_outcome` (pnp.h). Field-for-field.
@@ -109,12 +116,48 @@ pub struct PnpOutcomeC {
     verdict: u8,
     /// 1 when the backstop answered.
     backstop: u8,
+    /// 0 = Refused, 1 = Prohibited (meaningful iff verdict == REJECT).
+    reject_kind: u8,
+    _pad: u8,
     n_tags: u32,
     n_counts: u32,
     n_reports: u32,
     n_prompts: u32,
     /// Winning rule's attribution path, NUL-terminated, truncated.
     attributed: [c_char; 96],
+}
+
+/// Mirror of `struct peios_pnp_view` (pnp.h). Field-for-field.
+#[repr(C)]
+pub struct PnpViewC {
+    name: [c_char; 64],
+    hash: u64,
+    window_secs: u32,
+    keyspec: u8,
+    _pad: [u8; 3],
+}
+
+// The stores, in C (net/pnp/{tags,counters,report}.c).
+extern "C" {
+    fn peios_pnp_tag_lookup(flow: *const c_void, hash: u64, value_out: *mut u64) -> c_int;
+    fn peios_pnp_tag_apply(flow: *const c_void, hash: u64, op: u8, operand: u64);
+    fn peios_pnp_counter_read(
+        snap: *const PnpSnapshotC,
+        hash: u64,
+        keyspec: u8,
+        window_secs: u32,
+        value_out: *mut u64,
+    ) -> c_int;
+    fn peios_pnp_counter_add(snap: *const PnpSnapshotC, hash: u64, amount: u64);
+    fn peios_pnp_report_emit(
+        snap: *const PnpSnapshotC,
+        rule: *const c_char,
+        rule_len: usize,
+        level: u8,
+        layer: u8,
+        verdict: u8,
+        reject_kind: u8,
+    );
 }
 
 fn c_str_slice(buf: &[c_char]) -> &str {
@@ -199,10 +242,37 @@ fn snapshot_from_c(c: &PnpSnapshotC) -> Result<Snapshot, ()> {
             second: c.t_second as i64,
         });
     }
-    // Flow tags and counter cells are machinery facts; their stores are not
-    // wired yet, so those facts are absent (the absent-fact law keeps rules
-    // over them safely unmatched until the machinery lands).
     Ok(snap)
+}
+
+/// Resolves the forest's machinery facts for this packet: every tag name
+/// the forest can read (present on the flow), every counter view (present
+/// in the store for this packet's key). RawPacket forests read no tags —
+/// the ratified visibility law: tags flow upward only, and RawPacket is
+/// the lowest layer — so their snapshots carry none whatever the flow says.
+fn resolve_machinery(
+    forest: &Forest,
+    c: &PnpSnapshotC,
+    snap: &mut Snapshot,
+) -> Result<(), ()> {
+    if forest.layer == Layer::Packet && !c.flow.is_null() {
+        for tag in forest.tag_names.iter() {
+            let mut value = 0u64;
+            if unsafe { peios_pnp_tag_lookup(c.flow, tag.hash, &mut value) } == 1 {
+                snap.tags.push((tag.hash, value)).map_err(|_| ())?;
+            }
+        }
+    }
+    for (i, view) in forest.views.iter().enumerate() {
+        let mut value = 0u64;
+        let found = unsafe {
+            peios_pnp_counter_read(c, view.hash, view.keyspec, view.window_secs, &mut value)
+        };
+        if found == 1 {
+            snap.counter_views.push((i as u32, value)).map_err(|_| ())?;
+        }
+    }
+    Ok(())
 }
 
 // --- the policy builder -------------------------------------------------
@@ -499,15 +569,81 @@ pub extern "C" fn pnp_rust_forest_free(f: *mut c_void) {
     }
 }
 
+#[no_mangle]
+/// The cross-forest checks for a set of forests published together (tag
+/// and stream hash uniqueness across both, every view has a writer).
+/// Either pointer may be NULL. -EINVAL refuses the generation.
+pub extern "C" fn pnp_rust_forests_check(packet: *const c_void, raw: *const c_void) -> c_int {
+    let mut forests: [Option<&Forest>; 2] = [None, None];
+    if !packet.is_null() {
+        forests[0] = Some(unsafe { &*packet.cast::<Forest>() });
+    }
+    if !raw.is_null() {
+        forests[1] = Some(unsafe { &*raw.cast::<Forest>() });
+    }
+    let mut list: PkmVec<&Forest> = PkmVec::new();
+    for f in forests.iter().flatten() {
+        if list.push(*f).is_err() {
+            return -ENOMEM;
+        }
+    }
+    match check_forests(list.as_slice()) {
+        Ok(()) => 0,
+        Err(crate::pnp_core::BuildError::Alloc) => -ENOMEM,
+        Err(_) => -EINVAL,
+    }
+}
+
+#[no_mangle]
+/// Number of counter views the forest materializes (0 for NULL).
+pub extern "C" fn pnp_rust_forest_view_count(f: *const c_void) -> u32 {
+    if f.is_null() {
+        return 0;
+    }
+    let forest = unsafe { &*f.cast::<Forest>() };
+    forest.views.len() as u32
+}
+
+#[no_mangle]
+/// Copies view `index` out; -ENOENT past the end.
+pub extern "C" fn pnp_rust_forest_view(
+    f: *const c_void,
+    index: u32,
+    out: *mut PnpViewC,
+) -> c_int {
+    if f.is_null() || out.is_null() {
+        return -EINVAL;
+    }
+    let forest = unsafe { &*f.cast::<Forest>() };
+    let Some(view) = forest.views.iter().nth(index as usize) else {
+        return -ENOENT;
+    };
+    let out = unsafe { &mut *out };
+    let name = view.name.as_bytes();
+    let n = name.len().min(out.name.len() - 1);
+    for (i, &b) in name[..n].iter().enumerate() {
+        out.name[i] = b as c_char;
+    }
+    out.name[n] = 0;
+    out.hash = view.hash;
+    out.window_secs = view.window_secs;
+    out.keyspec = view.keyspec;
+    out._pad = [0; 3];
+    0
+}
+
 // --- evaluation ---------------------------------------------------------
 
 #[no_mangle]
-/// Judges one snapshot against one forest. Returns 0 with `out` filled,
-/// -EINVAL on bad arguments, -ENOMEM when atomic allocation failed
-/// mid-evaluation (the caller fails closed), -ENOENT for a null forest.
+/// Judges one snapshot against one forest and applies the effects.
+/// Returns 0 with `out` filled, -EINVAL on bad arguments, -ENOMEM when
+/// atomic allocation failed mid-evaluation (the caller fails closed),
+/// -ENOENT for a null forest.
 pub extern "C" fn pnp_rust_evaluate(
     f: *const c_void,
     snap: *const PnpSnapshotC,
+    layer: u8,
+    reporting_level: u8,
     out: *mut PnpOutcomeC,
 ) -> c_int {
     if snap.is_null() || out.is_null() {
@@ -518,31 +654,61 @@ pub extern "C" fn pnp_rust_evaluate(
     }
     let forest = unsafe { &*f.cast::<Forest>() };
     let snap_c = unsafe { &*snap };
-    let Ok(snapshot) = snapshot_from_c(snap_c) else {
+    let Ok(mut snapshot) = snapshot_from_c(snap_c) else {
         return -ENOMEM;
     };
-    let ctx = EvalContext { reporting_level: 0 };
+    if resolve_machinery(forest, snap_c, &mut snapshot).is_err() {
+        return -ENOMEM;
+    }
+    let ctx = EvalContext { reporting_level };
     let evaluation = match evaluate(forest, &snapshot, &ctx) {
         Ok(e) => e,
         Err(_) => return -ENOMEM,
     };
 
-    let out = unsafe { &mut *out };
-    out.verdict = match evaluation.verdict {
-        Verdict::Pass => 0,
-        Verdict::Reject => 1,
-        Verdict::Drop => 2,
+    let (verdict, reject_kind) = match evaluation.verdict {
+        Verdict::Pass => (0u8, 0u8),
+        Verdict::Reject(RejectKind::Refused) => (1, 0),
+        Verdict::Reject(RejectKind::Prohibited) => (1, 1),
+        Verdict::Drop => (2, 0),
     };
+
+    let out = unsafe { &mut *out };
+    out.verdict = verdict;
     out.backstop = evaluation.backstop as u8;
+    out.reject_kind = reject_kind;
+    out._pad = 0;
     out.n_tags = 0;
     out.n_counts = 0;
     out.n_reports = 0;
     out.n_prompts = 0;
+
+    // Effects apply after collation (temporal feedback; the report
+    // carries the verdict). The stores confess their own refusals.
     for effect in evaluation.effects.iter() {
         match effect {
-            Effect::Tag { .. } => out.n_tags += 1,
-            Effect::Count { .. } => out.n_counts += 1,
-            Effect::Report { .. } => out.n_reports += 1,
+            Effect::Tag { hash, op, .. } => {
+                out.n_tags += 1;
+                unsafe { peios_pnp_tag_apply(snap_c.flow, *hash, op.code(), op.operand()) };
+            }
+            Effect::Count { hash, amount, .. } => {
+                out.n_counts += 1;
+                unsafe { peios_pnp_counter_add(snap_c, *hash, *amount) };
+            }
+            Effect::Report { rule, level } => {
+                out.n_reports += 1;
+                unsafe {
+                    peios_pnp_report_emit(
+                        snap_c,
+                        rule.as_bytes().as_ptr().cast::<c_char>(),
+                        rule.as_bytes().len(),
+                        *level,
+                        layer,
+                        verdict,
+                        reject_kind,
+                    )
+                };
+            }
             Effect::PromptIssued { .. } => out.n_prompts += 1,
         }
     }

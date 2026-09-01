@@ -20,6 +20,7 @@
 #define KMES_ORIGIN_KMES	1U
 #define KMES_ORIGIN_KACS	2U
 #define KMES_ORIGIN_LCS		3U
+#define KMES_ORIGIN_PNP		4U	/* net/pnp: network-report */
 
 /*
  * One descriptor in a SYS_KMES_EMIT_BATCH entry array.

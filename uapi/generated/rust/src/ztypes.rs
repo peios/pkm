@@ -3017,7 +3017,8 @@ pub struct peios_pnp_event {
     pub src_port: __u16,
     pub dst_port: __u16,
     pub ether_type: __u16,
-    pub _pad0: __u16,
+    pub reject_kind: __u8,
+    pub _pad0: __u8,
     pub src_addr: [__u8; 16usize],
     pub dst_addr: [__u8; 16usize],
     pub length: __u32,
@@ -3180,8 +3181,18 @@ fn bindgen_test_layout_peios_pnp_event() {
         )
     );
     assert_eq!(
-        unsafe { ::core::ptr::addr_of!((*ptr)._pad0) as usize - ptr as usize },
+        unsafe { ::core::ptr::addr_of!((*ptr).reject_kind) as usize - ptr as usize },
         34usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(reject_kind)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad0) as usize - ptr as usize },
+        35usize,
         concat!(
             "Offset of field: ",
             stringify!(peios_pnp_event),
@@ -3285,7 +3296,16 @@ pub struct peios_pnp_status {
     pub fx_prompts: __u64,
     pub last_ingest_error: __u64,
     pub last_ingest_t_ns: __u64,
-    pub _reserved: [__u64; 5usize],
+    pub tag_writes: __u64,
+    pub tag_untracked: __u64,
+    pub tag_refused: __u64,
+    pub count_writes: __u64,
+    pub count_key_absent: __u64,
+    pub count_refused: __u64,
+    pub reports_emitted: __u64,
+    pub counter_cells: __u64,
+    pub reporting_level: __u64,
+    pub _reserved: [__u64; 4usize],
 }
 #[test]
 fn bindgen_test_layout_peios_pnp_status() {
@@ -3293,7 +3313,7 @@ fn bindgen_test_layout_peios_pnp_status() {
     let ptr = UNINIT.as_ptr();
     assert_eq!(
         ::core::mem::size_of::<peios_pnp_status>(),
-        224usize,
+        288usize,
         concat!("Size of: ", stringify!(peios_pnp_status))
     );
     assert_eq!(
@@ -3532,13 +3552,361 @@ fn bindgen_test_layout_peios_pnp_status() {
         )
     );
     assert_eq!(
-        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        unsafe { ::core::ptr::addr_of!((*ptr).tag_writes) as usize - ptr as usize },
         184usize,
         concat!(
             "Offset of field: ",
             stringify!(peios_pnp_status),
             "::",
+            stringify!(tag_writes)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).tag_untracked) as usize - ptr as usize },
+        192usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(tag_untracked)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).tag_refused) as usize - ptr as usize },
+        200usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(tag_refused)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).count_writes) as usize - ptr as usize },
+        208usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(count_writes)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).count_key_absent) as usize - ptr as usize },
+        216usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(count_key_absent)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).count_refused) as usize - ptr as usize },
+        224usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(count_refused)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).reports_emitted) as usize - ptr as usize },
+        232usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(reports_emitted)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).counter_cells) as usize - ptr as usize },
+        240usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(counter_cells)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).reporting_level) as usize - ptr as usize },
+        248usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(reporting_level)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        256usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
             stringify!(_reserved)
+        )
+    );
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct peios_pnp_counter_rec {
+    pub name: [__u8; 64usize],
+    pub hash: __u64,
+    pub keyspec: __u8,
+    pub family: __u8,
+    pub _pad0: [__u8; 2usize],
+    pub ifindex: __s32,
+    pub src_addr: [__u8; 16usize],
+    pub dst_addr: [__u8; 16usize],
+    pub total: __u64,
+    pub last_secs: __u64,
+    pub n_windows: __u32,
+    pub _pad1: __u32,
+    pub window_secs: [__u32; 8usize],
+    pub window_value: [__u64; 8usize],
+}
+#[test]
+fn bindgen_test_layout_peios_pnp_counter_rec() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_counter_rec> =
+        ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<peios_pnp_counter_rec>(),
+        232usize,
+        concat!("Size of: ", stringify!(peios_pnp_counter_rec))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<peios_pnp_counter_rec>(),
+        8usize,
+        concat!("Alignment of ", stringify!(peios_pnp_counter_rec))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).name) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(name)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).hash) as usize - ptr as usize },
+        64usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(hash)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).keyspec) as usize - ptr as usize },
+        72usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(keyspec)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).family) as usize - ptr as usize },
+        73usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(family)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad0) as usize - ptr as usize },
+        74usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(_pad0)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).ifindex) as usize - ptr as usize },
+        76usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(ifindex)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).src_addr) as usize - ptr as usize },
+        80usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(src_addr)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).dst_addr) as usize - ptr as usize },
+        96usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(dst_addr)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).total) as usize - ptr as usize },
+        112usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(total)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).last_secs) as usize - ptr as usize },
+        120usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(last_secs)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).n_windows) as usize - ptr as usize },
+        128usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(n_windows)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad1) as usize - ptr as usize },
+        132usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(_pad1)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).window_secs) as usize - ptr as usize },
+        136usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(window_secs)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).window_value) as usize - ptr as usize },
+        168usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counter_rec),
+            "::",
+            stringify!(window_value)
+        )
+    );
+}
+impl Default for peios_pnp_counter_rec {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct peios_pnp_counters_query {
+    pub buf: __u64,
+    pub buf_len: __u32,
+    pub count: __u32,
+    pub total: __u32,
+    pub _pad0: __u32,
+}
+#[test]
+fn bindgen_test_layout_peios_pnp_counters_query() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_counters_query> =
+        ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<peios_pnp_counters_query>(),
+        24usize,
+        concat!("Size of: ", stringify!(peios_pnp_counters_query))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<peios_pnp_counters_query>(),
+        8usize,
+        concat!("Alignment of ", stringify!(peios_pnp_counters_query))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).buf) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counters_query),
+            "::",
+            stringify!(buf)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).buf_len) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counters_query),
+            "::",
+            stringify!(buf_len)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).count) as usize - ptr as usize },
+        12usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counters_query),
+            "::",
+            stringify!(count)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).total) as usize - ptr as usize },
+        16usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counters_query),
+            "::",
+            stringify!(total)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad0) as usize - ptr as usize },
+        20usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_counters_query),
+            "::",
+            stringify!(_pad0)
         )
     );
 }

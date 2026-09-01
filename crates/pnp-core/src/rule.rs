@@ -1,8 +1,8 @@
 //! The rule atom and the forest it forms.
 
 use crate::action::{Action, Verdict};
-use crate::condition::Condition;
-use crate::pkm_alloc::{String as PkmString, Vec as PkmVec};
+use crate::condition::{Condition, CounterView};
+use crate::pkm_alloc::{AllocError, String as PkmString, TryClone, Vec as PkmVec};
 use crate::snapshot::Snapshot;
 
 /// Which rules layer a forest belongs to.
@@ -73,11 +73,44 @@ impl Rule {
     }
 }
 
+/// A name the forest mentions, with its store hash.
+#[derive(Debug)]
+pub struct NamedHash {
+    /// The name as written.
+    pub name: PkmString,
+    /// `name_hash(name)`.
+    pub hash: u64,
+}
+
+impl TryClone for NamedHash {
+    fn try_clone(&self) -> Result<Self, AllocError> {
+        Ok(NamedHash {
+            name: self.name.try_clone()?,
+            hash: self.hash,
+        })
+    }
+}
+
 /// A forest of rule trees for one layer. Tree order carries no meaning.
+///
+/// Alongside the trees, the forest carries what its machinery references —
+/// the complete name sets, known at build time because rules are the only
+/// source of them: the tags it reads or writes, the counter streams it
+/// writes, and the counter views it reads (deduplicated; conditions refer
+/// to them by index).
 #[derive(Debug)]
 pub struct Forest {
     /// The layer this forest governs.
     pub layer: Layer,
     /// The tree roots (each policy source ships complete trees).
     pub roots: PkmVec<Rule>,
+    /// Every tag name mentioned (TAG actions and Tag.<n> conditions).
+    pub tag_names: PkmVec<NamedHash>,
+    /// Every counter stream written (COUNT actions).
+    pub streams: PkmVec<NamedHash>,
+    /// Every counter view read (Counter.<n>(...) conditions).
+    pub views: PkmVec<CounterView>,
+    /// First (rule path, value key) mentioning each view, parallel to
+    /// `views` — attribution for the dead-read refusal.
+    pub view_sites: PkmVec<(PkmString, PkmString)>,
 }

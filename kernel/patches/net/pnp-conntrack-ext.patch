@@ -1,0 +1,67 @@
+PNP (PEI-598, machinery slice): the flow tag store's conntrack extension.
+One pointer per flow (struct peios_pnp_ct, include/linux/peios_pnp.h),
+added at flow creation and released when the flow is freed; net/pnp/tags.c
+owns what it points at. Configured out with CONFIG_PEIOS_PNP (the enum slot
+disappears and the hooks are static inline no-ops).
+
+diff --git a/include/net/netfilter/nf_conntrack_extend.h b/include/net/netfilter/nf_conntrack_extend.h
+--- a/include/net/netfilter/nf_conntrack_extend.h
++++ b/include/net/netfilter/nf_conntrack_extend.h
+@@ -31,6 +31,9 @@
+ #if IS_ENABLED(CONFIG_NET_ACT_CT)
+ 	NF_CT_EXT_ACT_CT,
+ #endif
++#if IS_ENABLED(CONFIG_PEIOS_PNP)
++	NF_CT_EXT_PNP,
++#endif
+ 	NF_CT_EXT_NUM,
+ };
+ 
+diff --git a/net/netfilter/nf_conntrack_extend.c b/net/netfilter/nf_conntrack_extend.c
+--- a/net/netfilter/nf_conntrack_extend.c
++++ b/net/netfilter/nf_conntrack_extend.c
+@@ -23,6 +23,7 @@
+ #include <net/netfilter/nf_conntrack_labels.h>
+ #include <net/netfilter/nf_conntrack_synproxy.h>
+ #include <net/netfilter/nf_conntrack_act_ct.h>
++#include <linux/peios_pnp.h>
+ #include <net/netfilter/nf_nat.h>
+ 
+ #define NF_CT_EXT_PREALLOC	128u /* conntrack events are on by default */
+@@ -54,6 +55,9 @@
+ #if IS_ENABLED(CONFIG_NET_ACT_CT)
+ 	[NF_CT_EXT_ACT_CT] = sizeof(struct nf_conn_act_ct_ext),
+ #endif
++#if IS_ENABLED(CONFIG_PEIOS_PNP)
++	[NF_CT_EXT_PNP] = sizeof(struct peios_pnp_ct),
++#endif
+ };
+ 
+ static __always_inline unsigned int total_extension_size(void)
+diff --git a/net/netfilter/nf_conntrack_core.c b/net/netfilter/nf_conntrack_core.c
+--- a/net/netfilter/nf_conntrack_core.c
++++ b/net/netfilter/nf_conntrack_core.c
+@@ -46,6 +46,7 @@
+ #include <net/netfilter/nf_conntrack_timestamp.h>
+ #include <net/netfilter/nf_conntrack_timeout.h>
+ #include <net/netfilter/nf_conntrack_labels.h>
++#include <linux/peios_pnp.h>
+ #include <net/netfilter/nf_conntrack_synproxy.h>
+ #include <net/netfilter/nf_nat.h>
+ #include <net/netfilter/nf_nat_helper.h>
+@@ -1743,6 +1744,7 @@
+ 		rcu_read_unlock();
+ 	}
+ 
++	peios_pnp_ct_destroy(ct);
+ 	kfree(ct->ext);
+ 	kmem_cache_free(nf_conntrack_cachep, ct);
+ 	cnet = nf_ct_pernet(net);
+@@ -1796,6 +1798,7 @@
+ 	nf_ct_acct_ext_add(ct, GFP_ATOMIC);
+ 	nf_ct_tstamp_ext_add(ct, GFP_ATOMIC);
+ 	nf_ct_labels_ext_add(ct);
++	peios_pnp_ct_ext_add(ct);
+ 
+ #ifdef CONFIG_NF_CONNTRACK_EVENTS
+ 	ecache = tmpl ? nf_ct_ecache_find(tmpl) : NULL;

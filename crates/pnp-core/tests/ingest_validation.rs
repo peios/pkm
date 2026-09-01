@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use pnp_core::{build_forest, BuildError, Layer, RegValue, Verdict};
+use pnp_core::{build_forest, BuildError, Layer, RegValue, RejectKind, Verdict};
 
 fn build_err(rule: Rb) -> BuildError {
     build_forest(Layer::Packet, &[rule.0]).expect_err("build should fail")
@@ -55,10 +55,53 @@ fn bad_patterns_are_rejected_with_the_offending_key() {
 }
 
 #[test]
-fn reject_kind_is_unminted_and_says_so() {
+fn reject_kinds_are_exactly_the_minted_two() {
+    match build_err(rb("r").actions(&["REJECT(icmp-admin-prohibited)"])) {
+        BuildError::BadAction { detail, .. } => {
+            assert_eq!(detail, pnp_core::ActionParseError::UnknownRejectKind)
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    let (forest, _) = common::build(
+        Layer::Packet,
+        vec![
+            rb("a").actions(&["REJECT"]),
+            rb("b").actions(&["REJECT(Refused)"]),
+            rb("c").actions(&["REJECT(Prohibited)"]),
+        ],
+    );
+    let kinds: Vec<_> = forest
+        .roots
+        .iter()
+        .map(|r| r.direct_verdict().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            Verdict::Reject(RejectKind::Refused),
+            Verdict::Reject(RejectKind::Refused),
+            Verdict::Reject(RejectKind::Prohibited),
+        ]
+    );
+}
+
+#[test]
+fn counter_view_keys_are_validated_with_the_offending_key() {
+    match build_err(rb("r").int("Counter.x(2d).GreaterThan", 1).actions(&["PASS"])) {
+        BuildError::BadCounterView { rule, key } => {
+            assert_eq!(rule.as_str(), "r");
+            assert_eq!(key.as_str(), "Counter.x(2d).GreaterThan");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
     assert!(matches!(
-        build_err(rb("r").actions(&["REJECT(icmp-admin-prohibited)"])),
-        BuildError::RejectKindUnminted { .. }
+        build_err(rb("r").int("Counter.x(Ttl).Equal", 1).actions(&["PASS"])),
+        BuildError::BadCounterView { .. }
+    ));
+    // Views compare as integers: address operators are refused.
+    assert!(matches!(
+        build_err(rb("r").s("Counter.x.Has", "SYN").actions(&["PASS"])),
+        BuildError::BadOperator { .. }
     ));
 }
 
@@ -137,7 +180,7 @@ fn v6_prefixes_never_match_v4_addresses_and_vice_versa() {
     assert_eq!(ev.attributed_to.as_str(), "v6-lan");
 
     let ev = judge(roots(), &tcp_in("10.0.0.9", 5555, "10.0.0.5", 22));
-    assert_eq!(ev.verdict, Verdict::Reject);
+    assert_eq!(ev.verdict, Verdict::Reject(RejectKind::Refused));
 }
 
 #[test]

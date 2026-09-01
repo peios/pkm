@@ -60,6 +60,8 @@ static void snapshot_flow_state(const struct sk_buff *skb, u8 seat,
 		return;
 
 	ct = nf_ct_get(skb, &ctinfo);
+	if (ct && !nf_ct_is_template(ct))
+		snap->flow = ct;	/* the tag store's scope */
 	if (!ct) {
 		/*
 		 * Conntrack ran and left nothing: untracked. (A packet

@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use pnp_core::Verdict;
+use pnp_core::{RejectKind, Verdict};
 
 #[test]
 fn empty_forest_fails_closed_to_the_backstop() {
@@ -24,7 +24,7 @@ fn strictest_wins_at_equal_priority() {
         vec![rb("a").actions(&["PASS"]), rb("b").actions(&["REJECT"])],
         &snap,
     );
-    assert_eq!(ev.verdict, Verdict::Reject);
+    assert_eq!(ev.verdict, Verdict::Reject(RejectKind::Refused));
     assert_eq!(ev.attributed_to.as_str(), "b");
 
     let ev = judge(

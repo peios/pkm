@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use pnp_core::{evaluate, EvalContext, Layer, Verdict};
+use pnp_core::{evaluate, EvalContext, Layer, RejectKind, Verdict};
 
 #[test]
 fn side_effects_union_across_overlapping_rules() {
@@ -103,6 +103,6 @@ fn nested_prompt_fallbacks_resolve_through_the_chain() {
         &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22),
     );
     // Both prompts issued (observability), final fallback verdict applies.
-    assert_eq!(ev.verdict, Verdict::Reject);
+    assert_eq!(ev.verdict, Verdict::Reject(RejectKind::Refused));
     assert_eq!(prompts(&ev).len(), 2);
 }

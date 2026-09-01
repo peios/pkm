@@ -3,17 +3,29 @@
 //! The glue lowers each rule key under
 //! `Machine\System\Network\Rules\<Layer>\...` into a [`RuleInput`] tree and
 //! hands it here. Ingestion parses, validates, resolves priority
-//! inheritance, and lints for layer-impossible facts. A forest that builds
-//! is semantically total; a forest that doesn't is rejected whole (atomic
-//! generations: the old policy stays until a new one builds).
+//! inheritance, lints for layer-impossible facts, and collects the
+//! machinery name sets (tags, counter streams, counter views) — rules are
+//! the only source of those names, so the whole set is known here and can
+//! be checked. A forest that builds is semantically total; a forest that
+//! doesn't is rejected whole (atomic generations: the old policy stays
+//! until a new one builds).
+//!
+//! Two checks span the name sets:
+//! - hash collisions among distinct tag (or stream) names are refused, so
+//!   the store hash is a deterministic identity within a running policy;
+//! - a counter view over a stream no rule writes is statically dead (it
+//!   can only ever read absent) and is refused. Streams are machine-scoped,
+//!   so the writer may live in another layer's forest: [`check_forests`]
+//!   runs that check across every forest being published together.
 
 use crate::action::{parse_action, Action, ParseFailure};
 use crate::condition::{
-    AddrPattern, CondKey, CondOp, Condition, FactFamily, FactId, IntPattern,
+    AddrPattern, CondKey, CondOp, Condition, CounterView, FactFamily, FactId, IntPattern,
 };
-use crate::error::{ActionParseError, BuildError, LintKind, LintWarning};
-use crate::pkm_alloc::{String as PkmString, Vec as PkmVec};
-use crate::rule::{Forest, Layer, Rule};
+use crate::error::{BuildError, LintKind, LintWarning};
+use crate::hash::name_hash;
+use crate::pkm_alloc::{String as PkmString, TryClone, Vec as PkmVec};
+use crate::rule::{Forest, Layer, NamedHash, Rule};
 use crate::snapshot::tcp_flags;
 use crate::strutil::{join_path, str_to_pkm};
 use crate::value::RegValue;
@@ -39,21 +51,151 @@ pub struct BuildOutput {
     pub lints: PkmVec<LintWarning>,
 }
 
+/// What the walk collects across the whole forest.
+struct Collector {
+    tag_names: PkmVec<NamedHash>,
+    streams: PkmVec<NamedHash>,
+    views: PkmVec<CounterView>,
+    /// First (rule path, value key) mentioning each view, parallel to
+    /// `views` — attribution for the dead-read refusal.
+    view_sites: PkmVec<(PkmString, PkmString)>,
+}
+
+impl Collector {
+    fn note_name(list: &mut PkmVec<NamedHash>, name: &str) -> Result<(), BuildError> {
+        if list.iter().any(|n| n.name.as_str() == name) {
+            return Ok(());
+        }
+        list.push(NamedHash {
+            name: str_to_pkm(name)?,
+            hash: name_hash(name),
+        })?;
+        Ok(())
+    }
+
+    fn note_tag(&mut self, name: &str) -> Result<(), BuildError> {
+        Self::note_name(&mut self.tag_names, name)
+    }
+
+    fn note_stream(&mut self, name: &str) -> Result<(), BuildError> {
+        Self::note_name(&mut self.streams, name)
+    }
+
+    fn note_view(
+        &mut self,
+        view: CounterView,
+        rule: &PkmString,
+        key: &str,
+    ) -> Result<u32, BuildError> {
+        if let Some(i) = self.views.iter().position(|v| *v == view) {
+            return Ok(i as u32);
+        }
+        self.views.push(view)?;
+        self.view_sites
+            .push((rule.try_clone_err()?, str_to_pkm(key)?))?;
+        Ok((self.views.len() - 1) as u32)
+    }
+
+    /// Records the names an action list mentions (PROMPT fallbacks
+    /// included: a fallback TAG is still a TAG).
+    fn note_actions(&mut self, actions: &[Action]) -> Result<(), BuildError> {
+        for action in actions {
+            match action {
+                Action::Tag { name, .. } => self.note_tag(name.as_str())?,
+                Action::Count { name, .. } => self.note_stream(name.as_str())?,
+                Action::Prompt { fallback, .. } => {
+                    if let Some(inner) = fallback.action() {
+                        self.note_actions(core::slice::from_ref(inner))?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Builds a layer's forest from registry-shaped input.
 pub fn build_forest(layer: Layer, roots: &[RuleInput]) -> Result<BuildOutput, BuildError> {
     let mut out_roots = PkmVec::new();
     let mut lints = PkmVec::new();
+    let mut collector = Collector {
+        tag_names: PkmVec::new(),
+        streams: PkmVec::new(),
+        views: PkmVec::new(),
+        view_sites: PkmVec::new(),
+    };
     for input in roots {
-        let rule = build_rule(layer, input, "", 0, &mut lints)?;
+        let rule = build_rule(layer, input, "", 0, &mut lints, &mut collector)?;
         out_roots.push(rule)?;
     }
+    check_collisions(&collector.tag_names, true)?;
+    check_collisions(&collector.streams, false)?;
     Ok(BuildOutput {
         forest: Forest {
             layer,
             roots: out_roots,
+            tag_names: collector.tag_names,
+            streams: collector.streams,
+            views: collector.views,
+            view_sites: collector.view_sites,
         },
         lints,
     })
+}
+
+/// Cross-forest checks for a set of forests published together: tag and
+/// stream hashes must be distinct across all of them (the stores are
+/// machine-wide), and every counter view must have a writer somewhere.
+pub fn check_forests(forests: &[&Forest]) -> Result<(), BuildError> {
+    let mut all_tags: PkmVec<NamedHash> = PkmVec::new();
+    let mut all_streams: PkmVec<NamedHash> = PkmVec::new();
+    for forest in forests {
+        for t in forest.tag_names.iter() {
+            if !all_tags.iter().any(|n| n.name.as_str() == t.name.as_str()) {
+                all_tags.push(t.try_clone()?)?;
+            }
+        }
+        for s in forest.streams.iter() {
+            if !all_streams
+                .iter()
+                .any(|n| n.name.as_str() == s.name.as_str())
+            {
+                all_streams.push(s.try_clone()?)?;
+            }
+        }
+    }
+    check_collisions(&all_tags, true)?;
+    check_collisions(&all_streams, false)?;
+    for forest in forests {
+        for (i, view) in forest.views.iter().enumerate() {
+            if !all_streams.iter().any(|s| s.hash == view.hash) {
+                let (rule, key) = &forest.view_sites[i];
+                return Err(BuildError::CounterNeverWritten {
+                    rule: rule.try_clone_err()?,
+                    key: key.try_clone_err()?,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_collisions(names: &[NamedHash], tags: bool) -> Result<(), BuildError> {
+    for (i, a) in names.iter().enumerate() {
+        for b in names[i + 1..].iter() {
+            if a.hash == b.hash && a.name.as_str() != b.name.as_str() {
+                let a = a.name.try_clone_err()?;
+                let b = b.name.try_clone_err()?;
+                return Err(if tags {
+                    BuildError::TagHashCollision { a, b }
+                } else {
+                    BuildError::StreamHashCollision { a, b }
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_rule(
@@ -62,6 +204,7 @@ fn build_rule(
     parent_path: &str,
     parent_priority: i64,
     lints: &mut PkmVec<LintWarning>,
+    collector: &mut Collector,
 ) -> Result<Rule, BuildError> {
     let name = input.name.as_str();
     if name.is_empty() || name.contains('/') || name.contains('\\') {
@@ -75,7 +218,6 @@ fn build_rule(
     let mut priority = parent_priority;
     let mut enabled = true;
     let mut actions = PkmVec::new();
-    let mut saw_actions = false;
 
     for (key, value) in input.values.iter() {
         match key.as_str() {
@@ -94,7 +236,6 @@ fn build_rule(
                 }
             },
             "Actions" => {
-                saw_actions = true;
                 let list = match value {
                     RegValue::List(items) => items,
                     _ => {
@@ -111,20 +252,27 @@ fn build_rule(
                 }
             }
             _ => {
-                let condition = parse_condition(key.as_str(), value, &path)?;
+                let condition = parse_condition(key.as_str(), value, &path, collector)?;
                 lint_condition(layer, &condition, &path, key.as_str(), lints)?;
                 conditions.push(condition)?;
             }
         }
     }
+    collector.note_actions(actions.as_slice())?;
 
     // A rule key with no Actions value is legal and means NULL (abstain):
     // authors nest pure-grouping rules. An empty Actions list means the same.
-    let _ = saw_actions;
 
     let mut children = PkmVec::new();
     for child in input.children.iter() {
-        children.push(build_rule(layer, child, path.as_str(), priority, lints)?)?;
+        children.push(build_rule(
+            layer,
+            child,
+            path.as_str(),
+            priority,
+            lints,
+            collector,
+        )?)?;
     }
 
     Ok(Rule {
@@ -141,33 +289,10 @@ fn parse_action_for_rule(expr: &str, path: &PkmString) -> Result<Action, BuildEr
     match parse_action(expr) {
         Ok(action) => Ok(action),
         Err(ParseFailure::Alloc) => Err(BuildError::Alloc),
-        Err(ParseFailure::Parse(detail)) => {
-            // REJECT with arguments gets its own error so authors learn the
-            // Kind slot exists but is unminted.
-            let compact_is_reject = {
-                let mut it = expr.chars().filter(|c| !c.is_ascii_whitespace());
-                let head: [Option<char>; 7] = core::array::from_fn(|_| it.next());
-                matches!(
-                    head,
-                    [Some(r), Some(e), Some(j), Some(e2), Some(c), Some(t), Some('(')]
-                        if r.eq_ignore_ascii_case(&'r')
-                            && e.eq_ignore_ascii_case(&'e')
-                            && j.eq_ignore_ascii_case(&'j')
-                            && e2.eq_ignore_ascii_case(&'e')
-                            && c.eq_ignore_ascii_case(&'c')
-                            && t.eq_ignore_ascii_case(&'t')
-                )
-            };
-            if compact_is_reject && detail == ActionParseError::BadArity {
-                return Err(BuildError::RejectKindUnminted {
-                    rule: path.try_clone_err()?,
-                });
-            }
-            Err(BuildError::BadAction {
-                rule: path.try_clone_err()?,
-                detail,
-            })
-        }
+        Err(ParseFailure::Parse(detail)) => Err(BuildError::BadAction {
+            rule: path.try_clone_err()?,
+            detail,
+        }),
     }
 }
 
@@ -175,6 +300,7 @@ fn parse_condition(
     key: &str,
     value: &RegValue,
     path: &PkmString,
+    collector: &mut Collector,
 ) -> Result<Condition, BuildError> {
     let (prefix, op_name) = match key.rfind('.') {
         Some(i) => (&key[..i], &key[i + 1..]),
@@ -193,15 +319,17 @@ fn parse_condition(
                 key: str_to_pkm(key)?,
             });
         }
-        CondKey::Tag(str_to_pkm(tag)?)
-    } else if let Some(counter) = prefix.strip_prefix("Counter.") {
-        if counter.is_empty() {
-            return Err(BuildError::UnknownFact {
-                rule: path.try_clone_err()?,
-                key: str_to_pkm(key)?,
-            });
+        collector.note_tag(tag)?;
+        CondKey::Tag {
+            name: str_to_pkm(tag)?,
+            hash: name_hash(tag),
         }
-        CondKey::Counter(str_to_pkm(counter)?)
+    } else if let Some(spec) = prefix.strip_prefix("Counter.") {
+        let view = CounterView::parse(spec).map_err(|_| BuildError::BadCounterView {
+            rule: path.try_clone_err().unwrap_or_default(),
+            key: str_to_pkm(key).unwrap_or_default(),
+        })?;
+        CondKey::Counter(collector.note_view(view, path, key)?)
     } else {
         match FactId::from_key(prefix) {
             Some(fact) => CondKey::Fact(fact),
@@ -216,7 +344,7 @@ fn parse_condition(
 
     let family = match &cond_key {
         CondKey::Fact(fact) => fact.family(),
-        CondKey::Tag(_) | CondKey::Counter(_) => FactFamily::Int,
+        CondKey::Tag { .. } | CondKey::Counter(_) => FactFamily::Int,
     };
     let fact_for_names = match &cond_key {
         CondKey::Fact(fact) => Some(*fact),
@@ -469,7 +597,7 @@ fn lint_condition(
         // other layer's state in either direction (ratified visibility law).
         Layer::RawPacket => matches!(
             condition.key,
-            CondKey::Fact(FactId::FlowState) | CondKey::Tag(_)
+            CondKey::Fact(FactId::FlowState) | CondKey::Tag { .. }
         ),
     };
     if never {

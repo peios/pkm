@@ -17,11 +17,13 @@
  * until the first generation ingests, that is every layer, loudly
  * (generation 0, ratified).
  *
- * REJECT is protocol-phrased by the kept nf_reject machinery: RST for
- * TCP, ICMP/ICMPv6 port-unreachable otherwise. Seats that cannot emit a
- * response (the device seats, for now — the outbound-from-egress and
- * non-IP cases from the design's care list) degrade REJECT to DROP and
- * count the degradation.
+ * REJECT is protocol-phrased by the kept nf_reject machinery, telling
+ * the story its kind names (ratified): Refused = RST for TCP, ICMP/ICMPv6
+ * port-unreachable otherwise ("nothing is listening"); Prohibited = ICMP
+ * admin-prohibited for every protocol ("policy refused you"). Seats that
+ * cannot emit a response (the device seats, for now — the
+ * outbound-from-egress and non-IP cases from the design's care list)
+ * degrade REJECT to DROP and count the degradation.
  *
  * Evaluation failure (atomic allocation exhausted mid-walk) fails
  * closed: the packet drops and the failure is counted. Totality does not
@@ -59,22 +61,30 @@ bool peios_pnp_traversal_reaches_ip_seat(__be16 protocol,
 	return true;
 }
 
-/* Emit the protocol-phrased refusal, where the seat allows one. */
+/* Emit the refusal the kind names, where the seat allows one. */
 static unsigned int apply_reject(struct sk_buff *skb,
 				 const struct nf_hook_state *state,
-				 const struct peios_pnp_snapshot *snap)
+				 const struct peios_pnp_snapshot *snap,
+				 u8 kind)
 {
+	bool prohibited = kind == PEIOS_PNP_REJECT_PROHIBITED;
+
 	if (snap->seat != PEIOS_PNP_SEAT_LOCAL_IN) {
 		atomic64_inc(&peios_pnp_stats.reject_degraded);
 		return NF_DROP;
 	}
 	if (snap->addr_family == 4) {
-		if (snap->protocol == IPPROTO_TCP)
+		if (prohibited)
+			nf_send_unreach(skb, ICMP_PKT_FILTERED, state->hook);
+		else if (snap->protocol == IPPROTO_TCP)
 			nf_send_reset(state->net, state->sk, skb, state->hook);
 		else
 			nf_send_unreach(skb, ICMP_PORT_UNREACH, state->hook);
 	} else if (snap->addr_family == 6) {
-		if (snap->protocol == IPPROTO_TCP)
+		if (prohibited)
+			nf_send_unreach6(state->net, skb, ICMPV6_ADM_PROHIBITED,
+					 state->hook);
+		else if (snap->protocol == IPPROTO_TCP)
 			nf_send_reset6(state->net, state->sk, skb,
 				       state->hook);
 		else
@@ -138,7 +148,7 @@ static unsigned int judge(struct sk_buff *skb, const struct net_device *dev,
 			continue;
 		case PEIOS_PNP_VERDICT_REJECT:
 			atomic64_inc(&peios_pnp_stats.verdict_reject);
-			return apply_reject(skb, state, &snap);
+			return apply_reject(skb, state, &snap, out.reject_kind);
 		case PEIOS_PNP_VERDICT_DROP:
 		default:
 			atomic64_inc(&peios_pnp_stats.verdict_drop);

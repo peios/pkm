@@ -26,7 +26,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PEIOS_PNP_ABI_VERSION		1U
+#define PEIOS_PNP_ABI_VERSION		2U
 
 /* Which standing seat judged the traversal. */
 #define PEIOS_PNP_EV_SEAT_INGRESS	1U
@@ -41,6 +41,10 @@
 #define PEIOS_PNP_EV_VERDICT_PASS	0U
 #define PEIOS_PNP_EV_VERDICT_REJECT	1U
 #define PEIOS_PNP_EV_VERDICT_DROP	2U
+
+/* The story a REJECT told (meaningful iff verdict == REJECT). */
+#define PEIOS_PNP_EV_REJECT_REFUSED	0U	/* RST / port-unreachable */
+#define PEIOS_PNP_EV_REJECT_PROHIBITED	1U	/* admin-prohibited */
 
 /* Traversal direction. */
 #define PEIOS_PNP_EV_DIR_IN		0U
@@ -83,7 +87,8 @@ struct peios_pnp_event {
 	__u16 src_port;		/* host order; 0 when the fact was absent */
 	__u16 dst_port;
 	__u16 ether_type;	/* host order */
-	__u16 _pad0;
+	__u8 reject_kind;	/* PEIOS_PNP_EV_REJECT_* */
+	__u8 _pad0;
 	__u8 src_addr[16];
 	__u8 dst_addr[16];
 	__u32 length;		/* stack view */
@@ -122,12 +127,70 @@ struct peios_pnp_status {
 	 */
 	__u64 last_ingest_error;
 	__u64 last_ingest_t_ns;
-	__u64 _reserved[5];
+	/* The machinery stores' confessions (ABI 2). */
+	__u64 tag_writes;	/* tag ops applied to a flow */
+	__u64 tag_untracked;	/* TAG on a packet with no flow: no-op */
+	__u64 tag_refused;	/* per-flow tripwire hit / atomic alloc failed */
+	__u64 count_writes;	/* stream emissions applied */
+	__u64 count_key_absent;	/* packet lacked a view's key fact: no-op */
+	__u64 count_refused;	/* table at its key cap / alloc failed */
+	__u64 reports_emitted;	/* KMES network-report events */
+	__u64 counter_cells;	/* live counter cells across all tables */
+	__u64 reporting_level;	/* the active CurrentReportingLevel */
+	__u64 _reserved[4];
+};
+
+/*
+ * One counter cell, as the counters dump reports it: the stream and
+ * key-spec of its table, the key it holds (only the facts the key-spec
+ * names are meaningful; the rest are zero), the cumulative total, and the
+ * value of every window the table answers.
+ */
+#define PEIOS_PNP_COUNTER_NAME_LEN	64U
+#define PEIOS_PNP_COUNTER_MAX_WINDOWS	8U
+
+/* Key-spec bits. */
+#define PEIOS_PNP_KEY_SRC_ADDR		0x01U
+#define PEIOS_PNP_KEY_DST_ADDR		0x02U
+#define PEIOS_PNP_KEY_INTERFACE		0x04U
+
+struct peios_pnp_counter_rec {
+	__u8 name[PEIOS_PNP_COUNTER_NAME_LEN];	/* stream, NUL-terminated */
+	__u64 hash;
+	__u8 keyspec;		/* PEIOS_PNP_KEY_* bits */
+	__u8 family;		/* 4 / 6 / 0 */
+	__u8 _pad0[2];
+	__s32 ifindex;
+	__u8 src_addr[16];
+	__u8 dst_addr[16];
+	__u64 total;
+	__u64 last_secs;	/* CLOCK_REALTIME seconds of the last write */
+	__u32 n_windows;
+	__u32 _pad1;
+	__u32 window_secs[PEIOS_PNP_COUNTER_MAX_WINDOWS];
+	__u64 window_value[PEIOS_PNP_COUNTER_MAX_WINDOWS];
+};
+
+/*
+ * The counters dump: fills `buf` with as many records as fit; `count` is
+ * how many were written, `total` how many cells exist (so a short buffer
+ * is visible).
+ */
+struct peios_pnp_counters_query {
+	__u64 buf;		/* struct peios_pnp_counter_rec __user * */
+	__u32 buf_len;		/* bytes */
+	__u32 count;		/* out */
+	__u32 total;		/* out */
+	__u32 _pad0;
 };
 
 #define PEIOS_PNP_IOC_TYPE		'N'
 #define PEIOS_PNP_IOC_STATUS_NR		1U
 #define PEIOS_PNP_IOC_STATUS \
 	_IOR(PEIOS_PNP_IOC_TYPE, PEIOS_PNP_IOC_STATUS_NR, struct peios_pnp_status)
+#define PEIOS_PNP_IOC_COUNTERS_NR	2U
+#define PEIOS_PNP_IOC_COUNTERS \
+	_IOWR(PEIOS_PNP_IOC_TYPE, PEIOS_PNP_IOC_COUNTERS_NR, \
+	      struct peios_pnp_counters_query)
 
 #endif /* _UAPI_PKM_PNP_H */

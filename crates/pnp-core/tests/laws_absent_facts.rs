@@ -68,13 +68,14 @@ fn tag_and_counter_conditions_read_the_snapshot() {
     };
 
     let mut snap = tcp_in("10.0.0.7", 5555, "10.0.0.5", 22);
-    snap.tags.push(("lan-trusted".into(), 1)).unwrap();
+    snap.set_tag("lan-trusted", 1).unwrap();
     let ev = judge(roots(), &snap);
     assert_eq!(ev.verdict, Verdict::Pass);
     assert_eq!(ev.attributed_to.as_str(), "trusted");
 
+    // The only view in the forest is index 0; the glue resolves it.
     let mut snap = tcp_in("192.0.2.1", 5555, "10.0.0.5", 22);
-    snap.counters.push(("synburst".into(), 250)).unwrap();
+    snap.counter_views.push((0, 250)).unwrap();
     let ev = judge(roots(), &snap);
     assert_eq!(ev.verdict, Verdict::Drop);
     assert_eq!(ev.attributed_to.as_str(), "flooded");

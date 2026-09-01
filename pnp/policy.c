@@ -3,19 +3,23 @@
  * Policy publication and lookup.
  *
  * The active policy is an RCU-published pair of opaque Rust forests (one
- * per layer). The split of responsibilities is deliberate: C owns the
- * kernel concurrency primitive (RCU — hook-path readers never block,
- * writers swap whole generations atomically, the I4 property), Rust owns
- * everything the forests mean. Old forests are freed after grace via the
- * pnp_rust_forest_free destructor.
+ * per layer) plus the generation's CurrentReportingLevel. The split of
+ * responsibilities is deliberate: C owns the kernel concurrency primitive
+ * (RCU — hook-path readers never block, writers swap whole generations
+ * atomically, the I4 property), Rust owns everything the forests mean.
+ * Old forests are freed after grace via the pnp_rust_forest_free
+ * destructor.
  *
- * Publication is process-context and serialized by a mutex; the only
- * caller today is the KUnit end-to-end test, with the LCS registry
- * ingestion path to follow as the next slice.
+ * Publication is process-context and serialized by a mutex. Before the
+ * swap, the forests are checked together (tag/stream identities distinct
+ * across both, every counter view has a writer) and the counter store is
+ * materialized for their views — so a refused generation leaves both the
+ * policy and the store as they were.
  */
 
 #include <linux/atomic.h>
 #include <linux/errno.h>
+#include <linux/kernel.h>
 #include <linux/ktime.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
@@ -29,6 +33,7 @@ struct peios_pnp_policy {
 	struct rcu_head rcu;
 	void *forests[2];		/* indexed by enum peios_pnp_layer */
 	u64 generation;
+	u8 reporting_level;
 };
 
 static struct peios_pnp_policy __rcu *peios_pnp_active;
@@ -46,17 +51,59 @@ static void peios_pnp_policy_reclaim(struct rcu_head *head)
 	kfree(policy);
 }
 
-int peios_pnp_policy_publish(void *packet_forest, void *raw_forest)
+/* Collects both forests' views and materializes the counter store. */
+static int peios_pnp_materialize_views(void *packet_forest, void *raw_forest)
+{
+	struct peios_pnp_view *views;
+	void *forests[2] = { packet_forest, raw_forest };
+	u32 total = 0, n = 0, i, j;
+	int ret;
+
+	for (i = 0; i < 2; i++)
+		total += pnp_rust_forest_view_count(forests[i]);
+	views = kcalloc(max_t(u32, total, 1), sizeof(*views), GFP_KERNEL);
+	if (!views)
+		return -ENOMEM;
+	for (i = 0; i < 2; i++) {
+		u32 count = pnp_rust_forest_view_count(forests[i]);
+
+		for (j = 0; j < count && n < total; j++) {
+			ret = pnp_rust_forest_view(forests[i], j, &views[n]);
+			if (ret)
+				goto out;
+			n++;
+		}
+	}
+	ret = peios_pnp_counters_publish(views, n);
+out:
+	kfree(views);
+	return ret;
+}
+
+int peios_pnp_policy_publish(void *packet_forest, void *raw_forest,
+			     u8 reporting_level)
 {
 	struct peios_pnp_policy *fresh, *old;
+	int ret;
+
+	ret = pnp_rust_forests_check(packet_forest, raw_forest);
+	if (ret)
+		return ret;
 
 	fresh = kzalloc(sizeof(*fresh), GFP_KERNEL);
 	if (!fresh)
 		return -ENOMEM;
 	fresh->forests[PEIOS_PNP_LAYER_PACKET] = packet_forest;
 	fresh->forests[PEIOS_PNP_LAYER_RAWPACKET] = raw_forest;
+	fresh->reporting_level = reporting_level;
 
 	mutex_lock(&peios_pnp_publish_lock);
+	ret = peios_pnp_materialize_views(packet_forest, raw_forest);
+	if (ret) {
+		mutex_unlock(&peios_pnp_publish_lock);
+		kfree(fresh);
+		return ret;
+	}
 	fresh->generation = pnp_rust_generation_advance();
 	old = rcu_dereference_protected(
 		peios_pnp_active,
@@ -64,9 +111,9 @@ int peios_pnp_policy_publish(void *packet_forest, void *raw_forest)
 	rcu_assign_pointer(peios_pnp_active, fresh);
 	mutex_unlock(&peios_pnp_publish_lock);
 
-	pr_info("pnp: policy generation %llu active (packet:%s rawpacket:%s)\n",
+	pr_info("pnp: policy generation %llu active (packet:%s rawpacket:%s reporting-level:%u)\n",
 		fresh->generation, packet_forest ? "loaded" : "none",
-		raw_forest ? "loaded" : "none");
+		raw_forest ? "loaded" : "none", reporting_level);
 
 	if (old)
 		call_rcu(&old->rcu, peios_pnp_policy_reclaim);
@@ -78,6 +125,7 @@ int peios_pnp_policy_eval(u8 layer, const struct peios_pnp_snapshot *snap,
 {
 	struct peios_pnp_policy *policy;
 	void *forest;
+	u8 level;
 	int ret;
 
 	if (layer > PEIOS_PNP_LAYER_RAWPACKET)
@@ -90,8 +138,11 @@ int peios_pnp_policy_eval(u8 layer, const struct peios_pnp_snapshot *snap,
 		rcu_read_unlock();
 		return -ENOENT;
 	}
-	/* Bounded, non-sleeping work: pnp-core allocates GFP_ATOMIC. */
-	ret = pnp_rust_evaluate(forest, snap, out);
+	level = policy->reporting_level;
+	/* Bounded, non-sleeping work: pnp-core allocates GFP_ATOMIC, and
+	 * the stores it calls back into are softirq-safe.
+	 */
+	ret = pnp_rust_evaluate(forest, snap, layer, level, out);
 	rcu_read_unlock();
 	return ret;
 }
@@ -108,6 +159,19 @@ bool peios_pnp_policy_enforcing(void)
 		     policy->forests[PEIOS_PNP_LAYER_RAWPACKET]);
 	rcu_read_unlock();
 	return enforcing;
+}
+
+u8 peios_pnp_policy_reporting_level(void)
+{
+	struct peios_pnp_policy *policy;
+	u8 level = 1;
+
+	rcu_read_lock();
+	policy = rcu_dereference(peios_pnp_active);
+	if (policy)
+		level = policy->reporting_level;
+	rcu_read_unlock();
+	return level;
 }
 
 void peios_pnp_policy_note_ingest(long err)
@@ -147,4 +211,15 @@ void peios_pnp_status_fill(struct peios_pnp_status *status)
 		atomic64_read(&peios_pnp_last_ingest_error);
 	status->last_ingest_t_ns =
 		atomic64_read(&peios_pnp_last_ingest_t_ns);
+	status->tag_writes = atomic64_read(&peios_pnp_stats.tag_writes);
+	status->tag_untracked = atomic64_read(&peios_pnp_stats.tag_untracked);
+	status->tag_refused = atomic64_read(&peios_pnp_stats.tag_refused);
+	status->count_writes = atomic64_read(&peios_pnp_stats.count_writes);
+	status->count_key_absent =
+		atomic64_read(&peios_pnp_stats.count_key_absent);
+	status->count_refused = atomic64_read(&peios_pnp_stats.count_refused);
+	status->reports_emitted =
+		atomic64_read(&peios_pnp_stats.reports_emitted);
+	status->counter_cells = peios_pnp_counters_cells();
+	status->reporting_level = peios_pnp_policy_reporting_level();
 }

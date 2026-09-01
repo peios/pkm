@@ -5,7 +5,7 @@
 //! compiles into the kernel (`feature = "kernel"`, staged by
 //! `kernel/stage-rust-core.sh`) and under plain cargo, where the test suite
 //! encodes every ratified law of the design (PEI-598, "PNP Rules — Packet
-//! Layer Design").
+//! Layer Design" and the machinery slice).
 
 #![cfg_attr(not(test), no_std)]
 #![allow(unreachable_pub)]
@@ -21,6 +21,8 @@ pub mod condition;
 pub mod error;
 /// The evaluation algorithm.
 pub mod eval;
+/// Name hashing for the machinery stores.
+pub mod hash;
 /// Registry-shaped input -> validated forest.
 pub mod ingest;
 /// PKM-owned fallible allocation wrappers.
@@ -40,11 +42,17 @@ pub fn kernel_compile_probe() -> usize {
     action::MAX_PROMPT_CHAIN
 }
 
-pub use action::{parse_action, Action, Fallback, TagOp, Verdict, MAX_PROMPT_CHAIN};
-pub use condition::{AddrPattern, CondKey, CondOp, Condition, FactFamily, FactId, IntPattern};
+pub use action::{
+    parse_action, Action, CountAmount, Fallback, RejectKind, TagOp, Verdict, MAX_PROMPT_CHAIN,
+};
+pub use condition::{
+    keyspec, AddrPattern, BadView, CondKey, CondOp, Condition, CounterView, FactFamily, FactId,
+    IntPattern, MAX_WINDOW_SECS,
+};
 pub use error::{ActionParseError, AllocError, BuildError, LintKind, LintWarning};
 pub use eval::{evaluate, Effect, EvalContext, Evaluation, VerdictCandidate};
-pub use ingest::{build_forest, BuildOutput, RuleInput};
-pub use rule::{Forest, Layer, Rule};
+pub use hash::name_hash;
+pub use ingest::{build_forest, check_forests, BuildOutput, RuleInput};
+pub use rule::{Forest, Layer, NamedHash, Rule};
 pub use snapshot::{tcp_flags, Direction, FlowState, Snapshot, TimeFacts};
 pub use value::RegValue;

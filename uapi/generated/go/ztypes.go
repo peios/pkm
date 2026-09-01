@@ -126,6 +126,29 @@ type Kmes_emit_entry struct {
 	Payload_len    uint32
 	_              [4]uint8
 }
+type Peios_pnp_counter_rec struct {
+	Name         [64]uint8
+	Hash         uint64
+	Keyspec      uint8
+	Family       uint8
+	_            [2]uint8
+	Ifindex      int32
+	Src_addr     [16]uint8
+	Dst_addr     [16]uint8
+	Total        uint64
+	Last_secs    uint64
+	N_windows    uint32
+	_            uint32
+	Window_secs  [8]uint32
+	Window_value [8]uint64
+}
+type Peios_pnp_counters_query struct {
+	Buf     uint64
+	Buf_len uint32
+	Count   uint32
+	Total   uint32
+	_       uint32
+}
 type Peios_pnp_event struct {
 	Seq         uint64
 	T_ns        uint64
@@ -141,7 +164,8 @@ type Peios_pnp_event struct {
 	Src_port    uint16
 	Dst_port    uint16
 	Ether_type  uint16
-	_           uint16
+	Reject_kind uint8
+	_           uint8
 	Src_addr    [16]uint8
 	Dst_addr    [16]uint8
 	Length      uint32
@@ -173,7 +197,16 @@ type Peios_pnp_status struct {
 	Fx_prompts        uint64
 	Last_ingest_error uint64
 	Last_ingest_t_ns  uint64
-	_                 [5]uint64
+	Tag_writes        uint64
+	Tag_untracked     uint64
+	Tag_refused       uint64
+	Count_writes      uint64
+	Count_key_absent  uint64
+	Count_refused     uint64
+	Reports_emitted   uint64
+	Counter_cells     uint64
+	Reporting_level   uint64
+	_                 [4]uint64
 }
 type Reg_backup_args struct {
 	Output_fd int32

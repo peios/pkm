@@ -62,3 +62,7 @@ arch/syscall-table-pkm.patch
 # PNP (PEI-598): wires net/pnp/ (staged by stage-sources.sh) into the net
 # build. Touches only net/{Kconfig,Makefile} one-liners; order-independent.
 net/pnp-wireup.patch
+# PNP machinery slice: the flow tag store's conntrack extension (enum slot,
+# size table, add at flow creation, release at free). Touches conntrack
+# files no other patch does; order-independent.
+net/pnp-conntrack-ext.patch

@@ -7,8 +7,13 @@
  * validity bits implementing the absent-fact law (a fact whose bit is clear
  * does not exist for this traversal; conditions over it are false).
  *
- * Not UAPI: the userspace-visible shapes are minted when the verdict
- * stream and authoring surfaces land.
+ * The machinery stores (tags.c, counters.c, report.c) sit behind small C
+ * entry points the Rust bridge calls during evaluation: reads before the
+ * walk (resolving the forest's tag names and counter views against this
+ * packet), writes after collation (so a COUNT lands after this packet's own
+ * reads — temporal feedback — and a REPORT can carry the verdict).
+ *
+ * Not UAPI: the userspace-visible shapes live in <pkm/pnp.h>.
  */
 #ifndef _NET_PNP_PNP_H
 #define _NET_PNP_PNP_H
@@ -19,8 +24,11 @@
 #include <linux/skbuff.h>
 #include <linux/types.h>
 
+#include <pkm/pnp.h>		/* the ABI: key-spec bits, window cap, records */
+
 struct net_device;
 struct nf_hook_state;
+struct nf_conn;
 
 /* Which standing seat judged the traversal (ratified seat geometry). */
 enum peios_pnp_seat {
@@ -62,7 +70,10 @@ enum peios_pnp_flow_state {
 
 /*
  * One traversal's facts at its standing seat. Fixed-size, stack-allocated
- * in the hook path; no pointers into the skb survive the call.
+ * in the hook path; no pointers into the skb survive the call except
+ * `flow`, the conntrack entry the skb holds a reference to (NULL when
+ * untracked or before conntrack), which the tag store scopes writes to.
+ * Mirrors `PnpSnapshotC` in kacs/pnp_runtime.rs field for field.
  */
 struct peios_pnp_snapshot {
 	u8 seat;			/* enum peios_pnp_seat */
@@ -94,6 +105,7 @@ struct peios_pnp_snapshot {
 	u8 t_day_of_month;		/* 1..31 */
 	u8 t_day_of_week;		/* ISO: 1 = Monday .. 7 = Sunday */
 	u8 t_hour, t_minute, t_second;
+	const void *flow;		/* struct nf_conn *, or NULL */
 };
 
 /* The verdicts, in strictness order. Mirrors pnp_runtime.rs. */
@@ -101,6 +113,12 @@ enum peios_pnp_verdict {
 	PEIOS_PNP_VERDICT_PASS = 0,
 	PEIOS_PNP_VERDICT_REJECT = 1,
 	PEIOS_PNP_VERDICT_DROP = 2,
+};
+
+/* The story a REJECT tells (ratified: Refused, Prohibited). */
+enum peios_pnp_reject_kind {
+	PEIOS_PNP_REJECT_REFUSED = 0,	/* TCP RST / ICMP port-unreachable */
+	PEIOS_PNP_REJECT_PROHIBITED = 1,	/* ICMP admin-prohibited */
 };
 
 /* The rules layers, as the bridge numbers them. */
@@ -111,17 +129,44 @@ enum peios_pnp_layer {
 
 /*
  * One evaluation's result, filled by the Rust bridge. Mirrors
- * `PnpOutcomeC` in kacs/pnp_runtime.rs field for field.
+ * `PnpOutcomeC` in kacs/pnp_runtime.rs field for field. The effect counts
+ * are effects yielded; the stores confess what they refused separately.
  */
 struct peios_pnp_outcome {
 	u8 verdict;			/* enum peios_pnp_verdict */
 	u8 backstop;			/* 1 when the backstop answered */
-	u32 n_tags;			/* effects yielded (counted, not yet */
-	u32 n_counts;			/* applied: their stores are unwired */
-	u32 n_reports;			/* machinery — those facts read as */
-	u32 n_prompts;			/* absent, coherently) */
+	u8 reject_kind;			/* enum peios_pnp_reject_kind */
+	u8 _pad;
+	u32 n_tags;
+	u32 n_counts;
+	u32 n_reports;
+	u32 n_prompts;
 	char attributed[96];		/* winning rule's path, truncated */
 };
+
+/*
+ * A counter view the forest materializes: one (stream, key-spec, window)
+ * the store must be able to answer. Exported by the bridge at publication
+ * (mirrors `PnpViewC`).
+ */
+#define PEIOS_PNP_VIEW_NAME_LEN		64
+
+struct peios_pnp_view {
+	char name[PEIOS_PNP_VIEW_NAME_LEN];
+	u64 hash;
+	u32 window_secs;		/* 0 = the cumulative total */
+	u8 keyspec;			/* PEIOS_PNP_KEY_* bits */
+	u8 _pad[3];
+};
+
+/* Key-spec bits: PEIOS_PNP_KEY_* from <pkm/pnp.h> (mirror pnp-core's
+ * condition::keyspec).
+ */
+
+/* Tag ops on the wire from the bridge (mirror TagOp::code). */
+#define PEIOS_PNP_TAG_SET		0
+#define PEIOS_PNP_TAG_CLEAR		1
+#define PEIOS_PNP_TAG_ADD		2
 
 /*
  * Engine counters. Plain atomics (not percpu) while the engine is young:
@@ -141,10 +186,18 @@ struct peios_pnp_stats {
 	atomic64_t verdict_drop;
 	atomic64_t verdict_reject;
 	atomic64_t reject_degraded;	/* REJECT at a seat that can't emit */
-	atomic64_t fx_tags;		/* effects yielded but not yet applied */
+	atomic64_t fx_tags;		/* effects yielded by evaluations */
 	atomic64_t fx_counts;
 	atomic64_t fx_reports;
 	atomic64_t fx_prompts;
+	/* The stores' confessions (machinery slice). */
+	atomic64_t tag_writes;		/* tag ops applied to a flow */
+	atomic64_t tag_untracked;	/* TAG on a packet with no flow: no-op */
+	atomic64_t tag_refused;		/* table full / atomic alloc failed */
+	atomic64_t count_writes;	/* stream emissions applied */
+	atomic64_t count_key_absent;	/* packet lacked a view's key fact */
+	atomic64_t count_refused;	/* table at its key cap / alloc failed */
+	atomic64_t reports_emitted;	/* KMES network-report events */
 };
 
 extern struct peios_pnp_stats peios_pnp_stats;
@@ -154,9 +207,11 @@ extern struct peios_pnp_stats peios_pnp_stats;
  * from pnp_rust_builder_build (either may be NULL = that layer has no
  * policy and is permissive). Publication is atomic: readers see the old
  * generation or the new one, never a mix; the generation counter
- * advances; old forests are freed after grace.
+ * advances; old forests are freed after grace. The counter store is
+ * re-materialized for the new forests' views before the swap.
  */
-int peios_pnp_policy_publish(void *packet_forest, void *raw_forest);
+int peios_pnp_policy_publish(void *packet_forest, void *raw_forest,
+			     u8 reporting_level);
 
 /*
  * Evaluates one snapshot against one layer's active forest.
@@ -169,17 +224,61 @@ int peios_pnp_policy_eval(u8 layer, const struct peios_pnp_snapshot *snap,
 /* True when any layer has a published forest. */
 bool peios_pnp_policy_enforcing(void);
 
+/* The active generation's CurrentReportingLevel (1 when absent). */
+u8 peios_pnp_policy_reporting_level(void);
+
 /* Records the outcome of a registry re-walk for status honesty. */
 void peios_pnp_policy_note_ingest(long err);
 
 /* The verdict event stream (events.c; ABI in <pkm/pnp.h>). */
 struct peios_pnp_status;
+struct peios_pnp_counters_query;
 int peios_pnp_events_init(void);
 void peios_pnp_event_emit(const struct peios_pnp_snapshot *snap,
 			  const struct peios_pnp_outcome *out, u8 layer,
 			  u8 flags);
 u64 peios_pnp_events_dropped(void);
 void peios_pnp_status_fill(struct peios_pnp_status *status);
+
+/*
+ * The flow tag store (tags.c): a pointer-sized conntrack extension on
+ * every flow, NULL until the first TAG, then a growable RCU table of
+ * (name hash, value) pairs. Reads are lock-free; writes serialize on the
+ * flow's lock. Untracked packets have no flow: TAG no-ops, confessed.
+ */
+void peios_pnp_ct_ext_add(struct nf_conn *ct);
+void peios_pnp_ct_destroy(struct nf_conn *ct);
+int peios_pnp_tag_lookup(const void *flow, u64 hash, u64 *value_out);
+void peios_pnp_tag_apply(const void *flow, u64 hash, u8 op, u64 operand);
+/* Distinct tags one flow may carry: a tripwire, not a budget. */
+#define PEIOS_PNP_TAG_MAX_PER_FLOW	64
+
+/*
+ * The counter store (counters.c): machine-scoped streams, materialized as
+ * one keyed table per (stream, key-spec) the forests view, each table
+ * answering every window referenced. The store outlives generations.
+ */
+int peios_pnp_counters_publish(const struct peios_pnp_view *views,
+			       u32 count);
+int peios_pnp_counter_read(const struct peios_pnp_snapshot *snap, u64 hash,
+			   u8 keyspec, u32 window_secs, u64 *value_out);
+void peios_pnp_counter_add(const struct peios_pnp_snapshot *snap, u64 hash,
+			   u64 amount);
+long peios_pnp_counters_dump(struct peios_pnp_counters_query *query);
+u64 peios_pnp_counters_cells(void);
+/* Keys per table: the keyspace is wire-driven, so the cap is hard. */
+#define PEIOS_PNP_COUNTER_MAX_KEYS	4096
+/* Distinct windows one table answers: PEIOS_PNP_COUNTER_MAX_WINDOWS
+ * (<pkm/pnp.h>).
+ */
+
+/*
+ * REPORT emission (report.c): one KMES `network-report` event, origin
+ * class PNP, msgpack payload built on the stack (softirq-safe).
+ */
+void peios_pnp_report_emit(const struct peios_pnp_snapshot *snap,
+			   const char *rule, size_t rule_len, u8 level,
+			   u8 layer, u8 verdict, u8 reject_kind);
 
 /*
  * The dispatch law (ratified): the Packet layer judges a traversal at its
@@ -229,8 +328,14 @@ int pnp_rust_builder_list_int(void *builder, s64 value);
 int pnp_rust_builder_value_list_end(void *builder);
 int pnp_rust_builder_build(void *builder, u8 layer, void **forest_out);
 void pnp_rust_forest_free(void *forest);
+/* Cross-forest checks for forests published together (-EINVAL refuses). */
+int pnp_rust_forests_check(const void *packet_forest, const void *raw_forest);
+/* The views a forest materializes. */
+u32 pnp_rust_forest_view_count(const void *forest);
+int pnp_rust_forest_view(const void *forest, u32 index,
+			 struct peios_pnp_view *out);
 int pnp_rust_evaluate(const void *forest,
-		      const struct peios_pnp_snapshot *snap,
-		      struct peios_pnp_outcome *out);
+		      const struct peios_pnp_snapshot *snap, u8 layer,
+		      u8 reporting_level, struct peios_pnp_outcome *out);
 
 #endif /* _NET_PNP_PNP_H */
