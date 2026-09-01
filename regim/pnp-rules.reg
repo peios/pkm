@@ -1,0 +1,95 @@
+{
+  "_comment": [
+    "PNP dev-baseline packet policy (PEI-598) — the first enforced Peios",
+    "firewall policy. The kernel reads Machine\\System\\Network\\Rules whole",
+    "at registryd's registration, re-walks on change, and publishes it as a",
+    "policy generation; applying this seed flips enforcement ON at boot.",
+    "",
+    "The compiled-in backstop is DROP, both directions, always (ratified):",
+    "every rule below is a visible, deletable permissive statement, per the",
+    "doctrine that permissiveness never lives in defaults. Approved by jack",
+    "2026-09-01. Rule by rule:",
+    "",
+    "  outbound-ok       All egress passes — the ratified shipped shape until",
+    "                    the connection tier earns outbound strictness.",
+    "  established       The stateful cornerstone: replies come home.",
+    "  loopback          Localhost is policed like everything else now;",
+    "                    every local daemon depends on this rule.",
+    "  arp               PNP polices ARP where stock Linux never did; without",
+    "                    this, the backstop kills neighbor resolution.",
+    "  icmpv6-housekeeping  ND (133-137) and MLD (130-132, 143) ride outside",
+    "                    conntrack's establishment model; IPv6 dies quietly",
+    "                    without them.",
+    "  dhcp-client       OFFER/ACK can arrive as broadcast conntrack will not",
+    "                    tie to the DISCOVER's flow.",
+    "  dev-viewer-ports  DEV-ONLY: atrium-server (8080) and the pnpd viewer",
+    "                    (8081) stay reachable through QEMU hostfwd. Delete",
+    "                    the day this baseline grows up.",
+    "",
+    "Everything else inbound answers to the backstop. No RawPacket key: that",
+    "layer ships zero default rules (ratified) and stays permissive.",
+    "",
+    "Shipped by the kernel package into /usr/share/regim/; inert until an",
+    "image names it in [registry] autoapply."
+  ],
+  "keys": [
+    { "path": "Machine\\System" },
+    { "path": "Machine\\System\\Network" },
+    { "path": "Machine\\System\\Network\\Rules" },
+    { "path": "Machine\\System\\Network\\Rules\\Packet" },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Packet\\outbound-ok",
+      "values": [
+        { "name": "Direction.Equal", "type": "sz", "data": "out" },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Packet\\established",
+      "values": [
+        { "name": "FlowState.Equal", "type": "multi", "data": ["established", "related"] },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Packet\\loopback",
+      "values": [
+        { "name": "Interface.Equal", "type": "sz", "data": "lo" },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Packet\\arp",
+      "values": [
+        { "name": "EtherType.Equal", "type": "sz", "data": "arp" },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Packet\\icmpv6-housekeeping",
+      "values": [
+        { "name": "Protocol.Equal", "type": "sz", "data": "icmpv6" },
+        { "name": "IcmpType.Equal", "type": "multi", "data": ["130-137", "143"] },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Packet\\dhcp-client",
+      "values": [
+        { "name": "Protocol.Equal", "type": "sz", "data": "udp" },
+        { "name": "SrcPort.Equal", "type": "dword", "data": 67 },
+        { "name": "DstPort.Equal", "type": "dword", "data": 68 },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Packet\\dev-viewer-ports",
+      "values": [
+        { "name": "Direction.Equal", "type": "sz", "data": "in" },
+        { "name": "Protocol.Equal", "type": "sz", "data": "tcp" },
+        { "name": "DstPort.Equal", "type": "multi", "data": ["8080", "8081"] },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    }
+  ]
+}

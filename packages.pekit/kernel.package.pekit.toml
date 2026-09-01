@@ -31,3 +31,7 @@ linux-kernel = "7.0.9"
 # names it in [registry] autoapply. Regenerate with
 # tools/gen-port-reservations-seed.py.
 "@source:regim/port-reservations.reg" = "usr/share/regim/port-reservations.reg"
+# PNP dev-baseline packet policy (PEI-598) — applying it flips PNP
+# enforcement on at boot (generation 1). Inert until an image names it in
+# [registry] autoapply.
+"@source:regim/pnp-rules.reg" = "usr/share/regim/pnp-rules.reg"

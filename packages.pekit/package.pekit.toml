@@ -35,7 +35,13 @@ format = "peipkg"
 # as the mounter -- so CREATOR OWNER resolves to the principal that made the
 # object and a runtime `sd set` governs the children that follow it. An explicit
 # creator descriptor from a native create is honoured on an overlay too.
-version      = "{{version}}-16"
+# -17: PNP — the Peios Network Policy packet engine (PEI-598). net/pnp
+# subtree at the ratified seats, pnp-core rules engine in the Rust island,
+# registry ingestion via LCS with a depth-unbounded rules watch, nftables
+# and the xtables family configured out (the clean slate), and the
+# dev-baseline policy seed (regim/pnp-rules.reg) that arms enforcement on
+# images that autoapply it.
+version      = "{{version}}-17"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"
