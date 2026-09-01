@@ -2329,6 +2329,11 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
+	/* Likewise the PNP rules key: absent, fallback covers it. */
+	static const struct pkm_lcs_kunit_walk_source_step rules_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Network", .empty = true },
+	};
 	static const u8 owner_only_sd[] = {
 		0x01, 0x00, 0x00, 0x80,
 		0x14, 0x00, 0x00, 0x00,
@@ -2373,6 +2378,10 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		.port_walk = {
 			.steps = port_steps,
 			.step_count = ARRAY_SIZE(port_steps),
+		},
+		.rules_walk = {
+			.steps = rules_steps,
+			.step_count = ARRAY_SIZE(rules_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -2434,8 +2443,8 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 16U);
-	KUNIT_EXPECT_EQ(test, script.writes, 16U);
+	KUNIT_EXPECT_EQ(test, script.reads, 18U);
+	KUNIT_EXPECT_EQ(test, script.writes, 18U);
 	KUNIT_EXPECT_TRUE(test, result.registry_root_present);
 	KUNIT_EXPECT_EQ(test, result.self_config.applied_count, 1U);
 	KUNIT_EXPECT_TRUE(test, result.kmes_root_present);
@@ -2520,6 +2529,11 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
+	/* Likewise the PNP rules key: absent, fallback covers it. */
+	static const struct pkm_lcs_kunit_walk_source_step rules_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Network", .empty = true },
+	};
 	static const u8 owner_only_sd[] = {
 		0x01, 0x00, 0x00, 0x80,
 		0x14, 0x00, 0x00, 0x00,
@@ -2568,6 +2582,10 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		.port_walk = {
 			.steps = port_steps,
 			.step_count = ARRAY_SIZE(port_steps),
+		},
+		.rules_walk = {
+			.steps = rules_steps,
+			.step_count = ARRAY_SIZE(rules_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -2636,8 +2654,8 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 16U);
-	KUNIT_EXPECT_EQ(test, script.writes, 16U);
+	KUNIT_EXPECT_EQ(test, script.reads, 18U);
+	KUNIT_EXPECT_EQ(test, script.writes, 18U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
 	KUNIT_ASSERT_EQ(test,

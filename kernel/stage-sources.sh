@@ -54,6 +54,8 @@ done
 #     not exported to modules. ---
 install -m 0644 "$here/include/linux/kacs_stratafs.h" \
 	"$linux_include_dir/kacs_stratafs.h"
+install -m 0644 "$here/include/linux/peios_pnp.h" \
+	"$linux_include_dir/peios_pnp.h"
 
 # --- Static tracepoint event headers, staged into the canonical
 #     include/trace/events/ so <trace/events/{kacs,kmes,lcs}.h> resolve with no

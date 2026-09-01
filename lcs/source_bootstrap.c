@@ -4,6 +4,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/peios_pnp.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -21,10 +22,12 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	u8 kmes_guid[RSI_GUID_SIZE] = { };
 	u8 layers_root_guid[RSI_GUID_SIZE] = { };
 	u8 port_guid[RSI_GUID_SIZE] = { };
+	u8 rules_guid[RSI_GUID_SIZE] = { };
 	bool registry_root_present = false;
 	bool kmes_root_present = false;
 	bool layers_root_present = false;
 	bool port_root_present = false;
+	bool rules_root_present = false;
 	u8 stage = LCS_BOOT_REGISTRY;
 	long ret;
 
@@ -101,12 +104,26 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 		pkm_kacs_port_reservations_refresh_from_key(source_id,
 							    port_guid);
 
+	/*
+	 * PNP network rules (net/pnp/ingest.c), the fifth kernel-read key,
+	 * discovered last like port reservations: only its discovery walk
+	 * may fail the bootstrap. A rejected forest is not a failure — PNP
+	 * keeps its previous policy generation and says why.
+	 */
+	ret = peios_pnp_rules_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &rules_root_present, rules_guid);
+	if (ret)
+		goto out;
+	result->rules_root_present = rules_root_present;
+	if (rules_root_present)
+		peios_pnp_rules_refresh_from_key(source_id, rules_guid);
+
 	stage = LCS_BOOT_SELF_WATCH;
 	ret = pkm_lcs_internal_self_watch_arm_full(
 		source_id, machine_root_guid, registry_root_present,
 		registry_guid, layers_root_present, layers_root_guid,
 		kmes_root_present, kmes_guid, port_root_present, port_guid,
-		&result->self_watch);
+		rules_root_present, rules_guid, &result->self_watch);
 	if (ret)
 		goto out;
 
@@ -133,7 +150,7 @@ out:
 
 		arm_ret = pkm_lcs_internal_self_watch_arm_full(
 			source_id, machine_root_guid, false, NULL, false, NULL,
-			false, NULL, false, NULL, &fallback);
+			false, NULL, false, NULL, false, NULL, &fallback);
 		trace_lcs_bootstrap_refresh(source_id, 0, 0, 0,
 					    LCS_BOOT_SELF_WATCH, arm_ret);
 	}

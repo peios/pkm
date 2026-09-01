@@ -7531,11 +7531,19 @@ int pkm_lcs_kunit_source_bootstrap_source_thread(void *raw_script)
 			goto out;
 	}
 
-	/* Port reservations are discovered last, after the layers stage. */
+	/* Port reservations are discovered after the layers stage. */
 	script->port_walk.file = script->file;
 	ret = pkm_lcs_kunit_walk_source_thread(&script->port_walk);
 	script->reads += script->port_walk.reads;
 	script->writes += script->port_walk.writes;
+	if (ret)
+		goto out;
+
+	/* PNP network rules are discovered last. */
+	script->rules_walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->rules_walk);
+	script->reads += script->rules_walk.reads;
+	script->writes += script->rules_walk.writes;
 
 out:
 	script->result = ret;

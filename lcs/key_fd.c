@@ -22,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
+#include <linux/peios_pnp.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -139,6 +140,7 @@ struct pkm_lcs_internal_self_watch_state {
 	struct pkm_lcs_internal_watch layers;
 	struct pkm_lcs_internal_watch kmes;
 	struct pkm_lcs_internal_watch port;
+	struct pkm_lcs_internal_watch rules;
 	struct pkm_lcs_internal_watch fallback;
 	u32 source_id;
 	enum pkm_lcs_internal_self_watch_mode mode;
@@ -11098,6 +11100,18 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 			event_type == REG_WATCH_SD_CHANGED);
 	case PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK:
 		return event_type == REG_WATCH_SUBKEY_CREATED;
+	case PKM_LCS_INTERNAL_WATCH_NETWORK_RULES:
+		/*
+		 * The rules key roots a whole policy subtree: any mutation
+		 * at any depth (rules are keys, exceptions are subkeys)
+		 * invalidates the compiled forests. PNP coalesces the
+		 * per-key events into one deferred re-walk.
+		 */
+		return event_type == REG_WATCH_VALUE_SET ||
+		       event_type == REG_WATCH_VALUE_DELETED ||
+		       event_type == REG_WATCH_SUBKEY_CREATED ||
+		       event_type == REG_WATCH_SUBKEY_DELETED ||
+		       event_type == REG_WATCH_KEY_DELETED;
 	default:
 		return false;
 	}
@@ -11346,6 +11360,15 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 			 */
 			pkm_kacs_port_reservations_refresh_from_key(
 				event->source_id, event->guid);
+		} else if (event->target ==
+			   PKM_LCS_INTERNAL_WATCH_NETWORK_RULES) {
+			/*
+			 * PNP coalesces (per-key events, one deferred
+			 * re-walk) and keeps its last known-good policy
+			 * generation if the re-walk fails.
+			 */
+			peios_pnp_rules_registry_changed(event->source_id,
+							 event->guid);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
 			pkm_lcs_internal_watch_deliver_layer_event(
@@ -11992,6 +12015,8 @@ static void pkm_lcs_internal_self_watch_disarm_locked(void)
 	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.kmes);
 	pkm_lcs_internal_watch_remove_locked(&pkm_lcs_internal_self_watch.port);
 	pkm_lcs_internal_watch_remove_locked(
+		&pkm_lcs_internal_self_watch.rules);
+	pkm_lcs_internal_watch_remove_locked(
 		&pkm_lcs_internal_self_watch.fallback);
 	pkm_lcs_internal_self_watch.source_id = 0;
 	pkm_lcs_internal_self_watch.mode =
@@ -12044,6 +12069,10 @@ static void pkm_lcs_internal_self_watch_fill_result_locked(
 		memcpy(out->port_guid,
 		       pkm_lcs_internal_self_watch.port.registry.guid,
 		       sizeof(out->port_guid));
+	if (pkm_lcs_internal_self_watch.rules.registry.linked)
+		memcpy(out->rules_guid,
+		       pkm_lcs_internal_self_watch.rules.registry.guid,
+		       sizeof(out->rules_guid));
 }
 
 long pkm_lcs_internal_self_watch_arm_full(
@@ -12053,6 +12082,7 @@ long pkm_lcs_internal_self_watch_arm_full(
 	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
 	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
 	bool port_present, const u8 port_guid[PKM_LCS_GUID_BYTES],
+	bool rules_present, const u8 rules_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out)
 {
 	bool fallback_needed;
@@ -12071,6 +12101,8 @@ long pkm_lcs_internal_self_watch_arm_full(
 	if (kmes_present && !pkm_lcs_internal_watch_guid_valid(kmes_guid))
 		return -EINVAL;
 	if (port_present && !pkm_lcs_internal_watch_guid_valid(port_guid))
+		return -EINVAL;
+	if (rules_present && !pkm_lcs_internal_watch_guid_valid(rules_guid))
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
@@ -12113,8 +12145,17 @@ long pkm_lcs_internal_self_watch_arm_full(
 		watch_count++;
 	}
 
+	if (rules_present) {
+		ret = pkm_lcs_internal_watch_add_locked(
+			&pkm_lcs_internal_self_watch.rules, source_id,
+			rules_guid, PKM_LCS_INTERNAL_WATCH_NETWORK_RULES);
+		if (ret)
+			goto out_rollback;
+		watch_count++;
+	}
+
 	fallback_needed = !registry_present || !layers_present ||
-			  !kmes_present || !port_present;
+			  !kmes_present || !port_present || !rules_present;
 	if (fallback_needed) {
 		ret = pkm_lcs_internal_watch_add_locked(
 			&pkm_lcs_internal_self_watch.fallback, source_id,
@@ -13240,6 +13281,10 @@ long pkm_lcs_kunit_internal_self_watch_snapshot(
 		memcpy(out->port_guid,
 		       pkm_lcs_internal_self_watch.port.registry.guid,
 		       sizeof(out->port_guid));
+	if (pkm_lcs_internal_self_watch.rules.registry.linked)
+		memcpy(out->rules_guid,
+		       pkm_lcs_internal_self_watch.rules.registry.guid,
+		       sizeof(out->rules_guid));
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return 0;
 }

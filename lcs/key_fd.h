@@ -138,6 +138,8 @@ enum pkm_lcs_internal_watch_target {
 	PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK = 3,
 	PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION = 4,
 	PKM_LCS_INTERNAL_WATCH_PORT_RESERVATIONS = 5,
+	/* PNP rules subtree (net/pnp): depth-unbounded, all mutation kinds. */
+	PKM_LCS_INTERNAL_WATCH_NETWORK_RULES = 6,
 };
 
 enum pkm_lcs_internal_self_watch_mode {
@@ -156,6 +158,7 @@ struct pkm_lcs_internal_self_watch_arm_result {
 	u8 kmes_guid[PKM_LCS_GUID_BYTES];
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
 	u8 port_guid[PKM_LCS_GUID_BYTES];
+	u8 rules_guid[PKM_LCS_GUID_BYTES];
 };
 
 struct pkm_lcs_internal_self_watch_snapshot {
@@ -167,6 +170,7 @@ struct pkm_lcs_internal_self_watch_snapshot {
 	u8 kmes_guid[PKM_LCS_GUID_BYTES];
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
 	u8 port_guid[PKM_LCS_GUID_BYTES];
+	u8 rules_guid[PKM_LCS_GUID_BYTES];
 };
 
 struct pkm_lcs_watch_dispatch_input {
@@ -246,6 +250,7 @@ long pkm_lcs_internal_self_watch_arm_full(
 	bool layers_present, const u8 layers_guid[PKM_LCS_GUID_BYTES],
 	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
 	bool port_present, const u8 port_guid[PKM_LCS_GUID_BYTES],
+	bool rules_present, const u8 rules_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out);
 /*
  * The three-key form, kept for callers that predate port reservations. A
@@ -264,7 +269,7 @@ static inline long pkm_lcs_internal_self_watch_arm(
 	return pkm_lcs_internal_self_watch_arm_full(
 		source_id, machine_root_guid, registry_present, registry_guid,
 		layers_present, layers_guid, kmes_present, kmes_guid, false,
-		NULL, result_out);
+		NULL, false, NULL, result_out);
 }
 
 void pkm_lcs_internal_self_watch_disarm(void);

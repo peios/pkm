@@ -83,6 +83,7 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xa3 };
 	static const u8 replacement_root_guid[RSI_GUID_SIZE] = { 0xa4 };
 	static const u8 port_guid[RSI_GUID_SIZE] = { 0xa5 };
+	static const u8 rules_guid[RSI_GUID_SIZE] = { 0xa6 };
 	struct pkm_lcs_internal_self_watch_arm_result result = { };
 	struct pkm_lcs_internal_self_watch_snapshot snapshot = { };
 
@@ -91,12 +92,16 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 			pkm_lcs_internal_self_watch_arm_full(
 				7, machine_root_guid, true, registry_guid, true,
 				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
-				true, port_guid, &result),
+				true, port_guid, true, rules_guid, &result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.source_id, 7U);
 	KUNIT_EXPECT_EQ(test, result.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, result.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 5U);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.rules_guid, rules_guid,
+			       sizeof(rules_guid)),
+			0);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.port_guid, port_guid, sizeof(port_guid)),
 			0);
@@ -117,7 +122,8 @@ static void pkm_lcs_kunit_internal_self_watch_arm_targeted_and_fallback(
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_internal_self_watch_arm_full(
 				7, machine_root_guid, true, registry_guid, true,
-				layers_guid, false, NULL, true, port_guid, &result),
+				layers_guid, false, NULL, true, port_guid,
+				false, NULL, &result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.source_id, 7U);
 	KUNIT_EXPECT_EQ(test, result.mode,
@@ -178,6 +184,7 @@ static void pkm_lcs_kunit_internal_self_watch_arms_port_reservations(
 	static const u8 registry_guid[RSI_GUID_SIZE] = { 0xc2 };
 	static const u8 layers_guid[RSI_GUID_SIZE] = { 0xc3 };
 	static const u8 port_guid[RSI_GUID_SIZE] = { 0xc5 };
+	static const u8 rules_guid[RSI_GUID_SIZE] = { 0xc6 };
 	static const u8 nil_guid[RSI_GUID_SIZE] = { 0 };
 	struct pkm_lcs_internal_self_watch_arm_result result = { };
 	struct pkm_lcs_internal_self_watch_snapshot snapshot = { };
@@ -187,18 +194,22 @@ static void pkm_lcs_kunit_internal_self_watch_arms_port_reservations(
 			pkm_lcs_internal_self_watch_arm_full(
 				11, machine_root_guid, true, registry_guid, true,
 				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
-				true, port_guid, &result),
+				true, port_guid, true, rules_guid, &result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_TARGETED);
-	KUNIT_EXPECT_EQ(test, result.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 5U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.port_guid, port_guid, sizeof(port_guid)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(result.rules_guid, rules_guid,
+			       sizeof(rules_guid)),
 			0);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_internal_self_watch_snapshot(&snapshot),
 			0L);
-	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test, snapshot.watch_count, 5U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(snapshot.port_guid, port_guid, sizeof(port_guid)),
 			0);
@@ -211,11 +222,11 @@ static void pkm_lcs_kunit_internal_self_watch_arms_port_reservations(
 			pkm_lcs_internal_self_watch_arm_full(
 				11, machine_root_guid, true, registry_guid, true,
 				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
-				false, NULL, &result),
+				false, NULL, true, rules_guid, &result),
 			0L);
 	KUNIT_EXPECT_EQ(test, result.mode,
 			(u32)PKM_LCS_INTERNAL_SELF_WATCH_MIXED);
-	KUNIT_EXPECT_EQ(test, result.watch_count, 4U);
+	KUNIT_EXPECT_EQ(test, result.watch_count, 5U);
 	KUNIT_EXPECT_EQ(test,
 			memcmp(result.fallback_guid, machine_root_guid,
 			       sizeof(machine_root_guid)),
@@ -229,7 +240,14 @@ static void pkm_lcs_kunit_internal_self_watch_arms_port_reservations(
 			pkm_lcs_internal_self_watch_arm_full(
 				11, machine_root_guid, true, registry_guid, true,
 				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
-				true, nil_guid, NULL),
+				true, nil_guid, false, NULL, NULL),
+			(long)-EINVAL);
+	/* Likewise a nil rules guid with rules_present. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_internal_self_watch_arm_full(
+				11, machine_root_guid, true, registry_guid, true,
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				true, port_guid, true, nil_guid, NULL),
 			(long)-EINVAL);
 	pkm_lcs_internal_self_watch_disarm();
 }
@@ -543,6 +561,11 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
+	/* Likewise the PNP rules key: absent, fallback covers it. */
+	static const struct pkm_lcs_kunit_walk_source_step rules_steps[] = {
+		{ .expected_child = "System", .guid = system_guid },
+		{ .expected_child = "Network", .empty = true },
+	};
 	u8 data[sizeof(u32)];
 	u8 kmes_data[sizeof(u32)];
 	struct pkm_lcs_watch_dispatch_context context = {
@@ -586,6 +609,10 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 		.port_walk = {
 			.steps = port_steps,
 			.step_count = ARRAY_SIZE(port_steps),
+		},
+		.rules_walk = {
+			.steps = rules_steps,
+			.step_count = ARRAY_SIZE(rules_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -649,8 +676,8 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 16U);
-	KUNIT_EXPECT_EQ(test, script.writes, 16U);
+	KUNIT_EXPECT_EQ(test, script.reads, 18U);
+	KUNIT_EXPECT_EQ(test, script.writes, 18U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_internal_self_watch_snapshot(
 				&watch_snapshot),
@@ -834,8 +861,11 @@ static void pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop(
 		{ 1 }, { 0xe5, 0x10 }, { 0xe5, 0x11 },
 		{ 0xe5, 0x12 }, { 0xe5 },
 	};
-	/* All four keys present, so the lifecycle event is a true no-op. */
+	/* All five keys present, so no fallback watch is armed and the
+	 * lifecycle event is a true no-op.
+	 */
 	static const u8 port_guid[RSI_GUID_SIZE] = { 0xe9 };
+	static const u8 rules_guid[RSI_GUID_SIZE] = { 0xea };
 	static const char value_name[] = "Child";
 	struct pkm_lcs_watch_dispatch_context context = {
 		.changed_key_guid = ancestors[4],
@@ -872,7 +902,7 @@ static void pkm_lcs_kunit_internal_layer_watch_lifecycle_event_noop(
 			pkm_lcs_internal_self_watch_arm_full(
 				1, ancestors[0], true, ancestors[2], true,
 				ancestors[3], true, pkm_lcs_kunit_kmes_watch_guid,
-				true, port_guid, NULL),
+				true, port_guid, true, rules_guid, NULL),
 			0L);
 	script.file = &file;
 	task = pkm_lcs_kunit_kthread_run(
