@@ -26,6 +26,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <net/net_namespace.h>
+#include <net/netfilter/nf_conntrack.h>
 
 #include "pnp.h"
 
@@ -152,10 +153,26 @@ static int __init peios_pnp_init(void)
 		return -EINVAL;
 	}
 
+	/*
+	 * Conntrack hooks are demand-activated: historically it was a
+	 * ct-using iptables/nft rule that pinned them. Those frontends are
+	 * gone (the clean slate), and PNP is the conntrack consumer now —
+	 * without this, nf_ct_get() is NULL on every packet, FlowState
+	 * reads untracked, and the ESTABLISHED cornerstone rule never
+	 * matches (found live: DNS replies reached the tap and died at
+	 * LOCAL_IN while every stateless rule worked).
+	 */
+	ret = nf_ct_netns_get(&init_net, NFPROTO_INET);
+	if (ret) {
+		pr_err("pnp: could not pin conntrack: %d\n", ret);
+		return ret;
+	}
+
 	ret = nf_register_net_hooks(&init_net, peios_pnp_inet_hooks,
 				    ARRAY_SIZE(peios_pnp_inet_hooks));
 	if (ret) {
 		pr_err("pnp: could not register IP seats: %d\n", ret);
+		nf_ct_netns_put(&init_net, NFPROTO_INET);
 		return ret;
 	}
 
@@ -166,6 +183,7 @@ static int __init peios_pnp_init(void)
 	if (ret) {
 		nf_unregister_net_hooks(&init_net, peios_pnp_inet_hooks,
 					ARRAY_SIZE(peios_pnp_inet_hooks));
+		nf_ct_netns_put(&init_net, NFPROTO_INET);
 		pr_err("pnp: could not register device notifier: %d\n", ret);
 		return ret;
 	}

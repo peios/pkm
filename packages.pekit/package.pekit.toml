@@ -41,7 +41,10 @@ format = "peipkg"
 # and the xtables family configured out (the clean slate), and the
 # dev-baseline policy seed (regim/pnp-rules.reg) that arms enforcement on
 # images that autoapply it.
-version      = "{{version}}-17"
+# -18: PNP pins conntrack at init (nf_ct_netns_get) — hooks are
+# demand-activated and the departed frontends were the demand; without the
+# pin FlowState reads untracked and the ESTABLISHED rule never matches.
+version      = "{{version}}-18"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"
