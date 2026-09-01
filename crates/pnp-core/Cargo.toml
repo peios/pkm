@@ -1,0 +1,14 @@
+[package]
+name = "pnp-core"
+version = "0.1.0"
+# Edition 2021 for kernel-staging parity with kacs-core: the staged copy is
+# compiled by the kernel's pinned Rust as modules of an edition-2021 crate.
+edition = "2021"
+license = "MIT"
+description = "PNP packet-layer rules engine: pure evaluator, policy ingestion, and validation"
+
+[features]
+default = []
+kernel = []
+
+[dependencies]

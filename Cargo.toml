@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kacs-core",
     "crates/lcs-core",
+    "crates/pnp-core",
     "crates/stratafs-core",
     "uapi/generated/rust",
 ]
