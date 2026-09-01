@@ -183,6 +183,12 @@ M.KACS_FSR_DECISION = 0
 M.KACS_FSR_GRANT_DENY = 2
 M.KACS_FSR_SIGNED_EXEC = 1
 M.KACS_FSR_UNMANAGED_SYSFS = 4
+M.KACS_FW_ALLOWED = 0
+M.KACS_FW_BELOW_TCB = 3
+M.KACS_FW_NO_KEY_MATCH = 2
+M.KACS_FW_PROBE_FAILED = 5
+M.KACS_FW_UNSIGNED = 1
+M.KACS_FW_UNVERIFIABLE = 4
 M.KACS_IMLEVEL_ANONYMOUS = 0
 M.KACS_IMLEVEL_DELEGATION = 3
 M.KACS_IMLEVEL_IDENTIFICATION = 1
@@ -842,6 +848,30 @@ M.LCS_TXN_ST_SOURCE_DOWN = 5
 M.LCS_TXN_ST_TIMED_OUT = 4
 M.MAXIMUM_ALLOWED = 33554432
 M.OWNER_SECURITY_INFORMATION = 1
+M.PEIOS_PNP_ABI_VERSION = 1
+M.PEIOS_PNP_EV_ATTR_LEN = 96
+M.PEIOS_PNP_EV_DIR_IN = 0
+M.PEIOS_PNP_EV_DIR_OUT = 1
+M.PEIOS_PNP_EV_FLOW_ABSENT = 0
+M.PEIOS_PNP_EV_FLOW_ESTABLISHED = 2
+M.PEIOS_PNP_EV_FLOW_INVALID = 4
+M.PEIOS_PNP_EV_FLOW_NEW = 1
+M.PEIOS_PNP_EV_FLOW_RELATED = 3
+M.PEIOS_PNP_EV_FLOW_UNTRACKED = 5
+M.PEIOS_PNP_EV_F_BACKSTOP = 1
+M.PEIOS_PNP_EV_F_FAIL_CLOSED = 2
+M.PEIOS_PNP_EV_F_REJECT_DEGRADED = 4
+M.PEIOS_PNP_EV_LAYER_PACKET = 0
+M.PEIOS_PNP_EV_LAYER_RAWPACKET = 1
+M.PEIOS_PNP_EV_SEAT_EGRESS = 2
+M.PEIOS_PNP_EV_SEAT_INGRESS = 1
+M.PEIOS_PNP_EV_SEAT_LOCAL_IN = 3
+M.PEIOS_PNP_EV_VERDICT_DROP = 2
+M.PEIOS_PNP_EV_VERDICT_PASS = 0
+M.PEIOS_PNP_EV_VERDICT_REJECT = 1
+M.PEIOS_PNP_IOC_STATUS = 2162183681
+M.PEIOS_PNP_IOC_STATUS_NR = 1
+M.PEIOS_PNP_IOC_TYPE = 78
 M.READ_CONTROL = 131072
 M.REG_BACKUP_ARGS_SIZE = 4
 M.REG_BACKUP_BLANKET_TOMBSTONE = 6
@@ -1250,6 +1280,62 @@ M.struct = {
       event_type_len = {offset = 8, size = 2, signed = false, kind = "uint"},
       payload = {offset = 16, size = 8, signed = false, kind = "uint"},
       payload_len = {offset = 24, size = 4, signed = false, kind = "uint"},
+    },
+  },
+  ["peios_pnp_event"] = {
+    size = 176,
+    pack = "<I8I8I1I1I1I1I1I1I1I1I4I2I2I2xxc16c16I4I4I1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"seq", "t_ns", "seat", "layer", "verdict", "flags", "direction", "addr_family", "protocol", "flow_state", "ifindex", "src_port", "dst_port", "ether_type", "src_addr", "dst_addr", "length", "effects", "attributed"},
+    field = {
+      seq = {offset = 0, size = 8, signed = false, kind = "uint"},
+      t_ns = {offset = 8, size = 8, signed = false, kind = "uint"},
+      seat = {offset = 16, size = 1, signed = false, kind = "uint"},
+      layer = {offset = 17, size = 1, signed = false, kind = "uint"},
+      verdict = {offset = 18, size = 1, signed = false, kind = "uint"},
+      flags = {offset = 19, size = 1, signed = false, kind = "uint"},
+      direction = {offset = 20, size = 1, signed = false, kind = "uint"},
+      addr_family = {offset = 21, size = 1, signed = false, kind = "uint"},
+      protocol = {offset = 22, size = 1, signed = false, kind = "uint"},
+      flow_state = {offset = 23, size = 1, signed = false, kind = "uint"},
+      ifindex = {offset = 24, size = 4, signed = false, kind = "uint"},
+      src_port = {offset = 28, size = 2, signed = false, kind = "uint"},
+      dst_port = {offset = 30, size = 2, signed = false, kind = "uint"},
+      ether_type = {offset = 32, size = 2, signed = false, kind = "uint"},
+      src_addr = {offset = 36, size = 16, signed = false, kind = "bytes"},
+      dst_addr = {offset = 52, size = 16, signed = false, kind = "bytes"},
+      length = {offset = 68, size = 4, signed = false, kind = "uint"},
+      effects = {offset = 72, size = 4, signed = false, kind = "uint"},
+      attributed = {offset = 76, size = 1, signed = false, kind = "uint"},
+    },
+  },
+  ["peios_pnp_status"] = {
+    size = 224,
+    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns"},
+    field = {
+      abi = {offset = 0, size = 8, signed = false, kind = "uint"},
+      generation = {offset = 8, size = 8, signed = false, kind = "uint"},
+      enforcing = {offset = 16, size = 8, signed = false, kind = "uint"},
+      events_dropped = {offset = 24, size = 8, signed = false, kind = "uint"},
+      seen_ingress = {offset = 32, size = 8, signed = false, kind = "uint"},
+      seen_egress = {offset = 40, size = 8, signed = false, kind = "uint"},
+      seen_local_in = {offset = 48, size = 8, signed = false, kind = "uint"},
+      deferred = {offset = 56, size = 8, signed = false, kind = "uint"},
+      fallback_judged = {offset = 64, size = 8, signed = false, kind = "uint"},
+      parse_errors = {offset = 72, size = 8, signed = false, kind = "uint"},
+      judged = {offset = 80, size = 8, signed = false, kind = "uint"},
+      permissive = {offset = 88, size = 8, signed = false, kind = "uint"},
+      fail_closed = {offset = 96, size = 8, signed = false, kind = "uint"},
+      verdict_pass = {offset = 104, size = 8, signed = false, kind = "uint"},
+      verdict_drop = {offset = 112, size = 8, signed = false, kind = "uint"},
+      verdict_reject = {offset = 120, size = 8, signed = false, kind = "uint"},
+      reject_degraded = {offset = 128, size = 8, signed = false, kind = "uint"},
+      fx_tags = {offset = 136, size = 8, signed = false, kind = "uint"},
+      fx_counts = {offset = 144, size = 8, signed = false, kind = "uint"},
+      fx_reports = {offset = 152, size = 8, signed = false, kind = "uint"},
+      fx_prompts = {offset = 160, size = 8, signed = false, kind = "uint"},
+      last_ingest_error = {offset = 168, size = 8, signed = false, kind = "uint"},
+      last_ingest_t_ns = {offset = 176, size = 8, signed = false, kind = "uint"},
     },
   },
   ["reg_backup_args"] = {

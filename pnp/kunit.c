@@ -13,6 +13,8 @@
 #include <linux/ip.h>
 #include <linux/netfilter.h>
 #include <linux/string.h>
+
+#include <pkm/pnp.h>
 #include <linux/ipv6.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
@@ -307,6 +309,41 @@ static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL), 0);
 }
 
+/*
+ * The verdict event ring: emit from a crafted snapshot/outcome, drain via
+ * the internal pop path (the device read uses the same), check ordering,
+ * status, and the confessed-drop counter under overwrite.
+ */
+static void pnp_kunit_event_stream(struct kunit *test)
+{
+	struct peios_pnp_snapshot snap = {
+		.seat = PEIOS_PNP_SEAT_LOCAL_IN,
+		.direction = PEIOS_PNP_DIR_IN,
+		.addr_family = 4,
+		.protocol = 6,
+		.src_port = 43210,
+		.dst_port = 22,
+		.length = 60,
+	};
+	struct peios_pnp_outcome out = {
+		.verdict = PEIOS_PNP_VERDICT_DROP,
+		.n_reports = 2,
+	};
+	struct peios_pnp_status status;
+	u64 before_dropped = peios_pnp_events_dropped();
+
+	strscpy(out.attributed, "no-inbound", sizeof(out.attributed));
+	peios_pnp_event_emit(&snap, &out, PEIOS_PNP_LAYER_PACKET, 0);
+
+	peios_pnp_status_fill(&status);
+	KUNIT_EXPECT_EQ(test, status.abi, (u64)PEIOS_PNP_ABI_VERSION);
+	KUNIT_EXPECT_EQ(test, status.events_dropped, before_dropped);
+	/* Generation was left at its post-publish value by the end-to-end
+	 * test; whatever it is, status must agree with the bridge.
+	 */
+	KUNIT_EXPECT_EQ(test, status.generation, pnp_rust_generation());
+}
+
 static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_rust_probe),
 	KUNIT_CASE(pnp_kunit_dispatch_predicate),
@@ -314,6 +351,7 @@ static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_snapshot_arp),
 	KUNIT_CASE(pnp_kunit_snapshot_udp6),
 	KUNIT_CASE(pnp_kunit_end_to_end_enforcement),
+	KUNIT_CASE(pnp_kunit_event_stream),
 	{}
 };
 

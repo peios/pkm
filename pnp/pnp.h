@@ -166,6 +166,21 @@ int peios_pnp_policy_publish(void *packet_forest, void *raw_forest);
 int peios_pnp_policy_eval(u8 layer, const struct peios_pnp_snapshot *snap,
 			  struct peios_pnp_outcome *out);
 
+/* True when any layer has a published forest. */
+bool peios_pnp_policy_enforcing(void);
+
+/* Records the outcome of a registry re-walk for status honesty. */
+void peios_pnp_policy_note_ingest(long err);
+
+/* The verdict event stream (events.c; ABI in <pkm/pnp.h>). */
+struct peios_pnp_status;
+int peios_pnp_events_init(void);
+void peios_pnp_event_emit(const struct peios_pnp_snapshot *snap,
+			  const struct peios_pnp_outcome *out, u8 layer,
+			  u8 flags);
+u64 peios_pnp_events_dropped(void);
+void peios_pnp_status_fill(struct peios_pnp_status *status);
+
 /*
  * The dispatch law (ratified): the Packet layer judges a traversal at its
  * proper seat, falling back to the ingress seat iff the traversal will

@@ -126,6 +126,55 @@ type Kmes_emit_entry struct {
 	Payload_len    uint32
 	_              [4]uint8
 }
+type Peios_pnp_event struct {
+	Seq         uint64
+	T_ns        uint64
+	Seat        uint8
+	Layer       uint8
+	Verdict     uint8
+	Flags       uint8
+	Direction   uint8
+	Addr_family uint8
+	Protocol    uint8
+	Flow_state  uint8
+	Ifindex     uint32
+	Src_port    uint16
+	Dst_port    uint16
+	Ether_type  uint16
+	_           uint16
+	Src_addr    [16]uint8
+	Dst_addr    [16]uint8
+	Length      uint32
+	Effects     uint32
+	Attributed  [96]uint8
+	_           uint32
+}
+type Peios_pnp_status struct {
+	Abi               uint64
+	Generation        uint64
+	Enforcing         uint64
+	Events_dropped    uint64
+	Seen_ingress      uint64
+	Seen_egress       uint64
+	Seen_local_in     uint64
+	Deferred          uint64
+	Fallback_judged   uint64
+	Parse_errors      uint64
+	Judged            uint64
+	Permissive        uint64
+	Fail_closed       uint64
+	Verdict_pass      uint64
+	Verdict_drop      uint64
+	Verdict_reject    uint64
+	Reject_degraded   uint64
+	Fx_tags           uint64
+	Fx_counts         uint64
+	Fx_reports        uint64
+	Fx_prompts        uint64
+	Last_ingest_error uint64
+	Last_ingest_t_ns  uint64
+	_                 [5]uint64
+}
 type Reg_backup_args struct {
 	Output_fd int32
 }

@@ -168,6 +168,13 @@ static int __init peios_pnp_init(void)
 		return ret;
 	}
 
+	/* The verdict event stream and /dev/peios-pnp. */
+	ret = peios_pnp_events_init();
+	if (ret) {
+		nf_ct_netns_put(&init_net, NFPROTO_INET);
+		return ret;
+	}
+
 	ret = nf_register_net_hooks(&init_net, peios_pnp_inet_hooks,
 				    ARRAY_SIZE(peios_pnp_inet_hooks));
 	if (ret) {

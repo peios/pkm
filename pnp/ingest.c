@@ -495,6 +495,7 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 		raw_forest = NULL;
 	}
 out:
+	peios_pnp_policy_note_ingest(ret);
 	if (ret)
 		pr_warn("pnp: rules refresh failed (%ld); keeping the previous generation\n",
 			ret);

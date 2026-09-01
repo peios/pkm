@@ -38,6 +38,8 @@
 #include <net/netfilter/ipv4/nf_reject.h>
 #include <net/netfilter/ipv6/nf_reject.h>
 
+#include <pkm/pnp.h>
+
 #include "pnp.h"
 
 struct peios_pnp_stats peios_pnp_stats;
@@ -100,6 +102,8 @@ static unsigned int judge(struct sk_buff *skb, const struct net_device *dev,
 		atomic64_inc(&peios_pnp_stats.parse_errors);
 
 	for (i = 0; i < n_layers; i++) {
+		u8 evflags = 0;
+
 		ret = peios_pnp_policy_eval(layers[i], &snap, &out);
 		if (ret == -ENOENT) {
 			/* No forest for this layer: permissive (gen 0). */
@@ -108,6 +112,12 @@ static unsigned int judge(struct sk_buff *skb, const struct net_device *dev,
 		}
 		if (ret < 0) {
 			atomic64_inc(&peios_pnp_stats.fail_closed);
+			memset(&out, 0, sizeof(out));
+			out.verdict = PEIOS_PNP_VERDICT_DROP;
+			strscpy(out.attributed, "fail-closed",
+				sizeof(out.attributed));
+			peios_pnp_event_emit(&snap, &out, layers[i],
+					     PEIOS_PNP_EV_F_FAIL_CLOSED);
 			return NF_DROP;
 		}
 
@@ -116,6 +126,11 @@ static unsigned int judge(struct sk_buff *skb, const struct net_device *dev,
 		atomic64_add(out.n_counts, &peios_pnp_stats.fx_counts);
 		atomic64_add(out.n_reports, &peios_pnp_stats.fx_reports);
 		atomic64_add(out.n_prompts, &peios_pnp_stats.fx_prompts);
+
+		if (out.verdict == PEIOS_PNP_VERDICT_REJECT &&
+		    seat != PEIOS_PNP_SEAT_LOCAL_IN)
+			evflags |= PEIOS_PNP_EV_F_REJECT_DEGRADED;
+		peios_pnp_event_emit(&snap, &out, layers[i], evflags);
 
 		switch (out.verdict) {
 		case PEIOS_PNP_VERDICT_PASS:
