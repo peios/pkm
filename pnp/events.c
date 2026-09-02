@@ -84,6 +84,23 @@ void peios_pnp_event_emit(const struct peios_pnp_snapshot *snap,
 		     (u32)saturate_u8(out->n_prompts) << 24;
 	strscpy((char *)ev.attributed, out->attributed,
 		sizeof(ev.attributed));
+	/* The identity facts: set on Flow views, zero everywhere else. */
+	ev.local_kind = snap->local_kind;
+	ev.remote_kind = snap->remote_kind;
+	ev.local_unresolved = snap->local_unresolved;
+	ev.remote_unresolved = snap->remote_unresolved;
+	ev.local_pid = snap->local_pid;
+	ev.remote_pid = snap->remote_pid;
+	memcpy(ev.local_guid, snap->local_guid, sizeof(ev.local_guid));
+	memcpy(ev.remote_guid, snap->remote_guid, sizeof(ev.remote_guid));
+	memcpy(ev.local_comm, snap->local_comm, sizeof(ev.local_comm));
+	memcpy(ev.remote_comm, snap->remote_comm, sizeof(ev.remote_comm));
+	if (snap->local_token)
+		pnp_rust_owner_sids(snap->local_token, ev.local_user,
+				    ev.local_service);
+	if (snap->remote_token)
+		pnp_rust_owner_sids(snap->remote_token, ev.remote_user,
+				    ev.remote_service);
 
 	spin_lock_irqsave(&peios_pnp_events.lock, irqflags);
 	ev.seq = peios_pnp_events.next_seq++;
@@ -221,6 +238,19 @@ static long peios_pnp_dev_ioctl(struct file *file, unsigned int cmd,
 		if (copy_from_user(&query, uarg, sizeof(query)))
 			return -EFAULT;
 		ret = peios_pnp_flows_dump(&query);
+		if (ret)
+			return ret;
+		if (copy_to_user(uarg, &query, sizeof(query)))
+			return -EFAULT;
+		return 0;
+	}
+	case PEIOS_PNP_IOC_LISTENERS: {
+		struct peios_pnp_listeners_query query;
+		long ret;
+
+		if (copy_from_user(&query, uarg, sizeof(query)))
+			return -EFAULT;
+		ret = peios_pnp_listeners_dump(&query);
 		if (ret)
 			return ret;
 		if (copy_to_user(uarg, &query, sizeof(query)))

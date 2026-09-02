@@ -124,6 +124,9 @@ void peios_pnp_ct_destroy(struct nf_conn *ct)
 	if (t)
 		kfree_rcu(t, rcu);
 	RCU_INIT_POINTER(pc->tags, NULL);
+	/* The endpoints' token references die with the flow. */
+	pkm_kacs_socket_owner_put(&pc->owner[0]);
+	pkm_kacs_socket_owner_put(&pc->owner[1]);
 }
 
 static struct peios_pnp_ct *pnp_ct_of(const void *flow)

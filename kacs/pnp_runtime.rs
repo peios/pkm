@@ -30,10 +30,14 @@ use crate::pnp_core::eval::{evaluate, Effect, EvalContext};
 use crate::pnp_core::ingest::{build_forest, check_forests, RuleInput};
 use crate::pnp_core::pkm_alloc::{String as PkmString, Vec as PkmVec};
 use crate::pnp_core::rule::{Forest, Layer};
-use crate::pnp_core::snapshot::{Direction, FlowState, Snapshot, TimeFacts};
+use crate::pnp_core::sid::Sid;
+use crate::pnp_core::snapshot::{
+    Direction, Endpoint, EndpointKind, FlowState, Principal, Snapshot, TimeFacts,
+};
 use crate::pnp_core::strutil::str_to_pkm;
 use crate::pnp_core::value::RegValue;
 use crate::pnp_core::{RejectKind, Verdict};
+use crate::token_runtime::{pnp_token_view, PnpTokenView};
 
 const EINVAL: c_int = 22;
 const ENOMEM: c_int = 12;
@@ -120,6 +124,165 @@ pub struct PnpSnapshotC {
     flow_reply: u8,
     loopback: u8,
     flow: *const c_void,
+    /// The identity facts (net/pnp/identity.c), Flow views only.
+    local_kind: u8,
+    remote_kind: u8,
+    local_unresolved: u8,
+    remote_unresolved: u8,
+    local_pid: i32,
+    remote_pid: i32,
+    local_guid: [u8; 16],
+    remote_guid: [u8; 16],
+    local_comm: [c_char; 16],
+    remote_comm: [c_char; 16],
+    local_token: *const c_void,
+    remote_token: *const c_void,
+}
+
+// --- endpoint kinds: keep in lockstep with enum peios_pnp_local_kind ---
+const LOCAL_ABSENT: u8 = 0;
+const LOCAL_PROGRAM: u8 = 1;
+const LOCAL_KERNEL: u8 = 2;
+const LOCAL_SHARED: u8 = 3;
+const LOCAL_NONE: u8 = 4;
+
+fn endpoint_kind(kind: u8) -> Option<EndpointKind> {
+    match kind {
+        LOCAL_PROGRAM => Some(EndpointKind::Program),
+        LOCAL_KERNEL => Some(EndpointKind::Kernel),
+        LOCAL_SHARED => Some(EndpointKind::Shared),
+        LOCAL_NONE => Some(EndpointKind::None),
+        _ => None,
+    }
+}
+
+const _: () = assert!(LOCAL_ABSENT == 0);
+
+/// A per-service SID: `S-1-5-80-…` in binary (authority 5, first
+/// sub-authority 80).
+fn is_service_sid(sid: &[u8]) -> bool {
+    sid.len() >= 12
+        && sid[2..8] == [0, 0, 0, 0, 0, 5]
+        && u32::from_le_bytes([sid[8], sid[9], sid[10], sid[11]]) == 80
+}
+
+/// The process GUID as the `Local.Process` fact's text: lowercase,
+/// hyphenated 8-4-4-4-12.
+fn guid_text(guid: &[u8; 16]) -> [u8; 36] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = [b'-'; 36];
+    let mut o = 0usize;
+    for (i, b) in guid.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+            o += 1;
+        }
+        out[o] = HEX[usize::from(b >> 4)];
+        out[o + 1] = HEX[usize::from(b & 0xf)];
+        o += 2;
+    }
+    out
+}
+
+/// The principal behind a program endpoint, over its token: what the
+/// Flow layer's `Local.*` / `Remote.*` conditions read. Borrows the token
+/// for the judgment (the flow's extension holds the reference).
+struct KernelPrincipal {
+    view: PnpTokenView<'static>,
+    user: Sid,
+    confinement: Option<Sid>,
+    service: Option<Sid>,
+    process: [u8; 36],
+}
+
+impl KernelPrincipal {
+    /// # Safety
+    /// `token` is a live token the caller keeps referenced for the
+    /// principal's life.
+    unsafe fn new(token: *const c_void, guid: &[u8; 16]) -> Option<Self> {
+        let view = unsafe { pnp_token_view::<'static>(token) }?;
+        let user = Sid::from_bytes(view.user)?;
+        let confinement = match view.confinement {
+            Some(bytes) => Some(Sid::from_bytes(bytes)?),
+            None => None,
+        };
+        let service = view
+            .enabled_groups()
+            .find(|g| is_service_sid(g))
+            .and_then(Sid::from_bytes);
+        Some(KernelPrincipal {
+            view,
+            user,
+            confinement,
+            service,
+            process: guid_text(guid),
+        })
+    }
+}
+
+impl Principal for KernelPrincipal {
+    fn user(&self) -> &Sid {
+        &self.user
+    }
+    fn is_member(&self, sid: &Sid) -> bool {
+        self.view.enabled_groups().any(|g| g == sid.as_bytes())
+    }
+    fn integrity(&self) -> i64 {
+        i64::from(self.view.integrity)
+    }
+    fn confinement(&self) -> Option<&Sid> {
+        self.confinement.as_ref()
+    }
+    fn has_capability(&self, sid: &Sid) -> bool {
+        self.view
+            .capabilities
+            .iter()
+            .any(|c| c.sid.as_bytes() == sid.as_bytes())
+    }
+    fn service(&self) -> Option<&Sid> {
+        self.service.as_ref()
+    }
+    fn process(&self) -> &str {
+        core::str::from_utf8(&self.process).unwrap_or("")
+    }
+}
+
+/// The principal for one end of the view, when it is a program.
+///
+/// # Safety
+/// As `KernelPrincipal::new`.
+unsafe fn principal_for(kind: u8, token: *const c_void, guid: &[u8; 16]) -> Option<KernelPrincipal> {
+    if kind != LOCAL_PROGRAM || token.is_null() {
+        return None;
+    }
+    unsafe { KernelPrincipal::new(token, guid) }
+}
+
+#[no_mangle]
+/// The binary user SID and, for a service, the per-service SID of a live
+/// token, into 68- and 32-byte buffers (zeroed when absent). For the
+/// event stream and the flows dump.
+pub extern "C" fn pnp_rust_owner_sids(
+    token: *const c_void,
+    user_out: *mut u8,
+    service_out: *mut u8,
+) -> c_int {
+    if user_out.is_null() || service_out.is_null() {
+        return -EINVAL;
+    }
+    let user_out = unsafe { core::slice::from_raw_parts_mut(user_out, 68) };
+    let service_out = unsafe { core::slice::from_raw_parts_mut(service_out, 32) };
+    user_out.fill(0);
+    service_out.fill(0);
+    let Some(view) = (unsafe { pnp_token_view::<'_>(token) }) else {
+        return -EINVAL;
+    };
+    let n = view.user.len().min(user_out.len());
+    user_out[..n].copy_from_slice(&view.user[..n]);
+    if let Some(service) = view.enabled_groups().find(|g| is_service_sid(g)) {
+        let n = service.len().min(service_out.len());
+        service_out[..n].copy_from_slice(&service[..n]);
+    }
+    0
 }
 
 /// Mirror of `struct peios_pnp_outcome` (pnp.h). Field-for-field.
@@ -183,7 +346,7 @@ fn c_str_slice(buf: &[c_char]) -> &str {
     core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
-fn snapshot_from_c(c: &PnpSnapshotC) -> Result<Snapshot, ()> {
+fn snapshot_from_c<'a>(c: &PnpSnapshotC) -> Result<Snapshot<'a>, ()> {
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     let mut snap = Snapshot::default();
@@ -272,11 +435,29 @@ fn snapshot_from_c(c: &PnpSnapshotC) -> Result<Snapshot, ()> {
 /// snapshots carry none whatever the flow says. The flow-only facts
 /// (`Related`, `Start.*`) are given to Flow forests alone: everywhere
 /// else they are absent by law, as ingestion's lint says.
-fn resolve_machinery(
+fn resolve_machinery<'a>(
     forest: &Forest,
     c: &PnpSnapshotC,
-    snap: &mut Snapshot,
+    snap: &mut Snapshot<'a>,
+    local: Option<&'a KernelPrincipal>,
+    remote: Option<&'a KernelPrincipal>,
 ) -> Result<(), ()> {
+    // The identity facts: the Flow view's alone, by the same law as
+    // Related and Start.*; the C side sets them only there.
+    if forest.layer == Layer::Flow {
+        if let Some(kind) = endpoint_kind(c.local_kind) {
+            snap.local = Some(Endpoint {
+                kind,
+                principal: local.map(|p| p as &dyn Principal),
+            });
+        }
+        if let Some(kind) = endpoint_kind(c.remote_kind) {
+            snap.remote = Some(Endpoint {
+                kind,
+                principal: remote.map(|p| p as &dyn Principal),
+            });
+        }
+    }
     if forest.layer == Layer::Flow && !c.flow.is_null() {
         snap.related = Some(c.flow_related != 0);
         if c.has & HAS_START != 0 {
@@ -699,10 +880,16 @@ pub extern "C" fn pnp_rust_evaluate(
     }
     let forest = unsafe { &*f.cast::<Forest>() };
     let snap_c = unsafe { &*snap };
+    // The principals outlive the snapshot that borrows them; the flow's
+    // extension keeps the tokens alive for the hook (identity.c).
+    let local = unsafe { principal_for(snap_c.local_kind, snap_c.local_token, &snap_c.local_guid) };
+    let remote =
+        unsafe { principal_for(snap_c.remote_kind, snap_c.remote_token, &snap_c.remote_guid) };
     let Ok(mut snapshot) = snapshot_from_c(snap_c) else {
         return -ENOMEM;
     };
-    if resolve_machinery(forest, snap_c, &mut snapshot).is_err() {
+    if resolve_machinery(forest, snap_c, &mut snapshot, local.as_ref(), remote.as_ref()).is_err()
+    {
         return -ENOMEM;
     }
     let ctx = EvalContext { reporting_level };

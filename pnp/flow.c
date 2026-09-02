@@ -223,6 +223,102 @@ static void pnp_flow_record(struct peios_pnp_ct *pc,
 	WRITE_ONCE(pc->judged, 1);
 }
 
+/*
+ * The endpoints' identities for one judgment: read from the extension
+ * when recorded, else resolved (identity.c) and recorded there — fixed for
+ * the flow's life, like the direction. `owned` marks a resolution the
+ * extension could not keep, released after the evaluation.
+ */
+struct pnp_identity_pair {
+	struct peios_pnp_identity id[2];
+	bool owned[2];
+};
+
+static void pnp_identity_read(const struct peios_pnp_ct *pc, u32 s,
+			      struct peios_pnp_identity *id)
+{
+	id->kind = READ_ONCE(pc->owner_kind[s]);
+	id->unresolved = READ_ONCE(pc->owner_unresolved[s]);
+	id->owner = pc->owner[s];	/* borrowed: the extension holds the ref */
+}
+
+static void pnp_flow_identity(struct sk_buff *skb,
+			      const struct nf_hook_state *state,
+			      const struct peios_pnp_snapshot *snap,
+			      struct nf_conn *ct, struct peios_pnp_ct *pc,
+			      u32 slot, struct pnp_identity_pair *p)
+{
+	u32 s;
+
+	memset(p, 0, sizeof(*p));
+	for (s = 0; s < 2; s++) {
+		struct peios_pnp_identity *id = &p->id[s];
+		bool other = s != slot;
+
+		/* The other end is a fact only when it is local too. */
+		if (other && !snap->loopback)
+			continue;
+		if (pc && smp_load_acquire(&pc->owner_recorded[s])) {
+			pnp_identity_read(pc, s, id);
+			continue;
+		}
+		peios_pnp_identity_resolve(skb, state, snap, other, id);
+		if (id->unresolved)
+			atomic64_inc(&peios_pnp_stats.identity_unresolved);
+		if (id->kind == PEIOS_PNP_LOCAL_ABSENT)
+			continue;
+		if (!pc) {
+			p->owned[s] = true;
+			continue;
+		}
+		spin_lock_bh(&ct->lock);
+		if (!pc->owner_recorded[s]) {
+			pc->owner[s] = id->owner;
+			WRITE_ONCE(pc->owner_kind[s], id->kind);
+			WRITE_ONCE(pc->owner_unresolved[s], id->unresolved);
+			smp_store_release(&pc->owner_recorded[s], 1);
+			spin_unlock_bh(&ct->lock);
+		} else {
+			/* Two CPUs on a new flow's first packets: the first
+			 * record stands, as the first sentence does.
+			 */
+			spin_unlock_bh(&ct->lock);
+			peios_pnp_identity_release(id);
+			pnp_identity_read(pc, s, id);
+		}
+	}
+}
+
+static void pnp_identity_pair_release(struct pnp_identity_pair *p)
+{
+	u32 s;
+
+	for (s = 0; s < 2; s++)
+		if (p->owned[s])
+			peios_pnp_identity_release(&p->id[s]);
+}
+
+/* The identity facts onto the flow view: this end, and the other. */
+static void pnp_flow_view_identity(struct peios_pnp_snapshot *view,
+				   const struct pnp_identity_pair *p, u32 slot)
+{
+	const struct peios_pnp_identity *l = &p->id[slot];
+	const struct peios_pnp_identity *r = &p->id[slot ^ 1];
+
+	view->local_kind = l->kind;
+	view->local_unresolved = l->unresolved;
+	view->local_token = l->owner.token;
+	view->local_pid = l->owner.pid;
+	memcpy(view->local_guid, l->owner.guid, sizeof(view->local_guid));
+	strscpy(view->local_comm, l->owner.comm, sizeof(view->local_comm));
+	view->remote_kind = r->kind;
+	view->remote_unresolved = r->unresolved;
+	view->remote_token = r->owner.token;
+	view->remote_pid = r->owner.pid;
+	memcpy(view->remote_guid, r->owner.guid, sizeof(view->remote_guid));
+	strscpy(view->remote_comm, r->owner.comm, sizeof(view->remote_comm));
+}
+
 static unsigned int pnp_apply_sentence(struct sk_buff *skb,
 				       const struct nf_hook_state *state,
 				       const struct peios_pnp_snapshot *snap,
@@ -246,6 +342,7 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 {
 	struct nf_conn *ct = (struct nf_conn *)snap->flow;
 	struct peios_pnp_sentence cur = { }, other = { };
+	struct pnp_identity_pair ids = { };
 	struct peios_pnp_snapshot view;
 	struct peios_pnp_outcome out;
 	struct peios_pnp_ct *pc;
@@ -277,10 +374,20 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 		atomic64_inc(&peios_pnp_stats.flow_cached);
 	} else {
 		pnp_flow_view(snap, pc, slot, &view);
+		/* The identity facts cost a socket lookup inbound: resolved
+		 * only when there is a Flow forest to judge them.
+		 */
+		if (peios_pnp_policy_has_layer(PEIOS_PNP_LAYER_FLOW)) {
+			pnp_flow_identity(skb, state, snap, ct, pc, slot, &ids);
+			pnp_flow_view_identity(&view, &ids, slot);
+			if (view.local_unresolved || view.remote_unresolved)
+				evflags |= PEIOS_PNP_EV_F_IDENTITY_UNRESOLVED;
+		}
 		ret = peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &view, &out);
 		if (ret == -ENOENT) {
 			/* No Flow forest: permissive, and nothing to cache. */
 			atomic64_inc(&peios_pnp_stats.permissive);
+			pnp_identity_pair_release(&ids);
 			return NF_ACCEPT;
 		}
 		if (ret < 0) {
@@ -291,6 +398,7 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 				sizeof(out.attributed));
 			peios_pnp_event_emit(&view, &out, PEIOS_PNP_LAYER_FLOW,
 					     PEIOS_PNP_EV_F_FAIL_CLOSED);
+			pnp_identity_pair_release(&ids);
 			return NF_DROP;
 		}
 		atomic64_inc(&peios_pnp_stats.judged);
@@ -338,9 +446,11 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 				evflags |= PEIOS_PNP_EV_F_REJECT_DEGRADED;
 			peios_pnp_event_emit(&view, &out, PEIOS_PNP_LAYER_FLOW,
 					     evflags);
+			pnp_identity_pair_release(&ids);
 			return NF_DROP;
 		}
 		peios_pnp_event_emit(&view, &out, PEIOS_PNP_LAYER_FLOW, evflags);
+		pnp_identity_pair_release(&ids);
 	}
 
 	/* A loopback flow answers to both endpoints' sentences: the other
@@ -370,6 +480,28 @@ static void pnp_sentence_to_rec(const struct peios_pnp_sentence *s,
 	rec->sentence_rule_hash[slot] = val.rule_hash;
 	rec->sentence_verdict[slot] = val.verdict;
 	rec->sentence_reject_kind[slot] = val.reject_kind;
+}
+
+/* The endpoint identity recorded for one slot, if any. */
+static void pnp_owner_to_rec(const struct peios_pnp_ct *pc,
+			     struct peios_pnp_flow_rec *rec, u32 slot)
+{
+	const struct peios_pnp_owner *o = &pc->owner[slot];
+
+	if (!smp_load_acquire(&pc->owner_recorded[slot]))
+		return;
+	rec->owner_kind[slot] = READ_ONCE(pc->owner_kind[slot]);
+	rec->owner_unresolved[slot] = READ_ONCE(pc->owner_unresolved[slot]);
+	rec->owner_pid[slot] = o->pid;
+	memcpy(&rec->owner_guid[slot * PEIOS_PNP_GUID_LEN], o->guid,
+	       PEIOS_PNP_GUID_LEN);
+	memcpy(&rec->owner_comm[slot * PEIOS_PNP_COMM_LEN], o->comm,
+	       PEIOS_PNP_COMM_LEN);
+	if (o->token)
+		pnp_rust_owner_sids(o->token,
+				    &rec->owner_user[slot * PEIOS_PNP_SID_LEN],
+				    &rec->owner_service[slot *
+							PEIOS_PNP_SERVICE_SID_LEN]);
 }
 
 /* Fills one record from a live entry; called under its bucket lock. */
@@ -436,6 +568,8 @@ static void pnp_flow_fill(struct peios_pnp_flow_rec *rec,
 		}
 		pnp_sentence_to_rec(&pc->sentence[0], rec, 0);
 		pnp_sentence_to_rec(&pc->sentence[1], rec, 1);
+		pnp_owner_to_rec(pc, rec, 0);
+		pnp_owner_to_rec(pc, rec, 1);
 		rec->n_tags = min_t(u32,
 				    peios_pnp_tags_snapshot(ct, rec->tag_hash,
 							    rec->tag_value,

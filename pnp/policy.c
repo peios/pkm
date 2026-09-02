@@ -165,6 +165,20 @@ bool peios_pnp_policy_enforcing(void)
 	return enforcing;
 }
 
+bool peios_pnp_policy_has_layer(u8 layer)
+{
+	struct peios_pnp_policy *policy;
+	bool present;
+
+	if (layer >= PEIOS_PNP_LAYER_COUNT)
+		return false;
+	rcu_read_lock();
+	policy = rcu_dereference(peios_pnp_active);
+	present = policy && policy->forests[layer];
+	rcu_read_unlock();
+	return present;
+}
+
 u8 peios_pnp_policy_reporting_level(void)
 {
 	struct peios_pnp_policy *policy;
@@ -238,4 +252,6 @@ void peios_pnp_status_fill(struct peios_pnp_status *status)
 		atomic64_read(&peios_pnp_stats.refusals_bypassed);
 	status->teardowns_emitted =
 		atomic64_read(&peios_pnp_stats.teardowns_emitted);
+	status->identity_unresolved =
+		atomic64_read(&peios_pnp_stats.identity_unresolved);
 }

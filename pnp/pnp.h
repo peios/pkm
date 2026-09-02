@@ -21,6 +21,7 @@
 #include <linux/atomic.h>
 #include <linux/bits.h>
 #include <linux/if.h>
+#include <linux/peios_pnp.h>	/* the owner KACS stamps on a socket */
 #include <linux/skbuff.h>
 #include <linux/types.h>
 
@@ -60,6 +61,19 @@ enum peios_pnp_flow_state {
 	PEIOS_PNP_FLOW_RELATED,
 	PEIOS_PNP_FLOW_INVALID,
 	PEIOS_PNP_FLOW_UNTRACKED,
+};
+
+/*
+ * What stands at a local end of a flow — the Flow layer's `Local` fact
+ * (and `Remote` on loopback). Mirrors pnp-core's EndpointKind; ABSENT is
+ * "not a Flow view" / "the other end is not local".
+ */
+enum peios_pnp_local_kind {
+	PEIOS_PNP_LOCAL_ABSENT = 0,
+	PEIOS_PNP_LOCAL_PROGRAM,	/* a process's socket: Local.* present */
+	PEIOS_PNP_LOCAL_KERNEL,		/* the stack itself */
+	PEIOS_PNP_LOCAL_SHARED,		/* inbound multicast/broadcast: many */
+	PEIOS_PNP_LOCAL_NONE,		/* nothing receives it */
 };
 
 /* Validity bits for facts whose zero values are meaningful. */
@@ -122,6 +136,30 @@ struct peios_pnp_snapshot {
 	u8 flow_reply;			/* packet is in the flow's reply direction */
 	u8 loopback;			/* the traversal is on the loopback route */
 	const void *flow;		/* struct nf_conn *, or NULL */
+	/*
+	 * The identity facts (identity.c), set on the Flow view only: the
+	 * local end, and on a loopback flow the other end. Tokens are
+	 * borrowed for the judgment (the extension holds the references).
+	 */
+	u8 local_kind;			/* enum peios_pnp_local_kind */
+	u8 remote_kind;
+	u8 local_unresolved;
+	u8 remote_unresolved;
+	s32 local_pid;
+	s32 remote_pid;
+	u8 local_guid[16];
+	u8 remote_guid[16];
+	char local_comm[16];
+	char remote_comm[16];
+	const void *local_token;	/* KACS token, or NULL */
+	const void *remote_token;
+};
+
+/* One resolved endpoint identity (identity.c). */
+struct peios_pnp_identity {
+	u8 kind;			/* enum peios_pnp_local_kind */
+	u8 unresolved;			/* confessed: could not be attributed */
+	struct peios_pnp_owner owner;	/* counted token ref when kind == PROGRAM */
 };
 
 /* The verdicts, in strictness order. Mirrors pnp_runtime.rs. */
@@ -230,6 +268,8 @@ struct peios_pnp_stats {
 	atomic64_t refusals_emitted;	/* REJECT answers built and sent */
 	atomic64_t refusals_bypassed;	/* own refusals waved through a seat */
 	atomic64_t teardowns_emitted;	/* far-end resets of established TCP */
+	/* The identity facts (rung 3). */
+	atomic64_t identity_unresolved;	/* an endpoint that could not be attributed */
 };
 
 extern struct peios_pnp_stats peios_pnp_stats;
@@ -255,6 +295,8 @@ int peios_pnp_policy_eval(u8 layer, const struct peios_pnp_snapshot *snap,
 
 /* True when any layer has a published forest. */
 bool peios_pnp_policy_enforcing(void);
+/* True when this layer has a published forest. */
+bool peios_pnp_policy_has_layer(u8 layer);
 
 /* The active generation's CurrentReportingLevel (1 when absent). */
 u8 peios_pnp_policy_reporting_level(void);
@@ -302,8 +344,27 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 				     const struct nf_hook_state *state,
 				     const struct peios_pnp_snapshot *snap);
 long peios_pnp_flows_dump(struct peios_pnp_flows_query *query);
+/* The listeners dump (listeners.c): what the machine is prepared to
+ * receive, and by whom, without a packet arriving.
+ */
+struct peios_pnp_listeners_query;
+long peios_pnp_listeners_dump(struct peios_pnp_listeners_query *query);
 /* FNV-1a-64, the same identity pnp-core's name_hash computes. */
 u64 peios_pnp_path_hash(const char *s, size_t len);
+
+/*
+ * The identity facts (identity.c): resolves what stands at this
+ * traversal's local end — or, with @other_end on a loopback packet, at
+ * the other local end — into @out, which the caller releases unless it
+ * hands the token reference to the flow's extension.
+ */
+void peios_pnp_identity_resolve(struct sk_buff *skb,
+				const struct nf_hook_state *state,
+				const struct peios_pnp_snapshot *snap,
+				bool other_end, struct peios_pnp_identity *out);
+void peios_pnp_identity_release(struct peios_pnp_identity *id);
+/* The binary user and service SIDs of a token (zeroed when absent). */
+int pnp_rust_owner_sids(const void *token, u8 *user_out, u8 *service_out);
 
 /*
  * Refusals (refuse.c): the answer a REJECT sends. Built from the kernel's

@@ -26,7 +26,7 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PEIOS_PNP_ABI_VERSION		3U
+#define PEIOS_PNP_ABI_VERSION		4U
 
 /* Which standing seat judged the traversal. */
 #define PEIOS_PNP_EV_SEAT_INGRESS	1U
@@ -65,8 +65,24 @@
 #define PEIOS_PNP_EV_F_FAIL_CLOSED	0x02U	/* evaluation failed; DROP */
 #define PEIOS_PNP_EV_F_REJECT_DEGRADED	0x04U	/* REJECT emitted as DROP */
 #define PEIOS_PNP_EV_F_REJUDGED		0x08U	/* Flow: a stale sentence re-judged */
+#define PEIOS_PNP_EV_F_IDENTITY_UNRESOLVED 0x10U	/* Flow: an endpoint could not be attributed */
+
+/* What stood at an endpoint: the Flow layer's Local / Remote facts (ABI 4). */
+#define PEIOS_PNP_EV_LOCAL_ABSENT	0U	/* not a Flow event / not local */
+#define PEIOS_PNP_EV_LOCAL_PROGRAM	1U	/* a process's socket */
+#define PEIOS_PNP_EV_LOCAL_KERNEL	2U	/* the stack itself */
+#define PEIOS_PNP_EV_LOCAL_SHARED	3U	/* inbound multicast / broadcast */
+#define PEIOS_PNP_EV_LOCAL_NONE		4U	/* nothing receives it */
 
 #define PEIOS_PNP_EV_ATTR_LEN		96U
+/* A SID's binary form: revision, sub-authority count, a 48-bit authority,
+ * up to 15 sub-authorities. Self-sized by its count byte; all zero = absent.
+ */
+#define PEIOS_PNP_SID_LEN		68U
+/* A per-service SID (S-1-5-80 + five sub-authorities) is exactly this. */
+#define PEIOS_PNP_SERVICE_SID_LEN	32U
+#define PEIOS_PNP_COMM_LEN		16U
+#define PEIOS_PNP_GUID_LEN		16U
 
 /*
  * One evaluation. `attributed` is the winning rule's registry path
@@ -98,7 +114,30 @@ struct peios_pnp_event {
 	__u32 effects;
 	/* UTF-8, NUL-terminated, truncated. */
 	__u8 attributed[PEIOS_PNP_EV_ATTR_LEN];
-	__u32 _pad1;		/* explicit tail padding to 8-byte size */
+	__u32 _pad1;
+	/*
+	 * The endpoints' identities (ABI 4): the local end of the flow, and
+	 * on a loopback flow the other end. Flow-layer events only; zero
+	 * elsewhere. `local_kind` is PEIOS_PNP_EV_LOCAL_*; the rest is present
+	 * for a program endpoint: the process GUID, thread-group id and comm
+	 * at the socket's stamp, the token's user SID and, for a service, its
+	 * per-service SID.
+	 */
+	__u8 local_kind;
+	__u8 remote_kind;
+	__u8 local_unresolved;
+	__u8 remote_unresolved;
+	__s32 local_pid;
+	__s32 remote_pid;
+	__u8 local_guid[PEIOS_PNP_GUID_LEN];
+	__u8 remote_guid[PEIOS_PNP_GUID_LEN];
+	__u8 local_comm[PEIOS_PNP_COMM_LEN];
+	__u8 remote_comm[PEIOS_PNP_COMM_LEN];
+	__u8 local_user[PEIOS_PNP_SID_LEN];
+	__u8 remote_user[PEIOS_PNP_SID_LEN];
+	__u8 local_service[PEIOS_PNP_SERVICE_SID_LEN];
+	__u8 remote_service[PEIOS_PNP_SERVICE_SID_LEN];
+	__u32 _pad2;		/* explicit tail padding to 8-byte size */
 };
 
 /* Engine status: counters are cumulative since boot. */
@@ -150,7 +189,9 @@ struct peios_pnp_status {
 	__u64 refusals_emitted;	/* REJECT answers PNP built and sent */
 	__u64 refusals_bypassed;	/* PNP's own refusals waved through its seats */
 	__u64 teardowns_emitted;	/* far-end resets sent for refused established TCP flows */
-	__u64 _reserved[3];
+	/* The identity facts (ABI 4). */
+	__u64 identity_unresolved;	/* endpoints that could not be attributed at resolution */
+	__u64 _reserved[2];
 };
 
 /*
@@ -245,6 +286,21 @@ struct peios_pnp_flow_rec {
 	/* Up to PEIOS_PNP_FLOW_MAX_TAGS present tags, by name hash. */
 	__u64 tag_hash[PEIOS_PNP_FLOW_MAX_TAGS];
 	__u64 tag_value[PEIOS_PNP_FLOW_MAX_TAGS];
+	/*
+	 * The endpoints' identities per sentence slot (ABI 4), recorded at
+	 * the flow's first judgment: `owner_kind` is PEIOS_PNP_EV_LOCAL_*
+	 * (ABSENT = not yet resolved); the per-slot arrays are flattened at
+	 * the stride their constant names (GUID 16, comm 16, SID 68, service
+	 * SID 32 per slot).
+	 */
+	__u8 owner_kind[PEIOS_PNP_FLOW_SENTENCES];
+	__u8 owner_unresolved[PEIOS_PNP_FLOW_SENTENCES];
+	__u8 _pad2[4];
+	__s32 owner_pid[PEIOS_PNP_FLOW_SENTENCES];
+	__u8 owner_guid[32];
+	__u8 owner_comm[32];
+	__u8 owner_user[136];
+	__u8 owner_service[64];
 };
 
 /*
@@ -254,6 +310,45 @@ struct peios_pnp_flow_rec {
  */
 struct peios_pnp_flows_query {
 	__u64 buf;		/* struct peios_pnp_flow_rec __user * */
+	__u32 buf_len;		/* bytes */
+	__u32 count;		/* out */
+	__u32 total;		/* out */
+	__u32 _pad0;
+};
+
+/*
+ * One socket prepared to receive (ABI 4): a TCP socket in the listening
+ * state, or a bound UDP / UDP-Lite socket (`connected` when it has a
+ * peer, i.e. receives from one address only) — with the governing
+ * identity the kernel stamped on it, in the same shape the flow record
+ * carries per slot. The attack surface as a list, and by whom.
+ */
+struct peios_pnp_listener_rec {
+	__u8 family;		/* 4 / 6 */
+	__u8 protocol;		/* IPPROTO_TCP / UDP / UDPLITE */
+	__u8 reuseport;		/* SO_REUSEPORT: one of a group */
+	__u8 connected;		/* UDP: bound to a peer as well */
+	__u8 v6only;		/* AF_INET6 socket that takes no v4-mapped traffic */
+	__u8 owner_kind;	/* PEIOS_PNP_EV_LOCAL_PROGRAM / KERNEL */
+	__u8 owner_unresolved;
+	__u8 _pad0;
+	__u16 port;		/* host order */
+	__u16 _pad1;
+	__s32 ifindex;		/* SO_BINDTODEVICE, 0 = any */
+	__u8 addr[16];		/* bound local address; all zero = any */
+	__s32 owner_pid;
+	__u8 owner_guid[PEIOS_PNP_GUID_LEN];
+	__u8 owner_comm[PEIOS_PNP_COMM_LEN];
+	__u8 owner_user[PEIOS_PNP_SID_LEN];
+	__u8 owner_service[PEIOS_PNP_SERVICE_SID_LEN];
+};
+
+/*
+ * The listeners dump: fills `buf` with as many records as fit; `count`
+ * is how many were written, `total` how many sockets the walk saw.
+ */
+struct peios_pnp_listeners_query {
+	__u64 buf;		/* struct peios_pnp_listener_rec __user * */
 	__u32 buf_len;		/* bytes */
 	__u32 count;		/* out */
 	__u32 total;		/* out */
@@ -272,5 +367,9 @@ struct peios_pnp_flows_query {
 #define PEIOS_PNP_IOC_FLOWS \
 	_IOWR(PEIOS_PNP_IOC_TYPE, PEIOS_PNP_IOC_FLOWS_NR, \
 	      struct peios_pnp_flows_query)
+#define PEIOS_PNP_IOC_LISTENERS_NR	4U
+#define PEIOS_PNP_IOC_LISTENERS \
+	_IOWR(PEIOS_PNP_IOC_TYPE, PEIOS_PNP_IOC_LISTENERS_NR, \
+	      struct peios_pnp_listeners_query)
 
 #endif /* _UAPI_PKM_PNP_H */

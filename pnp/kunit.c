@@ -29,6 +29,9 @@
 #include <pkm/kmes.h>
 
 #include "../../security/pkm/kmes/kmes.h"
+#include <linux/net.h>
+#include <net/sock.h>
+
 #include "pnp.h"
 
 static struct net_device *pnp_test_dev(struct kunit *test, const char *name,
@@ -1112,6 +1115,208 @@ static void pnp_kunit_downward_tag_read_refused(struct kunit *test)
 	pnp_rust_forest_free(flow);
 }
 
+
+/* The process GUID as the Local.Process fact's text (8-4-4-4-12). */
+static void pnp_test_guid_text(const u8 guid[16], char out[37])
+{
+	static const char hex[] = "0123456789abcdef";
+	int i, o = 0;
+
+	for (i = 0; i < 16; i++) {
+		if (i == 4 || i == 6 || i == 8 || i == 10)
+			out[o++] = '-';
+		out[o++] = hex[guid[i] >> 4];
+		out[o++] = hex[guid[i] & 0xf];
+	}
+	out[o] = '\0';
+}
+
+/*
+ * The identity facts (rung 3): the resolver classifies real sockets the
+ * way the design says — a listening program, nobody, the stack, a kernel
+ * socket, the sender — and the bridge lifts a program's token into the
+ * Local.* facts a Flow forest judges.
+ */
+static void pnp_kunit_identity_facts(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_hook_state in_state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct nf_hook_state out_state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	struct sockaddr_in addr = {
+		.sin_family = AF_INET,
+		.sin_port = htons(2222),
+	};
+	struct peios_pnp_identity id, kernel_id;
+	struct peios_pnp_snapshot snap;
+	struct peios_pnp_outcome out;
+	struct socket *sock = NULL, *ksock = NULL;
+	struct sk_buff *skb;
+	struct iphdr *iph;
+	void *b, *forest = NULL;
+	u8 user[68], service[32];
+	char guid[37];
+
+	dev_net_set(dev, &init_net);
+
+	/* A program's listener, on the port the packet is for. */
+	KUNIT_ASSERT_EQ(test, sock_create(AF_INET, SOCK_STREAM, 0, &sock), 0);
+	KUNIT_ASSERT_EQ(test,
+			kernel_bind(sock, (struct sockaddr_unsized *)&addr,
+				    sizeof(addr)),
+			0);
+	KUNIT_ASSERT_EQ(test, kernel_listen(sock, 1), 0);
+
+	skb = pnp_test_tcp4_skb(test, 2222);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &id);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_PNP_LOCAL_PROGRAM);
+	KUNIT_EXPECT_EQ(test, id.unresolved, 0);
+	KUNIT_ASSERT_NOT_NULL(test, id.owner.token);
+	KUNIT_EXPECT_EQ(test, id.owner.pid, (s32)task_tgid_nr(current));
+	KUNIT_EXPECT_NE(test, id.owner.comm[0], '\0');
+	/* Its SIDs cross the bridge: a user SID, and no service SID here. */
+	KUNIT_EXPECT_EQ(test, pnp_rust_owner_sids(id.owner.token, user, service),
+			0);
+	KUNIT_EXPECT_EQ(test, user[0], 1);	/* SID revision */
+	KUNIT_EXPECT_EQ(test, service[0], 0);
+	kfree_skb(skb);
+
+	/* Nobody listens on the next port: none. */
+	skb = pnp_test_tcp4_skb(test, 2223);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_NONE);
+	KUNIT_EXPECT_NULL(test, kernel_id.owner.token);
+	peios_pnp_identity_release(&kernel_id);
+
+	/* The stack consumes ICMP itself: kernel. A protocol nothing
+	 * handles (253, experimental): none.
+	 */
+	iph = ip_hdr(skb);
+	iph->protocol = IPPROTO_ICMP;
+	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_KERNEL);
+	peios_pnp_identity_release(&kernel_id);
+	iph->protocol = 253;
+	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_NONE);
+	peios_pnp_identity_release(&kernel_id);
+	kfree_skb(skb);
+
+	/* Outbound: the sending socket's stamp; a kernel socket is the
+	 * kernel's.
+	 */
+	skb = pnp_test_tcp4_skb(test, 443);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_OUT,
+						    PEIOS_PNP_DIR_OUT, &snap),
+			0);
+	out_state.sk = sock->sk;
+	peios_pnp_identity_resolve(skb, &out_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_PROGRAM);
+	KUNIT_EXPECT_PTR_EQ(test, kernel_id.owner.token, id.owner.token);
+	peios_pnp_identity_release(&kernel_id);
+
+	KUNIT_ASSERT_EQ(test,
+			sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0,
+					 &ksock),
+			0);
+	out_state.sk = ksock->sk;
+	peios_pnp_identity_resolve(skb, &out_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_KERNEL);
+	KUNIT_EXPECT_NULL(test, kernel_id.owner.token);
+	peios_pnp_identity_release(&kernel_id);
+	sock_release(ksock);
+
+	/* The bridge: a Flow forest over the identity facts, judged against
+	 * the program's token and against the kernel.
+	 */
+	pnp_test_guid_text(id.owner.guid, guid);
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "posture", 7), 0);
+	pnp_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "this-process", 12),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_str(b, "Local.Process.Equal", 19,
+						   guid, strlen(guid)),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_int(b, "Local.Service.Present",
+						   21, 0),
+			0);
+	pnp_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "kernel", 6), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_str(b, "Local.Equal", 11,
+						   "kernel", 6),
+			0);
+	pnp_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &forest),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, forest);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, forest, 1),
+			0);
+	KUNIT_EXPECT_TRUE(test, peios_pnp_policy_has_layer(PEIOS_PNP_LAYER_FLOW));
+	KUNIT_EXPECT_FALSE(test,
+			   peios_pnp_policy_has_layer(PEIOS_PNP_LAYER_PACKET));
+
+	/* This program: the exception speaks. */
+	snap.local_kind = PEIOS_PNP_LOCAL_PROGRAM;
+	snap.local_token = id.owner.token;
+	memcpy(snap.local_guid, id.owner.guid, sizeof(snap.local_guid));
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_STREQ(test, out.attributed, "posture/this-process");
+
+	/* Another process (a different GUID): the posture drops it. */
+	snap.local_guid[0] ^= 0xff;
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_DROP);
+	KUNIT_EXPECT_STREQ(test, out.attributed, "posture");
+
+	/* The kernel: no principal, the kernel exception speaks. */
+	snap.local_kind = PEIOS_PNP_LOCAL_KERNEL;
+	snap.local_token = NULL;
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_STREQ(test, out.attributed, "posture/kernel");
+
+	kfree_skb(skb);
+	peios_pnp_identity_release(&id);
+	sock_release(sock);
+}
+
 static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_rust_probe),
 	KUNIT_CASE(pnp_kunit_dispatch_predicate),
@@ -1130,6 +1335,7 @@ static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_teardown_resets_the_far_end),
 	KUNIT_CASE(pnp_kunit_own_refusals_bypass_the_seats),
 	KUNIT_CASE(pnp_kunit_downward_tag_read_refused),
+	KUNIT_CASE(pnp_kunit_identity_facts),
 	{}
 };
 
