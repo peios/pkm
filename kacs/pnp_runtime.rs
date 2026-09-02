@@ -117,6 +117,7 @@ pub struct PnpSnapshotC {
     s_minute: u8,
     s_second: u8,
     flow_related: u8,
+    flow_reply: u8,
     loopback: u8,
     flow: *const c_void,
 }

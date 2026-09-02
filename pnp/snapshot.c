@@ -87,6 +87,7 @@ static void snapshot_flow_state(const struct sk_buff *skb, u8 seat,
 	if (ct && !nf_ct_is_template(ct)) {
 		snap->flow = ct;	/* the tag and sentence stores' scope */
 		snap->flow_related = ct->master != NULL;
+		snap->flow_reply = CTINFO2DIR(ctinfo) == IP_CT_DIR_REPLY;
 		snapshot_start(ct, snap);
 	}
 	if (!ct) {

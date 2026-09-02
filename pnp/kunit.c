@@ -851,11 +851,34 @@ static void pnp_kunit_flow_sentence(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
 			judged0 + 3);
 
-	/* Loopback: two endpoints, two sentences, the stricter answers.
-	 * A forest that passes outbound and drops inbound, judged first at
-	 * the outbound endpoint (slot 0)...
+	/* A re-judgment on a REPLY packet judges the flow, not the packet:
+	 * the outbound flow is still outbound (so the forest that passes
+	 * out and drops in passes it), with the original tuple. Found live:
+	 * an inbound viewer flow re-judged on its reply as "out".
 	 */
 	pnp_test_publish_flow2(test);
+	{
+		struct peios_pnp_snapshot reply = snap;
+
+		reply.seat = PEIOS_PNP_SEAT_LOCAL_IN;
+		reply.direction = PEIOS_PNP_DIR_IN;
+		reply.flow_reply = 1;
+		memcpy(reply.src_addr, snap.dst_addr, 16);
+		memcpy(reply.dst_addr, snap.src_addr, 16);
+		reply.src_port = snap.dst_port;
+		reply.dst_port = snap.src_port;
+		KUNIT_EXPECT_EQ(test,
+				peios_pnp_flow_dispatch(skb, &state, &reply),
+				(unsigned int)NF_ACCEPT);
+		KUNIT_EXPECT_EQ(test, pc->sentence[0].rule_hash,
+				peios_pnp_path_hash("out", 3));
+		KUNIT_EXPECT_EQ(test, pc->direction, (u8)PEIOS_PNP_DIR_OUT);
+	}
+
+	/* Loopback: two endpoints, two sentences, the stricter answers.
+	 * The same forest (passes outbound, drops inbound), judged first at
+	 * the outbound endpoint (slot 0)...
+	 */
 	snap.loopback = 1;
 	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_ACCEPT);

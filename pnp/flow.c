@@ -35,6 +35,7 @@
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/netdevice.h>
 #include <linux/netfilter.h>
 #include <linux/peios_pnp.h>
 #include <linux/rcupdate.h>
@@ -127,6 +128,101 @@ static bool pnp_sentence_stricter(const struct peios_pnp_sentence *a,
 	return false;
 }
 
+/*
+ * The flow view: the snapshot the Flow layer judges. A Flow fact is one
+ * identical for every packet of the flow, so the view is built from the
+ * flow, not the packet — the original tuple (a reply packet's addresses
+ * and ports are swapped back), the originator's direction, and the facts
+ * recorded at the first judgment (interface, VLAN, the peer's MAC). A
+ * loopback flow is judged per endpoint: its direction is the slot's.
+ * The first judgment of a flow is on its first packet, in the original
+ * direction, so it records what it sees.
+ */
+static void pnp_flow_view(const struct peios_pnp_snapshot *snap,
+			  const struct peios_pnp_ct *pc, u32 slot,
+			  struct peios_pnp_snapshot *view)
+{
+	*view = *snap;
+	if (snap->flow_reply) {
+		u8 addr[16];
+		u16 port;
+
+		memcpy(addr, view->src_addr, 16);
+		memcpy(view->src_addr, view->dst_addr, 16);
+		memcpy(view->dst_addr, addr, 16);
+		port = view->src_port;
+		view->src_port = view->dst_port;
+		view->dst_port = port;
+		/* The reply's ICMP type is the answer's; the flow's is the
+		 * original tuple's, which conntrack keeps.
+		 */
+		if (snap->has & PEIOS_PNP_HAS_ICMP) {
+			const struct nf_conn *ct = snap->flow;
+			const struct nf_conntrack_tuple *t =
+				&ct->tuplehash[IP_CT_DIR_ORIGINAL].tuple;
+
+			view->icmp_type = t->dst.u.icmp.type;
+			view->icmp_code = t->dst.u.icmp.code;
+		}
+		view->direction = snap->direction == PEIOS_PNP_DIR_IN ?
+			PEIOS_PNP_DIR_OUT : PEIOS_PNP_DIR_IN;
+	}
+	if (snap->loopback)
+		view->direction = slot ? PEIOS_PNP_DIR_IN : PEIOS_PNP_DIR_OUT;
+	if (pc && READ_ONCE(pc->judged)) {
+		struct net_device *dev;
+
+		smp_rmb();
+		if (!snap->loopback)
+			view->direction = READ_ONCE(pc->direction);
+		view->ifindex = READ_ONCE(pc->ifindex);
+		/* Hook context holds the RCU read lock already; the KUnit
+		 * caller does not, and nesting is free.
+		 */
+		rcu_read_lock();
+		dev = dev_get_by_index_rcu(&init_net, view->ifindex);
+		if (dev)
+			strscpy(view->ifname, dev->name, IFNAMSIZ);
+		rcu_read_unlock();
+		view->has &= ~(PEIOS_PNP_HAS_VLAN | PEIOS_PNP_HAS_MACS |
+			       PEIOS_PNP_HAS_SRC_MAC);
+		if (READ_ONCE(pc->has_vlan)) {
+			view->vlan = READ_ONCE(pc->vlan);
+			view->has |= PEIOS_PNP_HAS_VLAN;
+		}
+		if (READ_ONCE(pc->has_src_mac)) {
+			memcpy(view->src_mac, pc->src_mac, 6);
+			view->has |= PEIOS_PNP_HAS_SRC_MAC;
+		}
+	}
+	/* A Flow fact set never carries the destination MAC. */
+	if (view->has & PEIOS_PNP_HAS_MACS) {
+		view->has &= ~PEIOS_PNP_HAS_MACS;
+		view->has |= PEIOS_PNP_HAS_SRC_MAC;
+	}
+}
+
+/* Records the flow facts the tuple does not carry, once. */
+static void pnp_flow_record(struct peios_pnp_ct *pc,
+			    const struct peios_pnp_snapshot *view)
+{
+	if (READ_ONCE(pc->judged))
+		return;
+	WRITE_ONCE(pc->ifindex, view->ifindex);
+	WRITE_ONCE(pc->direction, view->direction);
+	WRITE_ONCE(pc->loopback, view->loopback);
+	if (view->has & PEIOS_PNP_HAS_VLAN) {
+		WRITE_ONCE(pc->vlan, view->vlan);
+		WRITE_ONCE(pc->has_vlan, 1);
+	}
+	if (view->has & PEIOS_PNP_HAS_SRC_MAC) {
+		memcpy(pc->src_mac, view->src_mac, 6);
+		WRITE_ONCE(pc->has_src_mac, 1);
+	}
+	smp_wmb();
+	WRITE_ONCE(pc->judged, 1);
+}
+
 static unsigned int pnp_apply_sentence(struct sk_buff *skb,
 				       const struct nf_hook_state *state,
 				       const struct peios_pnp_snapshot *snap,
@@ -150,6 +246,7 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 {
 	struct nf_conn *ct = (struct nf_conn *)snap->flow;
 	struct peios_pnp_sentence cur = { }, other = { };
+	struct peios_pnp_snapshot view;
 	struct peios_pnp_outcome out;
 	struct peios_pnp_ct *pc;
 	u64 gen = pnp_rust_generation();
@@ -179,7 +276,8 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 	if (hit) {
 		atomic64_inc(&peios_pnp_stats.flow_cached);
 	} else {
-		ret = peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, snap, &out);
+		pnp_flow_view(snap, pc, slot, &view);
+		ret = peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &view, &out);
 		if (ret == -ENOENT) {
 			/* No Flow forest: permissive, and nothing to cache. */
 			atomic64_inc(&peios_pnp_stats.permissive);
@@ -191,7 +289,7 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 			out.verdict = PEIOS_PNP_VERDICT_DROP;
 			strscpy(out.attributed, "fail-closed",
 				sizeof(out.attributed));
-			peios_pnp_event_emit(snap, &out, PEIOS_PNP_LAYER_FLOW,
+			peios_pnp_event_emit(&view, &out, PEIOS_PNP_LAYER_FLOW,
 					     PEIOS_PNP_EV_F_FAIL_CLOSED);
 			return NF_DROP;
 		}
@@ -222,19 +320,15 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 		cur.reject_kind = out.reject_kind;
 		if (pc) {
 			pnp_sentence_write(ct, &pc->sentence[slot], &cur);
-			if (!READ_ONCE(pc->judged)) {
-				WRITE_ONCE(pc->ifindex, snap->ifindex);
-				WRITE_ONCE(pc->direction, snap->direction);
-				WRITE_ONCE(pc->loopback, snap->loopback);
-				smp_wmb();
-				WRITE_ONCE(pc->judged, 1);
-			}
+			pnp_flow_record(pc, &view);
 		} else {
 			atomic64_inc(&peios_pnp_stats.flow_uncached);
 		}
 
-		/* The refusal, when it is one, goes out before the event so
-		 * the event can confess a degradation.
+		/* The refusal, when it is one, answers the packet in hand
+		 * (the packet snapshot, not the flow view) and goes out before
+		 * the event so the event can confess a degradation. The event
+		 * describes the flow as judged.
 		 */
 		if (out.verdict == PEIOS_PNP_VERDICT_REJECT) {
 			bool sent = peios_pnp_refuse(skb, state, snap,
@@ -242,11 +336,11 @@ unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
 
 			if (!sent)
 				evflags |= PEIOS_PNP_EV_F_REJECT_DEGRADED;
-			peios_pnp_event_emit(snap, &out, PEIOS_PNP_LAYER_FLOW,
+			peios_pnp_event_emit(&view, &out, PEIOS_PNP_LAYER_FLOW,
 					     evflags);
 			return NF_DROP;
 		}
-		peios_pnp_event_emit(snap, &out, PEIOS_PNP_LAYER_FLOW, evflags);
+		peios_pnp_event_emit(&view, &out, PEIOS_PNP_LAYER_FLOW, evflags);
 	}
 
 	/* A loopback flow answers to both endpoints' sentences: the other

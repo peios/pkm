@@ -37,6 +37,10 @@ struct peios_pnp_sentence {
  * - `tags`: NULL until the flow's first TAG, then an RCU-managed table
  *   owned by net/pnp/tags.c;
  * - `start_secs`: when the flow was created (the `Start.*` facts);
+ * - the flow facts the tuple does not carry, recorded at the first
+ *   judgment so every later judgment (a re-judge on a reply packet, say)
+ *   sees the same facts: the originator's direction, the interface, the
+ *   VLAN, the peer's MAC;
  * - the sentences: the Flow layer's cached verdicts, one per local
  *   endpoint — slot 0 for every flow (a loopback flow's outbound
  *   endpoint), slot 1 only for a loopback flow's inbound endpoint.
@@ -46,9 +50,14 @@ struct peios_pnp_ct {
 	u64 start_secs;
 	int ifindex;		/* interface at first judgment */
 	u8 direction;		/* originator's side, at first judgment */
-	u8 judged;		/* ifindex/direction/loopback recorded */
+	u8 judged;		/* the facts below are recorded */
 	u8 loopback;		/* both endpoints local: two sentences */
-	u8 _pad;
+	u8 has_src_mac;
+	u16 vlan;
+	u8 has_vlan;
+	u8 _pad0;
+	u8 src_mac[6];
+	u8 _pad1[2];
 	struct peios_pnp_sentence sentence[2];
 };
 

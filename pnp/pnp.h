@@ -119,6 +119,7 @@ struct peios_pnp_snapshot {
 	u8 s_month, s_day_of_month, s_day_of_week;
 	u8 s_hour, s_minute, s_second;
 	u8 flow_related;		/* ct->master != NULL; valid iff flow */
+	u8 flow_reply;			/* packet is in the flow's reply direction */
 	u8 loopback;			/* the traversal is on the loopback route */
 	const void *flow;		/* struct nf_conn *, or NULL */
 };
