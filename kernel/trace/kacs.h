@@ -470,7 +470,8 @@ DEFINE_EVENT(kacs_firmware, kacs_firmware_load,
 	{ KACS_SOCK_LISTEN,		"listen" },			\
 	{ KACS_SOCK_RESTAMP,		"restamp" },			\
 	{ KACS_SOCK_PORT_BIND,		"port-bind" },			\
-	{ KACS_SOCK_PORT_TABLE,		"port-table" }
+	{ KACS_SOCK_PORT_TABLE,		"port-table" },			\
+	{ KACS_SOCK_OWNER,		"owner" }
 
 /*
  * One AF_UNIX socket SD / impersonation decision. Socket-shape fields are 0 at

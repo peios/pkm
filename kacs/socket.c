@@ -15,6 +15,8 @@
 #include <linux/un.h>
 #include <linux/in.h>
 #include <linux/in6.h>
+#include <linux/peios_pnp.h>
+#include <linux/sched.h>
 
 #include <net/scm.h>
 #include <net/sock.h>
@@ -23,6 +25,7 @@
 #include <pkm/socket.h>
 
 #include "lsm_internal.h"
+#include "process_state.h"
 #include "socket.h"
 #include "token_fd.h"
 #include "token_runtime.h"
@@ -38,6 +41,10 @@ static long pkm_kacs_create_captured_peer_token(
 	const void **out_token);
 static void pkm_kacs_binder_set(struct pkm_kacs_socket_security *sec,
 				const void *token);
+static void pkm_kacs_socket_owner_set(struct pkm_kacs_socket_security *sec,
+				      const void *token, u8 kind,
+				      const u8 *guid, s32 pid,
+				      const char *comm);
 
 /*
  * The conveyed-identity register. Readers clone under the lock; a writer
@@ -388,6 +395,12 @@ int pkm_kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 	sec->convey_src = NULL;
 	sec->convey_token = NULL;
 	sec->convey_level = 0;
+	spin_lock_init(&sec->owner_lock);
+	sec->owner_token = NULL;
+	sec->owner_kind = PEIOS_PNP_OWNER_UNSTAMPED;
+	memset(sec->owner_guid, 0, sizeof(sec->owner_guid));
+	sec->owner_pid = 0;
+	sec->owner_comm[0] = '\0';
 	return 0;
 }
 
@@ -402,6 +415,8 @@ void pkm_kacs_sk_free_security(struct sock *sk)
 	pkm_kacs_socket_peer_token_drop(sec);
 	pkm_kacs_listener_set(sec, NULL);
 	pkm_kacs_binder_set(sec, NULL);
+	pkm_kacs_socket_owner_set(sec, NULL, PEIOS_PNP_OWNER_UNSTAMPED, NULL, 0,
+				  NULL);
 	pkm_kacs_socket_convey_drop(sec);
 	pkm_kacs_process_sd_put(sec->socket_sd);
 	sec->socket_sd = NULL;
@@ -421,6 +436,165 @@ static void pkm_kacs_binder_set(struct pkm_kacs_socket_security *sec,
 	spin_unlock(&sec->register_lock);
 	if (old)
 		kacs_rust_token_drop(old);
+}
+
+/* ---- the governing identity (net/pnp's Local.* facts) ---- */
+
+static bool pkm_kacs_socket_family_inet(int family)
+{
+	return family == AF_INET || family == AF_INET6;
+}
+
+/*
+ * Installs @token (counted, consumed) and the process facts as the
+ * socket's governing identity. NULL fields clear. The old reference is
+ * dropped outside the lock.
+ */
+static void pkm_kacs_socket_owner_set(struct pkm_kacs_socket_security *sec,
+				      const void *token, u8 kind,
+				      const u8 *guid, s32 pid,
+				      const char *comm)
+{
+	const void *old;
+
+	spin_lock_bh(&sec->owner_lock);
+	old = sec->owner_token;
+	sec->owner_token = token;
+	sec->owner_kind = kind;
+	if (guid)
+		memcpy(sec->owner_guid, guid, sizeof(sec->owner_guid));
+	else
+		memset(sec->owner_guid, 0, sizeof(sec->owner_guid));
+	sec->owner_pid = pid;
+	if (comm)
+		strscpy(sec->owner_comm, comm, sizeof(sec->owner_comm));
+	else
+		sec->owner_comm[0] = '\0';
+	spin_unlock_bh(&sec->owner_lock);
+	if (old)
+		kacs_rust_token_drop(old);
+}
+
+/*
+ * Stamps the caller as the socket's governing identity: the effective
+ * token (impersonation attributes the socket to the client, as audit
+ * does) and the process facts of this moment. A kernel socket is stamped
+ * as the kernel's, with no token. Process context only; the accept path
+ * inherits instead (pkm_kacs_sk_clone_security).
+ */
+static void pkm_kacs_socket_stamp_owner(struct pkm_kacs_socket_security *sec,
+					bool kern, u16 family, u16 type,
+					u8 state)
+{
+	const struct pkm_kacs_process_state *pstate;
+	const void *effective = NULL, *token = NULL;
+	char comm[TASK_COMM_LEN];
+	u8 kind = PEIOS_PNP_OWNER_KERNEL;
+	const u8 *guid = NULL;
+	s32 pid = 0;
+
+	get_task_comm(comm, current);
+	if (!kern) {
+		effective = pkm_kacs_current_effective_token_ptr();
+		if (effective) {
+			token = kacs_rust_token_clone(effective);
+			pstate = pkm_kacs_current_process_state();
+			guid = pstate ? pstate->process_guid : NULL;
+			pid = task_tgid_nr(current);
+			kind = token ? PEIOS_PNP_OWNER_PROGRAM :
+				       PEIOS_PNP_OWNER_UNSTAMPED;
+		} else {
+			/* A task with no token: nothing to attribute to. */
+			kind = PEIOS_PNP_OWNER_UNSTAMPED;
+		}
+	}
+	pkm_kacs_socket_owner_set(sec, token, kind, guid, pid, comm);
+	trace_kacs_socket_token(family, type, state, kind, 0, KACS_SOCK_OWNER,
+				0);
+}
+
+int pkm_kacs_socket_owner(const struct sock *sk, struct peios_pnp_owner *out)
+{
+	struct pkm_kacs_socket_security *sec;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	out->kind = PEIOS_PNP_OWNER_UNSTAMPED;
+	if (!sk || !sk->sk_security)
+		return -ENOENT;
+	sec = pkm_kacs_sock(sk);
+	spin_lock_bh(&sec->owner_lock);
+	out->token = sec->owner_token ? kacs_rust_token_clone(sec->owner_token) :
+					NULL;
+	out->kind = sec->owner_kind;
+	memcpy(out->guid, sec->owner_guid, sizeof(out->guid));
+	out->pid = sec->owner_pid;
+	strscpy(out->comm, sec->owner_comm, sizeof(out->comm));
+	spin_unlock_bh(&sec->owner_lock);
+	return 0;
+}
+
+void pkm_kacs_socket_owner_put(struct peios_pnp_owner *owner)
+{
+	if (!owner || !owner->token)
+		return;
+	kacs_rust_token_drop(owner->token);
+	owner->token = NULL;
+}
+
+/* An accepted socket inherits its listener's governing identity. */
+void pkm_kacs_sk_clone_security(const struct sock *sk, struct sock *newsk)
+{
+	struct pkm_kacs_socket_security *parent, *child;
+	struct peios_pnp_owner owner;
+
+	if (!sk || !newsk || !sk->sk_security || !newsk->sk_security)
+		return;
+	if (!pkm_kacs_socket_family_inet(sk->sk_family))
+		return;
+	parent = pkm_kacs_sock(sk);
+	child = pkm_kacs_sock(newsk);
+	spin_lock_bh(&parent->owner_lock);
+	owner.token = parent->owner_token ?
+		kacs_rust_token_clone(parent->owner_token) : NULL;
+	owner.kind = parent->owner_kind;
+	memcpy(owner.guid, parent->owner_guid, sizeof(owner.guid));
+	owner.pid = parent->owner_pid;
+	strscpy(owner.comm, parent->owner_comm, sizeof(owner.comm));
+	spin_unlock_bh(&parent->owner_lock);
+	pkm_kacs_socket_owner_set(child, owner.token, owner.kind, owner.guid,
+				  owner.pid, owner.comm);
+}
+
+/* Creation: the first stamp. Kernel sockets are the kernel's. */
+int pkm_kacs_socket_post_create(struct socket *sock, int family, int type,
+				int protocol, int kern)
+{
+	(void)protocol;
+	if (!sock || !sock->sk || !sock->sk->sk_security)
+		return 0;
+	if (!pkm_kacs_socket_family_inet(family))
+		return 0;
+	pkm_kacs_socket_stamp_owner(pkm_kacs_sock(sock->sk), kern != 0, family,
+				    type, sock->state);
+	return 0;
+}
+
+/* connect(2) commits the socket to a role: the caller governs it. */
+int pkm_kacs_socket_connect(struct socket *sock, struct sockaddr *address,
+			    int addrlen)
+{
+	(void)address;
+	(void)addrlen;
+	if (!sock || !sock->sk || !sock->sk->sk_security)
+		return 0;
+	if (!pkm_kacs_socket_family_inet(sock->sk->sk_family))
+		return 0;
+	pkm_kacs_socket_stamp_owner(pkm_kacs_sock(sock->sk), false,
+				    sock->sk->sk_family, sock->type,
+				    sock->state);
+	return 0;
 }
 
 /*
@@ -535,8 +709,14 @@ int pkm_kacs_socket_bind(struct socket *sock, struct sockaddr *address,
 				       -EACCES);
 		return -EACCES;
 	}
-	if (sock->sk->sk_family == AF_INET || sock->sk->sk_family == AF_INET6)
-		return pkm_kacs_inet_bind(sock, address, addrlen);
+	if (pkm_kacs_socket_family_inet(sock->sk->sk_family)) {
+		ret = pkm_kacs_inet_bind(sock, address, addrlen);
+		if (!ret)
+			pkm_kacs_socket_stamp_owner(pkm_kacs_sock(sock->sk),
+						    false, sock->sk->sk_family,
+						    sock->type, sock->state);
+		return ret;
+	}
 	if (sock->sk->sk_family != AF_UNIX ||
 	    !pkm_kacs_sockaddr_is_abstract_unix(address, addrlen))
 		return 0;
@@ -577,6 +757,12 @@ int pkm_kacs_socket_listen(struct socket *sock, int backlog)
 	(void)backlog;
 	if (!sock || !sock->sk || !sock->sk->sk_security)
 		return 0;
+	if (pkm_kacs_socket_family_inet(sock->sk->sk_family)) {
+		pkm_kacs_socket_stamp_owner(pkm_kacs_sock(sock->sk), false,
+					    sock->sk->sk_family, sock->type,
+					    sock->state);
+		return 0;
+	}
 	if (sock->sk->sk_family != AF_UNIX ||
 	    !pkm_kacs_socket_type_supported(sock->type))
 		return 0;
@@ -1025,6 +1211,14 @@ int pkm_kacs_sock_setsockopt(struct socket *sock, int optname,
 		return -EFAULT;
 
 	if (optname == KACS_SO_RESTAMP) {
+		if (sock && sock->sk && sock->sk->sk_security &&
+		    pkm_kacs_socket_family_inet(sock->sk->sk_family)) {
+			/* Any state: the caller becomes the governing identity. */
+			pkm_kacs_socket_stamp_owner(pkm_kacs_sock(sock->sk),
+						    false, sock->sk->sk_family,
+						    sock->type, sock->state);
+			return 0;
+		}
 		ret = pkm_kacs_sockopt_socket(sock, &sec);
 		if (ret)
 			return ret;
@@ -1149,11 +1343,33 @@ static void pkm_kacs_kunit_socket_snapshot(
 	out->socket_sd_ptr = sec && sec->socket_sd ? sec->socket_sd->bytes : NULL;
 	out->socket_sd_len = sec && sec->socket_sd ? sec->socket_sd->len : 0;
 	out->max_impersonation = sec ? sec->max_impersonation : 0;
+	out->owner_token = sec ? sec->owner_token : NULL;
+	out->owner_kind = sec ? sec->owner_kind : 0;
+	out->owner_pid = sec ? sec->owner_pid : 0;
+	if (sec)
+		memcpy(out->owner_guid, sec->owner_guid, sizeof(out->owner_guid));
+	else
+		memset(out->owner_guid, 0, sizeof(out->owner_guid));
 }
+
+static int pkm_kacs_kunit_init_socket_family(struct socket *sock,
+					     struct sock *sk, void **blob_out,
+					     u16 family, u32 socket_type,
+					     u32 connected);
+static void pkm_kacs_kunit_cleanup_socket(struct sock *sk, void *blob);
 
 static int pkm_kacs_kunit_init_socket(struct socket *sock, struct sock *sk,
 				      void **blob_out, u32 socket_type,
 				      u32 connected)
+{
+	return pkm_kacs_kunit_init_socket_family(sock, sk, blob_out, AF_UNIX,
+						 socket_type, connected);
+}
+
+static int pkm_kacs_kunit_init_socket_family(struct socket *sock,
+					     struct sock *sk, void **blob_out,
+					     u16 family, u32 socket_type,
+					     u32 connected)
 {
 	size_t blob_len;
 	void *blob;
@@ -1170,7 +1386,7 @@ static int pkm_kacs_kunit_init_socket(struct socket *sock, struct sock *sk,
 	memset(sock, 0, sizeof(*sock));
 	memset(sk, 0, sizeof(*sk));
 
-	sk->sk_family = AF_UNIX;
+	sk->sk_family = family;
 	sk->sk_type = socket_type;
 	sk->sk_security = blob;
 
@@ -1179,7 +1395,125 @@ static int pkm_kacs_kunit_init_socket(struct socket *sock, struct sock *sk,
 	sock->sk = sk;
 
 	*blob_out = blob;
-	return pkm_kacs_sk_alloc_security(sk, AF_UNIX, GFP_KERNEL);
+	return pkm_kacs_sk_alloc_security(sk, family, GFP_KERNEL);
+}
+
+/* ---- the governing identity on synthetic inet sockets ---- */
+
+struct pkm_kacs_kunit_owner_socket {
+	struct socket sock;
+	struct sock sk;
+	void *blob;
+};
+
+long pkm_kacs_kunit_socket_owner_open(u32 family, u32 kern, void **handle_out,
+				      struct pkm_kacs_kunit_socket_view *out)
+{
+	struct pkm_kacs_kunit_owner_socket *s;
+	long ret;
+
+	if (!handle_out)
+		return -EINVAL;
+	*handle_out = NULL;
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	if (!s)
+		return -ENOMEM;
+	ret = pkm_kacs_kunit_init_socket_family(&s->sock, &s->sk, &s->blob,
+						(u16)family, SOCK_STREAM, 0);
+	if (ret) {
+		kfree(s);
+		return ret;
+	}
+	ret = pkm_kacs_socket_post_create(&s->sock, family, SOCK_STREAM, 0,
+					  kern != 0);
+	pkm_kacs_kunit_socket_snapshot(pkm_kacs_sock(&s->sk), out);
+	*handle_out = s;
+	return ret;
+}
+
+/*
+ * One committing act on an open synthetic socket: 1 = bind (port 0),
+ * 2 = listen, 3 = connect, 4 = KACS_SO_RESTAMP. The view afterwards.
+ */
+long pkm_kacs_kunit_socket_owner_act(void *handle, u32 act,
+				     struct pkm_kacs_kunit_socket_view *out)
+{
+	struct pkm_kacs_kunit_owner_socket *s = handle;
+	struct sockaddr_in addr = { .sin_family = AF_INET };
+	u32 one = 1;
+	long ret;
+
+	if (!s)
+		return -EINVAL;
+	switch (act) {
+	case 1:
+		ret = pkm_kacs_socket_bind(&s->sock, (struct sockaddr *)&addr,
+					   sizeof(addr));
+		break;
+	case 2:
+		ret = pkm_kacs_socket_listen(&s->sock, 1);
+		break;
+	case 3:
+		ret = pkm_kacs_socket_connect(&s->sock, (struct sockaddr *)&addr,
+					      sizeof(addr));
+		break;
+	case 4:
+		ret = pkm_kacs_sock_setsockopt(&s->sock, KACS_SO_RESTAMP,
+					       KERNEL_SOCKPTR(&one),
+					       sizeof(one));
+		break;
+	default:
+		return -EINVAL;
+	}
+	pkm_kacs_kunit_socket_snapshot(pkm_kacs_sock(&s->sk), out);
+	return ret;
+}
+
+/* Clones the socket the way accept does and views the child. */
+long pkm_kacs_kunit_socket_owner_clone(void *handle,
+				       struct pkm_kacs_kunit_socket_view *out)
+{
+	struct pkm_kacs_kunit_owner_socket *s = handle, *child;
+	long ret;
+
+	if (!s)
+		return -EINVAL;
+	child = kzalloc(sizeof(*child), GFP_KERNEL);
+	if (!child)
+		return -ENOMEM;
+	ret = pkm_kacs_kunit_init_socket_family(&child->sock, &child->sk,
+						&child->blob, s->sk.sk_family,
+						SOCK_STREAM, 1);
+	if (ret) {
+		kfree(child);
+		return ret;
+	}
+	pkm_kacs_sk_clone_security(&s->sk, &child->sk);
+	pkm_kacs_kunit_socket_snapshot(pkm_kacs_sock(&child->sk), out);
+	pkm_kacs_kunit_cleanup_socket(&child->sk, child->blob);
+	kfree(child);
+	return 0;
+}
+
+/* The engine's read: a counted reference the caller must put. */
+long pkm_kacs_kunit_socket_owner_query(void *handle,
+				       struct peios_pnp_owner *out)
+{
+	struct pkm_kacs_kunit_owner_socket *s = handle;
+
+	if (!s)
+		return -EINVAL;
+	return pkm_kacs_socket_owner(&s->sk, out);
+}
+
+void pkm_kacs_kunit_socket_owner_close(void *handle)
+{
+	struct pkm_kacs_kunit_owner_socket *s = handle;
+
+	if (!s)
+		return;
+	pkm_kacs_kunit_cleanup_socket(&s->sk, s->blob);
+	kfree(s);
 }
 
 static void pkm_kacs_kunit_cleanup_socket(struct sock *sk, void *blob)

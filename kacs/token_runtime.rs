@@ -528,6 +528,50 @@ struct OwnedSidAndAttributes {
     attributes: u32,
 }
 
+/// A token's identity as the network policy engine reads it for the Flow
+/// layer's `Local.*` facts (see `pnp_runtime.rs`). Borrowed from the token;
+/// no lock, no copy: membership is answered by scanning the fixed SID list
+/// against each group's atomic attributes.
+pub(crate) struct PnpTokenView<'a> {
+    /// The user SID, binary.
+    pub(crate) user: &'a [u8],
+    /// Every group SID, in token order (fixed at creation).
+    pub(crate) group_sids: &'a [Sid<'static>],
+    /// Each group's attributes, parallel to `group_sids`.
+    pub(crate) group_attributes: &'a [AtomicU32],
+    /// The integrity level.
+    pub(crate) integrity: u32,
+    /// The confinement SID, when confined.
+    pub(crate) confinement: Option<&'a [u8]>,
+    /// The confinement capabilities (presence-based, as AccessCheck reads
+    /// them).
+    pub(crate) capabilities: &'a [SidAndAttributes<'static>],
+}
+
+impl<'a> PnpTokenView<'a> {
+    /// The enabled groups, deny-only ones excluded: what policy may see.
+    pub(crate) fn enabled_groups(&self) -> impl Iterator<Item = &'a [u8]> + '_ {
+        self.group_sids
+            .iter()
+            .zip(self.group_attributes.iter())
+            .filter(|(_, attributes)| {
+                let a = attributes.load(Ordering::Relaxed);
+                a & SE_GROUP_ENABLED != 0 && a & SE_GROUP_USE_FOR_DENY_ONLY == 0
+            })
+            .map(|(sid, _)| sid.as_bytes())
+    }
+}
+
+/// The view of a live token, or `None` for a null pointer.
+///
+/// # Safety
+/// `token` must be a live token object the caller holds a counted reference
+/// to for as long as the view is used.
+pub(crate) unsafe fn pnp_token_view<'a>(token: *const c_void) -> Option<PnpTokenView<'a>> {
+    let token = unsafe { PkmKacsBootToken::from_ptr(token) }?;
+    Some(token.pnp_view())
+}
+
 struct OwnedSid {
     sid_bytes: Vec<u8>,
     sid: Sid<'static>,
@@ -7022,6 +7066,25 @@ impl PkmKacsBootToken {
         }
 
         self.group_sids.get(index as usize).copied()
+    }
+
+    /// The identity net/pnp reads (pnp_runtime.rs): borrowed and
+    /// lock-free — the group SIDs are fixed at creation and each group's
+    /// attributes are an atomic — valid while the caller holds a reference
+    /// to the token.
+    fn pnp_view(&self) -> PnpTokenView<'_> {
+        let n = self
+            .group_count
+            .min(self.group_sids.len())
+            .min(self.group_attributes.len());
+        PnpTokenView {
+            user: self.user_sid.as_bytes(),
+            group_sids: &self.group_sids[..n],
+            group_attributes: &self.group_attributes[..n],
+            integrity: self.integrity_level.0,
+            confinement: self.confinement_sid.as_ref().map(|sid| sid.as_bytes()),
+            capabilities: self.confinement_capability_views.as_slice(),
+        }
     }
 
     fn validate_owner_index(&self, index: u32) -> bool {

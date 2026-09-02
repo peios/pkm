@@ -175,6 +175,7 @@
 #define KACS_SOCK_RESTAMP		22U /* listener identity replaced by KACS_SO_RESTAMP */
 #define KACS_SOCK_PORT_BIND		23U /* inet bind: port reservation SD verdict */
 #define KACS_SOCK_PORT_TABLE		24U /* port reservation table load result */
+#define KACS_SOCK_OWNER			25U /* governing identity stamped on an inet socket */
 
 /* kacs_ipc reason — a System V IPC object SD decision (ipc.c). */
 #define KACS_IPC_ALLOC			0U  /* default SD stamped at *get creation */

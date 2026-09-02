@@ -478,6 +478,7 @@ const (
 	KACS_SOCK_NO_SECURITY                               = 2
 	KACS_SOCK_NO_TOKEN                                  = 3
 	KACS_SOCK_OPEN_TOKEN                                = 15
+	KACS_SOCK_OWNER                                     = 25
 	KACS_SOCK_PIP_CONTEXT                               = 7
 	KACS_SOCK_PORT_BIND                                 = 23
 	KACS_SOCK_PORT_TABLE                                = 24

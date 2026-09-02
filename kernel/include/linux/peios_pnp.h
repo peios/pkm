@@ -14,6 +14,41 @@
 
 struct nf_conn;
 struct peios_pnp_tag_table;
+struct sock;
+
+/*
+ * The identity that governs a socket's traffic, as KACS records it on
+ * the socket (security/pkm/kacs/socket.c) and net/pnp reads it at the IP
+ * seats for the Flow layer's `Local.*` facts. KACS stamps an inet socket
+ * with the caller's effective token at every act that commits the socket
+ * to a role — creation, bind, listen, connect, inheritance at accept,
+ * KACS_SO_RESTAMP — and copies the process facts of that moment alongside,
+ * so they outlive the process. A kernel socket is stamped as the kernel's.
+ */
+enum peios_pnp_owner_kind {
+	PEIOS_PNP_OWNER_UNSTAMPED = 0,	/* never stamped (not inet, or pre-KACS) */
+	PEIOS_PNP_OWNER_PROGRAM,	/* a process: token and facts below */
+	PEIOS_PNP_OWNER_KERNEL,		/* a kernel socket: no token */
+};
+
+#define PEIOS_PNP_OWNER_COMM_LEN	16
+
+struct peios_pnp_owner {
+	const void *token;	/* counted KACS token reference, or NULL */
+	u8 kind;		/* enum peios_pnp_owner_kind */
+	u8 guid[16];		/* the process GUID at the stamp */
+	s32 pid;		/* the thread-group id at the stamp */
+	char comm[PEIOS_PNP_OWNER_COMM_LEN];	/* the task comm at the stamp */
+};
+
+/*
+ * Reads the socket's governing identity into @out, handing the caller its
+ * own counted reference to the token (release with
+ * pkm_kacs_socket_owner_put). -ENOENT when the socket carries no KACS
+ * state at all; a socket that was never stamped reads UNSTAMPED.
+ */
+int pkm_kacs_socket_owner(const struct sock *sk, struct peios_pnp_owner *out);
+void pkm_kacs_socket_owner_put(struct peios_pnp_owner *owner);
 
 /*
  * One cached Flow-layer judgment — a "sentence" (net/pnp/flow.c). Written
@@ -43,7 +78,11 @@ struct peios_pnp_sentence {
  *   VLAN, the peer's MAC;
  * - the sentences: the Flow layer's cached verdicts, one per local
  *   endpoint — slot 0 for every flow (a loopback flow's outbound
- *   endpoint), slot 1 only for a loopback flow's inbound endpoint.
+ *   endpoint), slot 1 only for a loopback flow's inbound endpoint;
+ * - the endpoints' governing identities (net/pnp/identity.c), resolved at
+ *   the first judgment and fixed for the flow's life, one per slot: the
+ *   kind (what answers there), and for a program the owner KACS stamped
+ *   on its socket, holding a counted token reference until the flow dies.
  */
 struct peios_pnp_ct {
 	struct peios_pnp_tag_table __rcu *tags;
@@ -59,6 +98,10 @@ struct peios_pnp_ct {
 	u8 src_mac[6];
 	u8 _pad1[2];
 	struct peios_pnp_sentence sentence[2];
+	struct peios_pnp_owner owner[2];
+	u8 owner_kind[2];		/* enum peios_pnp_local_kind (net/pnp/pnp.h) */
+	u8 owner_unresolved[2];		/* confessed at resolution */
+	u8 owner_recorded[2];		/* published (release) after the fields */
 };
 
 #if IS_ENABLED(CONFIG_PEIOS_PNP)

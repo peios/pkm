@@ -12,8 +12,13 @@ struct socket;
 
 int pkm_kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority);
 void pkm_kacs_sk_free_security(struct sock *sk);
+void pkm_kacs_sk_clone_security(const struct sock *sk, struct sock *newsk);
+int pkm_kacs_socket_post_create(struct socket *sock, int family, int type,
+				int protocol, int kern);
 int pkm_kacs_socket_bind(struct socket *sock, struct sockaddr *address,
 			 int addrlen);
+int pkm_kacs_socket_connect(struct socket *sock, struct sockaddr *address,
+			    int addrlen);
 int pkm_kacs_unix_stream_connect(struct sock *sock, struct sock *other,
 				 struct sock *newsk);
 int pkm_kacs_unix_may_send(struct socket *sock, struct socket *other);

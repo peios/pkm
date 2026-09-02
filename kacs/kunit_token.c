@@ -10,9 +10,11 @@
 #include <uapi/linux/shm.h>
 #include <linux/stat.h>
 #include <pkm/ipc.h>
+#include <linux/peios_pnp.h>
 #include "exec.h"
 #include "ipc.h"
 #include "lsm_internal.h"
+#include "process_state.h"
 
 
 static void pkm_kunit_validate_sd_rejects_oversized_descriptor(
@@ -12946,6 +12948,175 @@ static void pkm_kunit_token_duplicate_to_anonymous_strips_identity(
 	kacs_rust_token_drop(source_token);
 }
 
+
+/* ---- the governing identity on inet sockets (net/pnp's owner) ---- */
+
+static void pkm_kunit_socket_owner_is_stamped_at_creation(struct kunit *test)
+{
+	struct pkm_kacs_kunit_socket_view view = { };
+	const struct pkm_kacs_process_state *pstate;
+	void *h = NULL;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	pstate = pkm_kacs_current_process_state();
+	KUNIT_ASSERT_NOT_NULL(test, pstate);
+
+	/* A program's socket: the effective token and the process facts. */
+	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 0, &h, &view);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_PROGRAM);
+	KUNIT_EXPECT_PTR_EQ(test, view.owner_token,
+			    pkm_kacs_current_effective_token_ptr());
+	KUNIT_EXPECT_EQ(test, view.owner_pid, (s32)task_tgid_nr(current));
+	KUNIT_EXPECT_EQ(test, memcmp(view.owner_guid, pstate->process_guid,
+				     sizeof(view.owner_guid)), 0);
+	pkm_kacs_kunit_socket_owner_close(h);
+
+	/* IPv6 alike. */
+	ret = pkm_kacs_kunit_socket_owner_open(AF_INET6, 0, &h, &view);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_PROGRAM);
+	pkm_kacs_kunit_socket_owner_close(h);
+
+	/* A kernel socket is the kernel's: no token to attribute to. */
+	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 1, &h, &view);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_KERNEL);
+	KUNIT_EXPECT_NULL(test, view.owner_token);
+	KUNIT_EXPECT_EQ(test, view.owner_pid, 0);
+	pkm_kacs_kunit_socket_owner_close(h);
+
+	/* Other families are not stamped at all. */
+	ret = pkm_kacs_kunit_socket_owner_open(AF_UNIX, 0, &h, &view);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_UNSTAMPED);
+	KUNIT_EXPECT_NULL(test, view.owner_token);
+	pkm_kacs_kunit_socket_owner_close(h);
+}
+
+/*
+ * Every act that commits the socket to a role restamps it with the
+ * caller's effective identity: bind, listen, connect, KACS_SO_RESTAMP —
+ * the last stamp governs (D3's hand-off rule). Impersonation attributes
+ * the socket to the client, as audit does.
+ */
+static void pkm_kunit_socket_owner_follows_the_committing_acts(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_socket_view view = { };
+	const void *primary, *client = NULL, *impersonated;
+	long fd = -1, ret;
+	void *h = NULL;
+	u32 act;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary);
+	client = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client);
+	fd = pkm_kacs_kunit_open_token_fd_for_subject(primary, client,
+						       KACS_TOKEN_IMPERSONATE);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 0, &h, &view);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, view.owner_token, primary);
+
+	for (act = 1; act <= 4; act++) {
+		/* Impersonating, the act attributes the socket to the client. */
+		ret = pkm_kacs_kunit_token_fd_impersonate((int)fd, primary);
+		KUNIT_ASSERT_EQ(test, ret, 0L);
+		impersonated = pkm_kacs_current_effective_token_ptr();
+		KUNIT_ASSERT_TRUE(test, impersonated != primary);
+		ret = pkm_kacs_kunit_socket_owner_act(h, act, &view);
+		KUNIT_ASSERT_EQ(test, ret, 0L);
+		KUNIT_EXPECT_EQ(test, view.owner_kind,
+				(u8)PEIOS_PNP_OWNER_PROGRAM);
+		KUNIT_EXPECT_PTR_EQ(test, view.owner_token, impersonated);
+
+		/* Reverted, the same act hands it back. */
+		KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+		ret = pkm_kacs_kunit_socket_owner_act(h, act, &view);
+		KUNIT_ASSERT_EQ(test, ret, 0L);
+		KUNIT_EXPECT_PTR_EQ(test, view.owner_token, primary);
+	}
+
+	pkm_kacs_kunit_socket_owner_close(h);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(client);
+}
+
+/* accept(2) inherits: the child carries the listener's stamp, counted. */
+static void pkm_kunit_socket_owner_is_inherited_at_accept(struct kunit *test)
+{
+	struct pkm_kacs_kunit_socket_view parent = { }, child = { };
+	void *h = NULL;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 0, &h, &parent);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	ret = pkm_kacs_kunit_socket_owner_act(h, 2, &parent);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+
+	ret = pkm_kacs_kunit_socket_owner_clone(h, &child);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, child.owner_kind, parent.owner_kind);
+	KUNIT_EXPECT_PTR_EQ(test, child.owner_token, parent.owner_token);
+	KUNIT_EXPECT_EQ(test, child.owner_pid, parent.owner_pid);
+	KUNIT_EXPECT_EQ(test, memcmp(child.owner_guid, parent.owner_guid,
+				     sizeof(child.owner_guid)), 0);
+
+	/* The parent still holds its own reference after the child died. */
+	ret = pkm_kacs_kunit_socket_owner_act(h, 2, &parent);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_PTR_EQ(test, parent.owner_token,
+			    pkm_kacs_current_effective_token_ptr());
+	pkm_kacs_kunit_socket_owner_close(h);
+}
+
+/* The engine's read hands out a counted reference and the facts. */
+static void pkm_kunit_socket_owner_query_is_a_counted_reference(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_socket_view view = { };
+	struct peios_pnp_owner owner = { };
+	void *h = NULL;
+	long ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 0, &h, &view);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+
+	ret = pkm_kacs_kunit_socket_owner_query(h, &owner);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, owner.kind, (u8)PEIOS_PNP_OWNER_PROGRAM);
+	KUNIT_EXPECT_PTR_EQ(test, owner.token, view.owner_token);
+	KUNIT_EXPECT_EQ(test, owner.pid, view.owner_pid);
+	KUNIT_EXPECT_EQ(test, memcmp(owner.guid, view.owner_guid,
+				     sizeof(owner.guid)), 0);
+	KUNIT_EXPECT_NE(test, owner.comm[0], '\0');
+
+	/* The socket may die first; the reference keeps the token alive. */
+	pkm_kacs_kunit_socket_owner_close(h);
+	KUNIT_EXPECT_NOT_NULL(test, owner.token);
+	pkm_kacs_socket_owner_put(&owner);
+	KUNIT_EXPECT_NULL(test, owner.token);
+
+	/* A kernel socket answers with no token. */
+	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 1, &h, &view);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	ret = pkm_kacs_kunit_socket_owner_query(h, &owner);
+	KUNIT_ASSERT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, owner.kind, (u8)PEIOS_PNP_OWNER_KERNEL);
+	KUNIT_EXPECT_NULL(test, owner.token);
+	pkm_kacs_socket_owner_put(&owner);
+	pkm_kacs_kunit_socket_owner_close(h);
+}
+
 static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_validate_sd_rejects_oversized_descriptor),
 	KUNIT_CASE(pkm_kunit_token_eval_context_requires_subjective_cred),
@@ -13059,6 +13230,10 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_socket_register_follows_read_position),
 	KUNIT_CASE(pkm_kunit_socket_listener_conveys_itself_at_identification),
 	KUNIT_CASE(pkm_kunit_socket_connect_fills_client_register),
+	KUNIT_CASE(pkm_kunit_socket_owner_is_stamped_at_creation),
+	KUNIT_CASE(pkm_kunit_socket_owner_follows_the_committing_acts),
+	KUNIT_CASE(pkm_kunit_socket_owner_is_inherited_at_accept),
+	KUNIT_CASE(pkm_kunit_socket_owner_query_is_a_counted_reference),
 	KUNIT_CASE(pkm_kunit_ipc_default_sd_grants_creator_denies_stranger),
 	KUNIT_CASE(pkm_kunit_ipc_operations_map_to_rights),
 	KUNIT_CASE(pkm_kunit_path_notify_maps_to_read_class_rights),

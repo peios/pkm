@@ -475,6 +475,7 @@ pub const KACS_SOCK_NO_SD: u32 = 9;
 pub const KACS_SOCK_NO_SECURITY: u32 = 2;
 pub const KACS_SOCK_NO_TOKEN: u32 = 3;
 pub const KACS_SOCK_OPEN_TOKEN: u32 = 15;
+pub const KACS_SOCK_OWNER: u32 = 25;
 pub const KACS_SOCK_PIP_CONTEXT: u32 = 7;
 pub const KACS_SOCK_PORT_BIND: u32 = 23;
 pub const KACS_SOCK_PORT_TABLE: u32 = 24;
