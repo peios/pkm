@@ -149,7 +149,8 @@ struct peios_pnp_status {
 	__u64 flow_uncached;	/* evaluations on flows with nowhere to hold a sentence */
 	__u64 refusals_emitted;	/* REJECT answers PNP built and sent */
 	__u64 refusals_bypassed;	/* PNP's own refusals waved through its seats */
-	__u64 _reserved[4];
+	__u64 teardowns_emitted;	/* far-end resets sent for refused established TCP flows */
+	__u64 _reserved[3];
 };
 
 /*

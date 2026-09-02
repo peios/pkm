@@ -253,7 +253,8 @@ type Peios_pnp_status struct {
 	Flow_uncached     uint64
 	Refusals_emitted  uint64
 	Refusals_bypassed uint64
-	_                 [4]uint64
+	Teardowns_emitted uint64
+	_                 [3]uint64
 }
 type Reg_backup_args struct {
 	Output_fd int32

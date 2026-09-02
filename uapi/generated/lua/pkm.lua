@@ -1404,8 +1404,8 @@ M.struct = {
   },
   ["peios_pnp_status"] = {
     size = 352,
-    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns", "tag_writes", "tag_untracked", "tag_refused", "count_writes", "count_key_absent", "count_refused", "reports_emitted", "counter_cells", "reporting_level", "seen_local_out", "flow_judged", "flow_cached", "flow_rejudged", "flow_expired", "flow_uncached", "refusals_emitted", "refusals_bypassed"},
+    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns", "tag_writes", "tag_untracked", "tag_refused", "count_writes", "count_key_absent", "count_refused", "reports_emitted", "counter_cells", "reporting_level", "seen_local_out", "flow_judged", "flow_cached", "flow_rejudged", "flow_expired", "flow_uncached", "refusals_emitted", "refusals_bypassed", "teardowns_emitted"},
     field = {
       abi = {offset = 0, size = 8, signed = false, kind = "uint"},
       generation = {offset = 8, size = 8, signed = false, kind = "uint"},
@@ -1447,6 +1447,7 @@ M.struct = {
       flow_uncached = {offset = 296, size = 8, signed = false, kind = "uint"},
       refusals_emitted = {offset = 304, size = 8, signed = false, kind = "uint"},
       refusals_bypassed = {offset = 312, size = 8, signed = false, kind = "uint"},
+      teardowns_emitted = {offset = 320, size = 8, signed = false, kind = "uint"},
     },
   },
   ["reg_backup_args"] = {

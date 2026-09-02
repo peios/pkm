@@ -229,6 +229,7 @@ struct peios_pnp_stats {
 	atomic64_t flow_uncached;	/* no extension to hold a sentence */
 	atomic64_t refusals_emitted;	/* REJECT answers built and sent */
 	atomic64_t refusals_bypassed;	/* own refusals waved through a seat */
+	atomic64_t teardowns_emitted;	/* far-end resets of established TCP */
 };
 
 extern struct peios_pnp_stats peios_pnp_stats;
@@ -316,6 +317,12 @@ struct sk_buff *peios_pnp_refuse_build(struct sk_buff *skb,
 				       const struct nf_hook_state *state,
 				       const struct peios_pnp_snapshot *snap,
 				       u8 kind);
+/* The refused packet of an established TCP flow, turned into a reset
+ * bound the same way (NULL when there is no far end to tear down).
+ */
+struct sk_buff *peios_pnp_teardown_build(const struct sk_buff *skb,
+					 const struct nf_hook_state *state,
+					 const struct peios_pnp_snapshot *snap);
 bool peios_pnp_refuse(struct sk_buff *skb, const struct nf_hook_state *state,
 		      const struct peios_pnp_snapshot *snap, u8 kind);
 

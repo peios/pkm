@@ -3314,7 +3314,8 @@ pub struct peios_pnp_status {
     pub flow_uncached: __u64,
     pub refusals_emitted: __u64,
     pub refusals_bypassed: __u64,
-    pub _reserved: [__u64; 4usize],
+    pub teardowns_emitted: __u64,
+    pub _reserved: [__u64; 3usize],
 }
 #[test]
 fn bindgen_test_layout_peios_pnp_status() {
@@ -3731,8 +3732,18 @@ fn bindgen_test_layout_peios_pnp_status() {
         )
     );
     assert_eq!(
-        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        unsafe { ::core::ptr::addr_of!((*ptr).teardowns_emitted) as usize - ptr as usize },
         320usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(teardowns_emitted)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        328usize,
         concat!(
             "Offset of field: ",
             stringify!(peios_pnp_status),

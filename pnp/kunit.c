@@ -971,6 +971,67 @@ static void pnp_kunit_refusal_is_built_and_marked(struct kunit *test)
 	kfree_skb(skb);
 }
 
+static void pnp_kunit_teardown_resets_the_far_end(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	struct sk_buff *skb = pnp_test_tcp4_skb(test, 443);
+	struct tcphdr *oth = (struct tcphdr *)(skb_network_header(skb) +
+					       sizeof(struct iphdr));
+	struct peios_pnp_snapshot snap;
+	struct sk_buff *reset;
+	const struct tcphdr *th;
+
+	/* A data segment of an established connection, refused outbound. */
+	oth->syn = 0;
+	oth->ack = 1;
+	oth->psh = 1;
+	oth->seq = htonl(5000);
+	oth->ack_seq = htonl(9000);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_OUT,
+						    PEIOS_PNP_DIR_OUT, &snap),
+			0);
+	/* No conntrack in this harness: say what the seat would have said. */
+	snap.flow_state = PEIOS_PNP_FLOW_ESTABLISHED;
+
+	reset = peios_pnp_teardown_build(skb, &state, &snap);
+	KUNIT_ASSERT_NOT_NULL(test, reset);
+	KUNIT_EXPECT_TRUE(test, reset->pnp_refusal);
+	/* Bound the same way as the refused packet, with its numbers. */
+	KUNIT_EXPECT_EQ(test, ip_hdr(reset)->saddr, htonl(0x0a000007));
+	KUNIT_EXPECT_EQ(test, ip_hdr(reset)->daddr, htonl(0x0a000005));
+	th = (const struct tcphdr *)((const u8 *)ip_hdr(reset) +
+				     ip_hdr(reset)->ihl * 4);
+	KUNIT_EXPECT_TRUE(test, th->rst);
+	KUNIT_EXPECT_TRUE(test, th->ack);
+	KUNIT_EXPECT_EQ(test, th->source, htons(43210));
+	KUNIT_EXPECT_EQ(test, th->dest, htons(443));
+	KUNIT_EXPECT_EQ(test, ntohl(th->seq), 5000U);
+	KUNIT_EXPECT_EQ(test, ntohl(th->ack_seq), 9000U);
+	kfree_skb(reset);
+
+	/* A new flow has no far end to tear down. */
+	snap.flow_state = PEIOS_PNP_FLOW_NEW;
+	KUNIT_EXPECT_NULL(test, peios_pnp_teardown_build(skb, &state, &snap));
+	/* Nor does a reset get one. */
+	snap.flow_state = PEIOS_PNP_FLOW_ESTABLISHED;
+	snap.tcp_flags |= 0x04;
+	KUNIT_EXPECT_NULL(test, peios_pnp_teardown_build(skb, &state, &snap));
+	/* Nor UDP. */
+	snap.tcp_flags &= ~0x04;
+	snap.protocol = IPPROTO_UDP;
+	KUNIT_EXPECT_NULL(test, peios_pnp_teardown_build(skb, &state, &snap));
+
+	kfree_skb(skb);
+}
+
 static void pnp_kunit_own_refusals_bypass_the_seats(struct kunit *test)
 {
 	struct net_device *dev = pnp_test_dev(test, "eth0", false);
@@ -1066,6 +1127,7 @@ static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_snapshot_local_out),
 	KUNIT_CASE(pnp_kunit_flow_sentence),
 	KUNIT_CASE(pnp_kunit_refusal_is_built_and_marked),
+	KUNIT_CASE(pnp_kunit_teardown_resets_the_far_end),
 	KUNIT_CASE(pnp_kunit_own_refusals_bypass_the_seats),
 	KUNIT_CASE(pnp_kunit_downward_tag_read_refused),
 	{}

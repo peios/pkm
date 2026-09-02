@@ -236,4 +236,6 @@ void peios_pnp_status_fill(struct peios_pnp_status *status)
 		atomic64_read(&peios_pnp_stats.refusals_emitted);
 	status->refusals_bypassed =
 		atomic64_read(&peios_pnp_stats.refusals_bypassed);
+	status->teardowns_emitted =
+		atomic64_read(&peios_pnp_stats.teardowns_emitted);
 }
