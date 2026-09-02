@@ -831,7 +831,7 @@ const (
 	LCS_TXN_ST_TIMED_OUT                                = 4
 	MAXIMUM_ALLOWED                                     = 33554432
 	OWNER_SECURITY_INFORMATION                          = 1
-	PEIOS_PNP_ABI_VERSION                               = 2
+	PEIOS_PNP_ABI_VERSION                               = 3
 	PEIOS_PNP_COUNTER_MAX_WINDOWS                       = 8
 	PEIOS_PNP_COUNTER_NAME_LEN                          = 64
 	PEIOS_PNP_EV_ATTR_LEN                               = 96
@@ -846,6 +846,8 @@ const (
 	PEIOS_PNP_EV_F_BACKSTOP                             = 1
 	PEIOS_PNP_EV_F_FAIL_CLOSED                          = 2
 	PEIOS_PNP_EV_F_REJECT_DEGRADED                      = 4
+	PEIOS_PNP_EV_F_REJUDGED                             = 8
+	PEIOS_PNP_EV_LAYER_FLOW                             = 2
 	PEIOS_PNP_EV_LAYER_PACKET                           = 0
 	PEIOS_PNP_EV_LAYER_RAWPACKET                        = 1
 	PEIOS_PNP_EV_REJECT_PROHIBITED                      = 1
@@ -853,12 +855,17 @@ const (
 	PEIOS_PNP_EV_SEAT_EGRESS                            = 2
 	PEIOS_PNP_EV_SEAT_INGRESS                           = 1
 	PEIOS_PNP_EV_SEAT_LOCAL_IN                          = 3
+	PEIOS_PNP_EV_SEAT_LOCAL_OUT                         = 4
 	PEIOS_PNP_EV_VERDICT_DROP                           = 2
 	PEIOS_PNP_EV_VERDICT_PASS                           = 0
 	PEIOS_PNP_EV_VERDICT_REJECT                         = 1
+	PEIOS_PNP_FLOW_MAX_TAGS                             = 8
+	PEIOS_PNP_FLOW_SENTENCES                            = 2
 	PEIOS_PNP_IOC_COUNTERS                              = 3222818306
 	PEIOS_PNP_IOC_COUNTERS_NR                           = 2
-	PEIOS_PNP_IOC_STATUS                                = 2166377985
+	PEIOS_PNP_IOC_FLOWS                                 = 3222818307
+	PEIOS_PNP_IOC_FLOWS_NR                              = 3
+	PEIOS_PNP_IOC_STATUS                                = 2170572289
 	PEIOS_PNP_IOC_STATUS_NR                             = 1
 	PEIOS_PNP_IOC_TYPE                                  = 78
 	PEIOS_PNP_KEY_DST_ADDR                              = 2

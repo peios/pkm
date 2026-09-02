@@ -473,9 +473,9 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
 	struct peios_pnp_walk walk = { .source_id = source_id };
-	u8 packet_guid[16], raw_guid[16];
-	bool packet_present = false, raw_present = false;
-	void *packet_forest = NULL, *raw_forest = NULL;
+	u8 packet_guid[16], raw_guid[16], flow_guid[16];
+	bool packet_present = false, raw_present = false, flow_present = false;
+	void *packet_forest = NULL, *raw_forest = NULL, *flow_forest = NULL;
 	u8 reporting_level = 1;
 	u32 i;
 	long ret;
@@ -498,7 +498,7 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 	if (ret)
 		goto out_level;
 
-	/* Find the layer keys under Rules. */
+	/* Find the layer keys under Rules: Packet, RawPacket, Flow. */
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 		source_id, 0, rules_guid, &walk.limits,
@@ -539,6 +539,9 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 			   !memcmp(name, "RawPacket", 9)) {
 			memcpy(raw_guid, subkey.child_guid, 16);
 			raw_present = true;
+		} else if (subkey.name_len == 4 && !memcmp(name, "Flow", 4)) {
+			memcpy(flow_guid, subkey.child_guid, 16);
+			flow_present = true;
 		}
 		/* Unknown layer names are someone else's future: ignored. */
 	}
@@ -554,12 +557,18 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 			      PEIOS_PNP_LAYER_RAWPACKET, &raw_forest);
 	if (ret)
 		goto out;
+	walk.rules_seen = 0;
+	ret = pnp_build_layer(&walk, flow_present, flow_guid,
+			      PEIOS_PNP_LAYER_FLOW, &flow_forest);
+	if (ret)
+		goto out;
 
-	ret = peios_pnp_policy_publish(packet_forest, raw_forest,
+	ret = peios_pnp_policy_publish(packet_forest, raw_forest, flow_forest,
 				       reporting_level);
 	if (!ret) {
 		packet_forest = NULL;
 		raw_forest = NULL;
+		flow_forest = NULL;
 	}
 out:
 	pkm_lcs_source_response_frame_destroy(&frame);
@@ -570,6 +579,7 @@ out_level:
 			ret);
 	pnp_rust_forest_free(packet_forest);
 	pnp_rust_forest_free(raw_forest);
+	pnp_rust_forest_free(flow_forest);
 	pkm_lcs_source_layer_snapshot_release(&walk.layers);
 	return ret;
 }

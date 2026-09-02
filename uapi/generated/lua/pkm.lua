@@ -849,7 +849,7 @@ M.LCS_TXN_ST_SOURCE_DOWN = 5
 M.LCS_TXN_ST_TIMED_OUT = 4
 M.MAXIMUM_ALLOWED = 33554432
 M.OWNER_SECURITY_INFORMATION = 1
-M.PEIOS_PNP_ABI_VERSION = 2
+M.PEIOS_PNP_ABI_VERSION = 3
 M.PEIOS_PNP_COUNTER_MAX_WINDOWS = 8
 M.PEIOS_PNP_COUNTER_NAME_LEN = 64
 M.PEIOS_PNP_EV_ATTR_LEN = 96
@@ -864,6 +864,8 @@ M.PEIOS_PNP_EV_FLOW_UNTRACKED = 5
 M.PEIOS_PNP_EV_F_BACKSTOP = 1
 M.PEIOS_PNP_EV_F_FAIL_CLOSED = 2
 M.PEIOS_PNP_EV_F_REJECT_DEGRADED = 4
+M.PEIOS_PNP_EV_F_REJUDGED = 8
+M.PEIOS_PNP_EV_LAYER_FLOW = 2
 M.PEIOS_PNP_EV_LAYER_PACKET = 0
 M.PEIOS_PNP_EV_LAYER_RAWPACKET = 1
 M.PEIOS_PNP_EV_REJECT_PROHIBITED = 1
@@ -871,12 +873,17 @@ M.PEIOS_PNP_EV_REJECT_REFUSED = 0
 M.PEIOS_PNP_EV_SEAT_EGRESS = 2
 M.PEIOS_PNP_EV_SEAT_INGRESS = 1
 M.PEIOS_PNP_EV_SEAT_LOCAL_IN = 3
+M.PEIOS_PNP_EV_SEAT_LOCAL_OUT = 4
 M.PEIOS_PNP_EV_VERDICT_DROP = 2
 M.PEIOS_PNP_EV_VERDICT_PASS = 0
 M.PEIOS_PNP_EV_VERDICT_REJECT = 1
+M.PEIOS_PNP_FLOW_MAX_TAGS = 8
+M.PEIOS_PNP_FLOW_SENTENCES = 2
 M.PEIOS_PNP_IOC_COUNTERS = 3222818306
 M.PEIOS_PNP_IOC_COUNTERS_NR = 2
-M.PEIOS_PNP_IOC_STATUS = 2166377985
+M.PEIOS_PNP_IOC_FLOWS = 3222818307
+M.PEIOS_PNP_IOC_FLOWS_NR = 3
+M.PEIOS_PNP_IOC_STATUS = 2170572289
 M.PEIOS_PNP_IOC_STATUS_NR = 1
 M.PEIOS_PNP_IOC_TYPE = 78
 M.PEIOS_PNP_KEY_DST_ADDR = 2
@@ -1349,10 +1356,56 @@ M.struct = {
       attributed = {offset = 76, size = 1, signed = false, kind = "uint"},
     },
   },
-  ["peios_pnp_status"] = {
+  ["peios_pnp_flow_rec"] = {
     size = 288,
-    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns", "tag_writes", "tag_untracked", "tag_refused", "count_writes", "count_key_absent", "count_refused", "reports_emitted", "counter_cells", "reporting_level"},
+    pack = "<I4I1I1I1I1I1I1I1I1i4I4c16c16I2I2I1I1I1xxxxxI8I8I8I8I8I8xxxxxxxxi8xxxxxxxxI8xxxxxxxxI1xI1xxxxxI8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"id", "family", "protocol", "direction", "loopback", "seen_reply", "assured", "related", "judged", "ifindex", "timeout_secs", "src_addr", "dst_addr", "src_port", "dst_port", "icmp_type", "icmp_code", "n_tags", "start_secs", "packets", "bytes", "sentence_generation", "sentence_expires_at", "sentence_rule_hash", "sentence_verdict", "sentence_reject_kind", "tag_hash", "tag_value"},
+    field = {
+      id = {offset = 0, size = 4, signed = false, kind = "uint"},
+      family = {offset = 4, size = 1, signed = false, kind = "uint"},
+      protocol = {offset = 5, size = 1, signed = false, kind = "uint"},
+      direction = {offset = 6, size = 1, signed = false, kind = "uint"},
+      loopback = {offset = 7, size = 1, signed = false, kind = "uint"},
+      seen_reply = {offset = 8, size = 1, signed = false, kind = "uint"},
+      assured = {offset = 9, size = 1, signed = false, kind = "uint"},
+      related = {offset = 10, size = 1, signed = false, kind = "uint"},
+      judged = {offset = 11, size = 1, signed = false, kind = "uint"},
+      ifindex = {offset = 12, size = 4, signed = true, kind = "int"},
+      timeout_secs = {offset = 16, size = 4, signed = false, kind = "uint"},
+      src_addr = {offset = 20, size = 16, signed = false, kind = "bytes"},
+      dst_addr = {offset = 36, size = 16, signed = false, kind = "bytes"},
+      src_port = {offset = 52, size = 2, signed = false, kind = "uint"},
+      dst_port = {offset = 54, size = 2, signed = false, kind = "uint"},
+      icmp_type = {offset = 56, size = 1, signed = false, kind = "uint"},
+      icmp_code = {offset = 57, size = 1, signed = false, kind = "uint"},
+      n_tags = {offset = 58, size = 1, signed = false, kind = "uint"},
+      start_secs = {offset = 64, size = 8, signed = false, kind = "uint"},
+      packets = {offset = 72, size = 16, signed = false, kind = "uint", count = 2},
+      bytes = {offset = 88, size = 16, signed = false, kind = "uint", count = 2},
+      sentence_generation = {offset = 104, size = 8, signed = false, kind = "uint"},
+      sentence_expires_at = {offset = 120, size = 8, signed = true, kind = "int"},
+      sentence_rule_hash = {offset = 136, size = 8, signed = false, kind = "uint"},
+      sentence_verdict = {offset = 152, size = 1, signed = false, kind = "uint"},
+      sentence_reject_kind = {offset = 154, size = 1, signed = false, kind = "uint"},
+      tag_hash = {offset = 160, size = 8, signed = false, kind = "uint"},
+      tag_value = {offset = 224, size = 8, signed = false, kind = "uint"},
+    },
+  },
+  ["peios_pnp_flows_query"] = {
+    size = 24,
+    pack = "<I8I4I4I4xxxx",
+    fields = {"buf", "buf_len", "count", "total"},
+    field = {
+      buf = {offset = 0, size = 8, signed = false, kind = "uint"},
+      buf_len = {offset = 8, size = 4, signed = false, kind = "uint"},
+      count = {offset = 12, size = 4, signed = false, kind = "uint"},
+      total = {offset = 16, size = 4, signed = false, kind = "uint"},
+    },
+  },
+  ["peios_pnp_status"] = {
+    size = 352,
+    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns", "tag_writes", "tag_untracked", "tag_refused", "count_writes", "count_key_absent", "count_refused", "reports_emitted", "counter_cells", "reporting_level", "seen_local_out", "flow_judged", "flow_cached", "flow_rejudged", "flow_expired", "flow_uncached", "refusals_emitted", "refusals_bypassed"},
     field = {
       abi = {offset = 0, size = 8, signed = false, kind = "uint"},
       generation = {offset = 8, size = 8, signed = false, kind = "uint"},
@@ -1386,6 +1439,14 @@ M.struct = {
       reports_emitted = {offset = 232, size = 8, signed = false, kind = "uint"},
       counter_cells = {offset = 240, size = 8, signed = false, kind = "uint"},
       reporting_level = {offset = 248, size = 8, signed = false, kind = "uint"},
+      seen_local_out = {offset = 256, size = 8, signed = false, kind = "uint"},
+      flow_judged = {offset = 264, size = 8, signed = false, kind = "uint"},
+      flow_cached = {offset = 272, size = 8, signed = false, kind = "uint"},
+      flow_rejudged = {offset = 280, size = 8, signed = false, kind = "uint"},
+      flow_expired = {offset = 288, size = 8, signed = false, kind = "uint"},
+      flow_uncached = {offset = 296, size = 8, signed = false, kind = "uint"},
+      refusals_emitted = {offset = 304, size = 8, signed = false, kind = "uint"},
+      refusals_bypassed = {offset = 312, size = 8, signed = false, kind = "uint"},
     },
   },
   ["reg_backup_args"] = {

@@ -1,0 +1,25 @@
+PNP (PEI-598, Flow layer slice): the refusal bit on sk_buff.
+
+Every refusal PNP emits for a REJECT verdict (an RST or ICMP unreachable it
+builds itself, net/pnp/refuse.c) carries this bit, and every PNP seat waves
+such a packet through without judging it — the ratified law "PNP does not
+judge its own refusals". Refusals are verdict machinery, not traffic: an
+inbound REJECT's RST used to cross the egress seat and could be dropped
+(and mis-attributed) by an outbound rule; an outbound REJECT's forged peer
+answer is delivered back through the receive path and would otherwise be
+judged as inbound traffic. The bit lives inside the `headers` group so
+clones and copies keep it. Configured out with CONFIG_PEIOS_PNP.
+
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -1030,6 +1030,9 @@
+ 	__u8			csum_not_inet:1;
+ #endif
+ 	__u8			unreadable:1;
++#if IS_ENABLED(CONFIG_PEIOS_PNP)
++	__u8			pnp_refusal:1;	/* a refusal PNP itself emitted */
++#endif
+ #if defined(CONFIG_NET_SCHED) || defined(CONFIG_NET_XGRESS)
+ 	__u16			tc_index;	/* traffic control index */
+ #endif

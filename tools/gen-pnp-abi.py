@@ -289,7 +289,7 @@ def build():
     w("layouts measured by compiling a probe against the real header.")
     w("Regenerate it whenever the ABI changes; do not edit it by hand. The")
     w("names here are the ones a program actually compiles")
-    w("against. [*abi.generated-from-source]")
+    w("against. [*abi.pnp-generated-from-source]")
     w("")
     w("What a compiler cannot measure -- the device's read and poll")
     w("semantics, what each ioctl expects, the error vocabulary, and the")

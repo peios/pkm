@@ -16,12 +16,40 @@ struct nf_conn;
 struct peios_pnp_tag_table;
 
 /*
- * The PNP conntrack extension: one pointer per flow, NULL until the flow's
- * first TAG, then an RCU-managed table owned by net/pnp/tags.c. Sized here
+ * One cached Flow-layer judgment — a "sentence" (net/pnp/flow.c). Written
+ * under the flow's lock with `generation` zeroed first and published last
+ * (release); read lock-free with an acquire and a re-check of
+ * `generation`, so a reader never applies a torn sentence.
+ */
+struct peios_pnp_sentence {
+	u64 generation;		/* 0 = empty; the policy generation that judged */
+	s64 expires_at;		/* CLOCK_REALTIME seconds; 0 = never */
+	u64 rule_hash;		/* FNV-1a-64 of the attributing rule's path */
+	u8 verdict;		/* enum peios_pnp_verdict */
+	u8 reject_kind;		/* enum peios_pnp_reject_kind */
+	u8 _pad[6];
+};
+
+/*
+ * The PNP conntrack extension, added to every flow at creation. Sized here
  * so nf_conntrack_extend.c's type table can see it.
+ *
+ * - `tags`: NULL until the flow's first TAG, then an RCU-managed table
+ *   owned by net/pnp/tags.c;
+ * - `start_secs`: when the flow was created (the `Start.*` facts);
+ * - the sentences: the Flow layer's cached verdicts, one per local
+ *   endpoint — slot 0 for every flow (a loopback flow's outbound
+ *   endpoint), slot 1 only for a loopback flow's inbound endpoint.
  */
 struct peios_pnp_ct {
 	struct peios_pnp_tag_table __rcu *tags;
+	u64 start_secs;
+	int ifindex;		/* interface at first judgment */
+	u8 direction;		/* originator's side, at first judgment */
+	u8 judged;		/* ifindex/direction/loopback recorded */
+	u8 loopback;		/* both endpoints local: two sentences */
+	u8 _pad;
+	struct peios_pnp_sentence sentence[2];
 };
 
 #if IS_ENABLED(CONFIG_PEIOS_PNP)

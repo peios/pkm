@@ -26,6 +26,7 @@
  * hashes and values, never a generation.
  */
 
+#include <linux/ktime.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -33,6 +34,8 @@
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_extend.h>
 #include <linux/peios_pnp.h>
+
+#include <pkm/pnp.h>
 
 #include "pnp.h"
 
@@ -52,6 +55,8 @@ struct peios_pnp_tag_table {
 
 #define PNP_TAG_INITIAL_CAP	8
 
+static struct peios_pnp_ct *pnp_ct_of(const void *flow);
+
 static struct peios_pnp_tag_table *pnp_tag_table_alloc(u32 cap)
 {
 	struct peios_pnp_tag_table *t;
@@ -67,11 +72,42 @@ void peios_pnp_ct_ext_add(struct nf_conn *ct)
 	struct peios_pnp_ct *pc;
 
 	pc = nf_ct_ext_add(ct, NF_CT_EXT_PNP, GFP_ATOMIC);
-	if (pc)
+	if (pc) {
+		memset(pc, 0, sizeof(*pc));
 		RCU_INIT_POINTER(pc->tags, NULL);
-	/* No ext (allocation failed): the flow is untaggable; TAG on it
-	 * confesses as refused. Conntrack itself carries on.
+		/* The flow's birth: the Start.* facts (flow.c reads it). */
+		pc->start_secs = ktime_get_real_seconds();
+	}
+	/* No ext (allocation failed): the flow is untaggable and holds no
+	 * sentence; TAG on it confesses as refused, the Flow layer judges
+	 * it every packet (confessed). Conntrack itself carries on.
 	 */
+}
+
+u32 peios_pnp_tags_snapshot(const struct nf_conn *ct, u64 *hashes,
+			    u64 *values, u32 max)
+{
+	struct peios_pnp_ct *pc = pnp_ct_of(ct);
+	struct peios_pnp_tag_table *t;
+	u32 i, n = 0;
+
+	if (!pc)
+		return 0;
+	rcu_read_lock();
+	t = rcu_dereference(pc->tags);
+	if (t) {
+		for (i = 0; i < READ_ONCE(t->len); i++) {
+			if (!READ_ONCE(t->e[i].present))
+				continue;
+			if (n < max) {
+				hashes[n] = t->e[i].hash;
+				values[n] = READ_ONCE(t->e[i].value);
+			}
+			n++;
+		}
+	}
+	rcu_read_unlock();
+	return n;
 }
 
 void peios_pnp_ct_destroy(struct nf_conn *ct)

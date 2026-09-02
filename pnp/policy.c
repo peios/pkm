@@ -31,7 +31,7 @@
 
 struct peios_pnp_policy {
 	struct rcu_head rcu;
-	void *forests[2];		/* indexed by enum peios_pnp_layer */
+	void *forests[PEIOS_PNP_LAYER_COUNT];	/* by enum peios_pnp_layer */
 	u64 generation;
 	u8 reporting_level;
 };
@@ -46,25 +46,26 @@ static void peios_pnp_policy_reclaim(struct rcu_head *head)
 	struct peios_pnp_policy *policy =
 		container_of(head, struct peios_pnp_policy, rcu);
 
-	pnp_rust_forest_free(policy->forests[PEIOS_PNP_LAYER_PACKET]);
-	pnp_rust_forest_free(policy->forests[PEIOS_PNP_LAYER_RAWPACKET]);
+	int i;
+
+	for (i = 0; i < PEIOS_PNP_LAYER_COUNT; i++)
+		pnp_rust_forest_free(policy->forests[i]);
 	kfree(policy);
 }
 
-/* Collects both forests' views and materializes the counter store. */
-static int peios_pnp_materialize_views(void *packet_forest, void *raw_forest)
+/* Collects every forest's views and materializes the counter store. */
+static int peios_pnp_materialize_views(void *const forests[])
 {
 	struct peios_pnp_view *views;
-	void *forests[2] = { packet_forest, raw_forest };
 	u32 total = 0, n = 0, i, j;
 	int ret;
 
-	for (i = 0; i < 2; i++)
+	for (i = 0; i < PEIOS_PNP_LAYER_COUNT; i++)
 		total += pnp_rust_forest_view_count(forests[i]);
 	views = kcalloc(max_t(u32, total, 1), sizeof(*views), GFP_KERNEL);
 	if (!views)
 		return -ENOMEM;
-	for (i = 0; i < 2; i++) {
+	for (i = 0; i < PEIOS_PNP_LAYER_COUNT; i++) {
 		u32 count = pnp_rust_forest_view_count(forests[i]);
 
 		for (j = 0; j < count && n < total; j++) {
@@ -81,12 +82,12 @@ out:
 }
 
 int peios_pnp_policy_publish(void *packet_forest, void *raw_forest,
-			     u8 reporting_level)
+			     void *flow_forest, u8 reporting_level)
 {
 	struct peios_pnp_policy *fresh, *old;
 	int ret;
 
-	ret = pnp_rust_forests_check(packet_forest, raw_forest);
+	ret = pnp_rust_forests_check(packet_forest, raw_forest, flow_forest);
 	if (ret)
 		return ret;
 
@@ -95,10 +96,11 @@ int peios_pnp_policy_publish(void *packet_forest, void *raw_forest,
 		return -ENOMEM;
 	fresh->forests[PEIOS_PNP_LAYER_PACKET] = packet_forest;
 	fresh->forests[PEIOS_PNP_LAYER_RAWPACKET] = raw_forest;
+	fresh->forests[PEIOS_PNP_LAYER_FLOW] = flow_forest;
 	fresh->reporting_level = reporting_level;
 
 	mutex_lock(&peios_pnp_publish_lock);
-	ret = peios_pnp_materialize_views(packet_forest, raw_forest);
+	ret = peios_pnp_materialize_views(fresh->forests);
 	if (ret) {
 		mutex_unlock(&peios_pnp_publish_lock);
 		kfree(fresh);
@@ -111,9 +113,10 @@ int peios_pnp_policy_publish(void *packet_forest, void *raw_forest,
 	rcu_assign_pointer(peios_pnp_active, fresh);
 	mutex_unlock(&peios_pnp_publish_lock);
 
-	pr_info("pnp: policy generation %llu active (packet:%s rawpacket:%s reporting-level:%u)\n",
+	pr_info("pnp: policy generation %llu active (packet:%s rawpacket:%s flow:%s reporting-level:%u)\n",
 		fresh->generation, packet_forest ? "loaded" : "none",
-		raw_forest ? "loaded" : "none", reporting_level);
+		raw_forest ? "loaded" : "none", flow_forest ? "loaded" : "none",
+		reporting_level);
 
 	if (old)
 		call_rcu(&old->rcu, peios_pnp_policy_reclaim);
@@ -128,7 +131,7 @@ int peios_pnp_policy_eval(u8 layer, const struct peios_pnp_snapshot *snap,
 	u8 level;
 	int ret;
 
-	if (layer > PEIOS_PNP_LAYER_RAWPACKET)
+	if (layer >= PEIOS_PNP_LAYER_COUNT)
 		return -EINVAL;
 
 	rcu_read_lock();
@@ -156,7 +159,8 @@ bool peios_pnp_policy_enforcing(void)
 	policy = rcu_dereference(peios_pnp_active);
 	enforcing = policy &&
 		    (policy->forests[PEIOS_PNP_LAYER_PACKET] ||
-		     policy->forests[PEIOS_PNP_LAYER_RAWPACKET]);
+		     policy->forests[PEIOS_PNP_LAYER_RAWPACKET] ||
+		     policy->forests[PEIOS_PNP_LAYER_FLOW]);
 	rcu_read_unlock();
 	return enforcing;
 }
@@ -222,4 +226,14 @@ void peios_pnp_status_fill(struct peios_pnp_status *status)
 		atomic64_read(&peios_pnp_stats.reports_emitted);
 	status->counter_cells = peios_pnp_counters_cells();
 	status->reporting_level = peios_pnp_policy_reporting_level();
+	status->seen_local_out = atomic64_read(&peios_pnp_stats.seen_local_out);
+	status->flow_judged = atomic64_read(&peios_pnp_stats.flow_judged);
+	status->flow_cached = atomic64_read(&peios_pnp_stats.flow_cached);
+	status->flow_rejudged = atomic64_read(&peios_pnp_stats.flow_rejudged);
+	status->flow_expired = atomic64_read(&peios_pnp_stats.flow_expired);
+	status->flow_uncached = atomic64_read(&peios_pnp_stats.flow_uncached);
+	status->refusals_emitted =
+		atomic64_read(&peios_pnp_stats.refusals_emitted);
+	status->refusals_bypassed =
+		atomic64_read(&peios_pnp_stats.refusals_bypassed);
 }

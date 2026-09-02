@@ -26,16 +26,18 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define PEIOS_PNP_ABI_VERSION		2U
+#define PEIOS_PNP_ABI_VERSION		3U
 
 /* Which standing seat judged the traversal. */
 #define PEIOS_PNP_EV_SEAT_INGRESS	1U
 #define PEIOS_PNP_EV_SEAT_EGRESS	2U
 #define PEIOS_PNP_EV_SEAT_LOCAL_IN	3U
+#define PEIOS_PNP_EV_SEAT_LOCAL_OUT	4U
 
 /* Which rules layer. */
 #define PEIOS_PNP_EV_LAYER_PACKET	0U
 #define PEIOS_PNP_EV_LAYER_RAWPACKET	1U
+#define PEIOS_PNP_EV_LAYER_FLOW		2U
 
 /* The verdict, in strictness order. */
 #define PEIOS_PNP_EV_VERDICT_PASS	0U
@@ -62,6 +64,7 @@
 #define PEIOS_PNP_EV_F_BACKSTOP		0x01U	/* nothing yielded; DROP */
 #define PEIOS_PNP_EV_F_FAIL_CLOSED	0x02U	/* evaluation failed; DROP */
 #define PEIOS_PNP_EV_F_REJECT_DEGRADED	0x04U	/* REJECT emitted as DROP */
+#define PEIOS_PNP_EV_F_REJUDGED		0x08U	/* Flow: a stale sentence re-judged */
 
 #define PEIOS_PNP_EV_ATTR_LEN		96U
 
@@ -137,6 +140,15 @@ struct peios_pnp_status {
 	__u64 reports_emitted;	/* KMES network-report events */
 	__u64 counter_cells;	/* live counter cells across all tables */
 	__u64 reporting_level;	/* the active CurrentReportingLevel */
+	/* The Flow layer (ABI 3). */
+	__u64 seen_local_out;	/* traversals at the outbound IP seat */
+	__u64 flow_judged;	/* Flow-layer evaluations (sentences written) */
+	__u64 flow_cached;	/* tracked packets that read a current sentence */
+	__u64 flow_rejudged;	/* re-judgments: sentence from an older generation */
+	__u64 flow_expired;	/* re-judgments: sentence past its time edge */
+	__u64 flow_uncached;	/* evaluations on flows with nowhere to hold a sentence */
+	__u64 refusals_emitted;	/* REJECT answers PNP built and sent */
+	__u64 refusals_bypassed;	/* PNP's own refusals waved through its seats */
 	__u64 _reserved[4];
 };
 
@@ -184,6 +196,69 @@ struct peios_pnp_counters_query {
 	__u32 _pad0;
 };
 
+/*
+ * One live flow, as the flows dump reports it (ABI 3): conntrack's view of
+ * the flow (original-direction tuple, state, remaining lifetime,
+ * accounting), PNP's extension (start time, the interface and direction
+ * at first judgment, the sentences, the tags). Tags are reported by hash;
+ * the policy names them.
+ */
+#define PEIOS_PNP_FLOW_MAX_TAGS		8U
+#define PEIOS_PNP_FLOW_SENTENCES	2U
+
+struct peios_pnp_flow_rec {
+	__u32 id;		/* conntrack's id for the flow */
+	__u8 family;		/* 4 / 6 */
+	__u8 protocol;
+	__u8 direction;		/* originator's side, PEIOS_PNP_EV_DIR_*; valid iff judged */
+	__u8 loopback;		/* both endpoints local: two sentences */
+	__u8 seen_reply;	/* conntrack has seen the reply direction */
+	__u8 assured;
+	__u8 related;		/* expected by another flow */
+	__u8 judged;		/* the Flow layer has judged it at least once */
+	__s32 ifindex;		/* interface at first judgment */
+	__u32 timeout_secs;	/* conntrack's remaining lifetime */
+	__u8 src_addr[16];	/* original direction */
+	__u8 dst_addr[16];
+	__u16 src_port;		/* host order; ICMP: the echo id */
+	__u16 dst_port;
+	__u8 icmp_type;
+	__u8 icmp_code;
+	__u8 n_tags;
+	__u8 _pad0[5];
+	__u64 start_secs;	/* CLOCK_REALTIME seconds the flow was created */
+	__u64 packets[2];	/* original, reply */
+	__u64 bytes[2];
+	/* The sentences, one cached Flow-layer judgment per slot, as parallel
+	 * arrays (UAPI records hold scalars only). Slot 0: the flow's
+	 * sentence (a loopback flow's outbound endpoint); slot 1: a loopback
+	 * flow's inbound endpoint, else empty. A slot with generation 0 is
+	 * empty.
+	 */
+	__u64 sentence_generation[PEIOS_PNP_FLOW_SENTENCES];
+	__s64 sentence_expires_at[PEIOS_PNP_FLOW_SENTENCES];	/* 0 = never */
+	__u64 sentence_rule_hash[PEIOS_PNP_FLOW_SENTENCES];	/* FNV-1a-64 of the rule path */
+	__u8 sentence_verdict[PEIOS_PNP_FLOW_SENTENCES];	/* PEIOS_PNP_EV_VERDICT_* */
+	__u8 sentence_reject_kind[PEIOS_PNP_FLOW_SENTENCES];	/* PEIOS_PNP_EV_REJECT_* */
+	__u8 _pad1[4];
+	/* Up to PEIOS_PNP_FLOW_MAX_TAGS present tags, by name hash. */
+	__u64 tag_hash[PEIOS_PNP_FLOW_MAX_TAGS];
+	__u64 tag_value[PEIOS_PNP_FLOW_MAX_TAGS];
+};
+
+/*
+ * The flows dump: fills `buf` with as many records as fit; `count` is how
+ * many were written, `total` how many live flows the walk saw. A
+ * best-effort snapshot of a table that changes under the walk.
+ */
+struct peios_pnp_flows_query {
+	__u64 buf;		/* struct peios_pnp_flow_rec __user * */
+	__u32 buf_len;		/* bytes */
+	__u32 count;		/* out */
+	__u32 total;		/* out */
+	__u32 _pad0;
+};
+
 #define PEIOS_PNP_IOC_TYPE		'N'
 #define PEIOS_PNP_IOC_STATUS_NR		1U
 #define PEIOS_PNP_IOC_STATUS \
@@ -192,5 +267,9 @@ struct peios_pnp_counters_query {
 #define PEIOS_PNP_IOC_COUNTERS \
 	_IOWR(PEIOS_PNP_IOC_TYPE, PEIOS_PNP_IOC_COUNTERS_NR, \
 	      struct peios_pnp_counters_query)
+#define PEIOS_PNP_IOC_FLOWS_NR		3U
+#define PEIOS_PNP_IOC_FLOWS \
+	_IOWR(PEIOS_PNP_IOC_TYPE, PEIOS_PNP_IOC_FLOWS_NR, \
+	      struct peios_pnp_flows_query)
 
 #endif /* _UAPI_PKM_PNP_H */

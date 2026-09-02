@@ -57,7 +57,12 @@ pub fn build(layer: Layer, roots: Vec<Rb>) -> (Forest, Vec<LintWarning>) {
 
 /// Builds and evaluates in one step with the default context.
 pub fn judge(roots: Vec<Rb>, snap: &Snapshot) -> Evaluation {
-    let (forest, _) = build(Layer::Packet, roots);
+    judge_in(Layer::Packet, roots, snap)
+}
+
+/// `judge` at a chosen layer.
+pub fn judge_in(layer: Layer, roots: Vec<Rb>, snap: &Snapshot) -> Evaluation {
+    let (forest, _) = build(layer, roots);
     evaluate(&forest, snap, &EvalContext::default()).expect("evaluation succeeds")
 }
 

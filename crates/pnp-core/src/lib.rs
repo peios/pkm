@@ -53,6 +53,6 @@ pub use error::{ActionParseError, AllocError, BuildError, LintKind, LintWarning}
 pub use eval::{evaluate, Effect, EvalContext, Evaluation, VerdictCandidate};
 pub use hash::name_hash;
 pub use ingest::{build_forest, check_forests, BuildOutput, RuleInput};
-pub use rule::{Forest, Layer, NamedHash, Rule};
+pub use rule::{Forest, Layer, MatchTrace, NamedHash, Rule};
 pub use snapshot::{tcp_flags, Direction, FlowState, Snapshot, TimeFacts};
 pub use value::RegValue;

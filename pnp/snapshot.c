@@ -30,14 +30,17 @@
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/netfilter/nf_conntrack.h>
+#include <net/netfilter/nf_conntrack_extend.h>
+#include <linux/peios_pnp.h>
 
 #include "pnp.h"
 
 static void snapshot_time(struct peios_pnp_snapshot *snap)
 {
+	time64_t now = ktime_get_real_seconds();
 	struct tm tm;
 
-	time64_to_tm(ktime_get_real_seconds(), 0, &tm);
+	time64_to_tm(now, 0, &tm);
 	snap->t_year = tm.tm_year + 1900;
 	snap->t_month = tm.tm_mon + 1;
 	snap->t_day_of_month = tm.tm_mday;
@@ -46,7 +49,28 @@ static void snapshot_time(struct peios_pnp_snapshot *snap)
 	snap->t_hour = tm.tm_hour;
 	snap->t_minute = tm.tm_min;
 	snap->t_second = tm.tm_sec;
+	snap->t_secs = now;
 	snap->has |= PEIOS_PNP_HAS_TIME;
+}
+
+/* The flow's start time (Start.* facts), from the PNP extension. */
+static void snapshot_start(const struct nf_conn *ct,
+			   struct peios_pnp_snapshot *snap)
+{
+	const struct peios_pnp_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_PNP);
+	struct tm tm;
+
+	if (!pc || !pc->start_secs)
+		return;
+	time64_to_tm(pc->start_secs, 0, &tm);
+	snap->s_year = tm.tm_year + 1900;
+	snap->s_month = tm.tm_mon + 1;
+	snap->s_day_of_month = tm.tm_mday;
+	snap->s_day_of_week = tm.tm_wday == 0 ? 7 : tm.tm_wday;
+	snap->s_hour = tm.tm_hour;
+	snap->s_minute = tm.tm_min;
+	snap->s_second = tm.tm_sec;
+	snap->has |= PEIOS_PNP_HAS_START;
 }
 
 static void snapshot_flow_state(const struct sk_buff *skb, u8 seat,
@@ -60,8 +84,11 @@ static void snapshot_flow_state(const struct sk_buff *skb, u8 seat,
 		return;
 
 	ct = nf_ct_get(skb, &ctinfo);
-	if (ct && !nf_ct_is_template(ct))
-		snap->flow = ct;	/* the tag store's scope */
+	if (ct && !nf_ct_is_template(ct)) {
+		snap->flow = ct;	/* the tag and sentence stores' scope */
+		snap->flow_related = ct->master != NULL;
+		snapshot_start(ct, snap);
+	}
 	if (!ct) {
 		/*
 		 * Conntrack ran and left nothing: untracked. (A packet
@@ -269,6 +296,7 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 	if (dev) {
 		snap->ifindex = dev->ifindex;
 		strscpy(snap->ifname, dev->name, IFNAMSIZ);
+		snap->loopback = (dev->flags & IFF_LOOPBACK) != 0;
 	}
 	snap->length = skb->len;
 	snapshot_time(snap);
@@ -278,8 +306,18 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 	snap->ether_type = ether_type;
 	snap->has |= PEIOS_PNP_HAS_ETHER_TYPE;
 
+	/*
+	 * The VLAN is a fact of the frame at the device seats and of the
+	 * device at the IP seats: inbound, the VLAN code strips the tag and
+	 * re-parents the packet onto the VLAN device before LOCAL_IN;
+	 * outbound, the tag is pushed only when the VLAN device transmits.
+	 * Either way the flow is on the VLAN device, and that is the fact.
+	 */
 	if (skb_vlan_tag_present(skb)) {
 		snap->vlan = skb_vlan_tag_get_id(skb);
+		snap->has |= PEIOS_PNP_HAS_VLAN;
+	} else if (dev && is_vlan_dev(dev)) {
+		snap->vlan = vlan_dev_vlan_id(dev);
 		snap->has |= PEIOS_PNP_HAS_VLAN;
 	}
 
@@ -290,6 +328,15 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 		ether_addr_copy(snap->src_mac, eth->h_source);
 		ether_addr_copy(snap->dst_mac, eth->h_dest);
 		snap->has |= PEIOS_PNP_HAS_MACS;
+	} else if (peios_pnp_seat_is_ip(seat) && dev &&
+		   dev->type == ARPHRD_ETHER && dev->dev_addr) {
+		/* No link header yet (locally generated): the source is our
+		 * own device — present, so every flow carries the same fact
+		 * set, and not useful. The destination is unknown until
+		 * neighbour resolution, after this seat: absent.
+		 */
+		ether_addr_copy(snap->src_mac, dev->dev_addr);
+		snap->has |= PEIOS_PNP_HAS_SRC_MAC;
 	}
 
 	network_offset = skb_network_offset(skb);

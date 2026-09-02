@@ -214,6 +214,19 @@ static long peios_pnp_dev_ioctl(struct file *file, unsigned int cmd,
 			return -EFAULT;
 		return 0;
 	}
+	case PEIOS_PNP_IOC_FLOWS: {
+		struct peios_pnp_flows_query query;
+		long ret;
+
+		if (copy_from_user(&query, uarg, sizeof(query)))
+			return -EFAULT;
+		ret = peios_pnp_flows_dump(&query);
+		if (ret)
+			return ret;
+		if (copy_to_user(uarg, &query, sizeof(query)))
+			return -EFAULT;
+		return 0;
+	}
 	default:
 		return -ENOTTY;
 	}

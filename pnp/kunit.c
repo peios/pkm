@@ -9,10 +9,13 @@
 #include <kunit/test.h>
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
+#include <linux/icmp.h>
 #include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <linux/netfilter.h>
+#include <linux/peios_pnp.h>
 #include <linux/string.h>
+#include <net/netfilter/nf_conntrack_extend.h>
 
 #include <pkm/pnp.h>
 #include <linux/ipv6.h>
@@ -94,13 +97,20 @@ static struct sk_buff *pnp_test_tcp4_skb(struct kunit *test, u16 dport)
 	iph->protocol = IPPROTO_TCP;
 	iph->saddr = htonl(0x0a000007);	/* 10.0.0.7 */
 	iph->daddr = htonl(0x0a000005);	/* 10.0.0.5 */
+	iph->tot_len = htons(sizeof(*iph) + sizeof(*th));
 
 	th = skb_put_zero(skb, sizeof(*th));
 	th->source = htons(43210);
 	th->dest = htons(dport);
+	th->doff = sizeof(*th) / 4;
 	th->syn = 1;
+	th->seq = htonl(1000);
 
 	skb->protocol = htons(ETH_P_IP);
+	skb_reset_transport_header(skb);
+	skb_set_transport_header(skb, sizeof(*iph));
+	/* No checksum to verify: the reject builders take it as valid. */
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
 	return skb;
 }
 
@@ -273,7 +283,8 @@ static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
 					       &forest),
 			0);
 	KUNIT_ASSERT_NOT_NULL(test, forest);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, 1), 0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, NULL, 1),
+			0);
 	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen_before + 1);
 
 	/* SSH passes through the exception... */
@@ -311,7 +322,8 @@ static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
 			-ENOENT);
 
 	/* Restore permissiveness for whatever runs after this suite. */
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, 1), 0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+			0);
 }
 
 /*
@@ -627,6 +639,395 @@ static void pnp_kunit_report_lands_in_kmes(struct kunit *test)
 	KUNIT_EXPECT_NOT_NULL(test, strnstr(buf, "192.0.2.9", written));
 }
 
+/*
+ * The Flow layer (rung 2): the outbound seat's snapshot, the sentence
+ * cache on a real conntrack entry (judge once, read thereafter, re-judge
+ * when stale by generation or by time edge, DROP persists, loopback's two
+ * endpoints answer to the stricter sentence), the refusal builder and the
+ * seat bypass for PNP's own refusals.
+ */
+static void pnp_kunit_snapshot_local_out(struct kunit *test)
+{
+	static const u8 mac[6] = { 0x52, 0x54, 0, 0xab, 0xcd, 0xef };
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *lo = pnp_test_dev(test, "lo", false);
+	struct peios_pnp_snapshot snap;
+	struct sk_buff *skb = pnp_test_tcp4_skb(test, 443);
+
+	dev->dev_addr = mac;
+	lo->flags |= IFF_LOOPBACK;
+
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_OUT,
+						    PEIOS_PNP_DIR_OUT, &snap),
+			0);
+	KUNIT_EXPECT_EQ(test, snap.seat, PEIOS_PNP_SEAT_LOCAL_OUT);
+	KUNIT_EXPECT_EQ(test, snap.direction, PEIOS_PNP_DIR_OUT);
+	/* No link header yet: the source MAC is our own device's, present
+	 * for the uniform fact set; the destination is absent.
+	 */
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_MACS);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_SRC_MAC);
+	KUNIT_EXPECT_EQ(test, memcmp(snap.src_mac, mac, 6), 0);
+	KUNIT_EXPECT_FALSE(test, snap.loopback);
+	/* The clock rides along as epoch seconds too. */
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_TIME);
+	KUNIT_EXPECT_GT(test, snap.t_secs, (s64)1700000000);
+	/* Untracked: no flow, no start facts. */
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_START);
+
+	KUNIT_EXPECT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, lo,
+						    PEIOS_PNP_SEAT_LOCAL_OUT,
+						    PEIOS_PNP_DIR_OUT, &snap),
+			0);
+	KUNIT_EXPECT_TRUE(test, snap.loopback);
+
+	kfree_skb(skb);
+}
+
+/* Publishes a one-rule Flow forest. */
+static void pnp_test_publish_flow(struct kunit *test, const char *cond_key,
+				  const char *cond_val, const char *action)
+{
+	void *b, *forest = NULL;
+
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "r", 1), 0);
+	if (cond_key)
+		KUNIT_ASSERT_EQ(test,
+				pnp_rust_builder_value_str(b, cond_key,
+							   strlen(cond_key),
+							   cond_val,
+							   strlen(cond_val)),
+				0);
+	pnp_test_actions(test, b, action);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &forest),
+			0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, forest, 1),
+			0);
+}
+
+/* Publishes a Flow forest: outbound passes, inbound drops. */
+static void pnp_test_publish_flow2(struct kunit *test)
+{
+	void *b, *forest = NULL;
+
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "out", 3), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_str(b, "Direction.Equal", 15,
+						   "out", 3),
+			0);
+	pnp_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "in", 2), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_str(b, "Direction.Equal", 15,
+						   "in", 2),
+			0);
+	pnp_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &forest),
+			0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, forest, 1),
+			0);
+}
+
+static void pnp_kunit_flow_sentence(struct kunit *test)
+{
+	struct nf_conn *ct = pnp_test_flow(test);
+	struct peios_pnp_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_PNP);
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	struct sk_buff *skb = pnp_test_tcp4_skb(test, 443);
+	struct peios_pnp_snapshot snap = {
+		.seat = PEIOS_PNP_SEAT_LOCAL_OUT,
+		.direction = PEIOS_PNP_DIR_OUT,
+		.addr_family = 4,
+		.protocol = IPPROTO_TCP,
+		.src_addr = { 10, 0, 0, 5 },
+		.dst_addr = { 192, 0, 2, 9 },
+		.src_port = 40000,
+		.dst_port = 443,
+		.has = PEIOS_PNP_HAS_PORTS | PEIOS_PNP_HAS_TIME,
+		.flow_state = PEIOS_PNP_FLOW_NEW,
+		.ifindex = 7,
+		.ifname = "eth0",
+		/* 2026-09-02 10:30:00 UTC. */
+		.t_year = 2026, .t_month = 9, .t_day_of_month = 2,
+		.t_day_of_week = 3, .t_hour = 10, .t_minute = 30,
+		.t_secs = 1788345000,
+		.flow = ct,
+	};
+	struct peios_pnp_snapshot untracked = snap;
+	u64 judged0 = atomic64_read(&peios_pnp_stats.flow_judged);
+	u64 cached0 = atomic64_read(&peios_pnp_stats.flow_cached);
+	u64 rejudged0 = atomic64_read(&peios_pnp_stats.flow_rejudged);
+	u64 expired0 = atomic64_read(&peios_pnp_stats.flow_expired);
+	u64 permissive0 = atomic64_read(&peios_pnp_stats.permissive);
+
+	KUNIT_ASSERT_NOT_NULL(test, pc);
+	KUNIT_EXPECT_GT(test, pc->start_secs, (u64)1700000000);
+	untracked.flow = NULL;
+
+	/* No Flow forest: permissive, nothing cached. */
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.permissive),
+			permissive0 + 1);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].generation, 0ULL);
+
+	/* Judged once: the sentence is written with the generation and,
+	 * for a rule that consulted the hour, the next flip (11:00).
+	 */
+	pnp_test_publish_flow(test, "Time.Hour.Equal", "9-17", "PASS");
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+			judged0 + 1);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].generation,
+			pnp_rust_generation());
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].verdict,
+			(u8)PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].expires_at,
+			(s64)(1788345000 - 1788345000 % 3600 + 8 * 3600));
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].rule_hash,
+			peios_pnp_path_hash("r", 1));
+	KUNIT_EXPECT_EQ(test, pc->direction, (u8)PEIOS_PNP_DIR_OUT);
+	KUNIT_EXPECT_EQ(test, pc->ifindex, 7);
+
+	/* Read thereafter: no evaluation. */
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+			judged0 + 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_cached),
+			cached0 + 1);
+
+	/* Past the edge: re-judged (and the hour rule now says DROP at
+	 * 18:00 — the backstop, since nothing else speaks).
+	 */
+	snap.t_hour = 18;
+	snap.t_secs = 1788345000 - 1788345000 % 3600 + 8 * 3600;
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_DROP);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_expired),
+			expired0 + 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+			judged0 + 2);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].verdict,
+			(u8)PEIOS_PNP_VERDICT_DROP);
+	/* A DROP sentence persists: still no evaluation. */
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_DROP);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+			judged0 + 2);
+
+	/* A new generation re-judges: this one passes everything. */
+	pnp_test_publish_flow(test, NULL, NULL, "PASS");
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_rejudged),
+			rejudged0 + 1);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].expires_at, 0LL);
+
+	/* Untracked: nothing to judge, the Packet verdict stands. */
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &untracked),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+			judged0 + 3);
+
+	/* Loopback: two endpoints, two sentences, the stricter answers.
+	 * A forest that passes outbound and drops inbound, judged first at
+	 * the outbound endpoint (slot 0)...
+	 */
+	pnp_test_publish_flow2(test);
+	snap.loopback = 1;
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].verdict,
+			(u8)PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, pc->sentence[1].generation, 0ULL);
+	/* ...then at the inbound endpoint (slot 1). */
+	snap.direction = PEIOS_PNP_DIR_IN;
+	snap.seat = PEIOS_PNP_SEAT_LOCAL_IN;
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_DROP);
+	KUNIT_EXPECT_EQ(test, pc->sentence[1].verdict,
+			(u8)PEIOS_PNP_VERDICT_DROP);
+	/* The outbound endpoint's own sentence says PASS, but the flow
+	 * answers to the stricter of the two.
+	 */
+	snap.direction = PEIOS_PNP_DIR_OUT;
+	snap.seat = PEIOS_PNP_SEAT_LOCAL_OUT;
+	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_DROP);
+
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	kfree_skb(skb);
+	nf_conntrack_free(ct);
+}
+
+static void pnp_kunit_refusal_is_built_and_marked(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
+	struct peios_pnp_snapshot snap;
+	struct sk_buff *nskb;
+	const struct tcphdr *th;
+	const struct icmphdr *ih;
+
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+
+	/* Refused, TCP: an RST from us (the SYN's destination) to the peer,
+	 * carrying the refusal bit.
+	 */
+	nskb = peios_pnp_refuse_build(skb, &state, &snap,
+				      PEIOS_PNP_REJECT_REFUSED);
+	KUNIT_ASSERT_NOT_NULL(test, nskb);
+	KUNIT_EXPECT_TRUE(test, nskb->pnp_refusal);
+	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->saddr, htonl(0x0a000005));
+	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->daddr, htonl(0x0a000007));
+	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->protocol, IPPROTO_TCP);
+	/* The builders leave the transport offset at the IP header (they
+	 * build for transmission, where nobody reads it): find the TCP
+	 * header by the IP header length, as the receive path will.
+	 */
+	th = (const struct tcphdr *)((const u8 *)ip_hdr(nskb) +
+				     ip_hdr(nskb)->ihl * 4);
+	KUNIT_EXPECT_TRUE(test, th->rst);
+	KUNIT_EXPECT_EQ(test, th->source, htons(22));
+	KUNIT_EXPECT_EQ(test, th->dest, htons(43210));
+	kfree_skb(nskb);
+
+	/* Prohibited: ICMP admin-prohibited, whatever the protocol. */
+	nskb = peios_pnp_refuse_build(skb, &state, &snap,
+				      PEIOS_PNP_REJECT_PROHIBITED);
+	KUNIT_ASSERT_NOT_NULL(test, nskb);
+	KUNIT_EXPECT_TRUE(test, nskb->pnp_refusal);
+	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->protocol, IPPROTO_ICMP);
+	ih = (const struct icmphdr *)((const u8 *)ip_hdr(nskb) +
+				      ip_hdr(nskb)->ihl * 4);
+	KUNIT_EXPECT_EQ(test, ih->type, ICMP_DEST_UNREACH);
+	KUNIT_EXPECT_EQ(test, ih->code, ICMP_PKT_FILTERED);
+	kfree_skb(nskb);
+
+	/* A broadcast destination gets no answer. */
+	snap.dst_addr[0] = 255;
+	snap.dst_addr[1] = 255;
+	snap.dst_addr[2] = 255;
+	snap.dst_addr[3] = 255;
+	KUNIT_EXPECT_NULL(test, peios_pnp_refuse_build(skb, &state, &snap,
+						       PEIOS_PNP_REJECT_REFUSED));
+
+	kfree_skb(skb);
+}
+
+static void pnp_kunit_own_refusals_bypass_the_seats(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
+	u64 bypassed0 = atomic64_read(&peios_pnp_stats.refusals_bypassed);
+	u64 judged0 = atomic64_read(&peios_pnp_stats.judged);
+	void *b, *forest = NULL;
+
+	/* A Packet forest that drops everything... */
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "all", 3), 0);
+	pnp_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+					       &forest),
+			0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, NULL, 1),
+			0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_hook_local_in(NULL, skb, &state),
+			(unsigned int)NF_DROP);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.judged),
+			judged0 + 1);
+
+	/* ...cannot touch a refusal PNP itself emitted. */
+	skb->pnp_refusal = 1;
+	KUNIT_EXPECT_EQ(test, peios_pnp_hook_local_in(NULL, skb, &state),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, peios_pnp_hook_egress(NULL, skb, &state),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.judged),
+			judged0 + 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.refusals_bypassed),
+			bypassed0 + 2);
+
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	kfree_skb(skb);
+}
+
+static void pnp_kunit_downward_tag_read_refused(struct kunit *test)
+{
+	void *b, *packet = NULL, *flow = NULL;
+
+	/* Packet reads a tag... */
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "r", 1), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_value_int(b, "Tag.admitted.Equal", 18,
+						   1),
+			0);
+	pnp_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+					       &packet),
+			0);
+	/* ...that Flow writes: a downward read, refused at publication. */
+	b = pnp_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "w", 1), 0);
+	pnp_test_actions(test, b, "TAG(admitted, Set)");
+	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &flow),
+			0);
+	KUNIT_EXPECT_EQ(test, peios_pnp_policy_publish(packet, NULL, flow, 1),
+			-EINVAL);
+	pnp_rust_forest_free(packet);
+	pnp_rust_forest_free(flow);
+}
+
 static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_rust_probe),
 	KUNIT_CASE(pnp_kunit_dispatch_predicate),
@@ -639,6 +1040,11 @@ static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_tag_store),
 	KUNIT_CASE(pnp_kunit_counter_store),
 	KUNIT_CASE(pnp_kunit_report_lands_in_kmes),
+	KUNIT_CASE(pnp_kunit_snapshot_local_out),
+	KUNIT_CASE(pnp_kunit_flow_sentence),
+	KUNIT_CASE(pnp_kunit_refusal_is_built_and_marked),
+	KUNIT_CASE(pnp_kunit_own_refusals_bypass_the_seats),
+	KUNIT_CASE(pnp_kunit_downward_tag_read_refused),
 	{}
 };
 

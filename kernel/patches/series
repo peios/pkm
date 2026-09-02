@@ -66,3 +66,6 @@ net/pnp-wireup.patch
 # size table, add at flow creation, release at free). Touches conntrack
 # files no other patch does; order-independent.
 net/pnp-conntrack-ext.patch
+# PNP Flow slice: the refusal bit on sk_buff (PNP does not judge its own
+# refusals). One hunk in include/linux/skbuff.h; order-independent.
+net/pnp-refusal-bit.patch

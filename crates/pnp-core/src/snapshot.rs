@@ -173,6 +173,15 @@ pub struct Snapshot {
     pub flow_state: Option<FlowState>,
     /// Wall-clock facts.
     pub time: Option<TimeFacts>,
+    /// The wall clock as epoch seconds (UTC), alongside `time`; what
+    /// live-time conditions compute their next flip from.
+    pub now_secs: Option<i64>,
+    /// Whether the flow was expected by another flow (conntrack's
+    /// "related"). Flow-layer snapshots only.
+    pub related: Option<bool>,
+    /// The flow's start time. Flow-layer snapshots only; fixed for the
+    /// flow's life, so conditions over it never expire a sentence.
+    pub start: Option<TimeFacts>,
     /// Flow tags visible to this evaluation as `(name hash, value)`
     /// (written by prior packets / layers below, per the visibility laws —
     /// the glue enforces those).

@@ -34,8 +34,14 @@ struct nf_conn;
 enum peios_pnp_seat {
 	PEIOS_PNP_SEAT_INGRESS = 1,	/* device RX: RawPacket + fallback */
 	PEIOS_PNP_SEAT_EGRESS,		/* device TX: RawPacket + outbound */
-	PEIOS_PNP_SEAT_LOCAL_IN,	/* IP hook: inbound proper seat */
+	PEIOS_PNP_SEAT_LOCAL_IN,	/* IP hook: inbound proper seat + Flow */
+	PEIOS_PNP_SEAT_LOCAL_OUT,	/* IP hook: outbound Flow seat */
 };
+
+static inline bool peios_pnp_seat_is_ip(u8 seat)
+{
+	return seat == PEIOS_PNP_SEAT_LOCAL_IN || seat == PEIOS_PNP_SEAT_LOCAL_OUT;
+}
 
 enum peios_pnp_direction {
 	PEIOS_PNP_DIR_IN = 0,
@@ -67,6 +73,8 @@ enum peios_pnp_flow_state {
 #define PEIOS_PNP_HAS_TCP_FLAGS	BIT(7)
 #define PEIOS_PNP_HAS_ICMP		BIT(8)
 #define PEIOS_PNP_HAS_TIME		BIT(9)
+#define PEIOS_PNP_HAS_SRC_MAC		BIT(10)	/* src only (our own device's, outbound) */
+#define PEIOS_PNP_HAS_START		BIT(11)	/* the flow's start time */
 
 /*
  * One traversal's facts at its standing seat. Fixed-size, stack-allocated
@@ -105,6 +113,13 @@ struct peios_pnp_snapshot {
 	u8 t_day_of_month;		/* 1..31 */
 	u8 t_day_of_week;		/* ISO: 1 = Monday .. 7 = Sunday */
 	u8 t_hour, t_minute, t_second;
+	s64 t_secs;			/* the same clock as epoch seconds */
+	/* The flow's start time (Flow layer: the Start.* facts). */
+	s64 s_year;
+	u8 s_month, s_day_of_month, s_day_of_week;
+	u8 s_hour, s_minute, s_second;
+	u8 flow_related;		/* ct->master != NULL; valid iff flow */
+	u8 loopback;			/* the traversal is on the loopback route */
 	const void *flow;		/* struct nf_conn *, or NULL */
 };
 
@@ -125,6 +140,8 @@ enum peios_pnp_reject_kind {
 enum peios_pnp_layer {
 	PEIOS_PNP_LAYER_PACKET = 0,
 	PEIOS_PNP_LAYER_RAWPACKET = 1,
+	PEIOS_PNP_LAYER_FLOW = 2,
+	PEIOS_PNP_LAYER_COUNT = 3,
 };
 
 /*
@@ -142,6 +159,10 @@ struct peios_pnp_outcome {
 	u32 n_reports;
 	u32 n_prompts;
 	char attributed[96];		/* winning rule's path, truncated */
+	/* Epoch seconds when a consulted live-time condition next flips;
+	 * 0 = never. The Flow layer's sentence expiry.
+	 */
+	s64 expires_at;
 };
 
 /*
@@ -198,20 +219,29 @@ struct peios_pnp_stats {
 	atomic64_t count_key_absent;	/* packet lacked a view's key fact */
 	atomic64_t count_refused;	/* table at its key cap / alloc failed */
 	atomic64_t reports_emitted;	/* KMES network-report events */
+	/* The Flow layer (rung 2). */
+	atomic64_t seen_local_out;	/* traversals at the outbound IP seat */
+	atomic64_t flow_judged;		/* Flow evaluations (sentences written) */
+	atomic64_t flow_cached;		/* packets that read a current sentence */
+	atomic64_t flow_rejudged;	/* stale by generation: re-judged */
+	atomic64_t flow_expired;	/* stale by time edge: re-judged */
+	atomic64_t flow_uncached;	/* no extension to hold a sentence */
+	atomic64_t refusals_emitted;	/* REJECT answers built and sent */
+	atomic64_t refusals_bypassed;	/* own refusals waved through a seat */
 };
 
 extern struct peios_pnp_stats peios_pnp_stats;
 
 /*
- * Policy publication (policy.c). Both pointers are opaque Rust forests
- * from pnp_rust_builder_build (either may be NULL = that layer has no
+ * Policy publication (policy.c). The pointers are opaque Rust forests
+ * from pnp_rust_builder_build (any may be NULL = that layer has no
  * policy and is permissive). Publication is atomic: readers see the old
  * generation or the new one, never a mix; the generation counter
  * advances; old forests are freed after grace. The counter store is
  * re-materialized for the new forests' views before the swap.
  */
 int peios_pnp_policy_publish(void *packet_forest, void *raw_forest,
-			     u8 reporting_level);
+			     void *flow_forest, u8 reporting_level);
 
 /*
  * Evaluates one snapshot against one layer's active forest.
@@ -233,6 +263,7 @@ void peios_pnp_policy_note_ingest(long err);
 /* The verdict event stream (events.c; ABI in <pkm/pnp.h>). */
 struct peios_pnp_status;
 struct peios_pnp_counters_query;
+struct peios_pnp_flows_query;
 int peios_pnp_events_init(void);
 void peios_pnp_event_emit(const struct peios_pnp_snapshot *snap,
 			  const struct peios_pnp_outcome *out, u8 layer,
@@ -250,8 +281,42 @@ void peios_pnp_ct_ext_add(struct nf_conn *ct);
 void peios_pnp_ct_destroy(struct nf_conn *ct);
 int peios_pnp_tag_lookup(const void *flow, u64 hash, u64 *value_out);
 void peios_pnp_tag_apply(const void *flow, u64 hash, u8 op, u64 operand);
+/* Copies up to `max` present tags out (for the flows dump); returns how
+ * many the flow carries in total.
+ */
+u32 peios_pnp_tags_snapshot(const struct nf_conn *ct, u64 *hashes,
+			    u64 *values, u32 max);
 /* Distinct tags one flow may carry: a tripwire, not a budget. */
 #define PEIOS_PNP_TAG_MAX_PER_FLOW	64
+
+/*
+ * The Flow layer's runtime (flow.c): one judgment per local endpoint of a
+ * flow, cached on the extension as a sentence (verdict, generation,
+ * expiry); every later packet of the flow reads the sentence instead of
+ * evaluating. Called from the IP seats after the Packet layer passed a
+ * tracked packet.
+ */
+unsigned int peios_pnp_flow_dispatch(struct sk_buff *skb,
+				     const struct nf_hook_state *state,
+				     const struct peios_pnp_snapshot *snap);
+long peios_pnp_flows_dump(struct peios_pnp_flows_query *query);
+/* FNV-1a-64, the same identity pnp-core's name_hash computes. */
+u64 peios_pnp_path_hash(const char *s, size_t len);
+
+/*
+ * Refusals (refuse.c): the answer a REJECT sends. Built from the kernel's
+ * own reject builders, marked as PNP's (the skb refusal bit: no seat
+ * judges it), and delivered — to the wire from the ingress seat, to
+ * ourselves through the output path from every other seat. Returns
+ * whether an answer was sent; the caller drops either way and counts a
+ * degradation when it was not.
+ */
+struct sk_buff *peios_pnp_refuse_build(struct sk_buff *skb,
+				       const struct nf_hook_state *state,
+				       const struct peios_pnp_snapshot *snap,
+				       u8 kind);
+bool peios_pnp_refuse(struct sk_buff *skb, const struct nf_hook_state *state,
+		      const struct peios_pnp_snapshot *snap, u8 kind);
 
 /*
  * The counter store (counters.c): machine-scoped streams, materialized as
@@ -306,6 +371,8 @@ unsigned int peios_pnp_hook_egress(void *priv, struct sk_buff *skb,
 				   const struct nf_hook_state *state);
 unsigned int peios_pnp_hook_local_in(void *priv, struct sk_buff *skb,
 				     const struct nf_hook_state *state);
+unsigned int peios_pnp_hook_local_out(void *priv, struct sk_buff *skb,
+				      const struct nf_hook_state *state);
 
 /* Rust bridge (security/pkm Rust island; see kacs/pnp_runtime.rs). */
 u64 pnp_rust_generation(void);
@@ -329,7 +396,8 @@ int pnp_rust_builder_value_list_end(void *builder);
 int pnp_rust_builder_build(void *builder, u8 layer, void **forest_out);
 void pnp_rust_forest_free(void *forest);
 /* Cross-forest checks for forests published together (-EINVAL refuses). */
-int pnp_rust_forests_check(const void *packet_forest, const void *raw_forest);
+int pnp_rust_forests_check(const void *packet_forest, const void *raw_forest,
+			   const void *flow_forest);
 /* The views a forest materializes. */
 u32 pnp_rust_forest_view_count(const void *forest);
 int pnp_rust_forest_view(const void *forest, u32 index,

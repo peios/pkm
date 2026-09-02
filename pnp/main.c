@@ -4,7 +4,10 @@
  *
  * Registers the ratified standing seats:
  *  - LOCAL_IN at filter priority for IPv4 and IPv6 (the inbound proper
- *    seat: after conntrack, after defrag, routing decided);
+ *    seat: after conntrack, after defrag, routing decided; Packet then
+ *    Flow);
+ *  - LOCAL_OUT at filter priority for IPv4 and IPv6 (the outbound Flow
+ *    seat: after conntrack classified the new flow);
  *  - per-device ingress and egress hooks (the device seats), attached to
  *    every net device from birth via a netdevice notifier — loopback
  *    included: localhost is policed like everything else.
@@ -41,6 +44,21 @@ static const struct nf_hook_ops peios_pnp_inet_hooks[] = {
 		.hook = peios_pnp_hook_local_in,
 		.pf = NFPROTO_IPV6,
 		.hooknum = NF_INET_LOCAL_IN,
+		.priority = NF_IP6_PRI_FILTER,
+	},
+	/* The outbound Flow seat (rung 2): after conntrack classified the
+	 * new flow, before anything confirmed it.
+	 */
+	{
+		.hook = peios_pnp_hook_local_out,
+		.pf = NFPROTO_IPV4,
+		.hooknum = NF_INET_LOCAL_OUT,
+		.priority = NF_IP_PRI_FILTER,
+	},
+	{
+		.hook = peios_pnp_hook_local_out,
+		.pf = NFPROTO_IPV6,
+		.hooknum = NF_INET_LOCAL_OUT,
 		.priority = NF_IP6_PRI_FILTER,
 	},
 };
@@ -167,6 +185,11 @@ static int __init peios_pnp_init(void)
 		pr_err("pnp: could not pin conntrack: %d\n", ret);
 		return ret;
 	}
+	/* Per-flow packet and byte accounting for the flows dump: PNP is
+	 * conntrack's consumer, so it turns the knob the old frontends
+	 * left to the administrator.
+	 */
+	init_net.ct.sysctl_acct = 1;
 
 	/* The verdict event stream and /dev/peios-pnp. */
 	ret = peios_pnp_events_init();

@@ -12,6 +12,9 @@ pub enum Layer {
     Packet,
     /// The wire-proximate escape hatch: judged at the device seats.
     RawPacket,
+    /// The flow layer (rung 2): judged once per local endpoint of a flow
+    /// at the IP seats, its verdict cached on the flow as a sentence.
+    Flow,
 }
 
 impl Layer {
@@ -20,7 +23,37 @@ impl Layer {
         match self {
             Layer::Packet => "Packet",
             Layer::RawPacket => "RawPacket",
+            Layer::Flow => "Flow",
         }
+    }
+
+    /// Height in the tag-visibility order (tags flow strictly upward: a
+    /// layer reads only tags written at or below its own height).
+    pub fn height(self) -> u8 {
+        match self {
+            Layer::RawPacket => 0,
+            Layer::Packet => 1,
+            Layer::Flow => 2,
+        }
+    }
+}
+
+/// What one match consulted that could change its answer later: the
+/// earliest moment a consulted live-time condition would next flip. A
+/// flow's sentence expires then (Flow layer); other layers ignore it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MatchTrace {
+    /// Epoch seconds of the earliest consulted flip; `None` = never.
+    pub expires_at: Option<i64>,
+}
+
+impl MatchTrace {
+    /// Records a flip moment, keeping the earliest.
+    pub fn note(&mut self, at: i64) {
+        self.expires_at = Some(match self.expires_at {
+            Some(cur) if cur <= at => cur,
+            _ => at,
+        });
     }
 }
 
@@ -45,7 +78,28 @@ pub struct Rule {
 impl Rule {
     /// Whether the rule matches a snapshot (disabled rules never match).
     pub fn matches(&self, snap: &Snapshot) -> bool {
-        self.enabled && self.conditions.iter().all(|c| c.matches(snap))
+        let mut trace = MatchTrace::default();
+        self.matches_traced(snap, &mut trace)
+    }
+
+    /// `matches`, recording into `trace` every live-time condition it
+    /// actually consulted — true or false, since a false one can flip to
+    /// true later. Conditions are ordered at ingestion so time comes last:
+    /// a rule whose other conditions fail never consults its clock, and
+    /// contributes no expiry.
+    pub fn matches_traced(&self, snap: &Snapshot, trace: &mut MatchTrace) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        for c in self.conditions.iter() {
+            if let Some(at) = c.next_flip(snap) {
+                trace.note(at);
+            }
+            if !c.matches(snap) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Whether the action list contains a direct verdict (PASS/DROP/REJECT
@@ -106,6 +160,11 @@ pub struct Forest {
     pub roots: PkmVec<Rule>,
     /// Every tag name mentioned (TAG actions and Tag.<n> conditions).
     pub tag_names: PkmVec<NamedHash>,
+    /// The tag names this forest writes (TAG actions, fallbacks included).
+    pub tag_writes: PkmVec<NamedHash>,
+    /// First (rule path, tag name) reading each tag (`Tag.<n>` conditions)
+    /// — attribution for the downward-read refusal.
+    pub tag_read_sites: PkmVec<(PkmString, PkmString)>,
     /// Every counter stream written (COUNT actions).
     pub streams: PkmVec<NamedHash>,
     /// Every counter view read (Counter.<n>(...) conditions).

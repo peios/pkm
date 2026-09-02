@@ -66,6 +66,23 @@ pub enum FactId {
     TimeMinute,
     /// Wall-clock second.
     TimeSecond,
+    /// Whether the flow was expected by another (ICMP error, FTP data).
+    /// Flow layer.
+    Related,
+    /// The flow's start time: year. Flow layer; never expires a sentence.
+    StartYear,
+    /// Start month.
+    StartMonth,
+    /// Start day of month.
+    StartDayOfMonth,
+    /// Start ISO day of week.
+    StartDayOfWeek,
+    /// Start hour.
+    StartHour,
+    /// Start minute.
+    StartMinute,
+    /// Start second.
+    StartSecond,
 }
 
 impl FactId {
@@ -98,6 +115,14 @@ impl FactId {
             "Time.Hour" => FactId::TimeHour,
             "Time.Minute" => FactId::TimeMinute,
             "Time.Second" => FactId::TimeSecond,
+            "Related" => FactId::Related,
+            "Start.Year" => FactId::StartYear,
+            "Start.Month" => FactId::StartMonth,
+            "Start.DayOfMonth" => FactId::StartDayOfMonth,
+            "Start.DayOfWeek" => FactId::StartDayOfWeek,
+            "Start.Hour" => FactId::StartHour,
+            "Start.Minute" => FactId::StartMinute,
+            "Start.Second" => FactId::StartSecond,
             _ => return None,
         })
     }
@@ -111,6 +136,53 @@ impl FactId {
             FactId::TcpFlags => FactFamily::Flags,
             _ => FactFamily::Int,
         }
+    }
+
+    /// Whether this is a live-clock fact (`Time.*`): its answer changes
+    /// while a flow lives, so a consulted condition over it expires the
+    /// flow's sentence. `Start.*` facts are fixed for the flow's life.
+    pub fn is_live_time(self) -> bool {
+        matches!(
+            self,
+            FactId::TimeYear
+                | FactId::TimeMonth
+                | FactId::TimeDayOfMonth
+                | FactId::TimeDayOfWeek
+                | FactId::TimeHour
+                | FactId::TimeMinute
+                | FactId::TimeSecond
+        )
+    }
+
+    /// Whether this fact is fixed for a flow's life — the Flow layer's
+    /// vocabulary. Everything else is per packet.
+    pub fn is_flow_invariant(self) -> bool {
+        !matches!(
+            self,
+            FactId::EtherType
+                | FactId::DstMac
+                | FactId::Ttl
+                | FactId::Dscp
+                | FactId::Fragment
+                | FactId::TcpFlags
+                | FactId::Length
+                | FactId::FlowState
+        )
+    }
+
+    /// Whether this fact exists only on a flow (the Flow layer's own).
+    pub fn is_flow_only(self) -> bool {
+        matches!(
+            self,
+            FactId::Related
+                | FactId::StartYear
+                | FactId::StartMonth
+                | FactId::StartDayOfMonth
+                | FactId::StartDayOfWeek
+                | FactId::StartHour
+                | FactId::StartMinute
+                | FactId::StartSecond
+        )
     }
 }
 
@@ -372,6 +444,49 @@ pub struct Condition {
 }
 
 impl Condition {
+    /// Whether this condition reads a live-clock fact.
+    pub fn is_live_time(&self) -> bool {
+        matches!(self.key, CondKey::Fact(f) if f.is_live_time())
+    }
+
+    /// The next moment (epoch seconds, UTC) at which this condition's
+    /// answer would change, given the snapshot's clock — `None` when it
+    /// never would, or when it reads no live-clock fact, or when the
+    /// snapshot has no clock. A condition whose answer is constant over its
+    /// fact's whole cycle (`Time.Hour.LessThan 24`) never flips.
+    ///
+    /// Hour, minute, second and day-of-week are exact (the value sequence
+    /// is scanned one cycle ahead with the condition's own operator).
+    /// Day-of-month, month and year answer "next midnight": exact flips
+    /// need calendar arithmetic nobody has asked for, and a daily re-judge
+    /// is cheap.
+    pub fn next_flip(&self, snap: &Snapshot) -> Option<i64> {
+        let fact = match self.key {
+            CondKey::Fact(f) if f.is_live_time() => f,
+            _ => return None,
+        };
+        let now = snap.now_secs?;
+        let time = snap.time?;
+        let (current, modulus, step, base): (i64, i64, i64, i64) = match fact {
+            FactId::TimeSecond => (time.second, 60, 1, now),
+            FactId::TimeMinute => (time.minute, 60, 60, now - now.rem_euclid(60)),
+            FactId::TimeHour => (time.hour, 24, 3600, now - now.rem_euclid(3600)),
+            FactId::TimeDayOfWeek => {
+                (time.day_of_week - 1, 7, 86_400, now - now.rem_euclid(86_400))
+            }
+            _ => return Some(now - now.rem_euclid(86_400) + 86_400),
+        };
+        let offset = if fact == FactId::TimeDayOfWeek { 1 } else { 0 };
+        let truth = int_op_matches(&self.op, current + offset);
+        for k in 1..=modulus {
+            let value = (current + k).rem_euclid(modulus) + offset;
+            if int_op_matches(&self.op, value) != truth {
+                return Some(base + k * step);
+            }
+        }
+        None
+    }
+
     /// Evaluates the condition against a snapshot (absent-fact law: an
     /// unresolvable key is false).
     pub fn matches(&self, snap: &Snapshot) -> bool {
@@ -474,6 +589,14 @@ fn int_fact(fact: FactId, snap: &Snapshot) -> Option<i64> {
         FactId::TimeHour => snap.time?.hour,
         FactId::TimeMinute => snap.time?.minute,
         FactId::TimeSecond => snap.time?.second,
+        FactId::Related => i64::from(snap.related? as u8),
+        FactId::StartYear => snap.start?.year,
+        FactId::StartMonth => snap.start?.month,
+        FactId::StartDayOfMonth => snap.start?.day_of_month,
+        FactId::StartDayOfWeek => snap.start?.day_of_week,
+        FactId::StartHour => snap.start?.hour,
+        FactId::StartMinute => snap.start?.minute,
+        FactId::StartSecond => snap.start?.second,
         _ => return None,
     })
 }

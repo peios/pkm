@@ -72,6 +72,8 @@ const HAS_PORTS: u32 = 1 << 6;
 const HAS_TCP_FLAGS: u32 = 1 << 7;
 const HAS_ICMP: u32 = 1 << 8;
 const HAS_TIME: u32 = 1 << 9;
+const HAS_SRC_MAC: u32 = 1 << 10;
+const HAS_START: u32 = 1 << 11;
 
 /// Mirror of `struct peios_pnp_snapshot` (pnp.h). Field-for-field.
 #[repr(C)]
@@ -106,6 +108,16 @@ pub struct PnpSnapshotC {
     t_hour: u8,
     t_minute: u8,
     t_second: u8,
+    t_secs: i64,
+    s_year: i64,
+    s_month: u8,
+    s_day_of_month: u8,
+    s_day_of_week: u8,
+    s_hour: u8,
+    s_minute: u8,
+    s_second: u8,
+    flow_related: u8,
+    loopback: u8,
     flow: *const c_void,
 }
 
@@ -125,6 +137,9 @@ pub struct PnpOutcomeC {
     n_prompts: u32,
     /// Winning rule's attribution path, NUL-terminated, truncated.
     attributed: [c_char; 96],
+    /// Epoch seconds when a consulted live-time condition next flips;
+    /// 0 = never (the Flow layer's sentence expiry).
+    expires_at: i64,
 }
 
 /// Mirror of `struct peios_pnp_view` (pnp.h). Field-for-field.
@@ -186,6 +201,8 @@ fn snapshot_from_c(c: &PnpSnapshotC) -> Result<Snapshot, ()> {
     if c.has & HAS_MACS != 0 {
         snap.src_mac = Some(c.src_mac);
         snap.dst_mac = Some(c.dst_mac);
+    } else if c.has & HAS_SRC_MAC != 0 {
+        snap.src_mac = Some(c.src_mac);
     }
     match c.addr_family {
         4 => {
@@ -241,21 +258,39 @@ fn snapshot_from_c(c: &PnpSnapshotC) -> Result<Snapshot, ()> {
             minute: c.t_minute as i64,
             second: c.t_second as i64,
         });
+        snap.now_secs = Some(c.t_secs);
     }
     Ok(snap)
 }
 
 /// Resolves the forest's machinery facts for this packet: every tag name
 /// the forest can read (present on the flow), every counter view (present
-/// in the store for this packet's key). RawPacket forests read no tags —
-/// the ratified visibility law: tags flow upward only, and RawPacket is
-/// the lowest layer — so their snapshots carry none whatever the flow says.
+/// in the store for this packet's key), and the Flow layer's own facts.
+/// RawPacket forests read no tags — the ratified visibility law: tags
+/// flow upward only, and RawPacket is the lowest layer — so their
+/// snapshots carry none whatever the flow says. The flow-only facts
+/// (`Related`, `Start.*`) are given to Flow forests alone: everywhere
+/// else they are absent by law, as ingestion's lint says.
 fn resolve_machinery(
     forest: &Forest,
     c: &PnpSnapshotC,
     snap: &mut Snapshot,
 ) -> Result<(), ()> {
-    if forest.layer == Layer::Packet && !c.flow.is_null() {
+    if forest.layer == Layer::Flow && !c.flow.is_null() {
+        snap.related = Some(c.flow_related != 0);
+        if c.has & HAS_START != 0 {
+            snap.start = Some(TimeFacts {
+                year: c.s_year,
+                month: c.s_month as i64,
+                day_of_month: c.s_day_of_month as i64,
+                day_of_week: c.s_day_of_week as i64,
+                hour: c.s_hour as i64,
+                minute: c.s_minute as i64,
+                second: c.s_second as i64,
+            });
+        }
+    }
+    if forest.layer != Layer::RawPacket && !c.flow.is_null() {
         for tag in forest.tag_names.iter() {
             let mut value = 0u64;
             if unsafe { peios_pnp_tag_lookup(c.flow, tag.hash, &mut value) } == 1 {
@@ -524,7 +559,7 @@ pub extern "C" fn pnp_rust_builder_value_list_end(b: *mut c_void) -> c_int {
 
 #[no_mangle]
 /// Validates and builds the forest, consuming the builder. layer: 0 =
-/// Packet, 1 = RawPacket. On success writes the opaque forest pointer to
+/// Packet, 1 = RawPacket, 2 = Flow. On success writes the opaque forest pointer to
 /// `out` and returns 0; on validation failure returns -EINVAL (the old
 /// policy generation stays — atomic transitions).
 pub extern "C" fn pnp_rust_builder_build(
@@ -542,6 +577,7 @@ pub extern "C" fn pnp_rust_builder_build(
     let layer = match layer {
         0 => Layer::Packet,
         1 => Layer::RawPacket,
+        2 => Layer::Flow,
         _ => return -EINVAL,
     };
     match build_forest(layer, builder.roots.as_slice()) {
@@ -571,15 +607,23 @@ pub extern "C" fn pnp_rust_forest_free(f: *mut c_void) {
 
 #[no_mangle]
 /// The cross-forest checks for a set of forests published together (tag
-/// and stream hash uniqueness across both, every view has a writer).
-/// Either pointer may be NULL. -EINVAL refuses the generation.
-pub extern "C" fn pnp_rust_forests_check(packet: *const c_void, raw: *const c_void) -> c_int {
-    let mut forests: [Option<&Forest>; 2] = [None, None];
+/// and stream hash uniqueness across all, every view has a writer, no
+/// downward tag reads). Any pointer may be NULL. -EINVAL refuses the
+/// generation.
+pub extern "C" fn pnp_rust_forests_check(
+    packet: *const c_void,
+    raw: *const c_void,
+    flow: *const c_void,
+) -> c_int {
+    let mut forests: [Option<&Forest>; 3] = [None, None, None];
     if !packet.is_null() {
         forests[0] = Some(unsafe { &*packet.cast::<Forest>() });
     }
     if !raw.is_null() {
         forests[1] = Some(unsafe { &*raw.cast::<Forest>() });
+    }
+    if !flow.is_null() {
+        forests[2] = Some(unsafe { &*flow.cast::<Forest>() });
     }
     let mut list: PkmVec<&Forest> = PkmVec::new();
     for f in forests.iter().flatten() {
@@ -682,6 +726,7 @@ pub extern "C" fn pnp_rust_evaluate(
     out.n_counts = 0;
     out.n_reports = 0;
     out.n_prompts = 0;
+    out.expires_at = evaluation.expires_at.unwrap_or(0);
 
     // Effects apply after collation (temporal feedback; the report
     // carries the verdict). The stores confess their own refusals.

@@ -42,6 +42,9 @@ pub enum BuildError {
     /// A `Counter.<n>` condition views a stream no rule anywhere writes:
     /// statically dead (it can only ever read absent), refused loudly.
     CounterNeverWritten { rule: PkmString, key: PkmString },
+    /// A rule reads a tag that a higher layer writes: a downward read,
+    /// forbidden by the visibility law (tags flow strictly upward).
+    TagDownwardRead { rule: PkmString, name: PkmString },
 }
 
 impl From<AllocError> for BuildError {

@@ -120,7 +120,14 @@ static void mp_key_uint(struct pnp_mp *m, const char *key, u64 v)
 
 static const char *pnp_layer_name(u8 layer)
 {
-	return layer == PEIOS_PNP_LAYER_RAWPACKET ? "RawPacket" : "Packet";
+	switch (layer) {
+	case PEIOS_PNP_LAYER_RAWPACKET:
+		return "RawPacket";
+	case PEIOS_PNP_LAYER_FLOW:
+		return "Flow";
+	default:
+		return "Packet";
+	}
 }
 
 static const char *pnp_seat_name(u8 seat)
@@ -132,6 +139,8 @@ static const char *pnp_seat_name(u8 seat)
 		return "egress";
 	case PEIOS_PNP_SEAT_LOCAL_IN:
 		return "local-in";
+	case PEIOS_PNP_SEAT_LOCAL_OUT:
+		return "local-out";
 	default:
 		return "unknown";
 	}

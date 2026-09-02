@@ -173,6 +173,45 @@ type Peios_pnp_event struct {
 	Attributed  [96]uint8
 	_           uint32
 }
+type Peios_pnp_flow_rec struct {
+	Id                   uint32
+	Family               uint8
+	Protocol             uint8
+	Direction            uint8
+	Loopback             uint8
+	Seen_reply           uint8
+	Assured              uint8
+	Related              uint8
+	Judged               uint8
+	Ifindex              int32
+	Timeout_secs         uint32
+	Src_addr             [16]uint8
+	Dst_addr             [16]uint8
+	Src_port             uint16
+	Dst_port             uint16
+	Icmp_type            uint8
+	Icmp_code            uint8
+	N_tags               uint8
+	_                    [5]uint8
+	Start_secs           uint64
+	Packets              [2]uint64
+	Bytes                [2]uint64
+	Sentence_generation  [2]uint64
+	Sentence_expires_at  [2]int64
+	Sentence_rule_hash   [2]uint64
+	Sentence_verdict     [2]uint8
+	Sentence_reject_kind [2]uint8
+	_                    [4]uint8
+	Tag_hash             [8]uint64
+	Tag_value            [8]uint64
+}
+type Peios_pnp_flows_query struct {
+	Buf     uint64
+	Buf_len uint32
+	Count   uint32
+	Total   uint32
+	_       uint32
+}
 type Peios_pnp_status struct {
 	Abi               uint64
 	Generation        uint64
@@ -206,6 +245,14 @@ type Peios_pnp_status struct {
 	Reports_emitted   uint64
 	Counter_cells     uint64
 	Reporting_level   uint64
+	Seen_local_out    uint64
+	Flow_judged       uint64
+	Flow_cached       uint64
+	Flow_rejudged     uint64
+	Flow_expired      uint64
+	Flow_uncached     uint64
+	Refusals_emitted  uint64
+	Refusals_bypassed uint64
 	_                 [4]uint64
 }
 type Reg_backup_args struct {

@@ -54,6 +54,9 @@ pub struct BuildOutput {
 /// What the walk collects across the whole forest.
 struct Collector {
     tag_names: PkmVec<NamedHash>,
+    tag_writes: PkmVec<NamedHash>,
+    /// First (rule path, tag name) reading each tag.
+    tag_read_sites: PkmVec<(PkmString, PkmString)>,
     streams: PkmVec<NamedHash>,
     views: PkmVec<CounterView>,
     /// First (rule path, value key) mentioning each view, parallel to
@@ -75,6 +78,23 @@ impl Collector {
 
     fn note_tag(&mut self, name: &str) -> Result<(), BuildError> {
         Self::note_name(&mut self.tag_names, name)
+    }
+
+    fn note_tag_write(&mut self, name: &str) -> Result<(), BuildError> {
+        Self::note_name(&mut self.tag_writes, name)
+    }
+
+    fn note_tag_read(&mut self, name: &str, rule: &PkmString) -> Result<(), BuildError> {
+        if self
+            .tag_read_sites
+            .iter()
+            .any(|(_, n)| n.as_str() == name)
+        {
+            return Ok(());
+        }
+        self.tag_read_sites
+            .push((rule.try_clone_err()?, str_to_pkm(name)?))?;
+        Ok(())
     }
 
     fn note_stream(&mut self, name: &str) -> Result<(), BuildError> {
@@ -101,7 +121,10 @@ impl Collector {
     fn note_actions(&mut self, actions: &[Action]) -> Result<(), BuildError> {
         for action in actions {
             match action {
-                Action::Tag { name, .. } => self.note_tag(name.as_str())?,
+                Action::Tag { name, .. } => {
+                    self.note_tag(name.as_str())?;
+                    self.note_tag_write(name.as_str())?;
+                }
                 Action::Count { name, .. } => self.note_stream(name.as_str())?,
                 Action::Prompt { fallback, .. } => {
                     if let Some(inner) = fallback.action() {
@@ -121,6 +144,8 @@ pub fn build_forest(layer: Layer, roots: &[RuleInput]) -> Result<BuildOutput, Bu
     let mut lints = PkmVec::new();
     let mut collector = Collector {
         tag_names: PkmVec::new(),
+        tag_writes: PkmVec::new(),
+        tag_read_sites: PkmVec::new(),
         streams: PkmVec::new(),
         views: PkmVec::new(),
         view_sites: PkmVec::new(),
@@ -136,6 +161,8 @@ pub fn build_forest(layer: Layer, roots: &[RuleInput]) -> Result<BuildOutput, Bu
             layer,
             roots: out_roots,
             tag_names: collector.tag_names,
+            tag_writes: collector.tag_writes,
+            tag_read_sites: collector.tag_read_sites,
             streams: collector.streams,
             views: collector.views,
             view_sites: collector.view_sites,
@@ -146,8 +173,30 @@ pub fn build_forest(layer: Layer, roots: &[RuleInput]) -> Result<BuildOutput, Bu
 
 /// Cross-forest checks for a set of forests published together: tag and
 /// stream hashes must be distinct across all of them (the stores are
-/// machine-wide), and every counter view must have a writer somewhere.
+/// machine-wide), every counter view must have a writer somewhere, and no
+/// forest reads a tag a higher layer writes (tags flow strictly upward —
+/// the visibility law, enforced statically because rules are the only
+/// source of tag names).
 pub fn check_forests(forests: &[&Forest]) -> Result<(), BuildError> {
+    for reader in forests {
+        for (rule, name) in reader.tag_read_sites.iter() {
+            for writer in forests {
+                if writer.layer.height() <= reader.layer.height() {
+                    continue;
+                }
+                if writer
+                    .tag_writes
+                    .iter()
+                    .any(|w| w.name.as_str() == name.as_str())
+                {
+                    return Err(BuildError::TagDownwardRead {
+                        rule: rule.try_clone_err()?,
+                        name: name.try_clone_err()?,
+                    });
+                }
+            }
+        }
+    }
     let mut all_tags: PkmVec<NamedHash> = PkmVec::new();
     let mut all_streams: PkmVec<NamedHash> = PkmVec::new();
     for forest in forests {
@@ -215,6 +264,9 @@ fn build_rule(
     let path = join_path(parent_path, name)?;
 
     let mut conditions = PkmVec::new();
+    // Live-time conditions are evaluated last (see Rule::matches_traced):
+    // collected separately here and appended after the rest.
+    let mut time_conditions = PkmVec::new();
     let mut priority = parent_priority;
     let mut enabled = true;
     let mut actions = PkmVec::new();
@@ -254,9 +306,16 @@ fn build_rule(
             _ => {
                 let condition = parse_condition(key.as_str(), value, &path, collector)?;
                 lint_condition(layer, &condition, &path, key.as_str(), lints)?;
-                conditions.push(condition)?;
+                if condition.is_live_time() {
+                    time_conditions.push(condition)?;
+                } else {
+                    conditions.push(condition)?;
+                }
             }
         }
+    }
+    for condition in time_conditions.into_iter() {
+        conditions.push(condition)?;
     }
     collector.note_actions(actions.as_slice())?;
 
@@ -320,6 +379,7 @@ fn parse_condition(
             });
         }
         collector.note_tag(tag)?;
+        collector.note_tag_read(tag, path)?;
         CondKey::Tag {
             name: str_to_pkm(tag)?,
             hash: name_hash(tag),
@@ -592,13 +652,17 @@ fn lint_condition(
     lints: &mut PkmVec<LintWarning>,
 ) -> Result<(), BuildError> {
     let never = match layer {
-        Layer::Packet => false,
+        // Flow-only facts (Related, Start.*) exist on no packet.
+        Layer::Packet => matches!(condition.key, CondKey::Fact(f) if f.is_flow_only()),
         // The RawPacket seat stands before conntrack (inbound) and reads no
         // other layer's state in either direction (ratified visibility law).
         Layer::RawPacket => matches!(
             condition.key,
             CondKey::Fact(FactId::FlowState) | CondKey::Tag { .. }
-        ),
+        ) || matches!(condition.key, CondKey::Fact(f) if f.is_flow_only()),
+        // A Flow fact is one identical for every packet of the flow; the
+        // per-packet facts are never given to a Flow snapshot.
+        Layer::Flow => matches!(condition.key, CondKey::Fact(f) if !f.is_flow_invariant()),
     };
     if never {
         lints.push(LintWarning {

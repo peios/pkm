@@ -21,7 +21,7 @@
 
 use crate::action::{Action, CountAmount, TagOp, Verdict, MAX_PROMPT_CHAIN};
 use crate::pkm_alloc::{AllocError, String as PkmString, TryClone, Vec as PkmVec};
-use crate::rule::{Forest, Rule};
+use crate::rule::{Forest, MatchTrace, Rule};
 use crate::snapshot::Snapshot;
 use crate::strutil::{join_path, str_to_pkm};
 
@@ -106,6 +106,11 @@ pub struct Evaluation {
     pub effects: PkmVec<Effect>,
     /// Every yielded verdict (winner included), for observability.
     pub candidates: PkmVec<VerdictCandidate>,
+    /// When this evaluation's answer could next change on its own: the
+    /// earliest flip of any live-time condition it consulted (epoch
+    /// seconds, UTC), or `None` when none was consulted. The Flow layer's
+    /// sentence expiry; meaningless for per-packet layers.
+    pub expires_at: Option<i64>,
 }
 
 /// Judges one snapshot against one forest.
@@ -119,11 +124,13 @@ pub fn evaluate(
     // Speakers already resolved this evaluation (a speaker executes once
     // even when several abstaining descendants reach it).
     let mut spoken: PkmVec<*const Rule> = PkmVec::new();
+    let mut trace = MatchTrace::default();
 
     for root in forest.roots.iter() {
         let mut chain: PkmVec<&Rule> = PkmVec::new();
         walk(
             root, &mut chain, "", snap, ctx, &mut effects, &mut candidates, &mut spoken,
+            &mut trace,
         )?;
     }
 
@@ -150,6 +157,7 @@ pub fn evaluate(
             backstop: false,
             effects,
             candidates,
+            expires_at: trace.expires_at,
         }),
         None => Ok(Evaluation {
             verdict: Verdict::Drop,
@@ -157,6 +165,7 @@ pub fn evaluate(
             backstop: true,
             effects,
             candidates,
+            expires_at: trace.expires_at,
         }),
     }
 }
@@ -175,8 +184,9 @@ fn walk<'a>(
     effects: &mut PkmVec<Effect>,
     candidates: &mut PkmVec<VerdictCandidate>,
     spoken: &mut PkmVec<*const Rule>,
+    trace: &mut MatchTrace,
 ) -> Result<bool, AllocError> {
-    if !rule.matches(snap) {
+    if !rule.matches_traced(snap, trace) {
         return Ok(false);
     }
     let path = join_path(parent_path, rule.name.as_str())?;
@@ -185,7 +195,7 @@ fn walk<'a>(
     chain.push(rule)?;
     for child in rule.children.iter() {
         any_child |= walk(
-            child, chain, path.as_str(), snap, ctx, effects, candidates, spoken,
+            child, chain, path.as_str(), snap, ctx, effects, candidates, spoken, trace,
         )?;
     }
     chain.pop();

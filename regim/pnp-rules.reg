@@ -1,33 +1,41 @@
 {
   "_comment": [
-    "PNP dev-baseline packet policy (PEI-598) — the first enforced Peios",
-    "firewall policy. The kernel reads Machine\\System\\Network\\Rules whole",
-    "at registryd's registration, re-walks on change, and publishes it as a",
-    "policy generation; applying this seed flips enforcement ON at boot.",
+    "PNP dev-baseline policy (PEI-598) — the first enforced Peios firewall",
+    "policy, now with the Flow layer (rung 2). The kernel reads",
+    "Machine\\System\\Network\\Rules whole at registryd's registration, re-walks",
+    "on change, and publishes it as a policy generation; applying this seed",
+    "flips enforcement ON at boot.",
     "",
-    "The compiled-in backstop is DROP, both directions, always (ratified):",
-    "every rule below is a visible, deletable permissive statement, per the",
-    "doctrine that permissiveness never lives in defaults. Approved by jack",
-    "2026-09-01. Rule by rule:",
+    "The compiled-in backstop is DROP for every layer, both directions,",
+    "always (ratified): every rule below is a visible, deletable permissive",
+    "statement, per the doctrine that permissiveness never lives in",
+    "defaults. Shape approved by jack 2026-09-02:",
     "",
-    "  outbound-ok       All egress passes — the ratified shipped shape until",
-    "                    the connection tier earns outbound strictness.",
-    "  established       The stateful cornerstone: replies come home.",
-    "  loopback          Localhost is policed like everything else now;",
-    "                    every local daemon depends on this rule.",
-    "  arp               PNP polices ARP where stock Linux never did; without",
-    "                    this, the backstop kills neighbor resolution.",
-    "  icmpv6-housekeeping  ND (133-137) and MLD (130-132, 143) ride outside",
-    "                    conntrack's establishment model; IPv6 dies quietly",
-    "                    without them.",
-    "  dhcp-client       OFFER/ACK can arrive as broadcast conntrack will not",
-    "                    tie to the DISCOVER's flow.",
-    "  dev-viewer-ports  DEV-ONLY: atrium-server (8080) and the pnpd viewer",
-    "                    (8081) stay reachable through QEMU hostfwd. Delete",
-    "                    the day this baseline grows up.",
+    "  RawPacket  all            Matches everything, passes: the wire-proximate",
+    "                            layer ships no policy, visibly.",
+    "  Packet     tracked        The cheap per-packet filter passes every",
+    "                            tracked packet (new, established, related);",
+    "                            the Flow layer judges new flows once, and the",
+    "                            flow's sentence answers for the rest. What is",
+    "                            untracked (conntrack-invalid) hits the backstop.",
+    "             outbound-ok    Untracked outbound (ND, ARP replies) passes.",
+    "             loopback       Localhost is policed like everything else;",
+    "                            every local daemon depends on this rule.",
+    "             arp            PNP polices ARP where stock Linux never did.",
+    "             icmpv6-housekeeping  ND (133-137) and MLD (130-132, 143) ride",
+    "                            outside conntrack; IPv6 dies quietly without them.",
+    "             dhcp-client    OFFER/ACK can arrive as broadcast conntrack will",
+    "                            not tie to the DISCOVER's flow.",
+    "  Flow       outbound-ok    Every flow this machine originates passes — the",
+    "                            ratified shipped posture until the identity tier",
+    "                            earns outbound strictness.",
+    "             loopback       A loopback flow has two endpoints; the inbound",
+    "                            one needs its own yes.",
+    "             dev-viewer-ports  DEV-ONLY: atrium-server (8080) and the pnpd",
+    "                            viewer (8081) stay reachable through QEMU",
+    "                            hostfwd. Delete the day this baseline grows up.",
     "",
-    "Everything else inbound answers to the backstop. No RawPacket key: that",
-    "layer ships zero default rules (ratified) and stays permissive.",
+    "Everything else inbound answers to the Flow backstop, once per flow.",
     "",
     "Shipped by the kernel package into /usr/share/regim/; inert until an",
     "image names it in [registry] autoapply."
@@ -36,18 +44,25 @@
     { "path": "Machine\\System" },
     { "path": "Machine\\System\\Network" },
     { "path": "Machine\\System\\Network\\Rules" },
+    { "path": "Machine\\System\\Network\\Rules\\RawPacket" },
+    {
+      "path": "Machine\\System\\Network\\Rules\\RawPacket\\all",
+      "values": [
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
     { "path": "Machine\\System\\Network\\Rules\\Packet" },
     {
-      "path": "Machine\\System\\Network\\Rules\\Packet\\outbound-ok",
+      "path": "Machine\\System\\Network\\Rules\\Packet\\tracked",
       "values": [
-        { "name": "Direction.Equal", "type": "sz", "data": "out" },
+        { "name": "FlowState.Equal", "type": "multi", "data": ["new", "established", "related"] },
         { "name": "Actions", "type": "multi", "data": ["PASS"] }
       ]
     },
     {
-      "path": "Machine\\System\\Network\\Rules\\Packet\\established",
+      "path": "Machine\\System\\Network\\Rules\\Packet\\outbound-ok",
       "values": [
-        { "name": "FlowState.Equal", "type": "multi", "data": ["established", "related"] },
+        { "name": "Direction.Equal", "type": "sz", "data": "out" },
         { "name": "Actions", "type": "multi", "data": ["PASS"] }
       ]
     },
@@ -82,8 +97,23 @@
         { "name": "Actions", "type": "multi", "data": ["PASS"] }
       ]
     },
+    { "path": "Machine\\System\\Network\\Rules\\Flow" },
     {
-      "path": "Machine\\System\\Network\\Rules\\Packet\\dev-viewer-ports",
+      "path": "Machine\\System\\Network\\Rules\\Flow\\outbound-ok",
+      "values": [
+        { "name": "Direction.Equal", "type": "sz", "data": "out" },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Flow\\loopback",
+      "values": [
+        { "name": "Interface.Equal", "type": "sz", "data": "lo" },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Flow\\dev-viewer-ports",
       "values": [
         { "name": "Direction.Equal", "type": "sz", "data": "in" },
         { "name": "Protocol.Equal", "type": "sz", "data": "tcp" },

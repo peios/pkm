@@ -45,7 +45,7 @@ format = "peipkg"
 # evaluation (verdict, attribution, tuple; drops confessed) and the STATUS
 # ioctl reports generation/enforcing/stats/last-ingest. ABI: <pkm/pnp.h>,
 # experimental. (-18: conntrack pinned at init.)
-version      = "{{version}}-20"
+version      = "{{version}}-21"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"
