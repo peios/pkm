@@ -81,15 +81,15 @@ if [ -z "$paths" ] || printf '%s\n' "$paths" | grep -q '^uapi/'; then
 	fi
 fi
 
-# TRM appendix drift. The three generators derive learn/'s KACS ABI, LCS ABI and
-# stratafs constants appendices from uapi/pkm and the stratafs sources, so a
+# TRM appendix drift. The four generators derive learn/'s KACS ABI, LCS ABI,
+# PNP ABI and stratafs constants appendices from uapi/pkm and the stratafs sources, so a
 # header change that has not been carried into them is drift of the same kind as
 # the bindings above. Each --check re-derives everything and compares without
 # writing, and each skips cleanly when there is no learn/ checkout beside pkm/.
 #
-# The prose in those chapters lives in separate notes appendices (§3.D, §5.B)
-# that no generator writes, so regenerating cannot destroy it — see PEI-473.
-for gen in gen-kacs-abi gen-lcs-abi gen-stratafs-constants; do
+# The prose in those chapters lives in separate notes appendices (§3.D, §5.B,
+# §6.B) that no generator writes, so regenerating cannot destroy it — see PEI-473.
+for gen in gen-kacs-abi gen-lcs-abi gen-stratafs-constants gen-pnp-abi; do
 	echo "pre-push: checking TRM appendix drift (tools/$gen.py --check)…" >&2
 	if ! python3 "tools/$gen.py" --check; then
 		echo >&2
