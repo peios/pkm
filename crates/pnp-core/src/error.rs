@@ -45,6 +45,12 @@ pub enum BuildError {
     /// A rule reads a tag that a higher layer writes: a downward read,
     /// forbidden by the visibility law (tags flow strictly upward).
     TagDownwardRead { rule: PkmString, name: PkmString },
+    /// A `Present` condition on a fact that never exists at the rule's
+    /// layer. Every other operator over such a fact is merely dead (the
+    /// absent-fact law makes it false, and the lint says so); `Present`
+    /// looks through that law, so `X.Present = 0` on a fact absent by law
+    /// would be an always-true condition wearing a meaningful name. Refused.
+    PresentNeverAtLayer { rule: PkmString, key: PkmString },
 }
 
 impl From<AllocError> for BuildError {

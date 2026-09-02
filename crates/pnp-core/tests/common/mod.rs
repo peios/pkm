@@ -67,7 +67,7 @@ pub fn judge_in(layer: Layer, roots: Vec<Rb>, snap: &Snapshot) -> Evaluation {
 }
 
 /// An inbound TCP packet at the Packet layer's proper seat.
-pub fn tcp_in(src: &str, sport: u16, dst: &str, dport: u16) -> Snapshot {
+pub fn tcp_in(src: &str, sport: u16, dst: &str, dport: u16) -> Snapshot<'static> {
     Snapshot {
         direction: Some(Direction::In),
         interface: Some("eth0".into()),
@@ -86,14 +86,14 @@ pub fn tcp_in(src: &str, sport: u16, dst: &str, dport: u16) -> Snapshot {
 }
 
 /// An outbound TCP packet.
-pub fn tcp_out(dst: &str, dport: u16) -> Snapshot {
+pub fn tcp_out(dst: &str, dport: u16) -> Snapshot<'static> {
     let mut s = tcp_in("10.0.0.5", 40000, dst, dport);
     s.direction = Some(Direction::Out);
     s
 }
 
 /// An inbound ARP frame: no IP facts, no flow state.
-pub fn arp_in() -> Snapshot {
+pub fn arp_in() -> Snapshot<'static> {
     Snapshot {
         direction: Some(Direction::In),
         interface: Some("eth0".into()),
@@ -106,7 +106,7 @@ pub fn arp_in() -> Snapshot {
 }
 
 /// An inbound ICMP echo: no ports.
-pub fn icmp_in(src: &str) -> Snapshot {
+pub fn icmp_in(src: &str) -> Snapshot<'static> {
     Snapshot {
         direction: Some(Direction::In),
         interface: Some("eth0".into()),

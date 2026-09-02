@@ -29,6 +29,10 @@ pub mod ingest;
 pub mod pkm_alloc;
 /// The rule atom and forest.
 pub mod rule;
+/// SHA-1, for service-SID derivation only.
+pub mod sha1;
+/// Security identifiers as identity facts.
+pub mod sid;
 /// The immutable fact snapshot.
 pub mod snapshot;
 /// Small string helpers over the fallible string type.
@@ -54,5 +58,9 @@ pub use eval::{evaluate, Effect, EvalContext, Evaluation, VerdictCandidate};
 pub use hash::name_hash;
 pub use ingest::{build_forest, check_forests, BuildOutput, RuleInput};
 pub use rule::{Forest, Layer, MatchTrace, NamedHash, Rule};
-pub use snapshot::{tcp_flags, Direction, FlowState, Snapshot, TimeFacts};
+pub use sid::Sid;
+pub use snapshot::{
+    tcp_flags, Direction, Endpoint, EndpointKind, FlowState, OwnedPrincipal, Principal, Snapshot,
+    TimeFacts,
+};
 pub use value::RegValue;

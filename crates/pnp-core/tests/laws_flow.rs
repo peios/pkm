@@ -28,7 +28,7 @@ fn clock(hour: i64, minute: i64, second: i64) -> TimeFacts {
 
 /// An outbound TCP flow's first packet as the Flow layer sees it: flow
 /// facts only, the clock, and the flow's start (= now).
-fn flow_out(dst: &str, dport: u16) -> Snapshot {
+fn flow_out(dst: &str, dport: u16) -> Snapshot<'static> {
     Snapshot {
         direction: Some(Direction::Out),
         interface: Some("eth0".into()),

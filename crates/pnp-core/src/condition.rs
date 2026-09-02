@@ -8,7 +8,8 @@ use core::net::IpAddr;
 
 use crate::hash::name_hash;
 use crate::pkm_alloc::{String as PkmString, Vec as PkmVec};
-use crate::snapshot::Snapshot;
+use crate::sid::Sid;
+use crate::snapshot::{Endpoint, Principal, Snapshot};
 use crate::strutil::str_to_pkm;
 
 /// The packet-layer fact vocabulary (ratified, complete).
@@ -83,6 +84,39 @@ pub enum FactId {
     StartMinute,
     /// Start second.
     StartSecond,
+    /// What stands at the local end: `program`, `kernel`, `shared`, `none`.
+    /// Flow layer; always present there.
+    Local,
+    /// The local principal's user SID. Flow layer, program endpoints.
+    LocalUser,
+    /// The local principal's enabled groups (any-of). Flow layer.
+    LocalGroup,
+    /// The local principal's integrity level. Flow layer.
+    LocalIntegrity,
+    /// The local principal's confinement SID; absent when unconfined.
+    LocalConfinement,
+    /// The local principal's confinement capabilities (any-of).
+    LocalCapability,
+    /// The local principal's per-service SID; absent for a user program.
+    LocalService,
+    /// The local process GUID.
+    LocalProcess,
+    /// What stands at the other end, when it is local too (loopback).
+    Remote,
+    /// The remote principal's user SID (loopback).
+    RemoteUser,
+    /// The remote principal's enabled groups (loopback).
+    RemoteGroup,
+    /// The remote principal's integrity level (loopback).
+    RemoteIntegrity,
+    /// The remote principal's confinement SID (loopback).
+    RemoteConfinement,
+    /// The remote principal's confinement capabilities (loopback).
+    RemoteCapability,
+    /// The remote principal's per-service SID (loopback).
+    RemoteService,
+    /// The remote process GUID (loopback).
+    RemoteProcess,
 }
 
 impl FactId {
@@ -123,6 +157,22 @@ impl FactId {
             "Start.Hour" => FactId::StartHour,
             "Start.Minute" => FactId::StartMinute,
             "Start.Second" => FactId::StartSecond,
+            "Local" => FactId::Local,
+            "Local.User" => FactId::LocalUser,
+            "Local.Group" => FactId::LocalGroup,
+            "Local.Integrity" => FactId::LocalIntegrity,
+            "Local.Confinement" => FactId::LocalConfinement,
+            "Local.Capability" => FactId::LocalCapability,
+            "Local.Service" => FactId::LocalService,
+            "Local.Process" => FactId::LocalProcess,
+            "Remote" => FactId::Remote,
+            "Remote.User" => FactId::RemoteUser,
+            "Remote.Group" => FactId::RemoteGroup,
+            "Remote.Integrity" => FactId::RemoteIntegrity,
+            "Remote.Confinement" => FactId::RemoteConfinement,
+            "Remote.Capability" => FactId::RemoteCapability,
+            "Remote.Service" => FactId::RemoteService,
+            "Remote.Process" => FactId::RemoteProcess,
             _ => return None,
         })
     }
@@ -130,12 +180,67 @@ impl FactId {
     /// The value family this fact compares in.
     pub fn family(self) -> FactFamily {
         match self {
-            FactId::Direction | FactId::Interface | FactId::FlowState => FactFamily::Str,
+            FactId::Direction
+            | FactId::Interface
+            | FactId::FlowState
+            | FactId::Local
+            | FactId::Remote
+            | FactId::LocalProcess
+            | FactId::RemoteProcess => FactFamily::Str,
             FactId::SrcAddr | FactId::DstAddr => FactFamily::Addr,
             FactId::SrcMac | FactId::DstMac => FactFamily::Mac,
             FactId::TcpFlags => FactFamily::Flags,
+            FactId::LocalUser
+            | FactId::LocalGroup
+            | FactId::LocalConfinement
+            | FactId::LocalCapability
+            | FactId::LocalService
+            | FactId::RemoteUser
+            | FactId::RemoteGroup
+            | FactId::RemoteConfinement
+            | FactId::RemoteCapability
+            | FactId::RemoteService => FactFamily::Sid,
             _ => FactFamily::Int,
         }
+    }
+
+    /// Whether this is an identity fact (`Local`, `Local.*`, `Remote`,
+    /// `Remote.*`): read from an endpoint's token, Flow layer only.
+    pub fn is_identity(self) -> bool {
+        matches!(
+            self,
+            FactId::Local
+                | FactId::LocalUser
+                | FactId::LocalGroup
+                | FactId::LocalIntegrity
+                | FactId::LocalConfinement
+                | FactId::LocalCapability
+                | FactId::LocalService
+                | FactId::LocalProcess
+                | FactId::Remote
+                | FactId::RemoteUser
+                | FactId::RemoteGroup
+                | FactId::RemoteIntegrity
+                | FactId::RemoteConfinement
+                | FactId::RemoteCapability
+                | FactId::RemoteService
+                | FactId::RemoteProcess
+        )
+    }
+
+    /// Whether this fact reads the other end's identity (loopback only).
+    pub fn is_remote(self) -> bool {
+        matches!(
+            self,
+            FactId::Remote
+                | FactId::RemoteUser
+                | FactId::RemoteGroup
+                | FactId::RemoteIntegrity
+                | FactId::RemoteConfinement
+                | FactId::RemoteCapability
+                | FactId::RemoteService
+                | FactId::RemoteProcess
+        )
     }
 
     /// Whether this is a live-clock fact (`Time.*`): its answer changes
@@ -172,17 +277,18 @@ impl FactId {
 
     /// Whether this fact exists only on a flow (the Flow layer's own).
     pub fn is_flow_only(self) -> bool {
-        matches!(
-            self,
-            FactId::Related
-                | FactId::StartYear
-                | FactId::StartMonth
-                | FactId::StartDayOfMonth
-                | FactId::StartDayOfWeek
-                | FactId::StartHour
-                | FactId::StartMinute
-                | FactId::StartSecond
-        )
+        self.is_identity()
+            || matches!(
+                self,
+                FactId::Related
+                    | FactId::StartYear
+                    | FactId::StartMonth
+                    | FactId::StartDayOfMonth
+                    | FactId::StartDayOfWeek
+                    | FactId::StartHour
+                    | FactId::StartMinute
+                    | FactId::StartSecond
+            )
     }
 }
 
@@ -199,6 +305,11 @@ pub enum FactFamily {
     Mac,
     /// Flag sets: `Has` / `Hasnt`.
     Flags,
+    /// Security identifiers: `Equal` with exact SIDs (any-of), written as
+    /// `S-1-…`, a well-known name, or — for the service facts — a service
+    /// name. A set-valued fact (groups, capabilities) matches when any
+    /// listed SID is in the set.
+    Sid,
 }
 
 /// Counter key-spec bits: which facts partition a counter view. A packet
@@ -432,6 +543,13 @@ pub enum CondOp {
     Has(u8),
     /// All listed flag bits clear.
     Hasnt(u8),
+    /// SID membership (any-of).
+    EqualSid(PkmVec<Sid>),
+    /// Whether the fact exists at all: `Present = 1` holds when it does,
+    /// `Present = 0` when it does not. The one operator that looks through
+    /// the absent-fact law — which is why ingestion refuses it on a fact
+    /// absent by law at the rule's layer.
+    Present(bool),
 }
 
 /// One condition: key + operator. A rule matches iff all its conditions do.
@@ -460,11 +578,15 @@ impl Condition {
     /// Day-of-month, month and year answer "next midnight": exact flips
     /// need calendar arithmetic nobody has asked for, and a daily re-judge
     /// is cheap.
-    pub fn next_flip(&self, snap: &Snapshot) -> Option<i64> {
+    pub fn next_flip(&self, snap: &Snapshot<'_>) -> Option<i64> {
         let fact = match self.key {
             CondKey::Fact(f) if f.is_live_time() => f,
             _ => return None,
         };
+        // Whether the clock is present never changes while a flow lives.
+        if matches!(self.op, CondOp::Present(_)) {
+            return None;
+        }
         let now = snap.now_secs?;
         let time = snap.time?;
         let (current, modulus, step, base): (i64, i64, i64, i64) = match fact {
@@ -487,9 +609,37 @@ impl Condition {
         None
     }
 
+    /// Whether the condition's key exists in the snapshot — what `Present`
+    /// answers.
+    pub fn present(&self, snap: &Snapshot<'_>) -> bool {
+        match &self.key {
+            CondKey::Tag { hash, .. } => snap.tag(*hash).is_some(),
+            CondKey::Counter(view) => snap.counter_view(*view).is_some(),
+            CondKey::Fact(fact) => match fact.family() {
+                FactFamily::Int => int_fact(*fact, snap).is_some(),
+                FactFamily::Str => str_fact(*fact, snap).is_some(),
+                FactFamily::Addr => match fact {
+                    FactId::SrcAddr => snap.src_addr.is_some(),
+                    FactId::DstAddr => snap.dst_addr.is_some(),
+                    _ => false,
+                },
+                FactFamily::Mac => match fact {
+                    FactId::SrcMac => snap.src_mac.is_some(),
+                    FactId::DstMac => snap.dst_mac.is_some(),
+                    _ => false,
+                },
+                FactFamily::Flags => snap.tcp_flags.is_some(),
+                FactFamily::Sid => sid_fact_present(*fact, snap),
+            },
+        }
+    }
+
     /// Evaluates the condition against a snapshot (absent-fact law: an
     /// unresolvable key is false).
-    pub fn matches(&self, snap: &Snapshot) -> bool {
+    pub fn matches(&self, snap: &Snapshot<'_>) -> bool {
+        if let CondOp::Present(want) = self.op {
+            return self.present(snap) == want;
+        }
         match &self.key {
             CondKey::Tag { hash, .. } => match snap.tag(*hash) {
                 Some(v) => int_op_matches(&self.op, clamp_u64(v)),
@@ -547,8 +697,67 @@ impl Condition {
                     },
                     None => false,
                 },
+                FactFamily::Sid => match &self.op {
+                    CondOp::EqualSid(list) => sid_fact_matches(*fact, snap, list),
+                    _ => false,
+                },
             },
         }
+    }
+}
+
+/// The endpoint an identity fact reads.
+fn endpoint<'s, 'a>(fact: FactId, snap: &'s Snapshot<'a>) -> Option<&'s Endpoint<'a>> {
+    if fact.is_remote() {
+        snap.remote.as_ref()
+    } else {
+        snap.local.as_ref()
+    }
+}
+
+/// The principal an identity fact reads: present iff the endpoint is a
+/// program.
+fn principal<'a>(fact: FactId, snap: &Snapshot<'a>) -> Option<&'a dyn Principal> {
+    endpoint(fact, snap).and_then(|e| e.principal)
+}
+
+fn sid_fact_present(fact: FactId, snap: &Snapshot<'_>) -> bool {
+    let Some(p) = principal(fact, snap) else {
+        return false;
+    };
+    match fact {
+        FactId::LocalUser | FactId::RemoteUser => true,
+        FactId::LocalGroup | FactId::RemoteGroup => true,
+        // Confinement and its capabilities exist together: an unconfined
+        // token has neither.
+        FactId::LocalConfinement
+        | FactId::RemoteConfinement
+        | FactId::LocalCapability
+        | FactId::RemoteCapability => p.confinement().is_some(),
+        FactId::LocalService | FactId::RemoteService => p.service().is_some(),
+        _ => false,
+    }
+}
+
+fn sid_fact_matches(fact: FactId, snap: &Snapshot<'_>, list: &[Sid]) -> bool {
+    let Some(p) = principal(fact, snap) else {
+        return false;
+    };
+    match fact {
+        FactId::LocalUser | FactId::RemoteUser => list.iter().any(|s| s == p.user()),
+        FactId::LocalGroup | FactId::RemoteGroup => list.iter().any(|s| p.is_member(s)),
+        FactId::LocalConfinement | FactId::RemoteConfinement => match p.confinement() {
+            Some(c) => list.iter().any(|s| s == c),
+            None => false,
+        },
+        FactId::LocalCapability | FactId::RemoteCapability => {
+            p.confinement().is_some() && list.iter().any(|s| p.has_capability(s))
+        }
+        FactId::LocalService | FactId::RemoteService => match p.service() {
+            Some(svc) => list.iter().any(|s| s == svc),
+            None => false,
+        },
+        _ => false,
     }
 }
 
@@ -569,7 +778,7 @@ fn clamp_u64(v: u64) -> i64 {
     }
 }
 
-fn int_fact(fact: FactId, snap: &Snapshot) -> Option<i64> {
+fn int_fact(fact: FactId, snap: &Snapshot<'_>) -> Option<i64> {
     Some(match fact {
         FactId::EtherType => i64::from(snap.ether_type?),
         FactId::Vlan => i64::from(snap.vlan?),
@@ -597,15 +806,18 @@ fn int_fact(fact: FactId, snap: &Snapshot) -> Option<i64> {
         FactId::StartHour => snap.start?.hour,
         FactId::StartMinute => snap.start?.minute,
         FactId::StartSecond => snap.start?.second,
+        FactId::LocalIntegrity | FactId::RemoteIntegrity => principal(fact, snap)?.integrity(),
         _ => return None,
     })
 }
 
-fn str_fact(fact: FactId, snap: &Snapshot) -> Option<&str> {
+fn str_fact<'s>(fact: FactId, snap: &'s Snapshot<'_>) -> Option<&'s str> {
     match fact {
         FactId::Direction => snap.direction.map(|d| d.as_str()),
         FactId::FlowState => snap.flow_state.map(|s| s.as_str()),
         FactId::Interface => snap.interface.as_ref().map(|s| s.as_str()),
+        FactId::Local | FactId::Remote => endpoint(fact, snap).map(|e| e.kind.as_str()),
+        FactId::LocalProcess | FactId::RemoteProcess => principal(fact, snap).map(|p| p.process()),
         _ => None,
     }
 }

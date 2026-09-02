@@ -116,7 +116,7 @@ pub struct Evaluation {
 /// Judges one snapshot against one forest.
 pub fn evaluate(
     forest: &Forest,
-    snap: &Snapshot,
+    snap: &Snapshot<'_>,
     ctx: &EvalContext,
 ) -> Result<Evaluation, AllocError> {
     let mut effects = PkmVec::new();
@@ -179,7 +179,7 @@ fn walk<'a>(
     rule: &'a Rule,
     chain: &mut PkmVec<&'a Rule>,
     parent_path: &str,
-    snap: &Snapshot,
+    snap: &Snapshot<'_>,
     ctx: &EvalContext,
     effects: &mut PkmVec<Effect>,
     candidates: &mut PkmVec<VerdictCandidate>,
@@ -269,7 +269,7 @@ fn chain_path(chain: &[&Rule]) -> Result<PkmString, AllocError> {
 fn resolve_rule(
     rule: &Rule,
     path: &str,
-    snap: &Snapshot,
+    snap: &Snapshot<'_>,
     ctx: &EvalContext,
     effects: &mut PkmVec<Effect>,
 ) -> Result<Option<Verdict>, AllocError> {
@@ -292,7 +292,7 @@ fn resolve_rule(
 fn resolve_action(
     action: &Action,
     path: &str,
-    snap: &Snapshot,
+    snap: &Snapshot<'_>,
     effects: &mut PkmVec<Effect>,
     verdict: &mut Option<Verdict>,
     best_report: &mut Option<u8>,

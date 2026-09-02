@@ -26,6 +26,7 @@ use crate::error::{BuildError, LintKind, LintWarning};
 use crate::hash::name_hash;
 use crate::pkm_alloc::{String as PkmString, TryClone, Vec as PkmVec};
 use crate::rule::{Forest, Layer, NamedHash, Rule};
+use crate::sid::Sid;
 use crate::snapshot::tcp_flags;
 use crate::strutil::{join_path, str_to_pkm};
 use crate::value::RegValue;
@@ -415,6 +416,12 @@ fn parse_condition(
     let bad_pattern = || mk_error(path, key, true);
 
     let op = match (op_name, family) {
+        // Present applies to every key: a fact, a tag, a counter view.
+        ("Present", _) => CondOp::Present(match scalar_int(value) {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err(bad_pattern()),
+        }),
         ("Equal", FactFamily::Int) => {
             let mut patterns = PkmVec::new();
             for_each_element(value, &mut |el| {
@@ -425,13 +432,34 @@ fn parse_condition(
             CondOp::EqualInt(patterns)
         }
         ("Equal", FactFamily::Str) => {
+            // Process GUIDs compare as lowercase text: the glue emits
+            // lowercase, so patterns are folded once here.
+            let fold = matches!(
+                fact_for_names,
+                Some(FactId::LocalProcess) | Some(FactId::RemoteProcess)
+            );
             let mut patterns = PkmVec::new();
             for_each_element(value, &mut |el| {
                 let s = el.as_str().ok_or(())?;
-                patterns.push(str_to_pkm(s).map_err(|_| ())?).map_err(|_| ())
+                let mut out = PkmString::new();
+                for c in s.chars() {
+                    out.push(if fold { c.to_ascii_lowercase() } else { c })
+                        .map_err(|_| ())?;
+                }
+                patterns.push(out).map_err(|_| ())
             })
             .map_err(|()| bad_pattern())?;
             CondOp::EqualStr(patterns)
+        }
+        ("Equal", FactFamily::Sid) => {
+            let mut patterns = PkmVec::new();
+            for_each_element(value, &mut |el| {
+                let s = el.as_str().ok_or(())?;
+                let sid = sid_pattern(s, fact_for_names).ok_or(())?;
+                patterns.push(sid).map_err(|_| ())
+            })
+            .map_err(|()| bad_pattern())?;
+            CondOp::EqualSid(patterns)
         }
         ("Equal", FactFamily::Addr) => {
             let mut patterns = PkmVec::new();
@@ -454,10 +482,10 @@ fn parse_condition(
             CondOp::EqualMac(patterns)
         }
         ("GreaterThan", FactFamily::Int) => {
-            CondOp::Gt(scalar_int(value).ok_or_else(bad_pattern)?)
+            CondOp::Gt(scalar_int_named(value, fact_for_names).ok_or_else(bad_pattern)?)
         }
         ("LessThan", FactFamily::Int) => {
-            CondOp::Lt(scalar_int(value).ok_or_else(bad_pattern)?)
+            CondOp::Lt(scalar_int_named(value, fact_for_names).ok_or_else(bad_pattern)?)
         }
         ("Has", FactFamily::Flags) => CondOp::Has(flag_mask(value).ok_or_else(bad_pattern)?),
         ("Hasnt", FactFamily::Flags) => {
@@ -513,6 +541,15 @@ fn scalar_int(value: &RegValue) -> Option<i64> {
         RegValue::Int(v) => Some(*v),
         RegValue::Str(s) => s.as_str().parse().ok(),
         RegValue::List(_) => None,
+    }
+}
+
+/// `scalar_int`, also accepting the fact's named values (`medium` for an
+/// integrity level), so a threshold reads as naturally as an equality.
+fn scalar_int_named(value: &RegValue, fact: Option<FactId>) -> Option<i64> {
+    match value {
+        RegValue::Str(s) if s.as_str().parse::<i64>().is_err() => named_int(s.as_str(), fact?),
+        other => scalar_int(other),
     }
 }
 
@@ -575,7 +612,43 @@ fn named_int(name: &str, fact: FactId) -> Option<i64> {
                 None
             }
         }
+        // The five standard integrity levels; any other level is written
+        // as its number.
+        FactId::LocalIntegrity | FactId::RemoteIntegrity => {
+            if eq("untrusted") {
+                Some(0)
+            } else if eq("low") {
+                Some(4096)
+            } else if eq("medium") {
+                Some(8192)
+            } else if eq("high") {
+                Some(12288)
+            } else if eq("system") {
+                Some(16384)
+            } else {
+                None
+            }
+        }
         _ => None,
+    }
+}
+
+/// A SID pattern: the textual SID, or a name. Service facts take a
+/// service name (derived exactly as the token's service SID was); every
+/// other SID fact takes a well-known principal name. A name that is
+/// neither is refused rather than guessed at — a typo in a group name must
+/// not quietly become a service SID that matches nothing.
+fn sid_pattern(s: &str, fact: Option<FactId>) -> Option<Sid> {
+    let s = s.trim();
+    if s.len() >= 2 && (s.starts_with("S-") || s.starts_with("s-")) {
+        return Sid::parse_str(s);
+    }
+    if s.is_empty() {
+        return None;
+    }
+    match fact? {
+        FactId::LocalService | FactId::RemoteService => Some(Sid::service(s)),
+        _ => Sid::well_known(s),
     }
 }
 
@@ -644,6 +717,9 @@ fn flag_mask(value: &RegValue) -> Option<u8> {
 
 /// Facts that never exist at a layer: conditions over them are legal but
 /// can never hold (absent-fact law), so the authoring surface should shout.
+/// One exception is not legal: `Present`, which looks through the law,
+/// would turn such a fact into an always-true or always-false condition
+/// with a meaningful-looking name, so it refuses the generation.
 fn lint_condition(
     layer: Layer,
     condition: &Condition,
@@ -665,6 +741,12 @@ fn lint_condition(
         Layer::Flow => matches!(condition.key, CondKey::Fact(f) if !f.is_flow_invariant()),
     };
     if never {
+        if matches!(condition.op, CondOp::Present(_)) {
+            return Err(BuildError::PresentNeverAtLayer {
+                rule: path.try_clone_err()?,
+                key: str_to_pkm(key)?,
+            });
+        }
         lints.push(LintWarning {
             rule: path.try_clone_err()?,
             key: str_to_pkm(key)?,

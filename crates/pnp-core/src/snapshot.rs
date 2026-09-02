@@ -13,10 +13,12 @@
 //! being evaluated: tags by name hash, counter views by their index in the
 //! forest's view table.
 
+use core::fmt;
 use core::net::IpAddr;
 
 use crate::hash::name_hash;
 use crate::pkm_alloc::{AllocError, String as PkmString, Vec as PkmVec};
+use crate::sid::Sid;
 
 /// Traversal direction, as attached by the standing seat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +109,126 @@ pub mod tcp_flags {
     }
 }
 
+/// What stands at one local end of a flow — the `Local` fact, and on a
+/// loopback flow the `Remote` fact for the other end. Classified by
+/// whether anyone answers, not by whether a socket structure exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointKind {
+    /// A program's socket: the glue found a stamped socket that sends or
+    /// will receive this flow. The identity facts are present.
+    Program,
+    /// The stack itself: kernel-originated traffic outbound (resets, ICMP
+    /// errors, IGMP), and inbound protocols the stack consumes without a
+    /// program (ICMP, neighbour discovery, tunnel outers).
+    Kernel,
+    /// Many receivers at once: inbound multicast or broadcast, delivered
+    /// to every socket bound to the port. One sentence, no single owner;
+    /// the per-program question is answered at the join, not here.
+    Shared,
+    /// Nobody: inbound to a port nothing listens on, which the stack will
+    /// answer with a reset or an unreachable.
+    None,
+}
+
+impl EndpointKind {
+    /// Canonical lowercase name, as written in rule values.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EndpointKind::Program => "program",
+            EndpointKind::Kernel => "kernel",
+            EndpointKind::Shared => "shared",
+            EndpointKind::None => "none",
+        }
+    }
+}
+
+/// The principal behind a program endpoint, as read from the socket's
+/// governing token. A trait rather than a copy: a token may carry up to
+/// 1024 groups and the flow judgment runs in softirq context, so the
+/// snapshot borrows a view the glue implements over the token and asks
+/// membership questions of it instead of materialising the lists.
+pub trait Principal {
+    /// The token's user SID.
+    fn user(&self) -> &Sid;
+    /// Whether `sid` is an *enabled* group of the token. Deny-only groups
+    /// are invisible to policy.
+    fn is_member(&self, sid: &Sid) -> bool;
+    /// The token's integrity level (0 Untrusted .. 16384 System).
+    fn integrity(&self) -> i64;
+    /// The confinement SID, when the token is confined.
+    fn confinement(&self) -> Option<&Sid>;
+    /// Whether `sid` is among the token's confinement capabilities.
+    fn has_capability(&self, sid: &Sid) -> bool;
+    /// The per-service SID (`S-1-5-80-…`) among the enabled groups, when
+    /// the principal is a service.
+    fn service(&self) -> Option<&Sid>;
+    /// The process GUID, lowercase hyphenated text.
+    fn process(&self) -> &str;
+}
+
+/// One end of a flow: what stands there and, for a program, who.
+#[derive(Clone, Copy)]
+pub struct Endpoint<'a> {
+    /// What answers at this end.
+    pub kind: EndpointKind,
+    /// The principal, present iff `kind` is `Program`.
+    pub principal: Option<&'a dyn Principal>,
+}
+
+impl fmt::Debug for Endpoint<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut d = f.debug_struct("Endpoint");
+        d.field("kind", &self.kind);
+        match self.principal {
+            Some(p) => d.field("user", p.user()).field("process", &p.process()),
+            None => d.field("principal", &"none"),
+        };
+        d.finish()
+    }
+}
+
+/// A principal that owns its lists: the cargo suite's shape, and any
+/// caller that already holds the identity as values.
+#[derive(Debug, Default)]
+pub struct OwnedPrincipal {
+    /// The user SID.
+    pub user: Sid,
+    /// Enabled group SIDs (the service SID among them, if any).
+    pub groups: PkmVec<Sid>,
+    /// Integrity level.
+    pub integrity: i64,
+    /// Confinement SID, when confined.
+    pub confinement: Option<Sid>,
+    /// Confinement capabilities.
+    pub capabilities: PkmVec<Sid>,
+    /// Process GUID text.
+    pub process: PkmString,
+}
+
+impl Principal for OwnedPrincipal {
+    fn user(&self) -> &Sid {
+        &self.user
+    }
+    fn is_member(&self, sid: &Sid) -> bool {
+        self.groups.iter().any(|g| g == sid)
+    }
+    fn integrity(&self) -> i64 {
+        self.integrity
+    }
+    fn confinement(&self) -> Option<&Sid> {
+        self.confinement.as_ref()
+    }
+    fn has_capability(&self, sid: &Sid) -> bool {
+        self.capabilities.iter().any(|c| c == sid)
+    }
+    fn service(&self) -> Option<&Sid> {
+        self.groups.iter().find(|g| g.is_service())
+    }
+    fn process(&self) -> &str {
+        self.process.as_str()
+    }
+}
+
 /// Wall-clock facts, attached by clock machinery.
 ///
 /// `day_of_week` is ISO: 1 = Monday .. 7 = Sunday. Timezone semantics are a
@@ -131,8 +253,11 @@ pub struct TimeFacts {
 
 /// The facts of one traversal at its standing seat. `None` = the packet does
 /// not have the fact (absent-fact law: conditions over it are false).
+///
+/// The lifetime is the identity facts': a Flow-layer snapshot borrows the
+/// principal views the glue built over the endpoints' tokens.
 #[derive(Debug, Default)]
-pub struct Snapshot {
+pub struct Snapshot<'a> {
     /// Traversal direction.
     pub direction: Option<Direction>,
     /// Interface name at the standing seat.
@@ -182,6 +307,13 @@ pub struct Snapshot {
     /// The flow's start time. Flow-layer snapshots only; fixed for the
     /// flow's life, so conditions over it never expire a sentence.
     pub start: Option<TimeFacts>,
+    /// The local end of the flow: the `Local` fact and, for a program,
+    /// `Local.*`. Flow-layer snapshots only; always present there, and
+    /// fixed for the flow's life.
+    pub local: Option<Endpoint<'a>>,
+    /// The other end, when it is local too (a loopback flow): `Remote`
+    /// and `Remote.*`. Absent off loopback — nothing is provable there yet.
+    pub remote: Option<Endpoint<'a>>,
     /// Flow tags visible to this evaluation as `(name hash, value)`
     /// (written by prior packets / layers below, per the visibility laws —
     /// the glue enforces those).
@@ -191,7 +323,7 @@ pub struct Snapshot {
     pub counter_views: PkmVec<(u32, u64)>,
 }
 
-impl Snapshot {
+impl<'a> Snapshot<'a> {
     /// Looks up a visible flow tag by its name hash.
     pub fn tag(&self, hash: u64) -> Option<u64> {
         self.tags

@@ -77,7 +77,7 @@ pub struct Rule {
 
 impl Rule {
     /// Whether the rule matches a snapshot (disabled rules never match).
-    pub fn matches(&self, snap: &Snapshot) -> bool {
+    pub fn matches(&self, snap: &Snapshot<'_>) -> bool {
         let mut trace = MatchTrace::default();
         self.matches_traced(snap, &mut trace)
     }
@@ -87,7 +87,7 @@ impl Rule {
     /// true later. Conditions are ordered at ingestion so time comes last:
     /// a rule whose other conditions fail never consults its clock, and
     /// contributes no expiry.
-    pub fn matches_traced(&self, snap: &Snapshot, trace: &mut MatchTrace) -> bool {
+    pub fn matches_traced(&self, snap: &Snapshot<'_>, trace: &mut MatchTrace) -> bool {
         if !self.enabled {
             return false;
         }
