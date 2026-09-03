@@ -363,6 +363,13 @@ python3-setuptools = "*"
 libpfm4-dev = "*"
 asciidoc = "*"
 xmlto = "*"
+# xmlto validates the perf/libperf man pages against the DocBook 4.5 DTD and
+# renders them with the DocBook stylesheets. Both must be present locally: with
+# neither, libxml2 falls through to fetching the DTD over HTTP and the build --
+# which has no network -- fails every man page (PEI-552). Mirrors the peipkg
+# list above; keep the two in step.
+docbook-xml = "*"
+docbook-xsl = "*"
 libudev-dev = "*"
 libncurses-dev = "*"
 libnl-3-dev = "*"

@@ -34,6 +34,34 @@ src_ts=${PEKIT_SOURCE_TIMESTAMP:-0}
 : "${KBUILD_BUILD_TIMESTAMP:=@${src_ts}}"
 export KBUILD_BUILD_TIMESTAMP
 
+# DocBook catalog for the doc builds (xmlto/a2x resolve the DocBook 4.5 DTD and
+# stylesheets through it). The path differs by environment and MUST be one that
+# exists: setting XML_CATALOG_FILES to a missing file does not fall back to the
+# default, it gives libxml2 an empty catalog, which then tries to fetch the DTD
+# over HTTP and fails every man page in a network-less build (PEI-552).
+#
+#   /usr/etc/xml/catalog  — a peipkg build root, which has no /etc merge to find
+#                           the catalog through, so it must be named explicitly.
+#   /etc/xml/catalog      — the Debian pkm-build container, where libxml2 would
+#                           find it unaided.
+#
+# Resolve to the first that exists rather than hardcoding either; leave unset if
+# neither is present, so libxml2 keeps its own default rather than being handed
+# a path we know is wrong. Exported, not passed per-make: it is an environment
+# variable libxml2 reads, and the doc builds inherit it like any other. Passing
+# it as a make override would also mean passing an empty value when unset, which
+# libxml2 reads as "no catalogs at all" rather than as "use your default".
+if [ -z "${XML_CATALOG_FILES:-}" ]; then
+	for _cat in /usr/etc/xml/catalog /etc/xml/catalog; do
+		if [ -f "$_cat" ]; then
+			XML_CATALOG_FILES=$_cat
+			export XML_CATALOG_FILES
+			break
+		fi
+	done
+	unset _cat
+fi
+
 # The tools' Makefiles write objects into the tree (not all honour O=), so build
 # in a throwaway copy to keep the cached source stage pristine.
 work=$(mktemp -d)
@@ -67,7 +95,6 @@ log "perf"
 # into the binary as PERF_EXEC_PATH, so it must point at the final install
 # location — under the triplet, since libexec/ is not a PSD-009 destination.
 make -C tools/perf -f Makefile.perf -j"$jobs" \
-	XML_CATALOG_FILES="${XML_CATALOG_FILES:-/usr/etc/xml/catalog}" \
 	prefix=/usr libdir=/usr/lib/$triplet sysconfdir=/etc \
 	perfexecdir=lib/$triplet/perf-core \
 	PYTHON=python3 BUILD_BPF_SKEL=1 WERROR=0 \
@@ -107,7 +134,6 @@ make -C tools/lib/perf -j"$jobs" \
 # libperf's install_doc: that target also runs install-html and
 # install-examples, and Peios ships no /usr/share/doc.
 make -C tools/lib/perf/Documentation -j"$jobs" \
-	XML_CATALOG_FILES="${XML_CATALOG_FILES:-/usr/etc/xml/catalog}" \
 	prefix=/usr mandir=/usr/share/man DESTDIR="$dest" install-man
 
 # --- bpftool: BPF program / map / tracing introspection ---
@@ -266,13 +292,11 @@ make -C tools/hv -j"$jobs"
 make -C tools/hv DESTDIR="$dest" prefix=/usr sbindir=/usr/bin libexecdir="/usr/lib/$triplet" install
 
 # kvm_stat — KVM event monitor (python). Its install target renders the man
-# page with a2x, which is in the pool since PEI-535; XML_CATALOG_FILES points
-# libxml2 at the DocBook catalog, which a build root needs explicitly because
-# it has no /etc merge to find it through. (The bundled kvm_stat.service
+# page with a2x, which is in the pool since PEI-535; XML_CATALOG_FILES carries
+# the DocBook catalog resolved at the top of this script. (The bundled kvm_stat.service
 # systemd unit is not installed/packaged.)
 log "kvm_stat"
 make -C tools/kvm/kvm_stat \
-	XML_CATALOG_FILES="${XML_CATALOG_FILES:-/usr/etc/xml/catalog}" \
 	INSTALL_ROOT="$dest" BINDIR=usr/bin MANDIR=usr/share/man install
 
 # thermal stack: libthermal (public API) + libthermal_tools (private helper) +

@@ -98,6 +98,10 @@ RUN cargo install --locked --version "${BINDGEN_VERSION}" bindgen-cli && \
 # the image but only yields a tiny jvmti .so in the package. source-highlight is
 # the asciidoc filter that colourises the libperf docs' [source] blocks — purely
 # build-time (no package effect), it just silences asciidoc filter-127 warnings.
+# docbook-xml/docbook-xsl are what xmlto resolves the man pages against: the DTD
+# it validates with and the stylesheets it renders with, registered in the local
+# XML catalog. Without them libxml2 cannot resolve the DocBook 4.5 public id and
+# tries to fetch it over HTTP, which fails the build (PEI-552).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         pkg-config \
@@ -107,7 +111,7 @@ RUN apt-get update && \
         libpci-dev gettext \
         libperl-dev binutils-dev \
         python3-dev python3-docutils python3-setuptools \
-        libpfm4-dev asciidoc xmlto \
+        libpfm4-dev asciidoc xmlto docbook-xml docbook-xsl \
         libudev-dev libncurses-dev \
         libnl-3-dev libnl-genl-3-dev libconfig-dev \
         autoconf automake libtool \
