@@ -333,7 +333,7 @@ clang = "*"
 python3-docutils = "*"
 # asciidoc + xmlto render the perf, libperf and kvm_stat man pages; the
 # DocBook stylesheets and DTD are what they resolve against.
-asciidoc = "*"
+"io.github.asciidoc-py.asciidoc" = "*"
 xmlto = "*"
 "docbook-xsl" = "*"
 "docbook-xml" = "*"
