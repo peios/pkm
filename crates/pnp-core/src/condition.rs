@@ -117,6 +117,26 @@ pub enum FactId {
     RemoteService,
     /// The remote process GUID (loopback).
     RemoteProcess,
+    /// Interface layer: what the interface is — `wired`, `wireless`,
+    /// `loopback`, `tunnel`, `bridge`, `other`.
+    InterfaceKind,
+    /// Interface layer: the stable interface id (the inventory key name).
+    InterfaceId,
+    /// Interface layer: the hardware address; absent when it has none.
+    InterfaceMac,
+    /// Interface layer: the bus position; absent for anything not hardware.
+    InterfacePath,
+    /// Interface layer: the kernel driver; absent for anything not hardware.
+    InterfaceDriver,
+    /// Interface layer: the network record's key name; present once the
+    /// interface has link and an offer.
+    NetworkId,
+    /// Interface layer: the operator's label for the network.
+    NetworkName,
+    /// Interface layer: the operator-assigned trust of the network.
+    NetworkTrust,
+    /// Interface layer: the kind of interface the network was seen on.
+    NetworkKind,
 }
 
 impl FactId {
@@ -173,6 +193,15 @@ impl FactId {
             "Remote.Capability" => FactId::RemoteCapability,
             "Remote.Service" => FactId::RemoteService,
             "Remote.Process" => FactId::RemoteProcess,
+            "Interface.Kind" => FactId::InterfaceKind,
+            "Interface.Id" => FactId::InterfaceId,
+            "Interface.Mac" => FactId::InterfaceMac,
+            "Interface.Path" => FactId::InterfacePath,
+            "Interface.Driver" => FactId::InterfaceDriver,
+            "Network.Id" => FactId::NetworkId,
+            "Network.Name" => FactId::NetworkName,
+            "Network.Trust" => FactId::NetworkTrust,
+            "Network.Kind" => FactId::NetworkKind,
             _ => return None,
         })
     }
@@ -186,9 +215,17 @@ impl FactId {
             | FactId::Local
             | FactId::Remote
             | FactId::LocalProcess
-            | FactId::RemoteProcess => FactFamily::Str,
+            | FactId::RemoteProcess
+            | FactId::InterfaceKind
+            | FactId::InterfaceId
+            | FactId::InterfacePath
+            | FactId::InterfaceDriver
+            | FactId::NetworkId
+            | FactId::NetworkName
+            | FactId::NetworkTrust
+            | FactId::NetworkKind => FactFamily::Str,
             FactId::SrcAddr | FactId::DstAddr => FactFamily::Addr,
-            FactId::SrcMac | FactId::DstMac => FactFamily::Mac,
+            FactId::SrcMac | FactId::DstMac | FactId::InterfaceMac => FactFamily::Mac,
             FactId::TcpFlags => FactFamily::Flags,
             FactId::LocalUser
             | FactId::LocalGroup
@@ -202,6 +239,30 @@ impl FactId {
             | FactId::RemoteService => FactFamily::Sid,
             _ => FactFamily::Int,
         }
+    }
+
+    /// Whether this fact belongs to the interface layer's own vocabulary
+    /// (`Interface.*`, `Network.*`): read from an interface and its
+    /// network record, never from a packet. `Interface` itself (the name)
+    /// is shared with the packet layers.
+    pub fn is_interface_layer(self) -> bool {
+        matches!(
+            self,
+            FactId::InterfaceKind
+                | FactId::InterfaceId
+                | FactId::InterfaceMac
+                | FactId::InterfacePath
+                | FactId::InterfaceDriver
+                | FactId::NetworkId
+                | FactId::NetworkName
+                | FactId::NetworkTrust
+                | FactId::NetworkKind
+        )
+    }
+
+    /// Whether this fact exists at the interface layer at all.
+    pub fn is_at_interface_layer(self) -> bool {
+        self == FactId::Interface || self.is_interface_layer()
     }
 
     /// Whether this is an identity fact (`Local`, `Local.*`, `Remote`,
@@ -626,6 +687,7 @@ impl Condition {
                 FactFamily::Mac => match fact {
                     FactId::SrcMac => snap.src_mac.is_some(),
                     FactId::DstMac => snap.dst_mac.is_some(),
+                    FactId::InterfaceMac => snap.interface_mac.is_some(),
                     _ => false,
                 },
                 FactFamily::Flags => snap.tcp_flags.is_some(),
@@ -679,6 +741,7 @@ impl Condition {
                     let v = match fact {
                         FactId::SrcMac => snap.src_mac,
                         FactId::DstMac => snap.dst_mac,
+                        FactId::InterfaceMac => snap.interface_mac,
                         _ => None,
                     };
                     match v {
@@ -818,6 +881,14 @@ fn str_fact<'s>(fact: FactId, snap: &'s Snapshot<'_>) -> Option<&'s str> {
         FactId::Interface => snap.interface.as_ref().map(|s| s.as_str()),
         FactId::Local | FactId::Remote => endpoint(fact, snap).map(|e| e.kind.as_str()),
         FactId::LocalProcess | FactId::RemoteProcess => principal(fact, snap).map(|p| p.process()),
+        FactId::InterfaceKind => snap.interface_kind.as_ref().map(|s| s.as_str()),
+        FactId::InterfaceId => snap.interface_id.as_ref().map(|s| s.as_str()),
+        FactId::InterfacePath => snap.interface_path.as_ref().map(|s| s.as_str()),
+        FactId::InterfaceDriver => snap.interface_driver.as_ref().map(|s| s.as_str()),
+        FactId::NetworkId => snap.network_id.as_ref().map(|s| s.as_str()),
+        FactId::NetworkName => snap.network_name.as_ref().map(|s| s.as_str()),
+        FactId::NetworkTrust => snap.network_trust.as_ref().map(|s| s.as_str()),
+        FactId::NetworkKind => snap.network_kind.as_ref().map(|s| s.as_str()),
         _ => None,
     }
 }

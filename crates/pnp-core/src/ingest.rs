@@ -18,7 +18,7 @@
 //!   so the writer may live in another layer's forest: [`check_forests`]
 //!   runs that check across every forest being published together.
 
-use crate::action::{parse_action, Action, ParseFailure};
+use crate::action::{parse_action, Action, ParseFailure, Verdict};
 use crate::condition::{
     AddrPattern, CondKey, CondOp, Condition, CounterView, FactFamily, FactId, IntPattern,
 };
@@ -63,9 +63,20 @@ struct Collector {
     /// First (rule path, value key) mentioning each view, parallel to
     /// `views` — attribution for the dead-read refusal.
     view_sites: PkmVec<(PkmString, PkmString)>,
+    /// Profile paths named by `JOIN`, first-mention order.
+    profiles: PkmVec<PkmString>,
 }
 
 impl Collector {
+    /// Interns a profile path and returns its index.
+    fn note_profile(&mut self, path: &str) -> Result<u32, BuildError> {
+        if let Some(i) = self.profiles.iter().position(|p| p.as_str() == path) {
+            return Ok(i as u32);
+        }
+        self.profiles.push(str_to_pkm(path)?)?;
+        Ok((self.profiles.len() - 1) as u32)
+    }
+
     fn note_name(list: &mut PkmVec<NamedHash>, name: &str) -> Result<(), BuildError> {
         if list.iter().any(|n| n.name.as_str() == name) {
             return Ok(());
@@ -150,6 +161,7 @@ pub fn build_forest(layer: Layer, roots: &[RuleInput]) -> Result<BuildOutput, Bu
         streams: PkmVec::new(),
         views: PkmVec::new(),
         view_sites: PkmVec::new(),
+        profiles: PkmVec::new(),
     };
     for input in roots {
         let rule = build_rule(layer, input, "", 0, &mut lints, &mut collector)?;
@@ -167,6 +179,7 @@ pub fn build_forest(layer: Layer, roots: &[RuleInput]) -> Result<BuildOutput, Bu
             streams: collector.streams,
             views: collector.views,
             view_sites: collector.view_sites,
+            profiles: collector.profiles,
         },
         lints,
     })
@@ -301,7 +314,9 @@ fn build_rule(
                     let expr = item.as_str().ok_or(BuildError::BadActionsValue {
                         rule: path.try_clone_err()?,
                     })?;
-                    actions.push(parse_action_for_rule(expr, &path)?)?;
+                    let action = parse_action_for_rule(expr, &path)?;
+                    let action = place_action(layer, action, &path, collector)?;
+                    actions.push(action)?;
                 }
             }
             _ => {
@@ -343,6 +358,51 @@ fn build_rule(
         actions,
         children,
     })
+}
+
+/// Checks an action against the rule's layer and lowers it to its
+/// evaluation form. The interface layer speaks `JOIN`, `IGNORE`, `DOWN`,
+/// `NULL` and `REPORT` and nothing else; the packet layers speak
+/// everything but the interface verdicts. A `JOIN` is interned: the
+/// profile path goes into the forest's table and the action becomes a
+/// `Verdict::Join(index)`.
+fn place_action(
+    layer: Layer,
+    action: Action,
+    path: &PkmString,
+    collector: &mut Collector,
+) -> Result<Action, BuildError> {
+    let refuse = || BuildError::ActionNotAtLayer {
+        rule: path.try_clone_err().unwrap_or_default(),
+    };
+    if layer.is_interface() {
+        match action {
+            Action::Null | Action::Report { .. } => Ok(action),
+            Action::Verdict(v) if v.is_interface() => Ok(action),
+            Action::Join { profile } => Ok(Action::Verdict(Verdict::Join(
+                collector.note_profile(profile.as_str())?,
+            ))),
+            _ => Err(refuse()),
+        }
+    } else {
+        match &action {
+            Action::Join { .. } => Err(refuse()),
+            Action::Verdict(v) if v.is_interface() => Err(refuse()),
+            Action::Prompt { fallback, .. } => {
+                let bad = match fallback.action() {
+                    Some(Action::Join { .. }) => true,
+                    Some(Action::Verdict(v)) => v.is_interface(),
+                    _ => false,
+                };
+                if bad {
+                    Err(refuse())
+                } else {
+                    Ok(action)
+                }
+            }
+            _ => Ok(action),
+        }
+    }
 }
 
 fn parse_action_for_rule(expr: &str, path: &PkmString) -> Result<Action, BuildError> {
@@ -728,17 +788,36 @@ fn lint_condition(
     lints: &mut PkmVec<LintWarning>,
 ) -> Result<(), BuildError> {
     let never = match layer {
-        // Flow-only facts (Related, Start.*) exist on no packet.
-        Layer::Packet => matches!(condition.key, CondKey::Fact(f) if f.is_flow_only()),
+        // The interface layer has no stores: a tag or counter read there
+        // is not dead, it is meaningless, so it refuses outright. Its
+        // facts are the `Interface.*` / `Network.*` families plus the
+        // interface name; a packet fact never exists on an interface.
+        Layer::Interface => match condition.key {
+            CondKey::Tag { .. } | CondKey::Counter(_) => {
+                return Err(BuildError::KeyNotAtLayer {
+                    rule: path.try_clone_err()?,
+                    key: str_to_pkm(key)?,
+                })
+            }
+            CondKey::Fact(f) => !f.is_at_interface_layer(),
+        },
+        // Flow-only facts (Related, Start.*) exist on no packet; the
+        // interface layer's own facts exist on no packet either.
+        Layer::Packet => {
+            matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_layer())
+        }
         // The RawPacket seat stands before conntrack (inbound) and reads no
         // other layer's state in either direction (ratified visibility law).
         Layer::RawPacket => matches!(
             condition.key,
             CondKey::Fact(FactId::FlowState) | CondKey::Tag { .. }
-        ) || matches!(condition.key, CondKey::Fact(f) if f.is_flow_only()),
+        ) || matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_layer()),
         // A Flow fact is one identical for every packet of the flow; the
         // per-packet facts are never given to a Flow snapshot.
-        Layer::Flow => matches!(condition.key, CondKey::Fact(f) if !f.is_flow_invariant()),
+        Layer::Flow => matches!(
+            condition.key,
+            CondKey::Fact(f) if !f.is_flow_invariant() || f.is_interface_layer()
+        ),
     };
     if never {
         if matches!(condition.op, CondOp::Present(_)) {

@@ -903,6 +903,9 @@ pub extern "C" fn pnp_rust_evaluate(
         Verdict::Reject(RejectKind::Refused) => (1, 0),
         Verdict::Reject(RejectKind::Prohibited) => (1, 1),
         Verdict::Drop => (2, 0),
+        // The interface layer's verdicts never reach the kernel: its
+        // forests are built and judged in userspace (netd). Fail closed.
+        Verdict::Join(_) | Verdict::Ignore | Verdict::Down => (2, 0),
     };
 
     let out = unsafe { &mut *out };

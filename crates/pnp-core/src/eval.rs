@@ -111,6 +111,12 @@ pub struct Evaluation {
     /// seconds, UTC), or `None` when none was consulted. The Flow layer's
     /// sentence expiry; meaningless for per-packet layers.
     pub expires_at: Option<i64>,
+    /// Two candidates tied on priority and strictness with different
+    /// verdicts — only possible in the interface layer, as `JOIN(a)`
+    /// against `JOIN(b)`. The winner above is the first such candidate
+    /// walked, which is no answer at all: the executor must refuse the
+    /// generation rather than pick, and `candidates` names both rules.
+    pub conflict: bool,
 }
 
 /// Judges one snapshot against one forest.
@@ -151,21 +157,32 @@ pub fn evaluate(
     }
 
     match winner {
-        Some(w) => Ok(Evaluation {
-            verdict: candidates[w].verdict,
-            attributed_to: candidates[w].rule.try_clone()?,
-            backstop: false,
-            effects,
-            candidates,
-            expires_at: trace.expires_at,
-        }),
+        Some(w) => {
+            let top = &candidates[w];
+            let conflict = candidates.iter().enumerate().any(|(i, c)| {
+                i != w
+                    && c.priority == top.priority
+                    && c.verdict.strictness() == top.verdict.strictness()
+                    && c.verdict != top.verdict
+            });
+            Ok(Evaluation {
+                verdict: top.verdict,
+                attributed_to: top.rule.try_clone()?,
+                backstop: false,
+                effects,
+                candidates,
+                expires_at: trace.expires_at,
+                conflict,
+            })
+        }
         None => Ok(Evaluation {
-            verdict: Verdict::Drop,
+            verdict: forest.layer.backstop(),
             attributed_to: str_to_pkm("backstop")?,
             backstop: true,
             effects,
             candidates,
             expires_at: trace.expires_at,
+            conflict: false,
         }),
     }
 }
@@ -300,6 +317,9 @@ fn resolve_action(
 ) -> Result<(), AllocError> {
     match action {
         Action::Null => {}
+        // Ingestion lowers every JOIN to `Verdict::Join(index)`; one that
+        // survived would be a bug, and abstaining is the harmless answer.
+        Action::Join { .. } => {}
         Action::Verdict(v) => {
             *verdict = Some(match *verdict {
                 Some(cur) => cur.strictest(*v),

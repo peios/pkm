@@ -51,6 +51,14 @@ pub enum BuildError {
     /// looks through that law, so `X.Present = 0` on a fact absent by law
     /// would be an always-true condition wearing a meaningful name. Refused.
     PresentNeverAtLayer { rule: PkmString, key: PkmString },
+    /// A condition key that cannot exist at the rule's layer at all: a
+    /// `Tag.*` or `Counter.*` read in the interface layer, where no store
+    /// stands behind it.
+    KeyNotAtLayer { rule: PkmString, key: PkmString },
+    /// An action the rule's layer does not speak: `JOIN`, `IGNORE` or
+    /// `DOWN` outside the interface layer, or anything but those, `NULL`
+    /// and `REPORT` inside it.
+    ActionNotAtLayer { rule: PkmString },
 }
 
 impl From<AllocError> for BuildError {

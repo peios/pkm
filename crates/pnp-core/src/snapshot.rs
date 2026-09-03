@@ -321,6 +321,28 @@ pub struct Snapshot<'a> {
     /// Resolved counter views for this packet: `(view index, value)`. A
     /// view whose key facts the packet lacks is simply absent.
     pub counter_views: PkmVec<(u32, u64)>,
+    /// Interface-layer snapshots only: `Interface.Kind`.
+    pub interface_kind: Option<PkmString>,
+    /// Interface-layer snapshots only: `Interface.Id`, the stable id.
+    pub interface_id: Option<PkmString>,
+    /// Interface-layer snapshots only: `Interface.Mac`; absent when the
+    /// interface has no hardware address.
+    pub interface_mac: Option<[u8; 6]>,
+    /// Interface-layer snapshots only: `Interface.Path`; absent for
+    /// anything that is not hardware.
+    pub interface_path: Option<PkmString>,
+    /// Interface-layer snapshots only: `Interface.Driver`; absent for
+    /// anything that is not hardware.
+    pub interface_driver: Option<PkmString>,
+    /// Interface-layer snapshots only: `Network.Id`; present once the
+    /// interface has link and an offer.
+    pub network_id: Option<PkmString>,
+    /// Interface-layer snapshots only: `Network.Name`.
+    pub network_name: Option<PkmString>,
+    /// Interface-layer snapshots only: `Network.Trust`.
+    pub network_trust: Option<PkmString>,
+    /// Interface-layer snapshots only: `Network.Kind`.
+    pub network_kind: Option<PkmString>,
 }
 
 impl<'a> Snapshot<'a> {

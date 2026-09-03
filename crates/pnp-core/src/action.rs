@@ -61,6 +61,13 @@ pub enum Verdict {
     Reject(RejectKind),
     /// Refuse silently.
     Drop,
+    /// Interface layer: join the network found on the interface, standing
+    /// in the profile at this index of the forest's `profiles` table.
+    Join(u32),
+    /// Interface layer: never touch the interface (something else owns it).
+    Ignore,
+    /// Interface layer: keep the interface administratively down.
+    Down,
 }
 
 impl Verdict {
@@ -68,13 +75,25 @@ impl Verdict {
     /// REJECTs the quieter story (`Refused`, which reveals no policy)
     /// wins — a deterministic tie-break, since tree order carries no
     /// meaning.
+    ///
+    /// The interface layer has its own scale (DOWN > IGNORE > JOIN); a
+    /// forest holds one layer's verdicts only, so the two scales never
+    /// meet.
     pub fn strictness(self) -> u8 {
         match self {
             Verdict::Pass => 0,
             Verdict::Reject(RejectKind::Prohibited) => 1,
             Verdict::Reject(RejectKind::Refused) => 2,
             Verdict::Drop => 3,
+            Verdict::Join(_) => 0,
+            Verdict::Ignore => 1,
+            Verdict::Down => 2,
         }
+    }
+
+    /// Whether this verdict belongs to the interface layer.
+    pub fn is_interface(self) -> bool {
+        matches!(self, Verdict::Join(_) | Verdict::Ignore | Verdict::Down)
     }
 
     /// Canonical action-language name (kind elided).
@@ -83,6 +102,9 @@ impl Verdict {
             Verdict::Pass => "PASS",
             Verdict::Reject(_) => "REJECT",
             Verdict::Drop => "DROP",
+            Verdict::Join(_) => "JOIN",
+            Verdict::Ignore => "IGNORE",
+            Verdict::Down => "DOWN",
         }
     }
 
@@ -148,6 +170,13 @@ pub enum Action {
     Null,
     /// Yield a verdict.
     Verdict(Verdict),
+    /// `JOIN(profile)` as parsed: the profile path by name. Ingestion
+    /// interns the path in the forest's profile table and rewrites this to
+    /// `Verdict(Verdict::Join(index))`; evaluation never sees it.
+    Join {
+        /// The profile path, `\` folded to `/`.
+        profile: PkmString,
+    },
     /// Defer to a userspace handler; on no answer, the fallback applies.
     Prompt {
         /// Handler name.
@@ -249,6 +278,29 @@ fn parse_one(input: &str, prompt_depth: usize) -> Result<(Action, &str), ParseFa
         "DROP" => {
             expect_arity(&args, 0)?;
             Action::Verdict(Verdict::Drop)
+        }
+        "IGNORE" => {
+            expect_arity(&args, 0)?;
+            Action::Verdict(Verdict::Ignore)
+        }
+        "DOWN" => {
+            expect_arity(&args, 0)?;
+            Action::Verdict(Verdict::Down)
+        }
+        "JOIN" => {
+            expect_arity(&args, 1)?;
+            let mut profile = PkmString::new();
+            for c in args[0].chars() {
+                profile.push(if c == '\\' { '/' } else { c })?;
+            }
+            if profile.is_empty()
+                || profile.starts_with('/')
+                || profile.ends_with('/')
+                || profile.as_str().contains("//")
+            {
+                return Err(ParseFailure::Parse(ActionParseError::BadArgument));
+            }
+            Action::Join { profile }
         }
         "REJECT" => {
             if args.len() > 1 {

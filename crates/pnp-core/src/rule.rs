@@ -15,6 +15,12 @@ pub enum Layer {
     /// The flow layer (rung 2): judged once per local endpoint of a flow
     /// at the IP seats, its verdict cached on the flow as a sentence.
     Flow,
+    /// The interface layer: judged per interface by a userspace executor
+    /// (netd) whenever an interface appears or changes or a generation
+    /// lands. The kernel never reads it. Its verdicts are `JOIN(profile)`,
+    /// `IGNORE` and `DOWN`; its facts are the `Interface.*` and
+    /// `Network.*` families.
+    Interface,
 }
 
 impl Layer {
@@ -24,6 +30,23 @@ impl Layer {
             Layer::Packet => "Packet",
             Layer::RawPacket => "RawPacket",
             Layer::Flow => "Flow",
+            Layer::Interface => "Interface",
+        }
+    }
+
+    /// Whether this is the interface layer (an interface, not a packet, is
+    /// the subject; a userspace executor, not the kernel, judges it).
+    pub fn is_interface(self) -> bool {
+        matches!(self, Layer::Interface)
+    }
+
+    /// The compiled-in backstop: what answers when nothing yielded. `DROP`
+    /// for the packet layers; `IGNORE` for the interface layer, so an
+    /// interface no rule speaks for is left as the kernel left it.
+    pub fn backstop(self) -> Verdict {
+        match self {
+            Layer::Interface => Verdict::Ignore,
+            _ => Verdict::Drop,
         }
     }
 
@@ -34,6 +57,9 @@ impl Layer {
             Layer::RawPacket => 0,
             Layer::Packet => 1,
             Layer::Flow => 2,
+            // No tags exist at the interface layer (ingestion refuses the
+            // reads and writes); the height only keeps the order total.
+            Layer::Interface => 3,
         }
     }
 }
@@ -172,4 +198,8 @@ pub struct Forest {
     /// First (rule path, value key) mentioning each view, parallel to
     /// `views` — attribution for the dead-read refusal.
     pub view_sites: PkmVec<(PkmString, PkmString)>,
+    /// Profile paths named by `JOIN(...)` actions, in first-mention order;
+    /// a `Verdict::Join(i)` indexes here. Interface layer only (empty
+    /// elsewhere). Paths are as written, with `\` folded to `/`.
+    pub profiles: PkmVec<PkmString>,
 }
