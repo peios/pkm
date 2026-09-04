@@ -45,7 +45,15 @@ format = "peipkg"
 # evaluation (verdict, attribution, tuple; drops confessed) and the STATUS
 # ioctl reports generation/enforcing/stats/last-ingest. ABI: <pkm/pnp.h>,
 # experimental. (-18: conntrack pinned at init.)
-version      = "{{version}}-23"
+# -24: KACS carries the caller's projected uid/gid across an overlay create
+# (PEI-618). Overlayfs performs the real create under the mounter's credential
+# and hands the caller's ownership down by assigning it to that cred's
+# fsuid/fsgid, which is inert here because current_fsuid() reads the projection
+# instead of the field. Every file created on the overlay root was therefore
+# stamped with the mounter's ids, so `stat` reported uid 0 for every
+# principal's files while the security descriptor named the right owner. Any
+# program checking that it owns its own directory refused to run.
+version      = "{{version}}-24"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"

@@ -30,6 +30,35 @@ void pkm_kacs_stamp_projected_ids(struct pkm_kacs_cred_security *sec)
 	sec->projected_gid = kacs_rust_token_projected_gid(sec->token);
 }
 
+/*
+ * Give @cred the projected ids of a different subject, leaving its token and
+ * therefore its authority alone.
+ *
+ * This exists for the stacking filesystems. Overlayfs performs the real create
+ * under the mounter's credential, and tells the LSM which subject the create is
+ * really for through security_dentry_create_files_as(). Its own mechanism for
+ * carrying the ownership down -- assigning the caller's ids to cred->fsuid and
+ * cred->fsgid -- cannot work here, because current_fsuid() on Peios reads the
+ * projection rather than the field (Kernel TRM §3.10.1), and the mounter's
+ * projection would answer for every principal's files.
+ *
+ * Only the projection moves. The token stays the mounter's, which is what
+ * overlayfs needs to write the upper filesystem at all, so nothing about who
+ * may do what changes -- the descriptor stamped on the new inode is computed
+ * from the *caller's* token separately, next to this call.
+ */
+void pkm_kacs_cred_set_projected_ids(struct cred *cred, u32 uid, u32 gid)
+{
+	struct pkm_kacs_cred_security *sec;
+
+	if (!cred || !cred->security)
+		return;
+
+	sec = pkm_kacs_cred(cred);
+	sec->projected_uid = uid;
+	sec->projected_gid = gid;
+}
+
 long pkm_kacs_project_linux_cred_from_token(struct cred *cred,
 					    const void *token)
 {

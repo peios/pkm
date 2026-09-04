@@ -1391,10 +1391,20 @@ long pkm_kacs_kunit_build_created_sd_for_parent(
 	const void *subject_token, const u8 *parent_sd_ptr,
 	size_t parent_sd_len, bool directory, const u8 **created_sd_out,
 	size_t *created_sd_len_out);
+/*
+ * Distinct projections for the two creds an overlay create involves, so a test
+ * can tell the caller's ids from the mounter's. Arbitrary values; only their
+ * being different matters.
+ */
+#define PKM_KACS_KUNIT_OVERLAY_CALLER_UID 4242U
+#define PKM_KACS_KUNIT_OVERLAY_CALLER_GID 4243U
+#define PKM_KACS_KUNIT_OVERLAY_MOUNTER_UID 0U
+#define PKM_KACS_KUNIT_OVERLAY_MOUNTER_GID 0U
+
 int pkm_kacs_kunit_overlay_create_files_as(
 	const void *subject_token, const u8 *parent_sd_ptr,
 	size_t parent_sd_len, bool directory, const u8 **pending_sd_out,
-	size_t *pending_sd_len_out);
+	size_t *pending_sd_len_out, u32 *new_uid_out, u32 *new_gid_out);
 int pkm_kacs_kunit_check_namespace_live(
 	const struct pkm_kacs_kunit_namespace_args *args,
 	const u8 **created_sd_out, size_t *created_sd_len_out);

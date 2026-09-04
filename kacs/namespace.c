@@ -30,6 +30,7 @@
 
 #include "file_access.h"
 #include "copy_up.h"
+#include "cred_lifecycle.h"
 #include "file_metadata.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
@@ -1151,6 +1152,27 @@ int pkm_kacs_dentry_create_files_as(struct dentry *dentry, int mode,
 
 	if (!dentry || !old || !new || !old->security)
 		return 0;
+
+	old_sec = pkm_kacs_cred(old);
+
+	/*
+	 * Hand the caller's projected ids to the credential overlayfs is about
+	 * to create under. It has already assigned them to new->fsuid and
+	 * new->fsgid, which is how this is carried down on a stock kernel; here
+	 * that assignment is inert, because current_fsuid() reads the
+	 * projection instead of the field. Without this the underlying
+	 * filesystem stamps the mounter's projection on the new inode and every
+	 * principal's files come out owned by uid 0 (PEI-618).
+	 *
+	 * Ahead of the checks below deliberately: those decide whether KACS
+	 * computes a descriptor for this create, which is a separate question
+	 * from whose uid the inode gets. An unmanaged or NTFS mount still needs
+	 * the caller's ids rather than the mounter's.
+	 */
+	if (old_sec->token)
+		pkm_kacs_cred_set_projected_ids(new, old_sec->projected_uid,
+						old_sec->projected_gid);
+
 	parent_dentry = dentry->d_parent;
 	if (!parent_dentry)
 		return 0;
@@ -1162,7 +1184,6 @@ int pkm_kacs_dentry_create_files_as(struct dentry *dentry, int mode,
 	if (pkm_kacs_inode_is_ntfs(parent_inode))
 		return 0;
 
-	old_sec = pkm_kacs_cred(old);
 	if (!old_sec->token) {
 		/*
 		 * Nothing to compute from. Leave it to inode_init_security,

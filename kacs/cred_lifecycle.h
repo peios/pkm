@@ -11,6 +11,7 @@ struct cred;
 struct pkm_kacs_cred_security;
 
 void pkm_kacs_stamp_projected_ids(struct pkm_kacs_cred_security *sec);
+void pkm_kacs_cred_set_projected_ids(struct cred *cred, u32 uid, u32 gid);
 long pkm_kacs_project_linux_cred_from_token(struct cred *cred,
 					    const void *token);
 int pkm_kacs_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp);

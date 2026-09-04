@@ -4789,7 +4789,7 @@ long pkm_kacs_kunit_build_created_sd_for_parent(
 int pkm_kacs_kunit_overlay_create_files_as(
 	const void *subject_token, const u8 *parent_sd_ptr,
 	size_t parent_sd_len, bool directory, const u8 **pending_sd_out,
-	size_t *pending_sd_len_out)
+	size_t *pending_sd_len_out, u32 *new_uid_out, u32 *new_gid_out)
 {
 	struct pkm_kacs_kunit_file_mount_state parent = {};
 	struct pkm_kacs_cred_security *old_sec;
@@ -4842,8 +4842,22 @@ int pkm_kacs_kunit_overlay_create_files_as(
 	new_sec = pkm_kacs_cred(&new_cred);
 	old_sec->token = subject_token;
 
+	/*
+	 * The two creds carry different projections, as they do in the kernel:
+	 * @new is prepared from the overlay mounter's cred and so answers for
+	 * the mounter until the hook is told whose create this really is.
+	 */
+	old_sec->projected_uid = PKM_KACS_KUNIT_OVERLAY_CALLER_UID;
+	old_sec->projected_gid = PKM_KACS_KUNIT_OVERLAY_CALLER_GID;
+	new_sec->projected_uid = PKM_KACS_KUNIT_OVERLAY_MOUNTER_UID;
+	new_sec->projected_gid = PKM_KACS_KUNIT_OVERLAY_MOUNTER_GID;
+
 	ret = pkm_kacs_dentry_create_files_as(&child, (int)mode, &child.d_name,
 					      &old_cred, &new_cred);
+	if (new_uid_out)
+		*new_uid_out = new_sec->projected_uid;
+	if (new_gid_out)
+		*new_gid_out = new_sec->projected_gid;
 	if (ret)
 		goto out;
 	if (!new_sec->pending_create_sd || new_sec->pending_create_sd_len == 0)

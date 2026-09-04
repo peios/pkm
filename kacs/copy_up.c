@@ -3134,7 +3134,7 @@ static void pkm_kunit_overlay_create_takes_caller_and_overlay_parent(
 
 	ret = pkm_kacs_kunit_overlay_create_files_as(
 		subject_token, parent_sd, parent_sd_len, false, &pending_sd,
-		&pending_sd_len);
+		&pending_sd_len, NULL, NULL);
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_NOT_NULL(test, pending_sd);
 	if (ret || !pending_sd)
@@ -3189,10 +3189,99 @@ static void pkm_kunit_overlay_create_without_a_token_defers(struct kunit *test)
 
 	ret = pkm_kacs_kunit_overlay_create_files_as(
 		NULL, parent_sd, parent_sd_len, false, &pending_sd,
-		&pending_sd_len);
+		&pending_sd_len, NULL, NULL);
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_EXPECT_NULL(test, pending_sd);
 	KUNIT_EXPECT_EQ(test, pending_sd_len, (size_t)0);
+
+	kfree((void *)pending_sd);
+	pkm_kacs_free((void *)parent_sd);
+}
+
+/*
+ * The uid half of the same problem (PEI-618). Overlayfs performs the create
+ * under the mounter's credential and carries the caller's ownership down by
+ * assigning it to that cred's fsuid/fsgid -- inert on Peios, where
+ * current_fsuid() reads the projection instead. So the hook has to move the
+ * projection across, or the underlying filesystem stamps the mounter's ids on
+ * the new inode and every principal's files come out owned by uid 0.
+ */
+static void pkm_kunit_overlay_create_projects_the_callers_ids(
+	struct kunit *test)
+{
+	const void *subject_token;
+	const u8 *parent_sd = NULL;
+	const u8 *pending_sd = NULL;
+	size_t parent_sd_len = 0;
+	size_t pending_sd_len = 0;
+	u32 new_uid = PKM_KACS_KUNIT_OVERLAY_MOUNTER_UID;
+	u32 new_gid = PKM_KACS_KUNIT_OVERLAY_MOUNTER_GID;
+	int ret;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     PKM_KUNIT_FILE_ADD_FILE |
+						     PKM_KUNIT_FILE_ADD_SUBDIRECTORY,
+						     &parent_sd_len);
+	if (!parent_sd) {
+		kacs_rust_token_drop(subject_token);
+		KUNIT_FAIL(test, "parent SD allocation failed");
+		return;
+	}
+	pkm_kunit_make_first_file_ace_inheritable((u8 *)parent_sd, 0x03);
+
+	ret = pkm_kacs_kunit_overlay_create_files_as(
+		subject_token, parent_sd, parent_sd_len, false, &pending_sd,
+		&pending_sd_len, &new_uid, &new_gid);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+
+	/* The caller's, not the mounter's it arrived with. */
+	KUNIT_EXPECT_EQ(test, new_uid, PKM_KACS_KUNIT_OVERLAY_CALLER_UID);
+	KUNIT_EXPECT_EQ(test, new_gid, PKM_KACS_KUNIT_OVERLAY_CALLER_GID);
+
+	kfree((void *)pending_sd);
+	pkm_kacs_free((void *)parent_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+/*
+ * A tokenless caller has no projection worth the name, so the cred is left
+ * exactly as overlayfs prepared it rather than being stamped with a sentinel.
+ * Same reasoning as the descriptor case above: this hook does not get to
+ * decide a tokenless create.
+ */
+static void pkm_kunit_overlay_create_without_a_token_keeps_mounter_ids(
+	struct kunit *test)
+{
+	const u8 *parent_sd = NULL;
+	const u8 *pending_sd = NULL;
+	size_t parent_sd_len = 0;
+	size_t pending_sd_len = 0;
+	u32 new_uid = 0;
+	u32 new_gid = 0;
+	const void *subject_token;
+	int ret;
+
+	subject_token = kacs_rust_kunit_create_adjustable_privileges_token();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	parent_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						     PKM_KUNIT_FILE_ADD_FILE |
+						     PKM_KUNIT_FILE_ADD_SUBDIRECTORY,
+						     &parent_sd_len);
+	kacs_rust_token_drop(subject_token);
+	if (!parent_sd) {
+		KUNIT_FAIL(test, "parent SD allocation failed");
+		return;
+	}
+	pkm_kunit_make_first_file_ace_inheritable((u8 *)parent_sd, 0x03);
+
+	ret = pkm_kacs_kunit_overlay_create_files_as(
+		NULL, parent_sd, parent_sd_len, false, &pending_sd,
+		&pending_sd_len, &new_uid, &new_gid);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, new_uid, PKM_KACS_KUNIT_OVERLAY_MOUNTER_UID);
+	KUNIT_EXPECT_EQ(test, new_gid, PKM_KACS_KUNIT_OVERLAY_MOUNTER_GID);
 
 	kfree((void *)pending_sd);
 	pkm_kacs_free((void *)parent_sd);
@@ -3247,6 +3336,8 @@ static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_not_inherited),
 	KUNIT_CASE(pkm_kunit_overlay_create_takes_caller_and_overlay_parent),
 	KUNIT_CASE(pkm_kunit_overlay_create_without_a_token_defers),
+	KUNIT_CASE(pkm_kunit_overlay_create_projects_the_callers_ids),
+	KUNIT_CASE(pkm_kunit_overlay_create_without_a_token_keeps_mounter_ids),
 	KUNIT_CASE(pkm_kunit_post_setxattr_drops_a_superseded_cache),
 	KUNIT_CASE(pkm_kunit_post_setxattr_keeps_an_unrelated_cache),
 	{}
