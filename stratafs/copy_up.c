@@ -836,14 +836,37 @@ static int stratafs_copy_regular_contents(
 			pkm_kacs_stratafs_copy_up_end_phase(context);
 			break;
 		}
-		file = source_file ?: kernel_file_open(
-			source, O_RDONLY | O_LARGEFILE, current_cred());
+		/*
+		 * The caller's own handle is reused when there is one, so the
+		 * copy reads the same open file the write is driving. It can
+		 * only be reused when it is readable: __kernel_read returns
+		 * -EINVAL for a file lacking FMODE_CAN_READ, so a write-only
+		 * handle failed the very first read of the copy and the write
+		 * that needed the copy-up failed with it (PEI-574).
+		 *
+		 * That is reachable because the route is decided twice.
+		 * stratafs_open downgrades the backing open to O_RDONLY only
+		 * when the route is already not IN_PLACE at open time, while
+		 * stratafs_write_iter re-decides on every write -- so a name
+		 * opened O_WRONLY against a provider that accepted
+		 * modification, and stopped accepting before the first write,
+		 * arrives here holding a handle it cannot read.
+		 *
+		 * Falling back re-opens the same struct path, not a fresh
+		 * lookup, so the identity the caller's handle was there to
+		 * guarantee still holds.
+		 */
+		if (source_file && (source_file->f_mode & FMODE_CAN_READ))
+			file = source_file;
+		else
+			file = kernel_file_open(source, O_RDONLY | O_LARGEFILE,
+						current_cred());
 		if (IS_ERR(file))
 			read = PTR_ERR(file);
 		else {
 			read = kernel_read(file, buffer, STRATAFS_COPY_BUFFER_SIZE,
 					   &read_pos);
-			if (!source_file)
+			if (file != source_file)
 				fput(file);
 		}
 		stratafs_copy_phase_leave(context);
