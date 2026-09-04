@@ -474,20 +474,34 @@ static void pkm_kunit_continuous_audit_append_records_matched_subset(
 	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buffer);
 
-		pkm_kunit_reset_kmes();
-		KUNIT_ASSERT_EQ(test,
-				pkm_kmes_kunit_set_process_override(
-					4301, PKM_KUNIT_KMES_PROCESS_NAME,
-					PKM_KUNIT_KMES_PROCESS_PATH),
-				0);
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_process_override(
+				4301, PKM_KUNIT_KMES_PROCESS_NAME,
+				PKM_KUNIT_KMES_PROCESS_PATH),
+			0);
 
 	ret = pkm_kacs_kunit_check_file_permission_snapshot_audit(
 		1, PKM_KUNIT_FILE_APPEND_DATA, PKM_KUNIT_FILE_APPEND_DATA,
 		O_APPEND, MAY_WRITE);
 	KUNIT_EXPECT_EQ(test, ret, 0);
+	/*
+	 * Ask for the event this test provoked rather than for "the only event
+	 * anywhere". pkm_kmes_kunit_copy_single_buffer refuses with -E2BIG when
+	 * more than one CPU holds live ring state, and the KUnit VM runs -smp 2
+	 * with nothing pinning the task, so a migration between the reset and
+	 * the read failed the assertion (PEI-569); when a stray event landed on
+	 * the same CPU instead, the read returned that event and the schema
+	 * check failed on its key count (PEI-505). Both are the same defect:
+	 * the assertion depended on CPU affinity that nothing established. The
+	 * matching-event helper has no single-CPU requirement, and its sibling
+	 * test above already uses it.
+	 */
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_copy_single_buffer(
-				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_KACS, "continuous-audit",
+				sizeof("continuous-audit") - 1, buffer,
+				PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
 				&snapshot),
 			0);
 	KUNIT_ASSERT_TRUE(test,
