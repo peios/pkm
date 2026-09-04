@@ -84,7 +84,7 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 # triplet-dir rustlib the rust package ships.
 [build.kunit.dependencies.peipkg]
 build-essentials = "*"
-bash = "*"
+"org.gnu.bash" = "*"
 gzip = "*"
 zstd = "*"
 rust = "*"
@@ -163,7 +163,7 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 # (already required). Rust toolchain comes from the build env/wrap, as above.
 [build.kernel.dependencies.peipkg]
 build-essentials = "*"
-bash = "*"
+"org.gnu.bash" = "*"
 gzip = "*"
 zstd = "*"
 rust = "*"
@@ -265,7 +265,7 @@ command = """
 # Splits vmlinux debug info: debugedit + binutils (readelf/strip/objcopy).
 [build.debuginfo.dependencies.peipkg]
 build-essentials = "*"
-bash = "*"
+"org.gnu.bash" = "*"
 binutils = "*"
 debugedit = "*"
 cpio = "*"
@@ -294,7 +294,7 @@ command = """
 # for the per-library rationale).
 [build.tools.dependencies.peipkg]
 build-essentials = "*"
-bash = "*"
+"org.gnu.bash" = "*"
 which = "*"
 rsync = "*"
 "openssl-devel" = "*"
@@ -418,7 +418,7 @@ command = """
 # --env none supply the host's QEMU.
 [test.modsig.dependencies.peipkg]
 dash               = "*"
-bash               = "*"
+"org.gnu.bash"     = "*"
 coreutils-gnu      = "*"
 findutils          = "*"
 grep               = "*"
@@ -452,7 +452,7 @@ command = """
 # compressed blob, to show the signature covers the on-disk bytes).
 [test.fwsig.dependencies.peipkg]
 dash               = "*"
-bash               = "*"
+"org.gnu.bash"     = "*"
 coreutils-gnu      = "*"
 findutils          = "*"
 grep               = "*"
@@ -481,7 +481,7 @@ command = """
 # Same shape as test.modsig, for the same reason.
 [test.stratafs.dependencies.peipkg]
 dash               = "*"
-bash               = "*"
+"org.gnu.bash"     = "*"
 coreutils-gnu      = "*"
 findutils          = "*"
 grep               = "*"
