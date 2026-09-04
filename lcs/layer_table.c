@@ -74,14 +74,6 @@ extern int lcs_rust_layer_name_casefold_eq(
 	const struct pkm_lcs_runtime_limits *limits,
 	u8 *equal_out);
 
-bool pkm_lcs_layer_name_is_base(const char *layer_name, u32 layer_name_len)
-{
-	return layer_name &&
-	       layer_name_len == sizeof(pkm_lcs_base_layer_name) - 1 &&
-	       !strncasecmp(layer_name, pkm_lcs_base_layer_name,
-			    layer_name_len);
-}
-
 long pkm_lcs_layer_name_casefold_equal_with_limits(
 	const char *left, u32 left_len, const char *right, u32 right_len,
 	const struct pkm_lcs_runtime_limits *limits, bool *equal)
@@ -121,6 +113,23 @@ long pkm_lcs_layer_name_casefold_is_base(const char *layer_name,
 	return pkm_lcs_layer_name_casefold_equal(
 		layer_name, layer_name_len, pkm_lcs_base_layer_name,
 		sizeof(pkm_lcs_base_layer_name) - 1, is_base);
+}
+
+/*
+ * As above, but against limits the caller already holds. Layer identity is the
+ * case-folded name, so the reserved name is recognised the same way every other
+ * layer name is compared. There used to be a second, ASCII comparator
+ * (strncasecmp) beside this one; the two agreed only because the length
+ * pre-check made a non-ASCII case pair fail before folding could matter, which
+ * made the divergence latent rather than absent (PEI-279).
+ */
+long pkm_lcs_layer_name_casefold_is_base_with_limits(
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *is_base)
+{
+	return pkm_lcs_layer_name_casefold_equal_with_limits(
+		layer_name, layer_name_len, pkm_lcs_base_layer_name,
+		sizeof(pkm_lcs_base_layer_name) - 1, limits, is_base);
 }
 
 void pkm_lcs_create_layer_target_set_base(

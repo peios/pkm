@@ -45,6 +45,7 @@ use crate::claims::{
 };
 use crate::condition::ConditionalContext;
 use crate::error::KacsError;
+use crate::lcs_core::casefold_eq;
 use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
 use crate::kmes_payload::{
     emit_access_check_events_to_kmes, emit_continuous_audit_to_kmes,
@@ -2134,10 +2135,17 @@ fn parse_lcs_credential_extension(
         if name.contains('\\') || name.contains('/') || name.as_bytes().contains(&0) {
             return Err(-EINVAL);
         }
+        // Layer identity is the case-folded name under Unicode Simple Case
+        // Folding, pinned to Unicode 16.0 — the same algorithm and the same
+        // table LCS uses for every layer lookup, collision check and table
+        // membership test. An ASCII comparison here let two names that LCS
+        // treats as one layer both sit on a single token, consuming two of the
+        // token's MaxPrivateLayersPerToken slots for one layer and leaving the
+        // deduplication incomplete (PEI-279).
         if private_layers
             .as_slice()
             .iter()
-            .any(|existing| existing.as_str().eq_ignore_ascii_case(name))
+            .any(|existing| casefold_eq(existing.as_str(), name))
         {
             return Err(-EINVAL);
         }

@@ -744,7 +744,9 @@ long pkm_lcs_runtime_limits_publish(
 void pkm_lcs_runtime_limits_reset_defaults(void);
 void pkm_lcs_runtime_limits_snapshot_or_default(
 	struct pkm_lcs_runtime_limits *limits);
-bool pkm_lcs_layer_name_is_base(const char *layer_name, u32 layer_name_len);
+long pkm_lcs_layer_name_casefold_is_base_with_limits(
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *is_base);
 long pkm_lcs_layer_name_casefold_equal_with_limits(
 	const char *left, u32 left_len, const char *right, u32 right_len,
 	const struct pkm_lcs_runtime_limits *limits, bool *equal);

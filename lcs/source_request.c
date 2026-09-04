@@ -1626,13 +1626,18 @@ long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 	size_t frame_len;
 	u64 request_id;
 	u64 next_request_id;
+	bool names_base_layer = false;
 	long ret;
 
 	if (result)
 		memset(result, 0, sizeof(*result));
 	if (!layer_name || !layer_name_len || !limits)
 		return -EINVAL;
-	if (pkm_lcs_layer_name_is_base(layer_name, layer_name_len))
+	ret = pkm_lcs_layer_name_casefold_is_base_with_limits(
+		layer_name, layer_name_len, limits, &names_base_layer);
+	if (ret)
+		return ret;
+	if (names_base_layer)
 		return -EINVAL;
 	if (layer_name_len > PKM_LCS_MAX_LAYER_NAME_BYTES_HARD)
 		return -ENAMETOOLONG;

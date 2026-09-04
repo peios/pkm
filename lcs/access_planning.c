@@ -153,6 +153,7 @@ long pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 {
 	struct pkm_lcs_layer_metadata_sd_selection selection = { };
 	const struct pkm_lcs_layer_metadata_sd_view *selected;
+	bool names_base_layer = false;
 	long ret;
 
 	if (!plan)
@@ -162,6 +163,11 @@ long pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 	if (!target || !target->name || !limits)
 		return -EINVAL;
 
+	ret = pkm_lcs_layer_name_casefold_is_base_with_limits(
+		target->name, target->name_len, limits, &names_base_layer);
+	if (ret)
+		return ret;
+
 	/*
 	 * The base layer is hardcoded and has no metadata-table row, so a
 	 * caller that names it explicitly ("base") must be authorized through
@@ -169,8 +175,7 @@ long pkm_lcs_create_layer_write_access_check_for_token_with_limits(
 	 * an explicit "base" through the metadata-SD lookup below would fail
 	 * EIO because no cached authorization SD exists for it.
 	 */
-	if (target->implicit_base ||
-	    pkm_lcs_layer_name_is_base(target->name, target->name_len))
+	if (target->implicit_base || names_base_layer)
 		return pkm_lcs_base_layer_write_access_check_for_token(
 			token, base_metadata_present, base_metadata_sd,
 			base_metadata_sd_len, plan);
