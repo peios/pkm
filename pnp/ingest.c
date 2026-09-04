@@ -655,12 +655,13 @@ static long pnp_refresh_rules(struct peios_pnp_walk *walk,
 	if (ret)
 		goto out;
 
-	if (walk->digest == pnp_published_digest &&
-	    peios_pnp_policy_enforcing()) {
+	if (walk->digest == pnp_published_digest) {
 		/* The same policy, byte for byte: the active generation
-		 * already is it. Publishing again would only re-judge every
-		 * flow for nothing (a policy save fires the watch for each
-		 * key it touches; netd's inventory writes share the watch).
+		 * already is it, even when that policy is no forests at all
+		 * (a Rules key seeded before its layers). Publishing again
+		 * would only re-judge every flow for nothing: a policy save
+		 * fires the watch for each key it touches, and netd's
+		 * inventory writes share the watch.
 		 */
 		ret = 0;
 		goto out;
