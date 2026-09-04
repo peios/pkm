@@ -22,6 +22,7 @@
 #include <linux/bits.h>
 #include <linux/if.h>
 #include <linux/peios_pnp.h>	/* the owner KACS stamps on a socket */
+#include <linux/rcupdate.h>
 #include <linux/skbuff.h>
 #include <linux/types.h>
 
@@ -89,6 +90,16 @@ enum peios_pnp_local_kind {
 #define PEIOS_PNP_HAS_TIME		BIT(9)
 #define PEIOS_PNP_HAS_SRC_MAC		BIT(10)	/* src only (our own device's, outbound) */
 #define PEIOS_PNP_HAS_START		BIT(11)	/* the flow's start time */
+#define PEIOS_PNP_HAS_NETWORK		BIT(12)	/* the network context (context.c) */
+
+/*
+ * The network context's string bounds. A network record's key name is a
+ * UUID (36 characters); the operator's Name and Trust are free text,
+ * bounded here and truncated at ingestion (a truncation is logged once).
+ */
+#define PEIOS_PNP_NETWORK_ID_LEN	40
+#define PEIOS_PNP_NETWORK_NAME_LEN	64
+#define PEIOS_PNP_NETWORK_TRUST_LEN	32
 
 /*
  * One traversal's facts at its standing seat. Fixed-size, stack-allocated
@@ -153,6 +164,15 @@ struct peios_pnp_snapshot {
 	char remote_comm[16];
 	const void *local_token;	/* KACS token, or NULL */
 	const void *remote_token;
+	/*
+	 * The network context (context.c): which network the interface at
+	 * the seat is standing on, per netd's inventory, and the operator's
+	 * word on it. Valid iff PEIOS_PNP_HAS_NETWORK; an empty name or
+	 * trust is that fact absent (the record carries no such value).
+	 */
+	char network_id[PEIOS_PNP_NETWORK_ID_LEN];
+	char network_name[PEIOS_PNP_NETWORK_NAME_LEN];
+	char network_trust[PEIOS_PNP_NETWORK_TRUST_LEN];
 };
 
 /* One resolved endpoint identity (identity.c). */
@@ -303,6 +323,40 @@ u8 peios_pnp_policy_reporting_level(void);
 
 /* Records the outcome of a registry re-walk for status honesty. */
 void peios_pnp_policy_note_ingest(long err);
+
+/*
+ * The network context (context.c): the kernel's per-interface table of
+ * which network each interface is standing on — netd's inventory
+ * (Machine\System\Network\Interfaces\<id>\Status Network, joined to
+ * Networks\<id> Name and Trust) read at ingestion and published under
+ * RCU. A publication that changes the table advances the policy
+ * generation, so every sentence is re-judged on its flow's next packet
+ * (a context change is a policy change to a flow); one that changes
+ * nothing is free. The table is not policy: a malformed record means
+ * that interface carries no context, never a refused generation.
+ */
+struct peios_pnp_context_entry {
+	char ifname[IFNAMSIZ];
+	char network_id[PEIOS_PNP_NETWORK_ID_LEN];
+	char network_name[PEIOS_PNP_NETWORK_NAME_LEN];
+	char network_trust[PEIOS_PNP_NETWORK_TRUST_LEN];
+};
+
+#define PEIOS_PNP_MAX_CONTEXTS		64U
+
+struct peios_pnp_context_table {
+	struct rcu_head rcu;
+	u32 count;
+	struct peios_pnp_context_entry entries[];
+};
+
+struct peios_pnp_context_table *peios_pnp_context_table_alloc(u32 count);
+/* Takes ownership of @table (NULL = no interface carries a context). */
+int peios_pnp_context_publish(struct peios_pnp_context_table *table);
+/* Fills the snapshot's network fields for @ifname; RCU inside. */
+void peios_pnp_context_fill(const char *ifname,
+			    struct peios_pnp_snapshot *snap);
+u32 peios_pnp_context_count(void);
 
 /* The verdict event stream (events.c; ABI in <pkm/pnp.h>). */
 struct peios_pnp_status;

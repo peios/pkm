@@ -288,7 +288,9 @@ fn packet_facts_are_dead_at_the_interface_layer_and_vice_versa() {
             vec![rb("r").s("Interface.Kind.Equal", "wired").actions(&["DROP"])],
         );
         assert_eq!(lints.len(), 1, "{layer:?}");
-        let err = refused(layer, rb("r").int("Network.Trust.Present", 1).actions(&["DROP"]));
+        // The network context (`Network.Id/Name/Trust`) is a packet fact
+        // too (laws_network_context.rs); `Network.Kind` is not.
+        let err = refused(layer, rb("r").int("Network.Kind.Present", 1).actions(&["DROP"]));
         assert!(matches!(err, BuildError::PresentNeverAtLayer { .. }), "{layer:?}: {err:?}");
     }
     // The interface name itself is shared with the packet layers.

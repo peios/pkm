@@ -2329,8 +2329,8 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
-	/* Likewise the PNP rules key: absent, fallback covers it. */
-	static const struct pkm_lcs_kunit_walk_source_step rules_steps[] = {
+	/* Likewise PNP's Network key: absent, fallback covers it. */
+	static const struct pkm_lcs_kunit_walk_source_step network_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
@@ -2379,9 +2379,9 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 			.steps = port_steps,
 			.step_count = ARRAY_SIZE(port_steps),
 		},
-		.rules_walk = {
-			.steps = rules_steps,
-			.step_count = ARRAY_SIZE(rules_steps),
+		.network_walk = {
+			.steps = network_steps,
+			.step_count = ARRAY_SIZE(network_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -2529,8 +2529,8 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
-	/* Likewise the PNP rules key: absent, fallback covers it. */
-	static const struct pkm_lcs_kunit_walk_source_step rules_steps[] = {
+	/* Likewise PNP's Network key: absent, fallback covers it. */
+	static const struct pkm_lcs_kunit_walk_source_step network_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
@@ -2583,9 +2583,9 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 			.steps = port_steps,
 			.step_count = ARRAY_SIZE(port_steps),
 		},
-		.rules_walk = {
-			.steps = rules_steps,
-			.step_count = ARRAY_SIZE(rules_steps),
+		.network_walk = {
+			.steps = network_steps,
+			.step_count = ARRAY_SIZE(network_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,

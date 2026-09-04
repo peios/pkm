@@ -22,12 +22,12 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	u8 kmes_guid[RSI_GUID_SIZE] = { };
 	u8 layers_root_guid[RSI_GUID_SIZE] = { };
 	u8 port_guid[RSI_GUID_SIZE] = { };
-	u8 rules_guid[RSI_GUID_SIZE] = { };
+	u8 network_guid[RSI_GUID_SIZE] = { };
 	bool registry_root_present = false;
 	bool kmes_root_present = false;
 	bool layers_root_present = false;
 	bool port_root_present = false;
-	bool rules_root_present = false;
+	bool network_root_present = false;
 	u8 stage = LCS_BOOT_REGISTRY;
 	long ret;
 
@@ -105,25 +105,26 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 							    port_guid);
 
 	/*
-	 * PNP network rules (net/pnp/ingest.c), the fifth kernel-read key,
+	 * PNP's Network key (net/pnp/ingest.c) — the policy rules and netd's
+	 * inventory, the network context — the fifth kernel-read key,
 	 * discovered last like port reservations: only its discovery walk
 	 * may fail the bootstrap. A rejected forest is not a failure — PNP
 	 * keeps its previous policy generation and says why.
 	 */
-	ret = peios_pnp_rules_root_discover_from_machine_hive(
-		source_id, machine_root_guid, &rules_root_present, rules_guid);
+	ret = peios_pnp_network_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &network_root_present, network_guid);
 	if (ret)
 		goto out;
-	result->rules_root_present = rules_root_present;
-	if (rules_root_present)
-		peios_pnp_rules_refresh_from_key(source_id, rules_guid);
+	result->network_root_present = network_root_present;
+	if (network_root_present)
+		peios_pnp_network_refresh_from_key(source_id, network_guid);
 
 	stage = LCS_BOOT_SELF_WATCH;
 	ret = pkm_lcs_internal_self_watch_arm_full(
 		source_id, machine_root_guid, registry_root_present,
 		registry_guid, layers_root_present, layers_root_guid,
 		kmes_root_present, kmes_guid, port_root_present, port_guid,
-		rules_root_present, rules_guid, &result->self_watch);
+		network_root_present, network_guid, &result->self_watch);
 	if (ret)
 		goto out;
 

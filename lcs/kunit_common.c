@@ -7539,11 +7539,11 @@ int pkm_lcs_kunit_source_bootstrap_source_thread(void *raw_script)
 	if (ret)
 		goto out;
 
-	/* PNP network rules are discovered last. */
-	script->rules_walk.file = script->file;
-	ret = pkm_lcs_kunit_walk_source_thread(&script->rules_walk);
-	script->reads += script->rules_walk.reads;
-	script->writes += script->rules_walk.writes;
+	/* PNP's Network key is discovered last. */
+	script->network_walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->network_walk);
+	script->reads += script->network_walk.reads;
+	script->writes += script->network_walk.writes;
 
 out:
 	script->result = ret;

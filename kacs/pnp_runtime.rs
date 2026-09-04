@@ -78,6 +78,12 @@ const HAS_ICMP: u32 = 1 << 8;
 const HAS_TIME: u32 = 1 << 9;
 const HAS_SRC_MAC: u32 = 1 << 10;
 const HAS_START: u32 = 1 << 11;
+const HAS_NETWORK: u32 = 1 << 12;
+
+// --- keep in lockstep with PEIOS_PNP_NETWORK_*_LEN in pnp.h ---
+const NETWORK_ID_LEN: usize = 40;
+const NETWORK_NAME_LEN: usize = 64;
+const NETWORK_TRUST_LEN: usize = 32;
 
 /// Mirror of `struct peios_pnp_snapshot` (pnp.h). Field-for-field.
 #[repr(C)]
@@ -137,6 +143,11 @@ pub struct PnpSnapshotC {
     remote_comm: [c_char; 16],
     local_token: *const c_void,
     remote_token: *const c_void,
+    /// The network context (net/pnp/context.c): valid iff HAS_NETWORK;
+    /// an empty name or trust is that fact absent.
+    network_id: [c_char; NETWORK_ID_LEN],
+    network_name: [c_char; NETWORK_NAME_LEN],
+    network_trust: [c_char; NETWORK_TRUST_LEN],
 }
 
 // --- endpoint kinds: keep in lockstep with enum peios_pnp_local_kind ---
@@ -356,6 +367,20 @@ fn snapshot_from_c<'a>(c: &PnpSnapshotC) -> Result<Snapshot<'a>, ()> {
         Direction::In
     });
     snap.interface = Some(str_to_pkm(c_str_slice(&c.ifname)).map_err(|_| ())?);
+    if c.has & HAS_NETWORK != 0 {
+        // Which network the interface at the seat is standing on, per
+        // netd's inventory. The id is always there when the bit is; the
+        // operator's Name and Trust only when the record carries them.
+        snap.network_id = Some(str_to_pkm(c_str_slice(&c.network_id)).map_err(|_| ())?);
+        let name = c_str_slice(&c.network_name);
+        if !name.is_empty() {
+            snap.network_name = Some(str_to_pkm(name).map_err(|_| ())?);
+        }
+        let trust = c_str_slice(&c.network_trust);
+        if !trust.is_empty() {
+            snap.network_trust = Some(str_to_pkm(trust).map_err(|_| ())?);
+        }
+    }
     if c.has & HAS_ETHER_TYPE != 0 {
         snap.ether_type = Some(c.ether_type);
     }

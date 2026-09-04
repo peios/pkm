@@ -241,11 +241,12 @@ impl FactId {
         }
     }
 
-    /// Whether this fact belongs to the interface layer's own vocabulary
-    /// (`Interface.*`, `Network.*`): read from an interface and its
-    /// network record, never from a packet. `Interface` itself (the name)
-    /// is shared with the packet layers.
-    pub fn is_interface_layer(self) -> bool {
+    /// Whether this fact is the interface layer's alone (`Interface.*`
+    /// and `Network.Kind`): read from an interface and its network record,
+    /// never from a packet. `Interface` itself (the name) and the network
+    /// context (`Network.Id`, `Network.Name`, `Network.Trust`) are shared
+    /// with the packet layers.
+    pub fn is_interface_only(self) -> bool {
         matches!(
             self,
             FactId::InterfaceKind
@@ -253,16 +254,26 @@ impl FactId {
                 | FactId::InterfaceMac
                 | FactId::InterfacePath
                 | FactId::InterfaceDriver
-                | FactId::NetworkId
-                | FactId::NetworkName
-                | FactId::NetworkTrust
                 | FactId::NetworkKind
+        )
+    }
+
+    /// Whether this fact is the network context: which network the
+    /// interface a packet crossed is standing on, and the operator's
+    /// word on it. Read from netd's inventory at every layer — from the
+    /// interface record at the interface layer, from the kernel's
+    /// per-interface context table at the packet layers — so a rule about
+    /// a network means the same thing wherever it is written.
+    pub fn is_network_context(self) -> bool {
+        matches!(
+            self,
+            FactId::NetworkId | FactId::NetworkName | FactId::NetworkTrust
         )
     }
 
     /// Whether this fact exists at the interface layer at all.
     pub fn is_at_interface_layer(self) -> bool {
-        self == FactId::Interface || self.is_interface_layer()
+        self == FactId::Interface || self.is_interface_only() || self.is_network_context()
     }
 
     /// Whether this is an identity fact (`Local`, `Local.*`, `Remote`,

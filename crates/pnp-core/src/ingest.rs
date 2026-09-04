@@ -802,21 +802,23 @@ fn lint_condition(
             CondKey::Fact(f) => !f.is_at_interface_layer(),
         },
         // Flow-only facts (Related, Start.*) exist on no packet; the
-        // interface layer's own facts exist on no packet either.
+        // interface layer's own facts exist on no packet either. The
+        // network context (`Network.Id`, `Network.Name`, `Network.Trust`)
+        // does: the kernel reads it per interface from netd's inventory.
         Layer::Packet => {
-            matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_layer())
+            matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_only())
         }
         // The RawPacket seat stands before conntrack (inbound) and reads no
         // other layer's state in either direction (ratified visibility law).
         Layer::RawPacket => matches!(
             condition.key,
             CondKey::Fact(FactId::FlowState) | CondKey::Tag { .. }
-        ) || matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_layer()),
+        ) || matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_only()),
         // A Flow fact is one identical for every packet of the flow; the
         // per-packet facts are never given to a Flow snapshot.
         Layer::Flow => matches!(
             condition.key,
-            CondKey::Fact(f) if !f.is_flow_invariant() || f.is_interface_layer()
+            CondKey::Fact(f) if !f.is_flow_invariant() || f.is_interface_only()
         ),
     };
     if never {

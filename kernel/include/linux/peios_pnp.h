@@ -2,7 +2,7 @@
 /*
  * Narrow in-kernel interface between the PNP packet engine (net/pnp) and
  * the subsystems it hooks: the LCS registry machinery (security/pkm/lcs)
- * for rules-subtree discovery, refresh, and change notification; and
+ * for Network-key discovery, refresh, and change notification; and
  * conntrack (net/netfilter) for the flow tag extension's lifecycle. Not
  * UAPI, not exported to modules. Stubbed when PNP is configured out so
  * neither side grows a hard link-time dependency on it.
@@ -107,20 +107,24 @@ struct peios_pnp_ct {
 #if IS_ENABLED(CONFIG_PEIOS_PNP)
 
 /*
- * Resolves Machine\System\Network\Rules from the machine hive root.
- * Absence is not an error: *present_out = false, return 0.
+ * Resolves Machine\System\Network from the machine hive root: the key
+ * PNP reads — Rules\ for the policy, Interfaces\ and Networks\ for the
+ * network context. Absence is not an error: *present_out = false,
+ * return 0.
  */
-long peios_pnp_rules_root_discover_from_machine_hive(u32 source_id,
-						     const u8 machine_root_guid[16],
-						     bool *present_out,
-						     u8 rules_guid_out[16]);
+long peios_pnp_network_root_discover_from_machine_hive(u32 source_id,
+						       const u8 machine_root_guid[16],
+						       bool *present_out,
+						       u8 network_guid_out[16]);
 
 /*
- * Walks the rules subtree and publishes a new policy generation. On any
- * failure the previous generation stays (atomic transitions) and the
- * error says why; PNP keeps its last known-good policy.
+ * Walks the Network key: publishes a new policy generation when the
+ * rules changed, and a new context table when the inventory did. On any
+ * failure the previous generation and table stay (atomic transitions)
+ * and the error says why; PNP keeps its last known-good state.
  */
-long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16]);
+long peios_pnp_network_refresh_from_key(u32 source_id,
+					const u8 network_guid[16]);
 
 /*
  * Change notification from the LCS internal watch dispatcher. Events are
@@ -128,7 +132,8 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16]);
  * deferred re-walk (dirty flag + debounced workqueue), so it is cheap to
  * call from the dispatch path.
  */
-void peios_pnp_rules_registry_changed(u32 source_id, const u8 rules_guid[16]);
+void peios_pnp_network_registry_changed(u32 source_id,
+					const u8 network_guid[16]);
 
 /*
  * Conntrack lifecycle hooks (net/pnp/tags.c): add the extension to a
@@ -141,24 +146,24 @@ void peios_pnp_ct_destroy(struct nf_conn *ct);
 #else /* CONFIG_PEIOS_PNP */
 
 static inline long
-peios_pnp_rules_root_discover_from_machine_hive(u32 source_id,
-						const u8 machine_root_guid[16],
-						bool *present_out,
-						u8 rules_guid_out[16])
+peios_pnp_network_root_discover_from_machine_hive(u32 source_id,
+						  const u8 machine_root_guid[16],
+						  bool *present_out,
+						  u8 network_guid_out[16])
 {
 	if (present_out)
 		*present_out = false;
 	return 0;
 }
 
-static inline long peios_pnp_rules_refresh_from_key(u32 source_id,
-						    const u8 rules_guid[16])
+static inline long peios_pnp_network_refresh_from_key(u32 source_id,
+						      const u8 network_guid[16])
 {
 	return 0;
 }
 
-static inline void peios_pnp_rules_registry_changed(u32 source_id,
-						    const u8 rules_guid[16])
+static inline void peios_pnp_network_registry_changed(u32 source_id,
+						      const u8 network_guid[16])
 {
 }
 

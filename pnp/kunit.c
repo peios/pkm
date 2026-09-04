@@ -1317,6 +1317,145 @@ static void pnp_kunit_identity_facts(struct kunit *test)
 	sock_release(sock);
 }
 
+/*
+ * The network context (context.c): netd's inventory as a per-interface
+ * table, read into the snapshot's Network.* facts and judged by the
+ * packet layers. A table that differs from the active one is a new
+ * generation (every sentence re-judged); an identical one is nothing.
+ */
+static void pnp_kunit_network_context(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *other = pnp_test_dev(test, "eth1", false);
+	struct peios_pnp_context_table *table;
+	struct peios_pnp_snapshot snap;
+	struct peios_pnp_outcome out;
+	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
+	u64 gen;
+
+	/* No table: no context on any interface, nothing to advance. */
+	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(NULL), 0);
+	gen = pnp_rust_generation();
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
+	KUNIT_EXPECT_EQ(test, peios_pnp_context_count(), 0U);
+
+	/* eth0 stands on a network the operator called home. */
+	table = peios_pnp_context_table_alloc(1);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+	strscpy(table->entries[0].ifname, "eth0", IFNAMSIZ);
+	strscpy(table->entries[0].network_id,
+		"6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718",
+		PEIOS_PNP_NETWORK_ID_LEN);
+	strscpy(table->entries[0].network_name, "palfrey-home",
+		PEIOS_PNP_NETWORK_NAME_LEN);
+	strscpy(table->entries[0].network_trust, "home",
+		PEIOS_PNP_NETWORK_TRUST_LEN);
+	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(table), 0);
+	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen + 1);
+	KUNIT_EXPECT_EQ(test, peios_pnp_context_count(), 1U);
+
+	/* The facts reach a traversal on eth0, and only eth0. */
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
+	KUNIT_EXPECT_STREQ(test, snap.network_id,
+			   "6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718");
+	KUNIT_EXPECT_STREQ(test, snap.network_name, "palfrey-home");
+	KUNIT_EXPECT_STREQ(test, snap.network_trust, "home");
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, other,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
+
+	/* A Flow rule about the network judges by it: it speaks on eth0
+	 * and is simply false (absent-fact law) on eth1.
+	 */
+	pnp_test_publish_flow(test, "Network.Trust.Equal", "home", "PASS");
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_STREQ(test, out.attributed, "r");
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, other,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_DROP);
+	KUNIT_EXPECT_STREQ(test, out.attributed, "backstop");
+
+	/* The same table again (netd rewrote Status): nothing changes,
+	 * so nothing advances and no sentence goes stale.
+	 */
+	gen = pnp_rust_generation();
+	table = peios_pnp_context_table_alloc(1);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+	strscpy(table->entries[0].ifname, "eth0", IFNAMSIZ);
+	strscpy(table->entries[0].network_id,
+		"6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718",
+		PEIOS_PNP_NETWORK_ID_LEN);
+	strscpy(table->entries[0].network_name, "palfrey-home",
+		PEIOS_PNP_NETWORK_NAME_LEN);
+	strscpy(table->entries[0].network_trust, "home",
+		PEIOS_PNP_NETWORK_TRUST_LEN);
+	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(table), 0);
+	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen);
+
+	/* The operator changes the word: a new generation, and the same
+	 * rule no longer speaks for eth0. Name and Trust left off the
+	 * record are absent facts; the id is still one.
+	 */
+	table = peios_pnp_context_table_alloc(1);
+	KUNIT_ASSERT_NOT_NULL(test, table);
+	strscpy(table->entries[0].ifname, "eth0", IFNAMSIZ);
+	strscpy(table->entries[0].network_id,
+		"6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718",
+		PEIOS_PNP_NETWORK_ID_LEN);
+	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(table), 0);
+	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen + 1);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_snapshot_from_skb(skb, dev,
+						    PEIOS_PNP_SEAT_LOCAL_IN,
+						    PEIOS_PNP_DIR_IN, &snap),
+			0);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
+	KUNIT_EXPECT_EQ(test, snap.network_trust[0], 0);
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_DROP);
+	pnp_test_publish_flow(test, "Network.Id.Equal",
+			      "6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718", "PASS");
+	KUNIT_ASSERT_EQ(test,
+			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+
+	/* Restore for whatever runs after this suite. */
+	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(NULL), 0);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	kfree_skb(skb);
+}
+
 static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_rust_probe),
 	KUNIT_CASE(pnp_kunit_dispatch_predicate),
@@ -1336,6 +1475,7 @@ static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_own_refusals_bypass_the_seats),
 	KUNIT_CASE(pnp_kunit_downward_tag_read_refused),
 	KUNIT_CASE(pnp_kunit_identity_facts),
+	KUNIT_CASE(pnp_kunit_network_context),
 	{}
 };
 

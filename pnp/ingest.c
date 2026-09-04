@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Registry ingestion: Machine\System\Network\Rules -> published policy.
+ * Registry ingestion: Machine\System\Network -> published policy and
+ * network context.
  *
  * The kernel reads its own policy (ratified: pnpd is an observer and an
  * authoring surface, never in the enforcement path). The walk follows the
@@ -11,16 +12,30 @@
  * Validation is pnp-core's; a forest that does not build leaves the
  * previous generation active (atomic transitions), loudly.
  *
+ * Two things are read under the Network key. `Rules\` is the policy: the
+ * three kernel layers' forests and CurrentReportingLevel. `Interfaces\`
+ * and `Networks\` are netd's inventory, from which the network context
+ * (context.c) is built: which network each interface is standing on and
+ * the operator's word on it, the `Network.*` facts of the packet layers.
+ * The inventory is read beside the rules because the two change
+ * together from a rule's point of view — a network being recognised is
+ * as much a policy change to a flow as a rule being written.
+ *
  * Change notification arrives per-key and uncoalesced from the LCS
- * internal watch dispatcher, so the entry point coalesces into one
- * deferred re-walk (pending flag + delayed work with a short debounce
- * window — a policy save touches many keys, and boot autoapply once ran
- * the generation to 31 re-walking after every one).
+ * internal watch dispatcher (one watch on the Network key, depth
+ * unbounded), so the entry point coalesces into one deferred re-walk
+ * (pending flag + delayed work with a short debounce window — a policy
+ * save touches many keys, and boot autoapply once ran the generation to
+ * 31 re-walking after every one). A re-walk publishes only what changed:
+ * the rules by a digest of everything the walk fed the builder, the
+ * context by comparing tables. netd rewriting an interface's Status
+ * therefore costs a walk, not a generation.
  */
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
 #include <linux/peios_pnp.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -51,21 +66,51 @@ struct peios_pnp_walk {
 	struct pkm_lcs_layer_snapshot layers;
 	void *builder;
 	u32 rules_seen;
+	/* FNV-1a over everything the rules walk fed the builder. */
+	u64 digest;
 };
 
-long peios_pnp_rules_root_discover_from_machine_hive(u32 source_id,
-						     const u8 machine_root_guid[16],
-						     bool *present_out,
-						     u8 rules_guid_out[16])
+/* The digest of the last rules walk that published; 0 = never. */
+static u64 pnp_published_digest;
+/* One refresh at a time: bootstrap and the deferred re-walk may overlap. */
+static DEFINE_MUTEX(pnp_refresh_lock);
+
+#define PNP_FNV_OFFSET	0xcbf29ce484222325ULL
+#define PNP_FNV_PRIME	0x100000001b3ULL
+
+static void pnp_digest_bytes(struct peios_pnp_walk *walk, const void *data,
+			     size_t len)
+{
+	const u8 *p = data;
+	u64 h = walk->digest;
+
+	while (len--) {
+		h ^= *p++;
+		h *= PNP_FNV_PRIME;
+	}
+	/* A separator, so "ab"+"c" and "a"+"bc" digest differently. */
+	h ^= 0xff;
+	h *= PNP_FNV_PRIME;
+	walk->digest = h;
+}
+
+static void pnp_digest_u32(struct peios_pnp_walk *walk, u32 v)
+{
+	pnp_digest_bytes(walk, &v, sizeof(v));
+}
+
+long peios_pnp_network_root_discover_from_machine_hive(u32 source_id,
+						       const u8 machine_root_guid[16],
+						       bool *present_out,
+						       u8 network_guid_out[16])
 {
 	/* Absolute path: the leading hive component ("Machine") is resolved
 	 * locally against the hive root, not round-tripped.
 	 */
-	static const struct pkm_lcs_path_component_view rules_path[] = {
+	static const struct pkm_lcs_path_component_view network_path[] = {
 		{ .name = "Machine", .name_len = sizeof("Machine") - 1 },
 		{ .name = "System", .name_len = sizeof("System") - 1 },
 		{ .name = "Network", .name_len = sizeof("Network") - 1 },
-		{ .name = "Rules", .name_len = sizeof("Rules") - 1 },
 	};
 	struct pkm_lcs_resolved_key_path key = { };
 	struct pkm_lcs_layer_snapshot layers = { };
@@ -74,7 +119,7 @@ long peios_pnp_rules_root_discover_from_machine_hive(u32 source_id,
 	if (present_out)
 		*present_out = false;
 	if (!source_id || !machine_root_guid || !present_out ||
-	    !rules_guid_out)
+	    !network_guid_out)
 		return -EINVAL;
 
 	ret = pkm_lcs_source_layer_snapshot_acquire(&layers);
@@ -82,18 +127,20 @@ long peios_pnp_rules_root_discover_from_machine_hive(u32 source_id,
 		return ret;
 
 	ret = pkm_lcs_walk_absolute_components(
-		source_id, 0, machine_root_guid, rules_path,
-		ARRAY_SIZE(rules_path), layers.layers, layers.layer_count,
+		source_id, 0, machine_root_guid, network_path,
+		ARRAY_SIZE(network_path), layers.layers, layers.layer_count,
 		NULL, 0, &key);
 	if (ret == -ENOENT) {
-		/* Absence is not an error: no rules key, no policy. */
+		/* Absence is not an error: no Network key, no policy and
+		 * no context.
+		 */
 		ret = 0;
 		goto out;
 	}
 	if (ret)
 		goto out;
 
-	memcpy(rules_guid_out, key.key_guid, 16);
+	memcpy(network_guid_out, key.key_guid, 16);
 	*present_out = true;
 	pkm_lcs_resolved_key_path_destroy(&key);
 out:
@@ -112,6 +159,9 @@ static u32 pnp_str_trim(const u8 *data, u32 len)
 static long pnp_feed_value(struct peios_pnp_walk *walk, const char *name,
 			   u32 name_len, u32 type, const u8 *data, u32 len)
 {
+	pnp_digest_bytes(walk, name, name_len);
+	pnp_digest_u32(walk, type);
+	pnp_digest_bytes(walk, data, len);
 	switch (type) {
 	case PNP_REG_SZ:
 	case PNP_REG_EXPAND_SZ:
@@ -332,6 +382,8 @@ static long pnp_walk_rule(struct peios_pnp_walk *walk, const u8 guid[16],
 	if (++walk->rules_seen > PEIOS_PNP_MAX_RULES)
 		return -E2BIG;
 
+	pnp_digest_u32(walk, depth);
+	pnp_digest_bytes(walk, name, name_len);
 	ret = pnp_rust_builder_rule_begin(walk->builder, name, name_len);
 	if (ret)
 		return ret;
@@ -401,6 +453,8 @@ static long pnp_build_layer(struct peios_pnp_walk *walk, bool present,
 	long ret;
 
 	*forest_out = NULL;
+	pnp_digest_u32(walk, layer);
+	pnp_digest_u32(walk, present);
 	if (!present)
 		return 0;
 
@@ -467,59 +521,44 @@ out_builder:
 	return ret;
 }
 
-long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
+/*
+ * One RSI_ENUM_CHILDREN round trip: each subkey of @guid -> cb, with the
+ * child's guid and its name (a pointer into the retained frame, valid
+ * for the callback; nested round trips take their own frames).
+ */
+typedef long (*pnp_child_cb)(struct peios_pnp_walk *walk, void *ctx,
+			     const u8 child_guid[16], const u8 *name,
+			     u32 name_len);
+
+static long pnp_for_each_child(struct peios_pnp_walk *walk, const u8 guid[16],
+			       pnp_child_cb cb, void *ctx)
 {
 	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
-	struct peios_pnp_walk walk = { .source_id = source_id };
-	u8 packet_guid[16], raw_guid[16], flow_guid[16];
-	bool packet_present = false, raw_present = false, flow_present = false;
-	void *packet_forest = NULL, *raw_forest = NULL, *flow_forest = NULL;
-	u8 reporting_level = 1;
 	u32 i;
 	long ret;
 
-	if (!source_id || !rules_guid)
-		return -EINVAL;
-
-	ret = pkm_lcs_runtime_limits_snapshot(&walk.limits);
-	if (ret)
-		return ret;
-	ret = pkm_lcs_source_next_sequence_snapshot(&walk.next_sequence);
-	if (ret)
-		return ret;
-	ret = pkm_lcs_source_layer_snapshot_acquire(&walk.layers);
-	if (ret)
-		return ret;
-
-	ret = pnp_for_each_value(&walk, rules_guid, pnp_reporting_level_cb,
-				 &reporting_level);
-	if (ret)
-		goto out_level;
-
-	/* Find the layer keys under Rules: Packet, RawPacket, Flow. */
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
-		source_id, 0, rules_guid, &walk.limits,
-		walk.limits.request_timeout_ms, &frame, &response, NULL);
+		walk->source_id, 0, guid, &walk->limits,
+		walk->limits.request_timeout_ms, &frame, &response, NULL);
 	if (ret)
 		goto out;
 	ret = pkm_lcs_rsi_materialize_enum_children_info_summary(
 		frame.data, frame.len, response.request_id,
-		walk.next_sequence, walk.layers.layers,
-		walk.layers.layer_count, NULL, 0, &response.limits, &summary);
+		walk->next_sequence, walk->layers.layers,
+		walk->layers.layer_count, NULL, 0, &response.limits, &summary);
 	if (ret)
 		goto out;
 
 	for (i = 0; i < summary.subkey_count; i++) {
 		struct pkm_lcs_rsi_enum_subkey_result subkey = { };
-		const u8 *name;
 
 		ret = pkm_lcs_rsi_materialize_enum_subkey_response(
 			frame.data, frame.len, response.request_id,
-			walk.next_sequence, i, walk.layers.layers,
-			walk.layers.layer_count, NULL, 0, &response.limits,
+			walk->next_sequence, i, walk->layers.layers,
+			walk->layers.layer_count, NULL, 0, &response.limits,
 			&subkey);
 		if (ret)
 			goto out;
@@ -531,56 +570,400 @@ long peios_pnp_rules_refresh_from_key(u32 source_id, const u8 rules_guid[16])
 			ret = -EIO;
 			goto out;
 		}
-		name = frame.data + subkey.name_offset;
-		if (subkey.name_len == 6 && !memcmp(name, "Packet", 6)) {
-			memcpy(packet_guid, subkey.child_guid, 16);
-			packet_present = true;
-		} else if (subkey.name_len == 9 &&
-			   !memcmp(name, "RawPacket", 9)) {
-			memcpy(raw_guid, subkey.child_guid, 16);
-			raw_present = true;
-		} else if (subkey.name_len == 4 && !memcmp(name, "Flow", 4)) {
-			memcpy(flow_guid, subkey.child_guid, 16);
-			flow_present = true;
-		}
-		/* Unknown layer names are someone else's future: ignored. */
+		ret = cb(walk, ctx, subkey.child_guid,
+			 frame.data + subkey.name_offset, subkey.name_len);
+		if (ret)
+			goto out;
 	}
+out:
 	pkm_lcs_source_response_frame_destroy(&frame);
-	pkm_lcs_source_response_frame_init(&frame);
+	return ret;
+}
 
-	ret = pnp_build_layer(&walk, packet_present, packet_guid,
+static bool pnp_name_is(const u8 *name, u32 name_len, const char *want)
+{
+	return name_len == strlen(want) && !memcmp(name, want, name_len);
+}
+
+/* --- the rules ---------------------------------------------------------- */
+
+struct pnp_rules_children {
+	u8 packet_guid[16], raw_guid[16], flow_guid[16];
+	bool packet_present, raw_present, flow_present;
+};
+
+static long pnp_rules_child_cb(struct peios_pnp_walk *walk, void *ctx,
+			       const u8 child_guid[16], const u8 *name,
+			       u32 name_len)
+{
+	struct pnp_rules_children *c = ctx;
+
+	if (pnp_name_is(name, name_len, "Packet")) {
+		memcpy(c->packet_guid, child_guid, 16);
+		c->packet_present = true;
+	} else if (pnp_name_is(name, name_len, "RawPacket")) {
+		memcpy(c->raw_guid, child_guid, 16);
+		c->raw_present = true;
+	} else if (pnp_name_is(name, name_len, "Flow")) {
+		memcpy(c->flow_guid, child_guid, 16);
+		c->flow_present = true;
+	}
+	/* Interface is netd's; unknown layer names are someone else's
+	 * future: ignored.
+	 */
+	return 0;
+}
+
+/*
+ * Walks the rules subtree and publishes a new policy generation, unless
+ * the walk fed the builder exactly what the last published walk did.
+ */
+static long pnp_refresh_rules(struct peios_pnp_walk *walk,
+			      const u8 rules_guid[16])
+{
+	struct pnp_rules_children c = { };
+	void *packet_forest = NULL, *raw_forest = NULL, *flow_forest = NULL;
+	u8 reporting_level = 1;
+	long ret;
+
+	walk->digest = PNP_FNV_OFFSET;
+	walk->rules_seen = 0;
+
+	ret = pnp_for_each_value(walk, rules_guid, pnp_reporting_level_cb,
+				 &reporting_level);
+	if (ret)
+		goto out;
+	pnp_digest_u32(walk, reporting_level);
+
+	/* Find the layer keys under Rules: Packet, RawPacket, Flow. */
+	ret = pnp_for_each_child(walk, rules_guid, pnp_rules_child_cb, &c);
+	if (ret)
+		goto out;
+
+	ret = pnp_build_layer(walk, c.packet_present, c.packet_guid,
 			      PEIOS_PNP_LAYER_PACKET, &packet_forest);
 	if (ret)
 		goto out;
-	walk.rules_seen = 0;
-	ret = pnp_build_layer(&walk, raw_present, raw_guid,
+	walk->rules_seen = 0;
+	ret = pnp_build_layer(walk, c.raw_present, c.raw_guid,
 			      PEIOS_PNP_LAYER_RAWPACKET, &raw_forest);
 	if (ret)
 		goto out;
-	walk.rules_seen = 0;
-	ret = pnp_build_layer(&walk, flow_present, flow_guid,
+	walk->rules_seen = 0;
+	ret = pnp_build_layer(walk, c.flow_present, c.flow_guid,
 			      PEIOS_PNP_LAYER_FLOW, &flow_forest);
 	if (ret)
 		goto out;
 
+	if (walk->digest == pnp_published_digest &&
+	    peios_pnp_policy_enforcing()) {
+		/* The same policy, byte for byte: the active generation
+		 * already is it. Publishing again would only re-judge every
+		 * flow for nothing (a policy save fires the watch for each
+		 * key it touches; netd's inventory writes share the watch).
+		 */
+		ret = 0;
+		goto out;
+	}
+
 	ret = peios_pnp_policy_publish(packet_forest, raw_forest, flow_forest,
 				       reporting_level);
 	if (!ret) {
+		pnp_published_digest = walk->digest;
 		packet_forest = NULL;
 		raw_forest = NULL;
 		flow_forest = NULL;
 	}
 out:
-	pkm_lcs_source_response_frame_destroy(&frame);
-out_level:
-	peios_pnp_policy_note_ingest(ret);
 	if (ret)
 		pr_warn("pnp: rules refresh failed (%ld); keeping the previous generation\n",
 			ret);
 	pnp_rust_forest_free(packet_forest);
 	pnp_rust_forest_free(raw_forest);
 	pnp_rust_forest_free(flow_forest);
+	return ret;
+}
+
+/* --- the network context ------------------------------------------------ */
+
+/* One network record as the walk read it: Networks\<id> Name, Trust. */
+struct pnp_network_record {
+	char id[PEIOS_PNP_NETWORK_ID_LEN];
+	char name[PEIOS_PNP_NETWORK_NAME_LEN];
+	char trust[PEIOS_PNP_NETWORK_TRUST_LEN];
+};
+
+#define PNP_MAX_NETWORK_RECORDS	256U
+
+struct pnp_networks {
+	struct pnp_network_record *records;
+	u32 count;
+};
+
+/* Copies a registry string into a bounded buffer; confesses truncation. */
+static void pnp_copy_str(char *dst, size_t dst_len, const u8 *data, u32 len,
+			 const char *what)
+{
+	len = pnp_str_trim(data, len);
+	if (len >= dst_len) {
+		pr_warn_once("pnp: network context: %s longer than %zu bytes; truncated\n",
+			     what, dst_len - 1);
+		len = dst_len - 1;
+	}
+	memcpy(dst, data, len);
+	dst[len] = '\0';
+}
+
+static long pnp_network_value_cb(struct peios_pnp_walk *walk, void *ctx,
+				 const char *name, u32 name_len, u32 type,
+				 const u8 *data, u32 len)
+{
+	struct pnp_network_record *rec = ctx;
+
+	if (type != PNP_REG_SZ && type != PNP_REG_EXPAND_SZ)
+		return 0;
+	if (pnp_name_is(name, name_len, "Name"))
+		pnp_copy_str(rec->name, sizeof(rec->name), data, len,
+			     "a network's Name");
+	else if (pnp_name_is(name, name_len, "Trust"))
+		pnp_copy_str(rec->trust, sizeof(rec->trust), data, len,
+			     "a network's Trust");
+	return 0;
+}
+
+static long pnp_network_child_cb(struct peios_pnp_walk *walk, void *ctx,
+				 const u8 child_guid[16], const u8 *name,
+				 u32 name_len)
+{
+	struct pnp_networks *nets = ctx;
+	struct pnp_network_record *rec;
+	long ret;
+
+	if (name_len >= PEIOS_PNP_NETWORK_ID_LEN) {
+		pr_warn_once("pnp: network context: a Networks record name is not a UUID; ignored\n");
+		return 0;
+	}
+	if (nets->count >= PNP_MAX_NETWORK_RECORDS) {
+		pr_warn_once("pnp: network context: more than %u network records; the rest are ignored\n",
+			     PNP_MAX_NETWORK_RECORDS);
+		return 0;
+	}
+	rec = &nets->records[nets->count];
+	memset(rec, 0, sizeof(*rec));
+	memcpy(rec->id, name, name_len);
+	/* A record whose values cannot be read is a record with no Name
+	 * and no Trust: the id is still a fact.
+	 */
+	ret = pnp_for_each_value(walk, child_guid, pnp_network_value_cb, rec);
+	if (ret)
+		pr_warn("pnp: network context: could not read Networks\\%s (%ld)\n",
+			rec->id, ret);
+	nets->count++;
+	return 0;
+}
+
+/* Interfaces\<ifid>\Status: Name (the kernel name) and Network (the id). */
+struct pnp_status_values {
+	char ifname[IFNAMSIZ];
+	char network_id[PEIOS_PNP_NETWORK_ID_LEN];
+};
+
+static long pnp_status_value_cb(struct peios_pnp_walk *walk, void *ctx,
+				const char *name, u32 name_len, u32 type,
+				const u8 *data, u32 len)
+{
+	struct pnp_status_values *v = ctx;
+
+	if (type != PNP_REG_SZ && type != PNP_REG_EXPAND_SZ)
+		return 0;
+	if (pnp_name_is(name, name_len, "Name"))
+		pnp_copy_str(v->ifname, sizeof(v->ifname), data, len,
+			     "an interface's Name");
+	else if (pnp_name_is(name, name_len, "Network"))
+		pnp_copy_str(v->network_id, sizeof(v->network_id), data, len,
+			     "an interface's Network");
+	return 0;
+}
+
+struct pnp_context_build {
+	const struct pnp_networks *nets;
+	struct peios_pnp_context_table *table;
+};
+
+/* Under an interface key: only its Status subkey is read. */
+static long pnp_interface_status_cb(struct peios_pnp_walk *walk, void *ctx,
+				    const u8 child_guid[16], const u8 *name,
+				    u32 name_len)
+{
+	struct pnp_context_build *b = ctx;
+	struct pnp_status_values v = { };
+	struct peios_pnp_context_entry *e;
+	u32 i;
+	long ret;
+
+	if (!pnp_name_is(name, name_len, "Status"))
+		return 0;
+	ret = pnp_for_each_value(walk, child_guid, pnp_status_value_cb, &v);
+	if (ret) {
+		pr_warn("pnp: network context: could not read an interface's Status (%ld)\n",
+			ret);
+		return 0;
+	}
+	/* No name, or no network identified on it: no context. */
+	if (!v.ifname[0] || !v.network_id[0])
+		return 0;
+	if (b->table->count >= PEIOS_PNP_MAX_CONTEXTS) {
+		pr_warn_once("pnp: network context: more than %u interfaces; the rest carry no context\n",
+			     PEIOS_PNP_MAX_CONTEXTS);
+		return 0;
+	}
+	e = &b->table->entries[b->table->count++];
+	memcpy(e->ifname, v.ifname, sizeof(e->ifname));
+	memcpy(e->network_id, v.network_id, sizeof(e->network_id));
+	for (i = 0; i < b->nets->count; i++) {
+		const struct pnp_network_record *rec = &b->nets->records[i];
+
+		if (strcmp(rec->id, e->network_id))
+			continue;
+		memcpy(e->network_name, rec->name, sizeof(e->network_name));
+		memcpy(e->network_trust, rec->trust, sizeof(e->network_trust));
+		break;
+	}
+	return 0;
+}
+
+static long pnp_interface_child_cb(struct peios_pnp_walk *walk, void *ctx,
+				   const u8 child_guid[16], const u8 *name,
+				   u32 name_len)
+{
+	return pnp_for_each_child(walk, child_guid, pnp_interface_status_cb,
+				  ctx);
+}
+
+/*
+ * Reads the inventory into a context table and publishes it. Absence of
+ * either key is an empty table. Nothing here refuses: a record that
+ * cannot be read is an interface without a context, and the table is
+ * published with whatever was readable.
+ */
+static long pnp_refresh_context(struct peios_pnp_walk *walk,
+				bool interfaces_present,
+				const u8 interfaces_guid[16],
+				bool networks_present,
+				const u8 networks_guid[16])
+{
+	struct pnp_networks nets = { };
+	struct pnp_context_build b = { .nets = &nets };
+	long ret = 0;
+
+	b.table = peios_pnp_context_table_alloc(PEIOS_PNP_MAX_CONTEXTS);
+	if (!b.table)
+		return -ENOMEM;
+	b.table->count = 0;
+
+	if (networks_present) {
+		nets.records = kvcalloc(PNP_MAX_NETWORK_RECORDS,
+					sizeof(*nets.records), GFP_KERNEL);
+		if (!nets.records) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		ret = pnp_for_each_child(walk, networks_guid,
+					 pnp_network_child_cb, &nets);
+		if (ret)
+			goto out;
+	}
+	if (interfaces_present) {
+		ret = pnp_for_each_child(walk, interfaces_guid,
+					 pnp_interface_child_cb, &b);
+		if (ret)
+			goto out;
+	}
+
+	/* Takes the table, or frees it when nothing changed. */
+	ret = peios_pnp_context_publish(b.table);
+	b.table = NULL;
+out:
+	if (ret)
+		pr_warn("pnp: network context refresh failed (%ld); keeping the previous table\n",
+			ret);
+	kfree(b.table);
+	kvfree(nets.records);
+	return ret;
+}
+
+/* --- the Network key ---------------------------------------------------- */
+
+struct pnp_network_children {
+	u8 rules_guid[16], interfaces_guid[16], networks_guid[16];
+	bool rules_present, interfaces_present, networks_present;
+};
+
+static long pnp_network_child_key_cb(struct peios_pnp_walk *walk, void *ctx,
+				     const u8 child_guid[16], const u8 *name,
+				     u32 name_len)
+{
+	struct pnp_network_children *c = ctx;
+
+	if (pnp_name_is(name, name_len, "Rules")) {
+		memcpy(c->rules_guid, child_guid, 16);
+		c->rules_present = true;
+	} else if (pnp_name_is(name, name_len, "Interfaces")) {
+		memcpy(c->interfaces_guid, child_guid, 16);
+		c->interfaces_present = true;
+	} else if (pnp_name_is(name, name_len, "Networks")) {
+		memcpy(c->networks_guid, child_guid, 16);
+		c->networks_present = true;
+	}
+	/* Profiles, Dns and the rest are netd's and resolvd's. */
+	return 0;
+}
+
+long peios_pnp_network_refresh_from_key(u32 source_id,
+					const u8 network_guid[16])
+{
+	struct peios_pnp_walk walk = { .source_id = source_id };
+	struct pnp_network_children c = { };
+	long ret, context_ret;
+
+	if (!source_id || !network_guid)
+		return -EINVAL;
+
+	mutex_lock(&pnp_refresh_lock);
+	ret = pkm_lcs_runtime_limits_snapshot(&walk.limits);
+	if (ret)
+		goto out_unlock;
+	ret = pkm_lcs_source_next_sequence_snapshot(&walk.next_sequence);
+	if (ret)
+		goto out_unlock;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&walk.layers);
+	if (ret)
+		goto out_unlock;
+
+	ret = pnp_for_each_child(&walk, network_guid, pnp_network_child_key_cb,
+				 &c);
+	if (ret)
+		goto out;
+
+	/* The rules: no key is no policy, and the previous generation
+	 * stands, exactly as a walk that refused would leave it.
+	 */
+	if (c.rules_present)
+		ret = pnp_refresh_rules(&walk, c.rules_guid);
+	else
+		pr_info_once("pnp: no Rules key; keeping the previous generation\n");
+
+	/* The context, whatever the rules did: the two are independent. */
+	context_ret = pnp_refresh_context(&walk, c.interfaces_present,
+					  c.interfaces_guid,
+					  c.networks_present, c.networks_guid);
+	if (!ret)
+		ret = context_ret;
+out:
 	pkm_lcs_source_layer_snapshot_release(&walk.layers);
+out_unlock:
+	mutex_unlock(&pnp_refresh_lock);
+	peios_pnp_policy_note_ingest(ret);
 	return ret;
 }
 
@@ -619,17 +1002,18 @@ static void peios_pnp_refresh_workfn(struct work_struct *work)
 	spin_unlock(&peios_pnp_refresh.lock);
 
 	/* Failure keeps the previous generation; the walk logged why. */
-	peios_pnp_rules_refresh_from_key(source_id, guid);
+	peios_pnp_network_refresh_from_key(source_id, guid);
 }
 
-void peios_pnp_rules_registry_changed(u32 source_id, const u8 rules_guid[16])
+void peios_pnp_network_registry_changed(u32 source_id,
+					const u8 network_guid[16])
 {
-	if (!source_id || !rules_guid)
+	if (!source_id || !network_guid)
 		return;
 
 	spin_lock(&peios_pnp_refresh.lock);
 	peios_pnp_refresh.source_id = source_id;
-	memcpy(peios_pnp_refresh.guid, rules_guid, 16);
+	memcpy(peios_pnp_refresh.guid, network_guid, 16);
 	peios_pnp_refresh.pending = true;
 	spin_unlock(&peios_pnp_refresh.lock);
 	/* mod_delayed_work restarts the window: a burst of changes yields

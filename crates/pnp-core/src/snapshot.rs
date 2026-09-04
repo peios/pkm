@@ -334,12 +334,15 @@ pub struct Snapshot<'a> {
     /// Interface-layer snapshots only: `Interface.Driver`; absent for
     /// anything that is not hardware.
     pub interface_driver: Option<PkmString>,
-    /// Interface-layer snapshots only: `Network.Id`; present once the
-    /// interface has link and an offer.
+    /// The network context, every layer: `Network.Id`, the record of
+    /// the network the interface is standing on. At the interface layer,
+    /// present once the interface has link and an offer; at the packet
+    /// layers, present while netd's inventory names a network for the
+    /// interface the packet crossed.
     pub network_id: Option<PkmString>,
-    /// Interface-layer snapshots only: `Network.Name`.
+    /// The network context: `Network.Name`, the operator's label.
     pub network_name: Option<PkmString>,
-    /// Interface-layer snapshots only: `Network.Trust`.
+    /// The network context: `Network.Trust`, the operator's word.
     pub network_trust: Option<PkmString>,
     /// Interface-layer snapshots only: `Network.Kind`.
     pub network_kind: Option<PkmString>,

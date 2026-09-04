@@ -53,7 +53,17 @@ format = "peipkg"
 # stamped with the mounter's ids, so `stat` reported uid 0 for every
 # principal's files while the security descriptor named the right owner. Any
 # program checking that it owns its own directory refused to run.
-version      = "{{version}}-24"
+# -25: PNP reads the network context (PEI-598). The kernel's registry walk
+# widens from Rules\ to the whole Machine\System\Network key and reads netd's
+# inventory — each interface's Status Network, joined to the Networks\<id>
+# record's Name and Trust — into a per-interface table (net/pnp/context.c), so
+# Network.Id/Name/Trust are facts at every packet layer and one rule can say
+# "SSH only on the network I called home". A table that differs from the active
+# one advances the policy generation (every sentence re-judged, as after a rule
+# change); an identical one does not. The rules walk now digests what it fed the
+# builder and skips republishing an unchanged forest. The LCS watch target moves
+# from the Rules key to the Network key.
+version      = "{{version}}-25"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 homepage     = "https://github.com/peios/pkm"

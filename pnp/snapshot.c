@@ -298,6 +298,10 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 		snap->ifindex = dev->ifindex;
 		strscpy(snap->ifname, dev->name, IFNAMSIZ);
 		snap->loopback = (dev->flags & IFF_LOOPBACK) != 0;
+		/* The network the interface stands on (context.c): the
+		 * Network.* facts, read from netd's inventory, not the frame.
+		 */
+		peios_pnp_context_fill(dev->name, snap);
 	}
 	snap->length = skb->len;
 	snapshot_time(snap);
