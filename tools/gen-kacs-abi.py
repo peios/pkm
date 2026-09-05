@@ -33,6 +33,159 @@ DESCRIPTION = ("Every KACS syscall number, structure layout, constant and "
                "enumeration, generated from the uapi headers and measured by "
                "compilation.")
 
+# Named-citation anchors for the stable constant groups, keyed by the leading
+# words of each group's heading comment in the header. One anchor names one
+# table, not one row: the rows are measured by compilation, so what a test
+# cites is the group. A retitled group silently drops its anchor -- the learn
+# build's citation grep is what surfaces a test left pointing at a retired
+# name -- and a group not listed here carries none. Keys are matched in order
+# against the group comment with its whitespace collapsed, so a key must be a
+# prefix of exactly one group and must not be a prefix of an earlier one.
+GROUP_ANCHORS = [
+    # token.h
+    ("kacs_open_self_token (SYS_KACS_OPEN_SELF_TOKEN) flags",
+     "kacs-abi.open-self-token-flags"),
+    ("Per-handle token rights", "kacs-abi.token-access-rights"),
+    ("Token ioctl interface identifier", "kacs-abi.token-ioctl-magic"),
+    ("kacs_priv_entry.attributes bits", "kacs-abi.privilege-attributes"),
+    ("kacs_adjust_privs bulk-reset flag",
+     "kacs-abi.privilege-reset-all-defaults"),
+    ("kacs_restrict_args.flags bits", "kacs-abi.restrict-flags"),
+    ("Token type (KACS_TOKEN_CLASS_TYPE)", "kacs-abi.token-types"),
+    ("Impersonation level (KACS_TOKEN_CLASS_IMPERSONATION_LEVEL)",
+     "kacs-abi.impersonation-levels"),
+    ("Elevation type (KACS_TOKEN_CLASS_ELEVATION_TYPE)",
+     "kacs-abi.elevation-types"),
+    ("Mandatory-policy bits (KACS_TOKEN_CLASS_MANDATORY_POLICY)",
+     "kacs-abi.mandatory-policy-bits"),
+    ("Per-token audit-policy bits", "kacs-abi.audit-policy-bits"),
+    ("Logon type (KACS_TOKEN_CLASS_LOGON_TYPE)", "kacs-abi.logon-types"),
+    ("Maximum number of groups a token may carry",
+     "kacs-abi.token-max-groups"),
+    ("Number of 64-bit words in a group enabled-state bitmask",
+     "kacs-abi.token-group-mask-words"),
+    ("kacs_create_token (SYS_KACS_CREATE_TOKEN) spec wire format",
+     "kacs-abi.token-spec-wire-format"),
+    ("Byte offsets of the fixed token-spec header fields",
+     "kacs-abi.token-spec-offsets"),
+    ("Byte length of the fixed token-source-name field",
+     "kacs-abi.token-source-name-bytes"),
+    ("Optional LCS registry-credentials extension",
+     "kacs-abi.token-lcs-extension"),
+    ("Byte offsets of the fixed LCS-extension header fields",
+     "kacs-abi.token-lcs-extension-offsets"),
+    ("kacs_create_logon_session (SYS_KACS_CREATE_LOGON_SESSION) spec wire",
+     "kacs-abi.logon-session-spec-wire-format"),
+    ("Byte offsets of the fixed-position session-spec fields",
+     "kacs-abi.logon-session-spec-offsets"),
+    ("Token-handle ioctls", "kacs-abi.token-ioctls"),
+    ("Token information classes", "kacs-abi.token-information-classes"),
+    ("Privileges, as single-bit masks", "kacs-abi.privilege-bits"),
+    # socket.h
+    ("KACS socket options", "kacs-abi.sol-kacs"),
+    ("getsockopt only.", "kacs-abi.so-peer-token"),
+    ("getsockopt / setsockopt. optval: __u32",
+     "kacs-abi.so-impersonation-level"),
+    ("getsockopt / setsockopt. optval: int", "kacs-abi.so-pass-token"),
+    ("setsockopt only.", "kacs-abi.so-restamp"),
+    ("Ancillary message type", "kacs-abi.scm-token"),
+    # ipc.h
+    ("KACS access rights for System V IPC objects",
+     "kacs-abi.ipc-access-rights"),
+    ("ipcctl gates:", "kacs-abi.sysv-sd-selectors"),
+    # access.h
+    ("Full size of kacs_access_check_args",
+     "kacs-abi.access-check-args-size"),
+    ("Minimum caller_size the kernel accepts",
+     "kacs-abi.access-check-args-v1-size"),
+    ("Byte size of one kacs_object_type_entry",
+     "kacs-abi.object-type-entry-size"),
+    ("Largest object-audit-context buffer",
+     "kacs-abi.max-audit-context-len"),
+    ("Largest @Local claims blob", "kacs-abi.max-local-claims-len"),
+    ("Largest object-type tree entry count",
+     "kacs-abi.max-object-type-count"),
+    ("Claim value types", "kacs-abi.claim-value-types"),
+    ("Claim attribute flags", "kacs-abi.claim-attribute-flags"),
+    ("Central Access Policy (CAAP) spec wire format",
+     "kacs-abi.caap-spec-wire-format"),
+    ("Byte offsets of the fixed CAAP-spec prefix fields",
+     "kacs-abi.caap-spec-offsets"),
+    ("Byte length of the fixed CAAP-spec prefix",
+     "kacs-abi.caap-spec-prefix-bytes"),
+    # file.h
+    ("Minimum caller-supplied size accepted", "kacs-abi.arg-block-min-sizes"),
+    ("Create dispositions", "kacs-abi.create-dispositions"),
+    ("Create options", "kacs-abi.create-options"),
+    ("kacs_open_how.flags bits", "kacs-abi.open-how-flags"),
+    ("File and directory object-specific access rights",
+     "kacs-abi.file-access-rights"),
+    ("Mount-policy values", "kacs-abi.mount-policy-values"),
+    ("Status word kacs_open writes back", "kacs-abi.open-status-values"),
+    # process.h
+    ("KACS process object-specific access rights",
+     "kacs-abi.process-access-rights"),
+    # psb.h
+    ("Process Security Block (PSB) process-mitigation bits",
+     "kacs-abi.mitigation-bits"),
+    ("All valid mitigation bits", "kacs-abi.mitigation-all-mask"),
+    # sd.h
+    ("Byte length of the self-relative security-descriptor header",
+     "kacs-abi.sd-header-bytes"),
+    ("SECURITY_INFORMATION selector bits",
+     "kacs-abi.security-information-bits"),
+    ("SECURITY_DESCRIPTOR_CONTROL bits", "kacs-abi.sd-control-bits"),
+    ("Access-mask bits", "kacs-abi.standard-and-generic-rights"),
+    ("ACE types", "kacs-abi.ace-types"),
+    ("ACE header `ace_flags` byte", "kacs-abi.ace-flags"),
+    ("Mandatory-label policy bits", "kacs-abi.mandatory-label-policy-bits"),
+    ("Object-ACE body `Flags` field", "kacs-abi.object-ace-flags"),
+    # sid.h
+    ("Largest sub_authority_count", "kacs-abi.sid-max-sub-authorities"),
+    ("Encoded byte length of a SID", "kacs-abi.sid-byte-len"),
+    ("SID_AND_ATTRIBUTES", "kacs-abi.sid-attribute-bits"),
+    # trace.h
+    ("kacs_access_decision reason", "kacs-abi.trace.access-decision-reasons"),
+    ("kacs_sd_cache reason", "kacs-abi.trace.sd-cache-reasons"),
+    ("kacs_process_access reason", "kacs-abi.trace.process-access-reasons"),
+    ("kacs_exec reason", "kacs-abi.trace.exec-reasons"),
+    ("kacs_signing reason", "kacs-abi.trace.signing-reasons"),
+    ("kacs_firmware reason", "kacs-abi.trace.firmware-reasons"),
+    ("kacs_socket reason", "kacs-abi.trace.socket-reasons"),
+    ("16 was KACS_SOCK_IMPERSONATE",
+     "kacs-abi.trace.socket-reason-16-retired"),
+    ("kacs_ipc reason", "kacs-abi.trace.ipc-reasons"),
+    ("kacs_namespace stage", "kacs-abi.trace.namespace-stages"),
+    ("kacs_psb reason", "kacs-abi.trace.psb-reasons"),
+    ("kacs_token_ioctl cmd", "kacs-abi.trace.token-ioctl-cmds"),
+    ("kacs_token_ref reason", "kacs-abi.trace.token-ref-reasons"),
+    ("kacs_logon_session reason", "kacs-abi.trace.logon-session-reasons"),
+    ("kacs_cred reason", "kacs-abi.trace.cred-reasons"),
+    ("kacs_setid reason", "kacs-abi.trace.setid-reasons"),
+    ("kacs_task reason", "kacs-abi.trace.task-reasons"),
+    ("kacs_primary_install reason",
+     "kacs-abi.trace.primary-install-reasons"),
+    ("kacs_process_token_open reason",
+     "kacs-abi.trace.process-token-open-reasons"),
+    ("kacs_process_state reason", "kacs-abi.trace.process-state-reasons"),
+    ("kacs_mount_policy reason", "kacs-abi.trace.mount-policy-reasons"),
+    ("kacs_sd_syscall target_kind",
+     "kacs-abi.trace.sd-syscall-target-kinds"),
+    ("kacs_sd_syscall reason", "kacs-abi.trace.sd-syscall-reasons"),
+    ("kacs_access_check reason", "kacs-abi.trace.access-check-reasons"),
+    ("kacs_file_snapshot op", "kacs-abi.trace.file-snapshot-ops"),
+    ("kacs_file_snapshot reason", "kacs-abi.trace.file-snapshot-reasons"),
+    ("kacs_metadata reason", "kacs-abi.trace.metadata-reasons"),
+    ("kacs_native_open_ext reason",
+     "kacs-abi.trace.native-open-ext-reasons"),
+    ("kacs_object reason", "kacs-abi.trace.object-reasons"),
+    ("kacs_securityfs reason", "kacs-abi.trace.securityfs-reasons"),
+    ("kacs_caap reason", "kacs-abi.trace.caap-reasons"),
+    ("kacs_capability reason", "kacs-abi.trace.capability-reasons"),
+    ("kacs_privilege reason", "kacs-abi.trace.privilege-reasons"),
+    ("kacs_tlp reason", "kacs-abi.trace.tlp-reasons"),
+]
+
 
 DEFINE = re.compile(r"^#define\s+([A-Z_][A-Z0-9_]*)(\([^)]*\))?\s+(.+?)\s*$")
 TRAILING = re.compile(r"/\*\s*(.*?)\s*\*/")
@@ -178,6 +331,19 @@ def shape_group(text):
     return head, body
 
 
+def group_anchor(text):
+    """The named-citation anchor for a constant group, or None.
+
+    Keyed on the group's own comment rather than on the italic heading
+    shape_group derives from it, because a group whose comment opens with a
+    long sentence gets no heading at all and would otherwise be uncitable --
+    and several of those (the privilege bits, the CAAP spec, the
+    SECURITY_INFORMATION selectors) are exactly what a test wants to name.
+    """
+    key = re.sub(r"\s+", " ", PSD_REF.sub("", text or "")).strip()
+    return next((n for k, n in GROUP_ANCHORS if key.startswith(k)), None)
+
+
 def fmt_value(name, raw, val):
     """Render a constant's value the way the header writes it, plus decimal."""
     if raw.lstrip("(").lower().startswith("0x"):
@@ -228,7 +394,8 @@ def main():
     w("layouts measured by compiling a probe against the real headers.")
     w("Regenerate it whenever the ABI changes; do not edit it by hand.")
     w("")
-    w("The names here are the ones a program actually compiles against.")
+    w("The names here are the ones a program actually compiles against."
+      " [*kacs-abi.generated-from-source]")
     w("Everything about the ABI a compiler cannot measure -- token query")
     w("payload shapes, the specification spellings that differ from these")
     w("names, what is documented elsewhere, and the kernel configuration")
@@ -237,7 +404,7 @@ def main():
     w("")
 
     # --- syscalls
-    w("## Syscall numbers")
+    w("## Syscall numbers [*kacs-abi.syscall-numbers]")
     w("")
     w("Signatures are read from the `SYSCALL_DEFINE` sites in `pkm/kacs/`.")
     w("")
@@ -256,7 +423,8 @@ def main():
     if others:
         lo, hi = others[0][0], others[-1][0]
         w(f"`uapi/pkm/syscall.h` also registers the KMES and LCS numbers,")
-        w(f"{lo}\u2013{hi}, documented in their own chapters.")
+        w(f"{lo}\u2013{hi}, documented in their own chapters."
+          " [*kacs-abi.sibling-syscall-range]")
         w("")
 
     # --- structs
@@ -265,7 +433,7 @@ def main():
     for sname, fields in structs:
         if sname not in sizes:
             continue
-        w(f"### `struct {sname}`")
+        w(f"### `struct {sname}` [*kacs-abi.struct-{sname.replace('_', '-')}]")
         w("")
         w(f"Total size {sizes[sname]} bytes.")
         w("")
@@ -314,12 +482,21 @@ def main():
         for gname, rows in groups:
             has_note = any(r[3] for r in rows)
             head, body = shape_group(gname)
+            anchor = group_anchor(gname)
+            cite = f" [*{anchor}]" if anchor else ""
             if head:
                 w("")
-                w(f"*{head}.*")
+                w(f"*{head}.*{cite}")
+                cite = ""
             if body:
                 w("")
-                for chunk in textwrap.wrap(body, 72):
+                chunks = textwrap.wrap(body, 72)
+                # A group with no short heading has nothing to hang the
+                # anchor on but the prose, so it rides the last line of it.
+                if cite and chunks:
+                    chunks[-1] += cite
+                    cite = ""
+                for chunk in chunks:
                     w(chunk)
             w("")
             w("| Constant | Value |" + (" Notes |" if has_note else ""))
