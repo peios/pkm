@@ -28,7 +28,8 @@
 
 /*
  * getsockopt only. optval: int — a new token fd, carrying fixed
- * TOKEN_QUERY | TOKEN_IMPERSONATE access and opened O_CLOEXEC, for this
+ * TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_DUPLICATE access and opened
+ * O_CLOEXEC, for this
  * end's conveyed-identity register: the peer identity associated with the
  * data this end has consumed so far. The register is initialised at
  * connect() — on the accepted end with the client's identity, on the
@@ -84,7 +85,8 @@
 /*
  * Ancillary message type, at cmsg_level SOL_KACS. Data: one int.
  *
- * Received: a token fd (TOKEN_QUERY | TOKEN_IMPERSONATE, O_CLOEXEC) for the
+ * Received: a token fd (TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_DUPLICATE,
+ * O_CLOEXEC) for the
  * identity the kernel attests sent the accompanying data. Delivered when the
  * receive buffer has room for it and the conveyed identity differs from the
  * reader's register; a receiver that reads no ancillary data still has the
