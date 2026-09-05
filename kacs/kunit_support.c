@@ -6538,3 +6538,33 @@ int pkm_kacs_kunit_prepare_projected_cred_for_subject(
 	return 0;
 }
 #endif
+
+/*
+ * The used-privilege recorder, interposed (see token_runtime.h).  A case can
+ * make it fail to witness that every gate fails its operation on a failed
+ * record, and can count how many times one operation records use.
+ */
+static atomic_t pkm_kacs_kunit_mark_used_fail = ATOMIC_INIT(0);
+static atomic_t pkm_kacs_kunit_mark_used_calls = ATOMIC_INIT(0);
+
+bool pkm_kacs_kunit_mark_privileges_used(const void *token, u64 used_mask)
+{
+	atomic_inc(&pkm_kacs_kunit_mark_used_calls);
+	if (atomic_read(&pkm_kacs_kunit_mark_used_fail))
+		return false;
+	return (kacs_rust_token_mark_privileges_used)(token, used_mask);
+}
+
+void pkm_kacs_kunit_set_fail_mark_privileges_used(bool fail)
+{
+	atomic_set(&pkm_kacs_kunit_mark_used_fail, fail ? 1 : 0);
+}
+
+u32 pkm_kacs_kunit_mark_privileges_used_calls(bool reset)
+{
+	u32 calls = (u32)atomic_read(&pkm_kacs_kunit_mark_used_calls);
+
+	if (reset)
+		atomic_set(&pkm_kacs_kunit_mark_used_calls, 0);
+	return calls;
+}

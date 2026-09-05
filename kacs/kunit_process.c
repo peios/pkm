@@ -4,6 +4,8 @@
 #include "lsm_internal.h"
 #include "process_state.h"
 
+#include <linux/prctl.h>
+
 
 static void pkm_kunit_capget_reports_allow_substrate(struct kunit *test)
 {
@@ -2872,6 +2874,9 @@ static void pkm_kunit_exec_commit_preserves_mitigations_and_no_child(
 	KUNIT_EXPECT_PTR_EQ(test, after.process_sd_ptr, before.process_sd_ptr);
 	KUNIT_EXPECT_PTR_EQ(test, after.rate_bucket_ptr,
 			    before.rate_bucket_ptr);
+	/* The GUID names the process, not the binary: it survives the exec. */
+	pkm_kunit_expect_guid_v4(test, before.process_guid);
+	pkm_kunit_expect_guid_eq(test, after.process_guid, before.process_guid);
 	KUNIT_EXPECT_EQ(test, after.mitigation_bits, mitigation_bits);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_no_child_process(
@@ -2890,6 +2895,49 @@ static void pkm_kunit_exec_commit_preserves_mitigations_and_no_child(
 			0);
 }
 
+
+/*
+ * sml's second route: a platform reporting a speculation control as
+ * unconditionally not-affected satisfies activation by that fact alone, with
+ * nothing to enable.  The vCPU under test reports PRCTL|ENABLE, so the
+ * force-disable route is what the live suite sees; this is the other branch.
+ */
+static void pkm_kunit_sml_not_affected_satisfies_activation(struct kunit *test)
+{
+	const unsigned long controls[] = {
+		PR_SPEC_STORE_BYPASS, PR_SPEC_INDIRECT_BRANCH, PR_SPEC_L1D_FLUSH,
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(controls); i++) {
+		KUNIT_EXPECT_TRUE(test,
+			pkm_kacs_kunit_sml_ctrl_is_satisfied(
+				controls[i], PR_SPEC_NOT_AFFECTED));
+		/* An error from the arch never satisfies. */
+		KUNIT_EXPECT_FALSE(test,
+			pkm_kacs_kunit_sml_ctrl_is_satisfied(controls[i],
+							     -EINVAL));
+		/* Nor, for the disable-type controls, one merely available. */
+		if (controls[i] != PR_SPEC_L1D_FLUSH)
+			KUNIT_EXPECT_FALSE(test,
+				pkm_kacs_kunit_sml_ctrl_is_satisfied(
+					controls[i],
+					PR_SPEC_PRCTL | PR_SPEC_ENABLE));
+	}
+	/* The activation targets, for contrast. */
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kacs_kunit_sml_ctrl_is_satisfied(
+			PR_SPEC_STORE_BYPASS, PR_SPEC_PRCTL | PR_SPEC_FORCE_DISABLE));
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kacs_kunit_sml_ctrl_is_satisfied(
+			PR_SPEC_INDIRECT_BRANCH, PR_SPEC_PRCTL | PR_SPEC_DISABLE));
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kacs_kunit_sml_ctrl_is_satisfied(
+			PR_SPEC_L1D_FLUSH, PR_SPEC_PRCTL | PR_SPEC_ENABLE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_kunit_sml_ctrl_is_satisfied(
+			PR_SPEC_L1D_FLUSH, PR_SPEC_PRCTL | PR_SPEC_DISABLE));
+}
 
 static void pkm_kunit_exec_dumpable_decision_tracks_pip(struct kunit *test)
 {
@@ -10073,6 +10121,7 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_exec_pip_pending_is_transactional),
 	KUNIT_CASE(pkm_kunit_exec_pip_unsigned_commit_clears_existing_pip),
 	KUNIT_CASE(pkm_kunit_exec_commit_preserves_mitigations_and_no_child),
+	KUNIT_CASE(pkm_kunit_sml_not_affected_satisfies_activation),
 	KUNIT_CASE(pkm_kunit_exec_dumpable_decision_tracks_pip),
 	KUNIT_CASE(pkm_kunit_exec_dumpable_signed_material_clears_if_mm),
 	KUNIT_CASE(pkm_kunit_lsv_signed_tcb_allows_none_and_tcb_pip),

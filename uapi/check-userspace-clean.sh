@@ -31,4 +31,14 @@ done
 "$cc" "${cflags[@]}" -c "$here/smoke_test.c" -o /dev/null
 echo "  ok  smoke_test.c (<pkm/pkm.h>)"
 
+# 3. The process-integrity ABI names neither None nor Isolated. The kernel
+#    admits only PeiosTcb-trusted signers, so Isolated is unreachable and None
+#    is the absence of a label; a constant for either would invite userspace
+#    to test for states the ABI does not produce (Kernel TRM section 3.3).
+if grep -En '^[[:space:]]*#[[:space:]]*define[[:space:]]+KACS_[A-Z0-9_]*(PIP|PROCESS)[A-Z0-9_]*_(NONE|ISOLATED)\b' "$here"/pkm/*.h; then
+	echo "check-userspace-clean: the ABI must not name a None or Isolated PIP state" >&2
+	exit 1
+fi
+echo "  ok  no None/Isolated PIP constant"
+
 echo "check-userspace-clean: PASS"

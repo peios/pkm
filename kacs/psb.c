@@ -495,6 +495,11 @@ int pkm_kacs_exec_pip_from_file(const struct file *file,
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
+bool pkm_kacs_kunit_sml_ctrl_is_satisfied(unsigned long which, int state)
+{
+	return pkm_kacs_sml_ctrl_is_satisfied(which, state);
+}
+
 int pkm_kacs_kunit_stage_exec_pip_from_signing_material(
 	const struct pkm_kacs_kunit_signing_probe *material, u32 commit,
 	struct pkm_kacs_kunit_process_state_view *out)

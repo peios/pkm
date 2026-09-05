@@ -5,6 +5,11 @@
 #include "file_metadata.h"
 #include "lsm_internal.h"
 #include "object_lifecycle.h"
+#include "file_sd_cache.h"
+#include "mount_policy.h"
+
+#include <linux/magic.h>
+#include <linux/namei.h>
 
 /* Internal VFS constructor exported for stackable-filesystem users. */
 extern struct file *alloc_empty_backing_file(int flags,
@@ -177,6 +182,115 @@ static void pkm_kunit_file_mmap_snapshot_read_and_private_write(
 			-EACCES);
 }
 
+
+
+/*
+ * Section 3.9.5: the nullfs namespace root that Linux mounts beneath rootfs
+ * is unmanaged by its magic, was never seeded, and cannot carry a descriptor
+ * at all.  No pathname resolves to it; the only way there is to step up from
+ * the root mount, which is what this does.
+ */
+static void pkm_kunit_nullfs_root_is_unmanaged_and_unseeded(struct kunit *test)
+{
+	struct pkm_kacs_inode_security *sec;
+	struct path rootfs = { };
+	struct path below = { };
+	struct inode *inode;
+
+	KUNIT_ASSERT_EQ(test, kern_path("/", LOOKUP_DIRECTORY, &rootfs), 0);
+	below = rootfs;
+	path_get(&below);
+	if (!follow_up(&below)) {
+		path_put(&below);
+		path_put(&rootfs);
+		kunit_skip(test, "rootfs is the namespace root here");
+	}
+	inode = d_inode(below.dentry);
+	KUNIT_ASSERT_NOT_NULL(test, inode);
+	KUNIT_ASSERT_NOT_NULL(test, inode->i_security);
+
+	KUNIT_EXPECT_EQ(test, below.dentry->d_sb->s_magic,
+			(unsigned long)NULL_FS_MAGIC);
+	KUNIT_EXPECT_NULL(test, below.dentry->d_sb->s_xattr);
+	KUNIT_EXPECT_TRUE(test, IS_IMMUTABLE(inode));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_mount_policy_for_magic(NULL_FS_MAGIC),
+			(u32)KACS_MOUNT_POLICY_UNMANAGED);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_superblock_mount_policy(below.dentry->d_sb),
+			(u32)KACS_MOUNT_POLICY_UNMANAGED);
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_inode_on_unmanaged_mount(inode));
+	/* Not seeded: nothing was ever stamped onto it... */
+	sec = pkm_kacs_inode(inode);
+	KUNIT_EXPECT_NULL(test, rcu_access_pointer(sec->sd_cache));
+	/* ...whereas the rootfs root above it was. */
+	sec = pkm_kacs_inode(d_inode(rootfs.dentry));
+	KUNIT_EXPECT_NOT_NULL(test, rcu_access_pointer(sec->sd_cache));
+
+	path_put(&below);
+	path_put(&rootfs);
+}
+
+/*
+ * Section 3.9.5: eviction frees the cached descriptor through the RCU
+ * destructor with the same pin draining as invalidation, so a permission
+ * check holding a pin sees the object intact until it lets go.
+ */
+static void pkm_kunit_inode_eviction_drains_pins_before_freeing(
+	struct kunit *test)
+{
+	struct super_block sb = { .s_magic = TMPFS_MAGIC };
+	struct inode inode = { .i_mode = S_IFREG, .i_sb = &sb };
+	struct pkm_kacs_inode_security *sec;
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_inode_sd_cache *pinned;
+	void *sb_blob;
+	void *inode_blob;
+	u8 *bytes;
+
+	sb_blob = kunit_kzalloc(test, pkm_blob_sizes.lbs_superblock +
+					  sizeof(struct pkm_kacs_superblock_security),
+				GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, sb_blob);
+	sb.s_security = sb_blob;
+	KUNIT_ASSERT_EQ(test, pkm_kacs_sb_alloc_security(&sb), 0);
+	inode_blob = kunit_kzalloc(test, pkm_blob_sizes.lbs_inode +
+					     sizeof(struct pkm_kacs_inode_security),
+				   GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, inode_blob);
+	inode.i_security = inode_blob;
+	KUNIT_ASSERT_EQ(test, pkm_kacs_inode_alloc_security(&inode), 0);
+	sec = pkm_kacs_inode(&inode);
+
+	bytes = kmemdup(pkm_kunit_system_read_sd, sizeof(pkm_kunit_system_read_sd),
+			GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, bytes);
+	cache = pkm_kacs_inode_sd_cache_alloc(PKM_KACS_INODE_SD_VALID, bytes,
+					      sizeof(pkm_kunit_system_read_sd));
+	KUNIT_ASSERT_NOT_NULL(test, cache);
+	mutex_lock(&sec->lock);
+	pkm_kacs_inode_replace_sd_cache_locked(sec, cache);
+	mutex_unlock(&sec->lock);
+
+	/* An in-flight check pins the current descriptor... */
+	pinned = pkm_kacs_inode_sd_cache_get_current(&inode, sec);
+	KUNIT_ASSERT_PTR_EQ(test, pinned, cache);
+	KUNIT_EXPECT_EQ(test, refcount_read(&pinned->refs), 2U);
+	/* ...the inode is evicted underneath it... */
+	pkm_kacs_inode_free_security_rcu(inode.i_security);
+	KUNIT_EXPECT_NULL(test, rcu_access_pointer(sec->sd_cache));
+	/* ...and the pinned object is whole until the pin is released. */
+	KUNIT_EXPECT_EQ(test, refcount_read(&pinned->refs), 1U);
+	KUNIT_EXPECT_EQ(test, pinned->state, (u8)PKM_KACS_INODE_SD_VALID);
+	KUNIT_EXPECT_EQ(test, pinned->len,
+			(size_t)sizeof(pkm_kunit_system_read_sd));
+	if (pinned->len == sizeof(pkm_kunit_system_read_sd))
+		KUNIT_EXPECT_MEMEQ(test, pinned->bytes, pkm_kunit_system_read_sd,
+				   sizeof(pkm_kunit_system_read_sd));
+	pkm_kacs_inode_sd_cache_free(pinned);
+
+	inode.i_security = NULL;
+	pkm_kacs_sb_free_security(&sb);
+}
 
 static void pkm_kunit_backing_file_inherits_exact_outer_snapshot(
 	struct kunit *test)
@@ -10564,6 +10678,8 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_backing_file_inherits_exact_outer_snapshot),
 	KUNIT_CASE(pkm_kunit_backing_file_rejects_unsettled_outer_handles),
 	KUNIT_CASE(pkm_kunit_copy_up_backing_file_requires_explicit_adoption),
+	KUNIT_CASE(pkm_kunit_nullfs_root_is_unmanaged_and_unseeded),
+	KUNIT_CASE(pkm_kunit_inode_eviction_drains_pins_before_freeing),
 	KUNIT_CASE(pkm_kunit_file_fsync_requires_synchronize_snapshot),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_exec),

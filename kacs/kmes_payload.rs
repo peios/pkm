@@ -519,7 +519,7 @@ fn encode_continuous_audit_payload(
     Ok(writer.into_vec())
 }
 
-fn encode_logon_session_destroyed_payload(
+pub(crate) fn encode_logon_session_destroyed_payload(
     session_id: u64,
     user_sid: &[u8],
     logon_type: u32,

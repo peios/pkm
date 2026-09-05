@@ -49,7 +49,7 @@ use crate::lcs_core::casefold_eq;
 use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
 use crate::kmes_payload::{
     emit_access_check_events_to_kmes, emit_continuous_audit_to_kmes,
-    emit_logon_session_destroyed_to_kmes,
+    encode_logon_session_destroyed_payload, emit_logon_session_destroyed_to_kmes,
 };
 use crate::mic::{
     IntegrityLevel, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
@@ -11710,6 +11710,28 @@ pub extern "C" fn kacs_rust_kunit_logon_session_snapshot(
 
     session.snapshot(out);
     0
+}
+
+#[no_mangle]
+/// Runs the `logon-session-destroyed` payload encoder over an arbitrary
+/// authentication-package name, so KUnit can witness the drop condition the
+/// live path can never reach: the name is validated as UTF-8 when the session
+/// is created, so only a probe can hand the encoder anything else.  Returns 0
+/// when a payload was encoded, or the negative errno the emitter would drop
+/// the event on.
+pub extern "C" fn kacs_rust_kunit_encode_logon_session_destroyed_probe(
+    auth_package: *const u8,
+    auth_package_len: usize,
+) -> c_long {
+    if auth_package.is_null() {
+        return -EINVAL as c_long;
+    }
+    let name = unsafe { core::slice::from_raw_parts(auth_package, auth_package_len) };
+    let user_sid: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
+    match encode_logon_session_destroyed_payload(7, &user_sid, 2, name, 1) {
+        Ok(_) => 0,
+        Err(errno) => errno,
+    }
 }
 
 #[no_mangle]

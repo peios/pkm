@@ -654,6 +654,18 @@ bool kacs_rust_token_has_enabled_administrators(const void *token);
 int kacs_rust_token_is_remote_shutdown_origin(const void *token);
 bool kacs_rust_token_has_new_process_min(const void *token);
 bool kacs_rust_token_mark_privileges_used(const void *token, u64 used_mask);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+/*
+ * KUnit interposes on the used-privilege record so a case can count the
+ * calls a gate makes and force the record to fail; every C gate reaches the
+ * Rust recorder through this name.
+ */
+bool pkm_kacs_kunit_mark_privileges_used(const void *token, u64 used_mask);
+void pkm_kacs_kunit_set_fail_mark_privileges_used(bool fail);
+u32 pkm_kacs_kunit_mark_privileges_used_calls(bool reset);
+#define kacs_rust_token_mark_privileges_used(token, used_mask) \
+	pkm_kacs_kunit_mark_privileges_used((token), (used_mask))
+#endif
 int kacs_rust_token_open_check(const void *subject_token, const void *target_token,
 			       u32 desired_access, u32 pip_type,
 			       u32 pip_trust, u32 *granted_out);
@@ -902,6 +914,8 @@ bool kacs_rust_kunit_boot_snapshot(struct pkm_kacs_boot_snapshot *out);
 int kacs_rust_kunit_logon_session_snapshot(
 	u64 logon_session_id, struct pkm_kacs_logon_session_snapshot *out);
 int kacs_rust_kunit_build_logon_sid(u64 logon_session_id, u8 *out);
+long kacs_rust_kunit_encode_logon_session_destroyed_probe(
+	const u8 *auth_package, size_t auth_package_len);
 const void *kacs_rust_kunit_create_query_only_token(void);
 const void *kacs_rust_kunit_create_without_tcb_token(void);
 const void *kacs_rust_kunit_create_adjustable_groups_token(void);
@@ -957,6 +971,7 @@ int pkm_kacs_kunit_token_eval_context_allowed(u32 task_context,
 					      u32 has_cred,
 					      u32 has_security_blob,
 					      u32 has_token);
+bool pkm_kacs_kunit_sml_ctrl_is_satisfied(unsigned long which, int state);
 const void *pkm_kacs_kunit_current_process_state_ptr(void);
 const void *pkm_kacs_kunit_current_effective_cred_process_state_ptr(void);
 const void *pkm_kacs_kunit_current_real_cred_process_state_ptr(void);

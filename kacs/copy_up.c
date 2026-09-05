@@ -39,6 +39,12 @@
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 #include <kunit/test.h>
+#include <linux/capability.h>
+#include <linux/completion.h>
+#include <linux/file.h>
+#include <linux/kthread.h>
+#include <linux/namei.h>
+#include <linux/posix_acl_xattr.h>
 #include "kunit_common.h"
 #endif
 
@@ -3088,6 +3094,22 @@ static void pkm_kunit_overlay_copy_up_sd_is_not_inherited(struct kunit *test)
 
 	/* cred_prepare cloned the token; release what it took. */
 	pkm_kacs_cred_free(&new_cred);
+
+	/* The same guard on the transfer path. */
+	memset(cred_blob, 0, pkm_blob_sizes.lbs_cred +
+			     sizeof(struct pkm_kacs_cred_security));
+	new_sec->pending_create_sd = (u8 *)pkm_kunit_system_read_sd;
+	new_sec->pending_create_sd_len = sizeof(pkm_kunit_system_read_sd);
+	old_sec->pending_create_sd = (u8 *)pkm_kunit_system_read_sd;
+	old_sec->pending_create_sd_len = sizeof(pkm_kunit_system_read_sd);
+	pkm_kacs_cred_transfer(&new_cred, current_cred());
+	old_sec->pending_create_sd = saved_sd;
+	old_sec->pending_create_sd_len = saved_len;
+	KUNIT_EXPECT_NULL(test, new_sec->pending_create_sd);
+	KUNIT_EXPECT_EQ(test, new_sec->pending_create_sd_len, (size_t)0);
+	new_sec->pending_create_sd = NULL;
+	new_sec->pending_create_sd_len = 0;
+	pkm_kacs_cred_free(&new_cred);
 }
 
 /*
@@ -3323,6 +3345,1447 @@ static void pkm_kunit_post_setxattr_keeps_an_unrelated_cache(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, survived);
 }
 
+/*
+ * ---- The phase machinery, driven the way StrataFS drives it -------------
+ *
+ * The cases above poke a context's fields and ask the hook predicates.  The
+ * ones below go through the entry points StrataFS calls, against a private
+ * tmpfs the test mounts for itself, so the hooks fire from the real VFS paths
+ * (vfs_create, kernel_tmpfile_open, vfs_link, vfs_unlink, dentry_open) with
+ * real dentries, inodes and mounts to pin.  The tree is
+ *
+ *   /            SYSTEM full control, inheritable, installed raw
+ *   /provider    a regular file re-labelled with pkm_kunit_system_read_sd,
+ *                so a copy of *its* descriptor is distinguishable from one
+ *                inherited from a parent
+ *   /up          the destination parent
+ *   /elsewhere   a second directory, for parent substitution
+ *
+ * The copy-up itself runs as a LocalService principal holding no privilege
+ * and named by no ACE in the tree.  Everything the context does not exempt is
+ * then refused by ordinary authorization, and everything it does exempt
+ * visibly is not -- which is the whole claim of section 3.9.7.
+ */
+
+#define PKM_KUNIT_COPY_UP_SD_XATTR "security.peios.sd"
+#define PKM_KUNIT_COPY_UP_FILE_ALL                                            \
+	(KACS_FILE_READ_DATA | KACS_FILE_WRITE_DATA | KACS_FILE_APPEND_DATA | \
+	 KACS_FILE_READ_EA | KACS_FILE_WRITE_EA | KACS_FILE_EXECUTE |          \
+	 KACS_FILE_DELETE_CHILD | KACS_FILE_READ_ATTRIBUTES |                  \
+	 KACS_FILE_WRITE_ATTRIBUTES | KACS_ACCESS_DELETE |                     \
+	 KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC |                    \
+	 KACS_ACCESS_WRITE_OWNER | KACS_ACCESS_SYNCHRONIZE)
+/* A mask bit no MAY_* flag uses: the "unknown bit" of the mask rules. */
+#define PKM_KUNIT_COPY_UP_UNKNOWN_MAY 0x100
+#define PKM_KUNIT_EXPECT_PHASE(test, ctx, expected) \
+	KUNIT_EXPECT_EQ(test, (int)(ctx)->phase, (int)(expected))
+
+/* Internal VFS constructor exported for stackable-filesystem users. */
+extern struct file *alloc_empty_backing_file(int flags,
+					      const struct cred *cred,
+					      const struct file *user_file);
+extern void backing_file_set_user_path(struct file *f,
+				       const struct path *path);
+
+struct pkm_kunit_copy_up_tree {
+	struct file_system_type *type;
+	struct vfsmount *mnt;
+	struct path root;
+	struct path provider;
+	struct path up;
+	struct path elsewhere;
+	struct cred *subject;
+	const struct cred *saved;
+};
+
+/* Plant a stored descriptor the way an offline tool would: raw xattr write,
+ * then the post-setxattr hook so no stale parse survives. */
+static int pkm_kunit_copy_up_install_sd(const struct path *path, const u8 *sd,
+					size_t len)
+{
+	struct dentry *dentry = path->dentry;
+	struct inode *inode = d_inode(dentry);
+	int ret;
+
+	inode_lock(inode);
+	ret = __vfs_setxattr(mnt_idmap(path->mnt), dentry, inode,
+			     PKM_KUNIT_COPY_UP_SD_XATTR, sd, len, 0);
+	inode_unlock(inode);
+	if (ret)
+		return ret;
+	pkm_kacs_inode_post_setxattr(dentry, PKM_KUNIT_COPY_UP_SD_XATTR, sd,
+				     len, 0);
+	return 0;
+}
+
+static int pkm_kunit_copy_up_raw_setxattr(const struct path *path,
+					  const char *name, const void *value,
+					  size_t size)
+{
+	struct inode *inode = d_inode(path->dentry);
+	int ret;
+
+	inode_lock(inode);
+	ret = __vfs_setxattr(mnt_idmap(path->mnt), path->dentry, inode, name,
+			     value, size, 0);
+	inode_unlock(inode);
+	return ret;
+}
+
+static ssize_t pkm_kunit_copy_up_raw_getxattr(const struct path *path,
+					      const char *name, void *buf,
+					      size_t size)
+{
+	return __vfs_getxattr(path->dentry, d_inode(path->dentry), name, buf,
+			      size);
+}
+
+/* Create `name` under `dir` as the current credential, through the VFS. */
+static int pkm_kunit_copy_up_make(struct pkm_kunit_copy_up_tree *t,
+				  const struct path *dir, const char *name,
+				  umode_t mode, struct path *out)
+{
+	struct mnt_idmap *idmap = mnt_idmap(t->mnt);
+	struct qstr q = QSTR(name);
+	struct dentry *dentry;
+	int ret;
+
+	dentry = start_creating(idmap, dir->dentry, &q);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+	if (S_ISDIR(mode)) {
+		struct dentry *made = vfs_mkdir(idmap, d_inode(dir->dentry),
+						dentry, mode & 0777, NULL);
+
+		if (IS_ERR(made)) {
+			/* vfs_mkdir consumed the dentry; the parent is ours. */
+			inode_unlock(d_inode(dir->dentry));
+			return PTR_ERR(made);
+		}
+		dentry = made;
+	} else {
+		ret = vfs_create(idmap, dentry, mode, NULL);
+		if (ret) {
+			end_creating(dentry);
+			return ret;
+		}
+	}
+	out->mnt = mntget(t->mnt);
+	out->dentry = dget(dentry);
+	end_creating(dentry);
+	return 0;
+}
+
+/* A locked negative dentry for `name` under `dir`, with no permission check
+ * of its own -- the way a filesystem that already holds authority obtains
+ * one.  Release with end_creating(). */
+static struct dentry *pkm_kunit_copy_up_negative(const struct path *dir,
+						 const char *name)
+{
+	struct qstr q = QSTR(name);
+
+	return start_creating_noperm(dir->dentry, &q);
+}
+
+static int pkm_kunit_copy_up_become_subject(struct pkm_kunit_copy_up_tree *t)
+{
+	struct pkm_kacs_cred_security *sec;
+	const void *token;
+	struct cred *cred;
+
+	token = kacs_rust_kunit_create_local_administrator_token();
+	if (!token)
+		return -ENOMEM;
+	cred = prepare_creds();
+	if (!cred) {
+		kacs_rust_token_drop(token);
+		return -ENOMEM;
+	}
+	sec = pkm_kacs_cred(cred);
+	if (sec->token)
+		kacs_rust_token_drop(sec->token);
+	sec->token = token;
+	pkm_kacs_stamp_projected_ids(sec);
+	t->subject = cred;
+	t->saved = override_creds(cred);
+	return 0;
+}
+
+static void pkm_kunit_copy_up_be_system(struct pkm_kunit_copy_up_tree *t)
+{
+	if (t->saved) {
+		revert_creds(t->saved);
+		t->saved = NULL;
+	}
+}
+
+static void pkm_kunit_copy_up_be_subject(struct pkm_kunit_copy_up_tree *t)
+{
+	if (!t->saved && t->subject)
+		t->saved = override_creds(t->subject);
+}
+
+static void pkm_kunit_copy_up_tree_exit(struct pkm_kunit_copy_up_tree *t)
+{
+	pkm_kunit_copy_up_be_system(t);
+	if (t->subject)
+		abort_creds(t->subject);
+	path_put(&t->elsewhere);
+	path_put(&t->up);
+	path_put(&t->provider);
+	path_put(&t->root);
+	if (t->mnt)
+		kern_unmount(t->mnt);
+	if (t->type)
+		put_filesystem(t->type);
+	memset(t, 0, sizeof(*t));
+}
+
+static int pkm_kunit_copy_up_tree_init(struct pkm_kunit_copy_up_tree *t)
+{
+	const u8 *sd = NULL;
+	size_t sd_len = 0;
+	int ret;
+
+	memset(t, 0, sizeof(*t));
+	t->type = get_fs_type("tmpfs");
+	if (!t->type)
+		return -ENODEV;
+	t->mnt = vfs_kern_mount(t->type, 0, "tmpfs", NULL);
+	if (IS_ERR(t->mnt)) {
+		ret = PTR_ERR(t->mnt);
+		t->mnt = NULL;
+		goto err;
+	}
+	t->root.mnt = mntget(t->mnt);
+	t->root.dentry = dget(t->mnt->mnt_root);
+
+	sd = pkm_kunit_create_precise_file_sd(
+		pkm_kacs_current_effective_token_ptr(),
+		PKM_KUNIT_COPY_UP_FILE_ALL, &sd_len);
+	if (!sd) {
+		ret = -ENOMEM;
+		goto err;
+	}
+	pkm_kunit_make_first_file_ace_inheritable((u8 *)sd, 0x03);
+	ret = pkm_kunit_copy_up_install_sd(&t->root, sd, sd_len);
+	pkm_kacs_free((void *)sd);
+	if (ret)
+		goto err;
+
+	ret = pkm_kunit_copy_up_make(t, &t->root, "provider", S_IFREG | 0600,
+				     &t->provider);
+	if (ret)
+		goto err;
+	ret = pkm_kunit_copy_up_install_sd(&t->provider,
+					   pkm_kunit_system_read_sd,
+					   sizeof(pkm_kunit_system_read_sd));
+	if (ret)
+		goto err;
+	ret = pkm_kunit_copy_up_make(t, &t->root, "up", S_IFDIR | 0700,
+				     &t->up);
+	if (ret)
+		goto err;
+	ret = pkm_kunit_copy_up_make(t, &t->root, "elsewhere", S_IFDIR | 0700,
+				     &t->elsewhere);
+	if (ret)
+		goto err;
+	return pkm_kunit_copy_up_become_subject(t);
+err:
+	pkm_kunit_copy_up_tree_exit(t);
+	return ret;
+}
+
+/* The provider's stored descriptor, read raw, for byte comparisons. */
+static void pkm_kunit_copy_up_expect_sd_xattr_eq(struct kunit *test,
+						 const struct path *path,
+						 const u8 *expected,
+						 size_t expected_len)
+{
+	u8 *buf;
+	ssize_t got;
+
+	buf = kunit_kzalloc(test, PKM_KACS_MAX_SD_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	got = pkm_kunit_copy_up_raw_getxattr(path, PKM_KUNIT_COPY_UP_SD_XATTR,
+					     buf, PKM_KACS_MAX_SD_BYTES);
+	KUNIT_EXPECT_EQ(test, got, (ssize_t)expected_len);
+	if (got == (ssize_t)expected_len)
+		KUNIT_EXPECT_MEMEQ(test, buf, expected, expected_len);
+}
+
+/* A valid version-2 file capability: CAP_NET_BIND_SERVICE permitted. */
+static void pkm_kunit_copy_up_fill_capability(struct vfs_cap_data *cap)
+{
+	memset(cap, 0, sizeof(*cap));
+	cap->magic_etc = cpu_to_le32(VFS_CAP_REVISION_2);
+	cap->data[0].permitted = cpu_to_le32(1U << CAP_NET_BIND_SERVICE);
+}
+
+/*
+ * Admission and lifetime: creation performs no check and pins the provider.
+ *
+ * The subject has no right whatsoever on the provider -- ordinary evaluation
+ * refuses it even a read -- yet the context is created, and what it pins is
+ * exactly the provider's path, inode, stored descriptor and capability
+ * value (or its absence).  A provider whose descriptor cannot be resolved
+ * fails the phase before anything is created.
+ */
+static void pkm_kunit_copy_up_begin_pins_provider_without_a_check(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct vfs_cap_data cap;
+	struct path bad = {};
+	struct dentry *stage;
+	struct file *file;
+	static const u8 garbage[] = { 0x01, 0x00, 0xff, 0xff, 0x00, 0x00 };
+	int ret;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+
+	/* This principal is refused a read of the provider by ordinary rules. */
+	file = dentry_open(&tree.provider, O_RDONLY, current_cred());
+	KUNIT_EXPECT_TRUE(test, IS_ERR(file));
+	if (!IS_ERR(file))
+		__fput_sync(file);
+
+	context = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+	KUNIT_EXPECT_PTR_EQ(test, task_sec->copy_up_context, context);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	KUNIT_EXPECT_TRUE(test, path_equal(&context->provider, &tree.provider));
+	KUNIT_EXPECT_PTR_EQ(test, context->provider_inode,
+			    d_inode(tree.provider.dentry));
+	KUNIT_EXPECT_EQ(test, context->provider_sd_len,
+			(size_t)sizeof(pkm_kunit_system_read_sd));
+	if (context->provider_sd_len == sizeof(pkm_kunit_system_read_sd))
+		KUNIT_EXPECT_MEMEQ(test, context->provider_sd,
+				   pkm_kunit_system_read_sd,
+				   sizeof(pkm_kunit_system_read_sd));
+	KUNIT_EXPECT_FALSE(test, context->provider_capability_present);
+	KUNIT_EXPECT_NULL(test, context->provider_capability);
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+
+	/* With a capability on the provider, that value is pinned too. */
+	pkm_kunit_copy_up_fill_capability(&cap);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_raw_setxattr(&tree.provider, XATTR_NAME_CAPS,
+					       &cap, sizeof(cap)), 0);
+	context = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+	KUNIT_EXPECT_TRUE(test, context->provider_capability_present);
+	KUNIT_EXPECT_EQ(test, context->provider_capability_len, sizeof(cap));
+	if (context->provider_capability_len == sizeof(cap))
+		KUNIT_EXPECT_MEMEQ(test, context->provider_capability, &cap,
+				   sizeof(cap));
+
+	/*
+	 * A second provider wearing bytes that do not parse: arming a create
+	 * phase for it fails, nothing is armed, and the destination stays
+	 * negative.
+	 */
+	pkm_kunit_copy_up_be_system(&tree);
+	ret = pkm_kunit_copy_up_make(&tree, &tree.root, "bad", S_IFREG | 0600,
+				     &bad);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_install_sd(&bad, garbage, sizeof(garbage)),
+		0);
+	pkm_kunit_copy_up_be_subject(&tree);
+	stage = pkm_kunit_copy_up_negative(&tree.up, "stage");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(stage));
+	ret = pkm_kacs_stratafs_copy_up_begin_create(
+		context, &bad, &tree.up, stage, S_IFREG | 0600);
+	KUNIT_EXPECT_LT(test, ret, 0);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	KUNIT_EXPECT_FALSE(test, context->phase_provider_pinned);
+	KUNIT_EXPECT_TRUE(test, d_is_negative(stage));
+	end_creating(stage);
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	/* And no context can be created over it at all. */
+	context = pkm_kacs_stratafs_copy_up_begin(&bad);
+	KUNIT_EXPECT_TRUE(test, IS_ERR(context));
+	if (!IS_ERR(context)) {
+		pkm_kacs_stratafs_copy_up_leave(context);
+		pkm_kacs_stratafs_copy_up_put(context);
+	}
+	path_put(&bad);
+	pkm_kunit_copy_up_tree_exit(&tree);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+}
+
+struct pkm_kunit_copy_up_worker {
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct completion attached;
+	struct completion release;
+	struct completion done;
+	void *inherited;
+	int enter_ret;
+	int arm_ret;
+	u64 generation;
+};
+
+static int pkm_kunit_copy_up_worker_fn(void *arg)
+{
+	struct pkm_kunit_copy_up_worker *w = arg;
+
+	w->inherited = pkm_kacs_task(current)->copy_up_context;
+	w->enter_ret = pkm_kacs_stratafs_copy_up_enter(w->context);
+	if (!w->enter_ret) {
+		w->arm_ret = pkm_kacs_stratafs_copy_up_begin_source_read(
+			w->context);
+		w->generation = w->context->phase_generation;
+		pkm_kacs_stratafs_copy_up_end_phase(w->context);
+	}
+	complete(&w->attached);
+	wait_for_completion(&w->release);
+	if (!w->enter_ret)
+		pkm_kacs_stratafs_copy_up_leave(w->context);
+	complete(&w->done);
+	return 0;
+}
+
+static void pkm_kunit_copy_up_worker_init(struct pkm_kunit_copy_up_worker *w,
+					  struct pkm_kacs_stratafs_copy_up *ctx)
+{
+	memset(w, 0, sizeof(*w));
+	w->context = ctx;
+	w->inherited = (void *)0x1;
+	w->enter_ret = -EIO;
+	w->arm_ret = -EIO;
+	init_completion(&w->attached);
+	init_completion(&w->release);
+	init_completion(&w->done);
+}
+
+/*
+ * One context per task, not inherited, transferable to a worker once the
+ * originator has left, and cleared of any armed phase by every way out.
+ */
+static void pkm_kunit_copy_up_attachment_is_exclusive_and_transferable(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct pkm_kacs_stratafs_copy_up *second;
+	struct pkm_kunit_copy_up_worker worker;
+	struct task_struct *task;
+	u64 generation;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	context = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+
+	/* A task carries at most one: a second creation cannot attach. */
+	second = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_EXPECT_TRUE(test, IS_ERR(second));
+	if (IS_ERR(second))
+		KUNIT_EXPECT_EQ(test, PTR_ERR(second), -EBUSY);
+	KUNIT_EXPECT_PTR_EQ(test, task_sec->copy_up_context, context);
+
+	/*
+	 * Concurrent attachment: a worker cannot enter while we hold it, and
+	 * a task it was never attached to did not inherit it.
+	 */
+	pkm_kunit_copy_up_worker_init(&worker, context);
+	task = kthread_run(pkm_kunit_copy_up_worker_fn, &worker,
+			   "pkm-kunit-copy-up");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	wait_for_completion(&worker.attached);
+	KUNIT_EXPECT_NULL(test, worker.inherited);
+	KUNIT_EXPECT_EQ(test, worker.enter_ret, -EBUSY);
+	complete(&worker.release);
+	wait_for_completion(&worker.done);
+	KUNIT_EXPECT_PTR_EQ(test, task_sec->copy_up_context, context);
+
+	/* Leaving with a phase armed clears it. */
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	generation = context->phase_generation;
+	pkm_kacs_stratafs_copy_up_leave(context);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	KUNIT_EXPECT_EQ(test, atomic_read(&context->attached), 0);
+	KUNIT_EXPECT_EQ(test, refcount_read(&context->refs), 1U);
+
+	/* A detached context refuses every phase operation from us. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), -EPERM);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_populate(context), -EPERM);
+	KUNIT_EXPECT_EQ(test, context->phase_generation, generation);
+
+	/* Transfer: the worker enters the refcounted context and drives it. */
+	pkm_kunit_copy_up_worker_init(&worker, context);
+	KUNIT_ASSERT_NOT_NULL(test, pkm_kacs_stratafs_copy_up_get(context));
+	task = kthread_run(pkm_kunit_copy_up_worker_fn, &worker,
+			   "pkm-kunit-copy-up");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	wait_for_completion(&worker.attached);
+	KUNIT_EXPECT_EQ(test, worker.enter_ret, 0);
+	KUNIT_EXPECT_EQ(test, worker.arm_ret, 0);
+	KUNIT_EXPECT_EQ(test, worker.generation, generation + 1);
+	/* ...and while it holds the context, nobody else may attach. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_stratafs_copy_up_enter(context), -EBUSY);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+	complete(&worker.release);
+	wait_for_completion(&worker.done);
+	pkm_kacs_stratafs_copy_up_put(context);
+	KUNIT_EXPECT_EQ(test, atomic_read(&context->attached), 0);
+	KUNIT_EXPECT_EQ(test, refcount_read(&context->refs), 1U);
+
+	/* Back with us: task exit clears an armed phase and detaches. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_stratafs_copy_up_enter(context), 0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	pkm_kacs_copy_up_task_exit(current);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+
+	/* Exec explicitly clears it: the commit hook detaches the same way. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_stratafs_copy_up_enter(context), 0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_exec_committing_creds_for_current(),
+			0L);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	KUNIT_EXPECT_EQ(test, atomic_read(&context->attached), 0);
+
+	/* An error path leaves no phase behind either. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_stratafs_copy_up_enter(context), 0);
+	generation = context->phase_generation;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_create(
+			context, &tree.provider, &tree.up, NULL,
+			S_IFCHR | 0600), -EINVAL);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	KUNIT_EXPECT_EQ(test, context->phase_generation, generation);
+	/* And completion: end_phase. */
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	pkm_kunit_copy_up_tree_exit(&tree);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+}
+
+/*
+ * One phase at a time, each with a fresh generation; a stale precondition
+ * fails closed before anything is armed.
+ */
+static void pkm_kunit_copy_up_phases_are_exclusive_and_generations_sealed(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct dentry *stage;
+	u64 generation;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	context = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+	generation = context->phase_generation;
+	KUNIT_EXPECT_GE(test, generation, 1ULL);
+
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	KUNIT_EXPECT_EQ(test, context->phase_generation, generation + 1);
+	/* A second arm of any kind is refused and consumes no generation. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), -EBUSY);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_orphan_marker_cleanup(context),
+		-EBUSY);
+	stage = pkm_kunit_copy_up_negative(&tree.up, "stage");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(stage));
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_create(
+			context, &tree.provider, &tree.up, stage,
+			S_IFREG | 0600), -EBUSY);
+	end_creating(stage);
+	KUNIT_EXPECT_EQ(test, context->phase_generation, generation + 1);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_SOURCE_READ);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+
+	/* Overflowing the generation fails closed. */
+	context->phase_generation = U64_MAX;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context),
+		-EOVERFLOW);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	context->phase_generation = generation + 1;
+
+	/* Nothing is bound yet: every phase that needs a binding is refused. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_populate(context), -EINVAL);
+	stage = pkm_kunit_copy_up_negative(&tree.up, "final");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(stage));
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_publish_link(
+			context, &tree.up, stage), -EINVAL);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_publish_rename(
+			context, &tree.up, stage), -EINVAL);
+	end_creating(stage);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_rebind_staging(context, &tree.provider),
+		-ESTALE);
+	/* The provider is not a retained creation nor the staging object. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_cleanup(
+			context, &tree.root, tree.provider.dentry, false),
+		-ESTALE);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	KUNIT_EXPECT_EQ(test, context->phase_generation, generation + 1);
+
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	pkm_kunit_copy_up_tree_exit(&tree);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+}
+
+/*
+ * The named copy-up, end to end, as a principal with no rights anywhere:
+ * create the staged object under an armed create phase (installing the
+ * pinned descriptor, not an inherited one), bind it, populate it, publish it
+ * by link, rebind, and clean the old name up -- with every mismatched
+ * operation along the way evaluated normally and refused.
+ */
+static void pkm_kunit_copy_up_named_flow_is_exact_and_exempt(struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_copy_up_created *created;
+	struct mnt_idmap *idmap;
+	struct inode *up_inode;
+	struct dentry *stage;
+	struct dentry *other;
+	struct dentry *final;
+	struct dentry *trap;
+	struct path stage_path = {};
+	struct path final_path = {};
+	struct renamedata rd = {};
+	int ret;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	idmap = mnt_idmap(tree.mnt);
+	up_inode = d_inode(tree.up.dentry);
+	context = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+
+	/* -- create ---------------------------------------------------- */
+	stage = pkm_kunit_copy_up_negative(&tree.up, "stage");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(stage));
+	other = lookup_noperm(&QSTR("other"), tree.up.dentry);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(other));
+
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_create(
+			context, &tree.provider, &tree.up, stage,
+			S_IFREG | 0600), 0);
+	KUNIT_EXPECT_TRUE(test, context->phase_provider_pinned);
+	KUNIT_EXPECT_PTR_EQ(test, context->phase_provider_inode,
+			    d_inode(tree.provider.dentry));
+	KUNIT_EXPECT_PTR_EQ(test, context->phase_parent_inode, up_inode);
+	KUNIT_EXPECT_PTR_EQ(test, context->phase_dentry, stage);
+
+	/* Another name in the same parent: evaluated normally, refused. */
+	KUNIT_EXPECT_EQ(test, vfs_create(idmap, other, S_IFREG | 0600, NULL),
+			-EACCES);
+	KUNIT_EXPECT_TRUE(test, d_is_negative(other));
+	KUNIT_EXPECT_FALSE(test, context->phase_create_seen);
+	/* The right name with the wrong object type: refused, not consumed. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_mkdir(up_inode, stage, S_IFDIR | 0700),
+			-EACCES);
+	KUNIT_EXPECT_TRUE(test, d_is_negative(stage));
+	KUNIT_EXPECT_FALSE(test, context->phase_create_seen);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_CREATE);
+
+	/* The exact armed creation succeeds for a principal the parent
+	 * grants nothing, and the new inode wears the provider's bytes. */
+	ret = vfs_create(idmap, stage, S_IFREG | 0600, NULL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_EXPECT_TRUE(test, context->phase_create_seen);
+	KUNIT_EXPECT_TRUE(test, context->phase_init_security_seen);
+	KUNIT_EXPECT_PTR_EQ(test, context->pending_created_inode,
+			    d_inode(stage));
+	created = list_first_entry_or_null(&context->created_objects,
+					   struct pkm_kacs_copy_up_created,
+					   node);
+	KUNIT_EXPECT_NOT_NULL(test, created);
+	if (created) {
+		KUNIT_EXPECT_PTR_EQ(test, created->path.dentry, stage);
+		KUNIT_EXPECT_PTR_EQ(test, created->inode, d_inode(stage));
+		KUNIT_EXPECT_PTR_EQ(test, created->parent_inode, up_inode);
+	}
+	stage_path.mnt = mntget(tree.mnt);
+	stage_path.dentry = dget(stage);
+	pkm_kunit_copy_up_expect_sd_xattr_eq(test, &stage_path,
+					     pkm_kunit_system_read_sd,
+					     sizeof(pkm_kunit_system_read_sd));
+	cache = pkm_kacs_inode_sd_cache_get_current(
+		d_inode(stage), pkm_kacs_inode(d_inode(stage)));
+	KUNIT_EXPECT_NOT_NULL(test, cache);
+	if (cache) {
+		KUNIT_EXPECT_EQ(test, cache->state, (u8)PKM_KACS_INODE_SD_VALID);
+		KUNIT_EXPECT_EQ(test, cache->len,
+				(size_t)sizeof(pkm_kunit_system_read_sd));
+		if (cache->len == sizeof(pkm_kunit_system_read_sd))
+			KUNIT_EXPECT_MEMEQ(test, cache->bytes,
+					   pkm_kunit_system_read_sd,
+					   sizeof(pkm_kunit_system_read_sd));
+		pkm_kacs_inode_sd_cache_free(cache);
+	}
+	/* A second creation in the same phase is not admitted. */
+	KUNIT_EXPECT_EQ(test, vfs_create(idmap, other, S_IFREG | 0600, NULL),
+			-EACCES);
+	/* A direct filesystem: the outer confirmation is already satisfied. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_confirm_named_create(context,
+							       &stage_path), 0);
+	dput(other);
+	end_creating(stage);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+
+	/* -- bind and populate ----------------------------------------- */
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_bind_staging(context, &stage_path), 0);
+	KUNIT_EXPECT_TRUE(test, context->staging_bound);
+	KUNIT_EXPECT_PTR_EQ(test, context->staging_inode, d_inode(stage));
+	KUNIT_EXPECT_PTR_EQ(test, context->staging_parent_inode, up_inode);
+	KUNIT_EXPECT_NULL(test, context->pending_created_inode);
+	/* Binding is one-shot. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_bind_staging(context, &stage_path),
+		-EBUSY);
+
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_populate(context), 0);
+	/*
+	 * Masks, at the predicate (inode_permission itself evaluates only
+	 * traverse and pathname-socket writes, so it cannot show a refusal
+	 * for the other masks): the staged object takes what population
+	 * needs, not execute on a regular file, and not an unknown bit; the
+	 * provider is read-only; the parent is not admitted in this phase.
+	 */
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kacs_copy_up_allows_inode_permission(
+			d_inode(stage), MAY_READ | MAY_WRITE | MAY_APPEND));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_copy_up_allows_inode_permission(d_inode(stage),
+							 MAY_EXEC));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_copy_up_allows_inode_permission(
+			d_inode(stage), MAY_WRITE | PKM_KUNIT_COPY_UP_UNKNOWN_MAY));
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kacs_copy_up_allows_inode_permission(
+			d_inode(tree.provider.dentry), MAY_READ));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_copy_up_allows_inode_permission(
+			d_inode(tree.provider.dentry), MAY_WRITE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_copy_up_allows_inode_permission(up_inode,
+							 MAY_WRITE | MAY_EXEC));
+	/* A traverse of the parent is evaluated normally and refused. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_permission(up_inode, MAY_EXEC),
+			-EACCES);
+	/* Eligible xattrs land on the staged object only. */
+	KUNIT_EXPECT_EQ(test,
+		vfs_setxattr(idmap, stage, "user.copy", "x", 1, 0), 0);
+	KUNIT_EXPECT_EQ(test,
+		vfs_setxattr(idmap, tree.provider.dentry, "user.copy", "x", 1,
+			     0), -EACCES);
+	/* The canonical descriptor, a POSIX ACL and a raw capability stay
+	 * denied inside the context. */
+	KUNIT_EXPECT_NE(test,
+		pkm_kacs_inode_setxattr(idmap, stage, PKM_KUNIT_COPY_UP_SD_XATTR,
+					pkm_kunit_system_read_sd,
+					sizeof(pkm_kunit_system_read_sd), 0), 0);
+	KUNIT_EXPECT_NE(test,
+		pkm_kacs_inode_setxattr(idmap, stage, XATTR_NAME_POSIX_ACL_ACCESS,
+					"x", 1, 0), 0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_inode_setxattr(idmap, stage, XATTR_NAME_CAPS, "x", 1,
+					0), -EPERM);
+
+	/*
+	 * Parent substitution invalidates the binding while the staged
+	 * dentry and inode are unchanged: move it into /elsewhere (as
+	 * SYSTEM, out of band), and the populate exemptions are gone.
+	 */
+	pkm_kunit_copy_up_be_system(&tree);
+	trap = lock_rename(tree.elsewhere.dentry, tree.up.dentry);
+	KUNIT_ASSERT_NULL(test, trap);
+	other = lookup_noperm(&QSTR("moved"), tree.elsewhere.dentry);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(other));
+	rd.mnt_idmap = idmap;
+	rd.old_parent = tree.up.dentry;
+	rd.old_dentry = stage;
+	rd.new_parent = tree.elsewhere.dentry;
+	rd.new_dentry = other;
+	KUNIT_ASSERT_EQ(test, vfs_rename(&rd), 0);
+	unlock_rename(tree.elsewhere.dentry, tree.up.dentry);
+	pkm_kunit_copy_up_be_subject(&tree);
+	KUNIT_EXPECT_PTR_EQ(test, context->staging.dentry, stage);
+	KUNIT_EXPECT_PTR_EQ(test, context->staging_inode, d_inode(stage));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_copy_up_allows_inode_permission(d_inode(stage),
+							 MAY_WRITE));
+	KUNIT_EXPECT_EQ(test,
+		vfs_setxattr(idmap, stage, "user.copy2", "x", 1, 0), -EACCES);
+	/* Moving it back restores the binding. */
+	pkm_kunit_copy_up_be_system(&tree);
+	trap = lock_rename(tree.up.dentry, tree.elsewhere.dentry);
+	KUNIT_ASSERT_NULL(test, trap);
+	rd.old_parent = tree.elsewhere.dentry;
+	rd.old_dentry = stage;
+	rd.new_parent = tree.up.dentry;
+	rd.new_dentry = other;
+	dput(other);
+	other = lookup_noperm(&QSTR("stage"), tree.up.dentry);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(other));
+	rd.new_dentry = other;
+	KUNIT_ASSERT_EQ(test, vfs_rename(&rd), 0);
+	unlock_rename(tree.up.dentry, tree.elsewhere.dentry);
+	dput(other);
+	pkm_kunit_copy_up_be_subject(&tree);
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kacs_copy_up_allows_inode_permission(d_inode(stage),
+							 MAY_WRITE));
+	KUNIT_EXPECT_EQ(test,
+		vfs_setxattr(idmap, stage, "user.copy2", "x", 1, 0), 0);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+
+	/* -- publish by link ------------------------------------------- */
+	/* A publish phase whose completion names the wrong object fails
+	 * and, like every error path, clears the phase. */
+	final = pkm_kunit_copy_up_negative(&tree.up, "wrong");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(final));
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_publish_link(context, &tree.up,
+							     final), 0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_finish_publish(context, &stage_path),
+		-ESTALE);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	KUNIT_EXPECT_EQ(test, vfs_link(stage, idmap, up_inode, final, NULL),
+			-EACCES);
+	KUNIT_EXPECT_TRUE(test, d_is_negative(final));
+	end_creating(final);
+
+	final = pkm_kunit_copy_up_negative(&tree.up, "final");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(final));
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_publish_link(context, &tree.up,
+							     final), 0);
+	/* Only the armed destination: another negative name is refused. */
+	other = lookup_noperm(&QSTR("other"), tree.up.dentry);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(other));
+	KUNIT_EXPECT_EQ(test, vfs_link(stage, idmap, up_inode, other, NULL),
+			-EACCES);
+	dput(other);
+	KUNIT_ASSERT_EQ(test, vfs_link(stage, idmap, up_inode, final, NULL), 0);
+	final_path.mnt = mntget(tree.mnt);
+	final_path.dentry = dget(final);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_finish_publish(context, &final_path),
+		0);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	/* The link case rebinds the staging identity to the published name. */
+	KUNIT_EXPECT_PTR_EQ(test, context->staging.dentry, final);
+	KUNIT_EXPECT_PTR_EQ(test, context->staging_inode, d_inode(stage));
+	end_creating(final);
+
+	/* -- rebind ---------------------------------------------------- */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_rebind_staging(context, &final_path),
+		0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_rebind_staging(context, &tree.provider),
+		-ESTALE);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_rebind_staging(context, &final_path),
+		-ESTALE);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+
+	/* -- cleanup --------------------------------------------------- */
+	/* The old staging name is a retained creation: cleanup may take it. */
+	inode_lock_nested(up_inode, I_MUTEX_PARENT);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_cleanup(context, &tree.up, stage,
+							false), 0);
+	/* ...the directory flavour of the same victim is a mismatch. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, stage), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, final), -EACCES);
+	KUNIT_EXPECT_EQ(test, vfs_unlink(idmap, up_inode, stage, NULL), 0);
+	inode_unlock(up_inode);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+	/* Still referenced here, the unlinked name is unhashed rather than
+	 * negative. */
+	KUNIT_EXPECT_TRUE(test, d_unhashed(stage));
+	/* The bound staging object (now the published name) is admitted;
+	 * the provider, under its own parent, never is. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_cleanup(context, &tree.up, final,
+							false), 0);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_cleanup(
+			context, &tree.root, tree.provider.dentry, false),
+		-ESTALE);
+
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	path_put(&final_path);
+	path_put(&stage_path);
+	pkm_kunit_copy_up_tree_exit(&tree);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+}
+
+/*
+ * The anonymous copy-up: a tmpfile created under an armed create phase is
+ * anchored but usable by nothing until it is bound as the staged object;
+ * an internal file is sealed to the phase generation it was opened in; a
+ * backing file is adopted against the still-bound staging binding; and the
+ * dedicated capability clone accepts only the pinned value, re-read.
+ */
+static void pkm_kunit_copy_up_anonymous_object_must_be_bound(struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct pkm_kacs_file_security *backing_sec;
+	struct mnt_idmap *idmap;
+	struct inode *up_inode;
+	struct file *tmp;
+	struct file *writer;
+	struct file *backing;
+	struct file outer = {};
+	struct vfs_cap_data cap;
+	struct vfs_cap_data other_cap;
+	struct dentry *final;
+	struct path final_path = {};
+	void *outer_blob;
+	u8 got[sizeof(struct vfs_cap_data)];
+	loff_t pos = 0;
+	int ret;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	idmap = mnt_idmap(tree.mnt);
+	up_inode = d_inode(tree.up.dentry);
+	/* The provider carries a capability for the clone to copy. */
+	pkm_kunit_copy_up_fill_capability(&cap);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_raw_setxattr(&tree.provider, XATTR_NAME_CAPS,
+					       &cap, sizeof(cap)), 0);
+	context = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+	KUNIT_ASSERT_TRUE(test, context->provider_capability_present);
+
+	/* -- anonymous create ------------------------------------------ */
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_anonymous_create(
+			context, &tree.provider, &tree.up, S_IFREG | 0600), 0);
+	tmp = kernel_tmpfile_open(idmap, &tree.up, S_IFREG | 0600, O_RDWR,
+				  current_cred());
+	KUNIT_ASSERT_FALSE(test, IS_ERR(tmp));
+	KUNIT_EXPECT_TRUE(test, context->phase_init_security_seen);
+	KUNIT_EXPECT_PTR_EQ(test, context->pending_created_inode,
+			    file_inode(tmp));
+	KUNIT_EXPECT_TRUE(test, list_empty(&context->created_objects));
+	pkm_kunit_copy_up_expect_sd_xattr_eq(test, &tmp->f_path,
+					     pkm_kunit_system_read_sd,
+					     sizeof(pkm_kunit_system_read_sd));
+	/* The file opened inside the phase is internal: no grant, managed. */
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_copy_up_file_is_internal(tmp));
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_file(tmp)->managed);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file(tmp)->granted_access, 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file(tmp)->copy_up_phase_generation,
+			context->phase_generation);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_permission(tmp, MAY_WRITE), 0);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+	/* Between phases it conveys nothing. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_permission(tmp, MAY_WRITE), -EACCES);
+
+	/* Unbound, the anonymous object can be used by no later phase. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_populate(context), -EINVAL);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_cleanup(
+			context, &tree.up, tmp->f_path.dentry, false), -ESTALE);
+	final = pkm_kunit_copy_up_negative(&tree.up, "anon");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(final));
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_publish_link(context, &tree.up,
+							     final), -EINVAL);
+	end_creating(final);
+
+	/* -- bind, populate, clone ------------------------------------- */
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_bind_staging(context, &tmp->f_path), 0);
+	KUNIT_EXPECT_PTR_EQ(test, context->staging_inode, file_inode(tmp));
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_populate(context), 0);
+	/* A file sealed to the create generation does not come back. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_permission(tmp, MAY_WRITE), -EACCES);
+	/* One opened in this phase, on the bound object, is the way in. */
+	writer = dentry_open(&tmp->f_path, O_WRONLY, current_cred());
+	KUNIT_ASSERT_FALSE(test, IS_ERR(writer));
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_copy_up_file_is_internal(writer));
+	KUNIT_EXPECT_EQ(test, kernel_write(writer, "copy", 4, &pos), 4);
+
+	/* The clone: wrong bytes, then the right ones after the provider
+	 * changed under us, then the right ones for real. */
+	pkm_kunit_copy_up_fill_capability(&other_cap);
+	other_cap.data[0].permitted = cpu_to_le32(1U << CAP_CHOWN);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_set_capability(
+			context, &other_cap, sizeof(other_cap)), -ESTALE);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_raw_setxattr(&tree.provider, XATTR_NAME_CAPS,
+					       &other_cap, sizeof(other_cap)),
+		0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_set_capability(
+			context, &cap, sizeof(cap)), -ESTALE);
+	KUNIT_EXPECT_LT(test,
+		pkm_kunit_copy_up_raw_getxattr(&tmp->f_path, XATTR_NAME_CAPS,
+					       got, sizeof(got)), (ssize_t)0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_raw_setxattr(&tree.provider, XATTR_NAME_CAPS,
+					       &cap, sizeof(cap)), 0);
+	ret = pkm_kacs_stratafs_copy_up_set_capability(context, &cap,
+						       sizeof(cap));
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_FALSE(test, context->capability_clone_active);
+	if (!ret) {
+		KUNIT_EXPECT_EQ(test,
+			pkm_kunit_copy_up_raw_getxattr(&tmp->f_path,
+						       XATTR_NAME_CAPS, got,
+						       sizeof(got)),
+			(ssize_t)sizeof(cap));
+		KUNIT_EXPECT_MEMEQ(test, got, &cap, sizeof(cap));
+		/* XATTR_CREATE: a second install is the VFS's refusal. */
+		KUNIT_EXPECT_EQ(test,
+			pkm_kacs_stratafs_copy_up_set_capability(
+				context, &cap, sizeof(cap)), -EEXIST);
+	}
+	__fput_sync(writer);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+
+	/* -- adoption, before publication ------------------------------ */
+	outer_blob = kunit_kzalloc(test, pkm_blob_sizes.lbs_file +
+					     sizeof(struct pkm_kacs_file_security),
+				   GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, outer_blob);
+	outer.f_security = outer_blob;
+	outer.f_inode = d_inode(tree.provider.dentry);
+	*(struct path *)&outer.f_path = tree.provider;
+	pkm_kacs_file(&outer)->managed = 1;
+	pkm_kacs_file(&outer)->granted_access = KACS_FILE_READ_DATA |
+						 KACS_FILE_WRITE_DATA;
+	pkm_kacs_file(&outer)->continuous_audit_mask = KACS_FILE_WRITE_DATA;
+	backing = alloc_empty_backing_file(O_RDWR, current_cred(), &outer);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(backing));
+	*(struct path *)&backing->f_path = tmp->f_path;
+	path_get(&backing->f_path);
+	backing->f_inode = file_inode(tmp);
+	/* The user path is what backing_file_open() records; final release
+	 * puts it. */
+	path_get(&outer.f_path);
+	backing_file_set_user_path(backing, &outer.f_path);
+	backing_sec = pkm_kacs_file(backing);
+	backing_sec->copy_up_context = pkm_kacs_stratafs_copy_up_get(context);
+	backing_sec->copy_up_phase_generation = context->phase_generation;
+	/* Not while a phase is armed... */
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	backing_sec->copy_up_phase_generation = context->phase_generation;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_adopt_backing_file(context, &outer,
+							     backing), -ESTALE);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+	/* ...but on the still-bound staging binding, idle, it transfers. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_adopt_backing_file(context, &outer,
+							     backing), 0);
+	KUNIT_EXPECT_NULL(test, backing_sec->copy_up_context);
+	KUNIT_EXPECT_EQ(test, backing_sec->granted_access,
+			pkm_kacs_file(&outer)->granted_access);
+	KUNIT_EXPECT_TRUE(test, backing_sec->managed);
+	__fput_sync(backing);
+
+	/* -- publish --------------------------------------------------- */
+	final = pkm_kunit_copy_up_negative(&tree.up, "anon");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(final));
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_publish_link(context, &tree.up,
+							     final), 0);
+	KUNIT_ASSERT_EQ(test,
+		vfs_link(tmp->f_path.dentry, idmap, up_inode, final, NULL), 0);
+	final_path.mnt = mntget(tree.mnt);
+	final_path.dentry = dget(final);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_finish_publish(context, &final_path),
+		0);
+	end_creating(final);
+	KUNIT_EXPECT_PTR_EQ(test, context->staging.dentry, final_path.dentry);
+
+	__fput_sync(tmp);
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	path_put(&final_path);
+	pkm_kunit_copy_up_tree_exit(&tree);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+}
+
+/*
+ * Staging recovery: the marker is admitted only on the exact object the
+ * orphan phases were armed for, and orphan deletion is bound to the exact
+ * dentry, inode and parent supplied.
+ */
+static void pkm_kunit_copy_up_orphan_recovery_binds_the_marker_object(
+	struct kunit *test)
+{
+	static const char marker[] = "1";
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct mnt_idmap *idmap;
+	struct inode *up_inode;
+	struct path orphan = {};
+	struct path sibling = {};
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	idmap = mnt_idmap(tree.mnt);
+	up_inode = d_inode(tree.up.dentry);
+	pkm_kunit_copy_up_be_system(&tree);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_make(&tree, &tree.up, "orphan",
+				       S_IFREG | 0600, &orphan), 0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_make(&tree, &tree.up, "sibling",
+				       S_IFREG | 0600, &sibling), 0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_raw_setxattr(&orphan, STRATAFS_STAGING_XATTR,
+					       marker, sizeof(marker) - 1), 0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_raw_setxattr(&sibling, STRATAFS_STAGING_XATTR,
+					       marker, sizeof(marker) - 1), 0);
+	pkm_kunit_copy_up_be_subject(&tree);
+
+	/* Caller-originated marker traffic is denied, context or not. */
+	KUNIT_EXPECT_NE(test,
+		pkm_kacs_inode_removexattr(idmap, orphan.dentry,
+					   STRATAFS_STAGING_XATTR), 0);
+	context = pkm_kacs_stratafs_copy_up_begin(&orphan);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+	KUNIT_EXPECT_NE(test,
+		pkm_kacs_inode_removexattr(idmap, orphan.dentry,
+					   STRATAFS_STAGING_XATTR), 0);
+
+	/* Marker cleanup admits a write as well as a removal -- on the exact
+	 * orphan only, and only of the marker. */
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_orphan_marker_cleanup(context),
+		0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_inode_setxattr(idmap, orphan.dentry,
+					STRATAFS_STAGING_XATTR, marker,
+					sizeof(marker) - 1, 0), 0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_inode_removexattr(idmap, orphan.dentry,
+					   STRATAFS_STAGING_XATTR), 0);
+	KUNIT_EXPECT_NE(test,
+		pkm_kacs_inode_removexattr(idmap, sibling.dentry,
+					   STRATAFS_STAGING_XATTR), 0);
+	KUNIT_EXPECT_NE(test,
+		pkm_kacs_inode_setxattr(idmap, orphan.dentry, "user.other", "x",
+					1, 0), 0);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+
+	/* Orphan deletion: wrong victim, wrong parent, wrong type, then the
+	 * exact binding. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_orphan_cleanup(
+			context, &tree.up, sibling.dentry, false), -ESTALE);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_orphan_cleanup(
+			context, &tree.root, orphan.dentry, false), -ESTALE);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_orphan_cleanup(
+			context, &tree.up, orphan.dentry, true), -ESTALE);
+	PKM_KUNIT_EXPECT_PHASE(test, context, PKM_KACS_COPY_UP_PHASE_NONE);
+	inode_lock_nested(up_inode, I_MUTEX_PARENT);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_orphan_cleanup(
+			context, &tree.up, orphan.dentry, false), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, sibling.dentry),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test, vfs_unlink(idmap, up_inode, orphan.dentry, NULL),
+			0);
+	inode_unlock(up_inode);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+	KUNIT_EXPECT_TRUE(test, d_unhashed(orphan.dentry));
+
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	path_put(&sibling);
+	path_put(&orphan);
+	pkm_kunit_copy_up_tree_exit(&tree);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+}
+
+/*
+ * An internal copy-up file: opened for read on the provider it carries a
+ * granted mask of zero and is refused the operations the list excludes;
+ * opened for write on the provider it is not admitted at all.
+ */
+static void pkm_kunit_copy_up_internal_file_is_denied_the_listed_operations(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct pkm_kacs_stratafs_copy_up *context;
+	struct file *file;
+	struct file *writer;
+
+	KUNIT_ASSERT_NULL(test, task_sec->copy_up_context);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	context = pkm_kacs_stratafs_copy_up_begin(&tree.provider);
+	KUNIT_ASSERT_FALSE(test, IS_ERR(context));
+
+	/* Outside a phase the principal cannot open the provider at all. */
+	file = dentry_open(&tree.provider, O_RDONLY, current_cred());
+	KUNIT_EXPECT_TRUE(test, IS_ERR(file));
+	if (!IS_ERR(file))
+		__fput_sync(file);
+
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_copy_up_begin_source_read(context), 0);
+	writer = dentry_open(&tree.provider, O_WRONLY, current_cred());
+	KUNIT_EXPECT_TRUE(test, IS_ERR(writer));
+	if (!IS_ERR(writer))
+		__fput_sync(writer);
+	file = dentry_open(&tree.provider, O_RDONLY, current_cred());
+	KUNIT_ASSERT_FALSE(test, IS_ERR(file));
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_copy_up_file_is_internal(file));
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_file(file)->managed);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file(file)->granted_access, 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file(file)->continuous_audit_mask, 0U);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_permission(file, MAY_READ), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_permission(file, MAY_WRITE), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_statfs(file), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_truncate(file), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_fsync(file), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_fallocate(file, 0), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_ioctl(file, 0, 0), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_lock(file, 0), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_fcntl(file, F_GETFL, 0), -EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_receive(file), -EACCES);
+	pkm_kacs_stratafs_copy_up_end_phase(context);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_file_permission(file, MAY_READ), -EACCES);
+	__fput_sync(file);
+
+	pkm_kacs_stratafs_copy_up_leave(context);
+	pkm_kacs_stratafs_copy_up_put(context);
+	pkm_kunit_copy_up_tree_exit(&tree);
+	KUNIT_EXPECT_NULL(test, task_sec->copy_up_context);
+}
+
+
+/*
+ * Deferred deletion: at final close the synchronous internal scope admits
+ * only the exact outer entry, or the one provider entry StrataFS bound to it
+ * -- bound once -- and an entry that no longer names the descriptor's inode
+ * is never unlinked.  The subject holds no right to delete anything, so a
+ * refusal is ordinary authorization and an admission is the scope.
+ */
+static void pkm_kunit_copy_up_deferred_deletion_is_bound_to_the_exact_entry(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct mnt_idmap *idmap;
+	struct inode *up_inode;
+	struct inode *root_inode;
+	struct path victim = {};
+	struct path entry = {};
+	struct file *outer;
+	struct inode *entry_inode;
+	struct dentry *recreated;
+
+	KUNIT_ASSERT_NULL(test, task_sec->delete_on_close_file);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	idmap = mnt_idmap(tree.mnt);
+	up_inode = d_inode(tree.up.dentry);
+	root_inode = d_inode(tree.root.dentry);
+	pkm_kunit_copy_up_be_system(&tree);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_make(&tree, &tree.up, "victim", S_IFREG | 0600,
+				       &victim), 0);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_make(&tree, &tree.up, "entry", S_IFREG | 0600,
+				       &entry), 0);
+	/* The outer handle whose final close carries the deletion. */
+	outer = dentry_open(&victim, O_RDONLY, current_cred());
+	KUNIT_ASSERT_FALSE(test, IS_ERR(outer));
+	pkm_kunit_copy_up_be_subject(&tree);
+
+	/* No scope: the subject is refused, as anyone would be. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, victim.dentry),
+			-EACCES);
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_stratafs_delete_on_close_active(victim.dentry));
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_delete_on_close_bind_provider(
+			victim.dentry, &tree.up, entry.dentry), -EPERM);
+
+	/* Armed for that outer file, as the final-close path arms it. */
+	task_sec->delete_on_close_file = outer;
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kacs_stratafs_delete_on_close_active(victim.dentry));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_stratafs_delete_on_close_active(entry.dentry));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, victim.dentry), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(root_inode, victim.dentry),
+			-EACCES);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, entry.dentry),
+			-EACCES);
+
+	/* The provider entry is bound once, to the exact parent and target. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_delete_on_close_bind_provider(
+			entry.dentry, &tree.up, entry.dentry), -EPERM);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_delete_on_close_bind_provider(
+			victim.dentry, &tree.root, entry.dentry), -EPERM);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kacs_stratafs_delete_on_close_bind_provider(
+			victim.dentry, &tree.up, entry.dentry), 0);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_stratafs_delete_on_close_bind_provider(
+			victim.dentry, &tree.up, victim.dentry), -EBUSY);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, entry.dentry), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(root_inode, entry.dentry),
+			-EACCES);
+
+	/*
+	 * Identity: the bound entry is unlinked and re-created under the same
+	 * name (as SYSTEM, out of band).  Whatever dentry now names that
+	 * entry, it does not name the inode the descriptor did, and the scope
+	 * admits neither it nor the old, unhashed one.
+	 */
+	entry_inode = d_inode(entry.dentry);
+	pkm_kunit_copy_up_be_system(&tree);
+	inode_lock_nested(up_inode, I_MUTEX_PARENT);
+	KUNIT_ASSERT_EQ(test, vfs_unlink(idmap, up_inode, entry.dentry, NULL),
+			0);
+	inode_unlock(up_inode);
+	recreated = start_creating(idmap, tree.up.dentry, &QSTR("entry"));
+	KUNIT_ASSERT_FALSE(test, IS_ERR(recreated));
+	KUNIT_ASSERT_EQ(test, vfs_create(idmap, recreated, S_IFREG | 0600, NULL),
+			0);
+	recreated = end_creating_keep(recreated);
+	pkm_kunit_copy_up_be_subject(&tree);
+	KUNIT_EXPECT_TRUE(test, d_is_positive(recreated));
+	KUNIT_EXPECT_PTR_NE(test, d_inode(recreated), entry_inode);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, recreated),
+			-EACCES);
+	if (d_is_positive(entry.dentry) && d_inode(entry.dentry) != entry_inode)
+		KUNIT_EXPECT_EQ(test,
+			pkm_kacs_inode_unlink(up_inode, entry.dentry), -EACCES);
+	dput(recreated);
+	/* The outer entry, likewise substituted, is refused too. */
+	pkm_kunit_copy_up_be_system(&tree);
+	inode_lock_nested(up_inode, I_MUTEX_PARENT);
+	KUNIT_ASSERT_EQ(test, vfs_unlink(idmap, up_inode, victim.dentry, NULL),
+			0);
+	inode_unlock(up_inode);
+	recreated = start_creating(idmap, tree.up.dentry, &QSTR("victim"));
+	KUNIT_ASSERT_FALSE(test, IS_ERR(recreated));
+	KUNIT_ASSERT_EQ(test, vfs_create(idmap, recreated, S_IFREG | 0600, NULL),
+			0);
+	recreated = end_creating_keep(recreated);
+	pkm_kunit_copy_up_be_subject(&tree);
+	KUNIT_EXPECT_PTR_NE(test, recreated, victim.dentry);
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kacs_stratafs_delete_on_close_active(recreated));
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, recreated),
+			-EACCES);
+	dput(recreated);
+
+	/* Every return clears the scope. */
+	pkm_kacs_stratafs_delete_on_close_unbind_provider();
+	KUNIT_EXPECT_NULL(test, task_sec->delete_on_close_dentry);
+	KUNIT_EXPECT_NULL(test, task_sec->delete_on_close_inode);
+	KUNIT_EXPECT_NULL(test, task_sec->delete_on_close_parent_inode);
+	task_sec->delete_on_close_file = NULL;
+	KUNIT_EXPECT_EQ(test, pkm_kacs_inode_unlink(up_inode, victim.dentry),
+			-EACCES);
+
+	pkm_kunit_copy_up_be_system(&tree);
+	__fput_sync(outer);
+	path_put(&entry);
+	path_put(&victim);
+	pkm_kunit_copy_up_tree_exit(&tree);
+}
+
+/*
+ * The overlayfs path's last claim: releasing the credential releases the
+ * pending descriptor.  The blob is primed with an allocation the way
+ * pkm_kacs_inode_copy_up() leaves it, and cred_free is what frees it.
+ */
+static void pkm_kunit_overlay_release_frees_the_pending_descriptor(
+	struct kunit *test)
+{
+	struct pkm_kacs_cred_security *sec;
+	struct cred cred = {};
+	void *cred_blob;
+	u8 *pending;
+
+	cred_blob = kunit_kzalloc(
+		test, pkm_blob_sizes.lbs_cred +
+			      sizeof(struct pkm_kacs_cred_security), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, cred_blob);
+	cred.security = cred_blob;
+	KUNIT_ASSERT_EQ(test, pkm_kacs_cred_alloc_blank(&cred, GFP_KERNEL), 0);
+	sec = pkm_kacs_cred(&cred);
+	KUNIT_EXPECT_NULL(test, sec->pending_create_sd);
+
+	pending = kmemdup(pkm_kunit_system_read_sd,
+			  sizeof(pkm_kunit_system_read_sd), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pending);
+	sec->pending_create_sd = pending;
+	sec->pending_create_sd_len = sizeof(pkm_kunit_system_read_sd);
+
+	pkm_kacs_cred_free(&cred);
+	KUNIT_EXPECT_NULL(test, sec->pending_create_sd);
+	KUNIT_EXPECT_EQ(test, sec->pending_create_sd_len, (size_t)0);
+}
+
 static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_copy_up_scope_is_exact),
 	KUNIT_CASE(pkm_kunit_copy_up_exact_sd_is_installed_and_cached),
@@ -3332,6 +4795,14 @@ static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_copy_up_context_is_non_nesting),
 	KUNIT_CASE(pkm_kunit_copy_up_adopts_outer_descriptor_snapshot),
 	KUNIT_CASE(pkm_kunit_copy_up_publish_identity_matches_vfs_semantics),
+	KUNIT_CASE(pkm_kunit_copy_up_begin_pins_provider_without_a_check),
+	KUNIT_CASE(pkm_kunit_copy_up_attachment_is_exclusive_and_transferable),
+	KUNIT_CASE(pkm_kunit_copy_up_phases_are_exclusive_and_generations_sealed),
+	KUNIT_CASE(pkm_kunit_copy_up_named_flow_is_exact_and_exempt),
+	KUNIT_CASE(pkm_kunit_copy_up_anonymous_object_must_be_bound),
+	KUNIT_CASE(pkm_kunit_copy_up_orphan_recovery_binds_the_marker_object),
+	KUNIT_CASE(pkm_kunit_copy_up_internal_file_is_denied_the_listed_operations),
+	KUNIT_CASE(pkm_kunit_copy_up_deferred_deletion_is_bound_to_the_exact_entry),
 	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_installed_and_cached),
 	KUNIT_CASE(pkm_kunit_overlay_copy_up_sd_is_not_inherited),
 	KUNIT_CASE(pkm_kunit_overlay_create_takes_caller_and_overlay_parent),
@@ -3340,6 +4811,7 @@ static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_overlay_create_without_a_token_keeps_mounter_ids),
 	KUNIT_CASE(pkm_kunit_post_setxattr_drops_a_superseded_cache),
 	KUNIT_CASE(pkm_kunit_post_setxattr_keeps_an_unrelated_cache),
+	KUNIT_CASE(pkm_kunit_overlay_release_frees_the_pending_descriptor),
 	{}
 };
 
