@@ -453,6 +453,18 @@ long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 		trace_kacs_capability(cap, 0, KACS_CAP_CAPABLE, -EPERM);
 		return -EPERM;
 	}
+	/*
+	 * cap_convert_nscap() performs CAP_SETFCAP before the xattr LSM hook.
+	 * KACS owns the one exact-value StrataFS clone call that may cross that
+	 * gate; no caller-controlled setxattr path can arm this condition. The
+	 * exception lives here rather than only in the LSM capable hook because
+	 * security_capable() reaches the capability LSM's cap_capable() -- and
+	 * so this function -- first, and a refusal there ends the walk before
+	 * pkm_kacs_capable() is consulted.
+	 */
+	if (cap == CAP_SETFCAP && cred == current_cred() &&
+	    pkm_kacs_copy_up_allows_capability_use(target_ns))
+		return 0;
 	return pkm_kacs_check_capability_for_token(sec->token, cap);
 }
 
@@ -505,14 +517,7 @@ int pkm_kacs_capable(const struct cred *cred,
 		     struct user_namespace *target_ns, int cap,
 		     unsigned int opts)
 {
-	/*
-	 * cap_convert_nscap() performs CAP_SETFCAP before the xattr LSM hook.
-	 * KACS owns the one exact-value StrataFS clone call that may cross that
-	 * gate; no caller-controlled setxattr path can arm this condition.
-	 */
-	if (cap == CAP_SETFCAP && cred == current_cred() &&
-	    pkm_kacs_copy_up_allows_capability_use(target_ns))
-		return 0;
+	/* The StrataFS capability-clone exception is in the shared core. */
 	return pkm_kacs_capable_in_cred_ns(cred, target_ns, cap, opts);
 }
 
