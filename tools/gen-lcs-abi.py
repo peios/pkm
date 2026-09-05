@@ -42,6 +42,49 @@ TRAILING = re.compile(r"/\*\s*(.*?)\s*\*/")
 # citations rather than emit stale cross-references into the TRM.
 PSD_REF = re.compile(r"(?:See\s+)?PSD-\d+(?:\s*§[\d.]+)?[,;:]?\s*", re.I)
 
+# Named-citation anchors for the stable constant groups, keyed by the leading
+# words of each group's heading comment in the header (case-insensitive,
+# after the PSD reference is stripped). One anchor names one group: the unit
+# a test cites is the group. A retitled group silently drops its anchor -- the
+# learn build then surfaces any test left pointing at the retired name -- and
+# a group not listed here carries none.
+GROUP_ANCHORS = [
+    ("syscall and ioctl argument sizes", "lcs-abi.argument-sizes"),
+    ("transaction state codes", "lcs-abi.txn-state-codes"),
+    ("syscall flags and dispositions", "lcs-abi.syscall-flags-and-dispositions"),
+    ("registry key access rights", "lcs-abi.key-access-rights"),
+    ("security information flags", "lcs-abi.security-information-flags"),
+    ("registry value types", "lcs-abi.value-types"),
+    ("watch event types and filters", "lcs-abi.watch-event-types-and-filters"),
+    ("watch event raw byte layout", "lcs-abi.watch-record-layout"),
+    ("rsi common wire layout", "lcs-abi.rsi-wire-layout"),
+    ("rsi op codes and response op codes", "lcs-abi.rsi-op-codes"),
+    ("rsi status codes", "lcs-abi.rsi-status-codes"),
+    ("rsi path target types", "lcs-abi.rsi-path-target-types"),
+    ("rsi_write_key field mask bits", "lcs-abi.rsi-write-key-field-mask"),
+    ("rsi transaction modes and source-registration flags",
+     "lcs-abi.rsi-txn-modes-and-registration-flags"),
+    ("backup record types and magic", "lcs-abi.backup-record-types"),
+    # trace.h
+    ("lcs_rsi_request op", "lcs-abi.trace.rsi-request-ops"),
+    ("lcs_rsi_response reason", "lcs-abi.trace.rsi-response-reasons"),
+    ("lcs_source_fd reason", "lcs-abi.trace.source-fd-reasons"),
+    ("lcs_in_flight reason", "lcs-abi.trace.in-flight-reasons"),
+    ("lcs_route op", "lcs-abi.trace.route-ops"),
+    ("lcs_registration decision", "lcs-abi.trace.registration-decisions"),
+    ("lcs_bootstrap stage", "lcs-abi.trace.bootstrap-stages"),
+    ("lcs_runtime_limits field_id", "lcs-abi.trace.runtime-limit-fields"),
+    ("lcs_audit event_type_id", "lcs-abi.trace.audit-event-types"),
+    ("lcs_txn state", "lcs-abi.trace.txn-states"),
+    ("lcs_key_fd cmd", "lcs-abi.trace.key-fd-cmds"),
+]
+
+
+def group_anchor(text):
+    """The named-citation anchor for a constant group, or None."""
+    key = re.sub(r"\s+", " ", PSD_REF.sub("", text or "")).strip().lower()
+    return next((n for k, n in GROUP_ANCHORS if key.startswith(k)), None)
+
 
 def esc(cell):
     """A markdown table cell: a pipe inside one silently breaks the row."""
@@ -227,7 +270,8 @@ def build():
     w("`pkm/uapi/pkm/lcs.h` by `pkm/tools/gen-lcs-abi.py`, with ioctl")
     w("encodings and struct layouts measured by compiling a probe against the")
     w("real header. Regenerate it whenever the ABI changes; do not edit it by")
-    w("hand. The names here are the ones a program actually compiles against.")
+    w("hand. The names here are the ones a program actually compiles against."
+      " [*lcs-abi.generated-from-source]")
     w("")
     w("What a compiler cannot measure -- which properties belong with their")
     w("operations rather than here, and the kernel configuration -- is in the")
@@ -235,7 +279,7 @@ def build():
     w("")
 
     # --- syscalls -------------------------------------------------------
-    w("## Syscall numbers")
+    w("## Syscall numbers [*lcs-abi.syscall-numbers]")
     w("")
     w("Signatures are read from the `SYSCALL_DEFINE` sites in `pkm/lcs/`.")
     w("")
@@ -250,7 +294,7 @@ def build():
     w("")
 
     # --- ioctls ---------------------------------------------------------
-    w("## Ioctls")
+    w("## Ioctls [*lcs-abi.ioctl-numbers]")
     w("")
     w("The type byte is `'R'`. Ioctl number namespaces are per fd type, so")
     w("`REG_SRC_REGISTER` (number 0 on the source device) and")
@@ -292,7 +336,7 @@ def build():
     for sname, fields in structs:
         if sname not in sizes:
             continue
-        w(f"### `struct {sname}`")
+        w(f"### `struct {sname}` [*lcs-abi.struct-{sname.replace('_', '-')}]")
         w("")
         w(f"Total size {sizes[sname]} bytes.")
         w("")
@@ -323,6 +367,11 @@ def build():
             continue
         if name.endswith("_NR"):
             continue
+        # An ioctl macro is already in the ioctl table above, whatever comment
+        # group it fell into; the _IOWR note over REG_IOC_QUERY_KEY_INFO used
+        # to open a group of its own and list nine ioctls a second time.
+        if re.match(r"_IOW?R?\s*\(", raw.strip()):
+            continue
         if group not in seen:
             seen.add(group)
             order.append((group, []))
@@ -341,8 +390,10 @@ def build():
         head = PSD_REF.sub("", group or "").strip().rstrip(".")
         if head:
             head = head[0].upper() + head[1:]
+        anchor = group_anchor(group)
+        cite = f" [*{anchor}]" if anchor else ""
         if head:
-            w(f"*{head}.*")
+            w(f"*{head}.*{cite}")
             w("")
         has_note = any(r[3] for r in rows)
         trows = []
@@ -383,11 +434,19 @@ def build():
             body = parts[1].strip() if len(parts) > 1 else ""
             if len(head) > 90:
                 head, body = "", text
+            anchor = group_anchor(group)
+            cite = f" [*{anchor}]" if anchor else ""
             if head:
-                w(f"*{head}.*")
+                w(f"*{head}.*{cite}")
+                cite = ""
                 w("")
             if body:
-                for chunk in textwrap.wrap(body, 72):
+                chunks = textwrap.wrap(body, 72)
+                # A group with no short heading has nothing to hang the
+                # anchor on but the prose, so it rides the last line of it.
+                if cite and chunks:
+                    chunks[-1] += cite
+                for chunk in chunks:
                     w(chunk)
                 w("")
             has_note = any(r[3] for r in rows)
