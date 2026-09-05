@@ -995,6 +995,43 @@ long pkm_lcs_layer_table_metadata_key_guid_present(
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
+/*
+ * Leaves a published entry without its owner SID, the half-populated shape
+ * publication never produces, so a snapshot reader can be shown refusing it.
+ */
+long pkm_lcs_kunit_layer_table_strip_owner(const char *layer_name,
+					   u32 layer_name_len)
+{
+	long ret = -ENOENT;
+	u32 i;
+
+	if (!layer_name)
+		return -EINVAL;
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+		struct pkm_lcs_layer_table_entry *entry =
+			&pkm_lcs_layer_table[i];
+		bool equal = false;
+
+		if (!entry->occupied)
+			continue;
+		ret = pkm_lcs_layer_name_casefold_equal(
+			layer_name, layer_name_len, entry->name,
+			entry->name_len, &equal);
+		if (ret)
+			break;
+		if (!equal) {
+			ret = -ENOENT;
+			continue;
+		}
+		entry->owner_sid_len = 0;
+		ret = 0;
+		break;
+	}
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+	return ret;
+}
+
 void pkm_lcs_kunit_reset_layer_table(void)
 {
 	u32 i;

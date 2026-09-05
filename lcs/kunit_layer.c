@@ -1965,6 +1965,110 @@ static void pkm_lcs_kunit_layer_delete_abort_uses_runtime_limits(
 	kacs_rust_token_drop(token);
 }
 
+
+/*
+ * §5.3.3: the Owner fallback chain ends with "the layer cannot be
+ * published". With no metadata value, no creator, no previous owner and no
+ * descriptor to take one from, selection fails and publication refuses the
+ * missing owner outright.
+ */
+static void pkm_lcs_kunit_layer_owner_unresolvable_blocks_publication(
+	struct kunit *test)
+{
+	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xe1 };
+	struct pkm_lcs_layer_table_publish_result publish = { };
+	u8 *owner = NULL;
+	size_t owner_len = 0;
+	u32 source = 0;
+
+	KUNIT_EXPECT_NE(test,
+			pkm_lcs_layer_owner_select_copy(
+				NULL, 0, false, NULL, 0, false, NULL, 0, false,
+				NULL, 0, false, false, &owner, &owner_len,
+				&source),
+			0L);
+	KUNIT_EXPECT_NULL(test, owner);
+	KUNIT_EXPECT_EQ(test, owner_len, (size_t)0);
+	/* A new layer with no creator is no better off. */
+	KUNIT_EXPECT_NE(test,
+			pkm_lcs_layer_owner_select_copy(
+				NULL, 0, false, NULL, 0, false, NULL, 0, false,
+				NULL, 0, false, true, &owner, &owner_len,
+				&source),
+			0L);
+	KUNIT_EXPECT_NULL(test, owner);
+	/* The metadata value, when present, is the first choice. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_owner_select_copy(
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid), true, NULL, 0,
+				false, NULL, 0, false, NULL, 0, false, false,
+				&owner, &owner_len, &source),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, owner);
+	KUNIT_EXPECT_EQ(test, owner_len, sizeof(pkm_lcs_kunit_system_sid));
+	kfree(owner);
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_publish_with_result(
+				"Policy", strlen("Policy"), 7, 1, policy_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd), NULL, 0,
+				&publish),
+			(long)-EINVAL);
+	pkm_lcs_kunit_reset_layer_table();
+}
+
+
+/*
+ * §5.3.3: the published unit is the table entry, the metadata GUID and the
+ * cached descriptor together. A snapshot reader that finds an entry without
+ * one of its parts returns EIO rather than a half-populated layer.
+ */
+static void pkm_lcs_kunit_layer_snapshot_incomplete_entry_is_eio(
+	struct kunit *test)
+{
+	static const u8 policy_guid[RSI_GUID_SIZE] = { 0xe2 };
+	struct pkm_lcs_layer_table_publish_result publish = { };
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	char names[64] = { };
+	u32 count = 0;
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_layer_table_publish_with_result(
+				"Policy", strlen("Policy"), 7, 1, policy_guid,
+				pkm_lcs_kunit_owner_only_sd,
+				sizeof(pkm_lcs_kunit_owner_only_sd),
+				pkm_lcs_kunit_system_sid,
+				sizeof(pkm_lcs_kunit_system_sid), &publish),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_EXPECT_EQ(test, count, 2U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_acquire(&snapshot), 0L);
+	KUNIT_EXPECT_EQ(test, snapshot.layer_count, 2U);
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_layer_table_strip_owner("policy",
+							      strlen("policy")),
+			0L);
+	memset(&snapshot, 0, sizeof(snapshot));
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_source_layer_snapshot_acquire(&snapshot),
+			(long)-EIO);
+	pkm_lcs_kunit_reset_layer_table();
+}
+
+
 static struct kunit_case pkm_lcs_kunit_layer_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_root_discovers_layers),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_root_missing_retains_fallback),
@@ -1988,6 +2092,8 @@ static struct kunit_case pkm_lcs_kunit_layer_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_denies_service),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
+	KUNIT_CASE(pkm_lcs_kunit_layer_owner_unresolvable_blocks_publication),
+	KUNIT_CASE(pkm_lcs_kunit_layer_snapshot_incomplete_entry_is_eio),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_layer_path_refresh_uses_supplied_limits),

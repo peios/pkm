@@ -19,6 +19,33 @@
 
 #include <trace/events/lcs.h>
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+static bool pkm_lcs_kunit_request_alloc_fail_next;
+
+void pkm_lcs_kunit_fail_next_request_alloc(void)
+{
+	WRITE_ONCE(pkm_lcs_kunit_request_alloc_fail_next, true);
+}
+
+bool pkm_lcs_kunit_request_alloc_fail_pending(void)
+{
+	return READ_ONCE(pkm_lcs_kunit_request_alloc_fail_next);
+}
+#endif
+
+/* Every queued request is born here, so this is where an allocation failure
+ * is injected for the tests that need one. */
+static void *pkm_lcs_source_request_zalloc(size_t size)
+{
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (READ_ONCE(pkm_lcs_kunit_request_alloc_fail_next)) {
+		WRITE_ONCE(pkm_lcs_kunit_request_alloc_fail_next, false);
+		return NULL;
+	}
+#endif
+	return kzalloc(size, GFP_KERNEL);
+}
+
 long pkm_lcs_source_dispatch_lookup_request_with_waiter(
 	u32 source_id, u64 txn_id, const u8 parent_guid[RSI_GUID_SIZE],
 	const char *child_name, u32 child_name_len,
@@ -52,7 +79,7 @@ long pkm_lcs_source_dispatch_lookup_request_with_waiter(
 	    check_add_overflow(frame_len, (size_t)child_name_len, &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -150,7 +177,7 @@ long pkm_lcs_source_dispatch_read_key_request_with_waiter(
 		limits = &effective_limits;
 	}
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -243,7 +270,7 @@ long pkm_lcs_source_dispatch_enum_children_request_with_waiter(
 	if (!parent_guid)
 		return -EINVAL;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -351,7 +378,7 @@ long pkm_lcs_source_dispatch_query_values_request_with_waiter(
 	    check_add_overflow(frame_len, sizeof(u8), &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -474,7 +501,7 @@ long pkm_lcs_source_dispatch_set_value_request_with_waiter(
 	    check_add_overflow(frame_len, sizeof(u64), &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -601,7 +628,7 @@ long pkm_lcs_source_dispatch_delete_value_entry_request_with_waiter(
 			       &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -712,7 +739,7 @@ long pkm_lcs_source_dispatch_set_blanket_tombstone_request_with_waiter(
 	    check_add_overflow(frame_len, sizeof(u64), &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -811,7 +838,7 @@ long pkm_lcs_source_dispatch_drop_key_request_with_waiter(
 		limits = &effective_limits;
 	}
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -927,7 +954,7 @@ long pkm_lcs_source_dispatch_create_entry_request_with_waiter(
 	    check_add_overflow(frame_len, sizeof(u64), &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -1044,7 +1071,7 @@ long pkm_lcs_source_dispatch_hide_delete_entry_request_with_waiter(
 					&frame_len)))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -1169,7 +1196,7 @@ long pkm_lcs_source_dispatch_create_key_request_with_waiter(
 	    check_add_overflow(frame_len, sizeof(u8), &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -1283,7 +1310,7 @@ long pkm_lcs_source_dispatch_write_key_request_with_waiter(
 	if (check_add_overflow(frame_len, sizeof(u64), &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -1413,7 +1440,7 @@ long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		return -EINVAL;
 	}
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -1539,7 +1566,7 @@ long pkm_lcs_source_dispatch_flush_request_with_waiter(
 	    check_add_overflow(frame_len, (size_t)hive_name_len, &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);
@@ -1646,7 +1673,7 @@ long pkm_lcs_source_dispatch_delete_layer_request_with_waiter(
 	    check_add_overflow(frame_len, (size_t)layer_name_len, &frame_len))
 		return -EOVERFLOW;
 
-	request = kzalloc(sizeof(*request), GFP_KERNEL);
+	request = pkm_lcs_source_request_zalloc(sizeof(*request));
 	if (!request)
 		return -ENOMEM;
 	request->frame = kmalloc(frame_len, GFP_KERNEL);

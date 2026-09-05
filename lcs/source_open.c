@@ -510,10 +510,23 @@ out_snapshot:
 	return ret;
 }
 
+/*
+ * The token an open is evaluated against is the calling thread's effective
+ * token: the impersonation token if one is set, otherwise the primary. This
+ * is the syscall body; KUnit calls it with its own usercopy ops.
+ */
+long pkm_lcs_reg_open_key_as_current(const struct pkm_lcs_usercopy_ops *ops,
+				     int parent_fd, const char __user *path,
+				     u32 desired_access, u32 flags)
+{
+	return pkm_lcs_reg_open_key_for_token(
+		pkm_kacs_current_effective_token_ptr(), ops, parent_fd, path,
+		desired_access, flags);
+}
+
 SYSCALL_DEFINE4(reg_open_key, int, parent_fd, const char __user *, path,
 		u32, desired_access, u32, flags)
 {
-	return pkm_lcs_reg_open_key_for_token(
-		pkm_kacs_current_effective_token_ptr(), NULL, parent_fd, path,
-		desired_access, flags);
+	return pkm_lcs_reg_open_key_as_current(NULL, parent_fd, path,
+					       desired_access, flags);
 }

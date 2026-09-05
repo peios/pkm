@@ -10121,6 +10121,90 @@ static void pkm_lcs_kunit_open_component_walk_symlink_fails_closed(
 	kacs_rust_token_drop(token);
 }
 
+
+/*
+ * §5.4.1 step 1: the open is evaluated against the calling thread's
+ * effective token — the impersonation token when one is set. The key's
+ * descriptor names only the impersonated principal, so the open succeeds
+ * while impersonating and is refused once the thread reverts to its
+ * primary token.
+ */
+static void pkm_lcs_kunit_open_captures_the_impersonation_token(
+	struct kunit *test)
+{
+	static const u8 app_guid[RSI_GUID_SIZE] = {
+		0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8,
+		0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0,
+	};
+	const char path_src[] = "Machine\\App";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_kunit_walk_source_step steps[1] = {
+		{ .expected_child = "App", .guid = app_guid },
+	};
+	struct pkm_lcs_kunit_walk_source_script script = {
+		.steps = steps,
+		.step_count = ARRAY_SIZE(steps),
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *source_token;
+	const void *client;
+	const u8 *sd;
+	size_t sd_len = 0;
+	long ret;
+	int thread_ret;
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	/* LocalService, impersonation type at level Impersonation. */
+	client = kacs_rust_kunit_create_impersonation_variant_token(
+		1U, KACS_TOKEN_TYPE_IMPERSONATION, KACS_IMLEVEL_IMPERSONATION,
+		16384U, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, client);
+	sd = kacs_rust_kunit_create_file_sd(client, KEY_QUERY_VALUE, 0, 0, 0,
+					    &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	steps[0].sd = sd;
+	steps[0].sd_len = sd_len;
+	script.file = &file;
+
+	/* Impersonating: the descriptor grants this principal, so it opens. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_install_impersonation_token(client), 0);
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread,
+					 &script, "pkm-lcs-kunit-open-imp");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_reg_open_key_as_current(
+		&ops, -1, (const char __user *)path_src, KEY_QUERY_VALUE, 0);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_EXPECT_TRUE(test, ret >= 0);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	if (ret >= 0)
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)ret), 0);
+
+	/* Reverted: the primary token is not named, so the same open fails. */
+	script.reads = 0;
+	script.writes = 0;
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_walk_source_thread,
+					 &script, "pkm-lcs-kunit-open-primary");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_reg_open_key_as_current(
+		&ops, -1, (const char __user *)path_src, KEY_QUERY_VALUE, 0);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_kacs_free((void *)sd);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(client);
+	kacs_rust_token_drop(source_token);
+}
+
+
 static struct kunit_case pkm_lcs_kunit_open_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_absolute_path_route_uses_first_component_and_errno),
 	KUNIT_CASE(pkm_lcs_kunit_absolute_path_route_uses_dynamic_hives),
@@ -10199,6 +10283,7 @@ static struct kunit_case pkm_lcs_kunit_open_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_root_symlink_follows_target),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_symlink_target_hive_root),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_denied_publishes_no_fd),
+	KUNIT_CASE(pkm_lcs_kunit_open_captures_the_impersonation_token),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_malformed_sd_fails_closed),
 	KUNIT_CASE(pkm_lcs_kunit_open_absolute_preflight_stops_before_usercopy),
 	KUNIT_CASE(pkm_lcs_kunit_open_relative_composes_success),

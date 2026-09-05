@@ -57,6 +57,20 @@
 #define PKM_LCS_BACKUP_RESTORE_FD_OP_BACKUP_OUTPUT 0U
 #define PKM_LCS_BACKUP_RESTORE_FD_OP_RESTORE_INPUT 1U
 
+/*
+ * A generation counter that cannot advance is the one failure after a
+ * committed source mutation that is not the source's fault: report it as
+ * the documented EOVERFLOW and leave the slot Active. Anything else means
+ * the slot vanished under us, which downs it and surfaces as EIO.
+ */
+static long pkm_lcs_key_fd_generation_failure(u32 source_id, long ret)
+{
+	if (ret == -EOVERFLOW)
+		return -EOVERFLOW;
+	pkm_lcs_source_mark_down_by_id(source_id);
+	return -EIO;
+}
+
 struct pkm_lcs_key_fd_string_view {
 	const u8 *bytes;
 	u32 len;
@@ -4599,8 +4613,7 @@ static long pkm_lcs_key_fd_set_security_from_args(
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
 	if (ret) {
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
-		ret = -EIO;
+		ret = pkm_lcs_key_fd_generation_failure(key_fd->source_id, ret);
 		goto out_merge;
 	}
 
@@ -4784,8 +4797,7 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
 	if (ret) {
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
-		ret = -EIO;
+		ret = pkm_lcs_key_fd_generation_failure(key_fd->source_id, ret);
 		goto out_input;
 	}
 
@@ -4944,8 +4956,7 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
 	if (ret) {
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
-		ret = -EIO;
+		ret = pkm_lcs_key_fd_generation_failure(key_fd->source_id, ret);
 		goto out_after;
 	}
 
@@ -5105,8 +5116,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
 	if (ret) {
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
-		ret = -EIO;
+		ret = pkm_lcs_key_fd_generation_failure(key_fd->source_id, ret);
 		goto out_events;
 	}
 
@@ -5306,8 +5316,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
 	if (ret) {
-		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
-		ret = -EIO;
+		ret = pkm_lcs_key_fd_generation_failure(key_fd->source_id, ret);
 		goto out_cancel_mutation;
 	}
 	ret = 0;
@@ -5473,8 +5482,8 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 			key_fd->source_id, key_fd->ancestor_guids[0],
 			&generation);
 		if (ret) {
-			pkm_lcs_source_mark_down_by_id(key_fd->source_id);
-			ret = -EIO;
+			ret = pkm_lcs_key_fd_generation_failure(
+				key_fd->source_id, ret);
 			goto out_input;
 		}
 	}
@@ -5704,10 +5713,8 @@ long pkm_lcs_key_fd_publish_restore_commit_effects(
 
 	ret = pkm_lcs_source_record_transaction_generation(
 		source_id, ancestor_guids[0], &generation);
-	if (ret) {
-		pkm_lcs_source_mark_down_by_id(source_id);
-		return -EIO;
-	}
+	if (ret)
+		return pkm_lcs_key_fd_generation_failure(source_id, ret);
 
 	ret = pkm_lcs_key_fd_dispatch_source_overflow_with_limits(
 		source_id, limits, &watch_count);
@@ -12493,6 +12500,106 @@ long pkm_lcs_key_fd_parent_snapshot(int fd,
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_lcs_kunit_build_watch_event_kind(
+	u32 event_type, const u8 *name, u32 name_len, bool subtree,
+	const u8 *const *components, const u32 *component_lens,
+	u32 component_count, u32 *kind_out, u32 *total_len_out)
+{
+	struct pkm_lcs_key_fd_string_view *views = NULL;
+	struct pkm_lcs_key_fd_watch_event *event;
+	u32 i;
+
+	if (!kind_out || !total_len_out)
+		return -EINVAL;
+	*kind_out = 0;
+	*total_len_out = 0;
+	if (component_count) {
+		views = kcalloc(component_count, sizeof(*views), GFP_KERNEL);
+		if (!views)
+			return -ENOMEM;
+		for (i = 0; i < component_count; i++) {
+			views[i].bytes = components[i];
+			views[i].len = component_lens[i];
+		}
+	}
+	event = pkm_lcs_key_fd_build_watch_event(event_type, name, name_len,
+						 subtree, views,
+						 component_count);
+	kfree(views);
+	if (IS_ERR(event))
+		return PTR_ERR(event);
+	*kind_out = event->event_type;
+	*total_len_out = event->total_len;
+	pkm_lcs_key_fd_watch_event_free(event);
+	return 0;
+}
+
+/*
+ * The transaction batch path, stopping short of delivery: how many
+ * internal-watch events the batch collected is the number this returns,
+ * and the events are discarded rather than acted on.
+ */
+long pkm_lcs_kunit_dispatch_batch_collect_internal(
+	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count,
+	u32 *collected_out)
+{
+	LIST_HEAD(internal_events);
+	LIST_HEAD(transaction_burst_counts);
+	struct pkm_lcs_internal_watch_event *event;
+	struct pkm_lcs_internal_watch_event *tmp;
+	struct pkm_lcs_runtime_limits limits;
+	long ret = 0;
+	u32 collected = 0;
+	u32 i;
+
+	if (!collected_out)
+		return -EINVAL;
+	*collected_out = 0;
+	if (!contexts || !context_count)
+		return -EINVAL;
+	for (i = 0; i < context_count; i++) {
+		ret = pkm_lcs_key_fd_validate_dispatch_context(&contexts[i]);
+		if (ret)
+			return ret;
+	}
+	pkm_lcs_key_fd_runtime_limits_snapshot_or_default(&limits);
+
+	mutex_lock(&pkm_lcs_watch_registry_lock);
+	for (i = 0; i < context_count; i++) {
+		ret = pkm_lcs_key_fd_transaction_burst_count_context_locked(
+			&contexts[i], &transaction_burst_counts,
+			limits.max_transaction_watch_event_burst,
+			limits.max_subtree_watch_depth);
+		if (ret)
+			goto out_unlock;
+	}
+	ret = pkm_lcs_key_fd_transaction_burst_dispatch_overflows_locked(
+		&transaction_burst_counts, limits.notification_queue_size);
+	if (ret)
+		goto out_unlock;
+	for (i = 0; i < context_count; i++) {
+		ret = pkm_lcs_key_fd_dispatch_watch_event_context_locked(
+			&contexts[i], &transaction_burst_counts,
+			&internal_events, limits.max_subtree_watch_depth,
+			limits.notification_queue_size);
+		if (ret)
+			break;
+	}
+out_unlock:
+	mutex_unlock(&pkm_lcs_watch_registry_lock);
+	pkm_lcs_key_fd_transaction_burst_counts_free(
+		&transaction_burst_counts);
+	list_for_each_entry_safe(event, tmp, &internal_events, link) {
+		collected++;
+		list_del(&event->link);
+		pkm_lcs_internal_watch_event_path_destroy(event);
+		pkm_lcs_internal_watch_event_name_destroy(event);
+		kfree(event);
+	}
+	*collected_out = collected;
+	return ret;
+}
+
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned)
 {
 	struct pkm_lcs_key_fd *key_fd;

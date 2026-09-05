@@ -5532,8 +5532,94 @@ static void pkm_lcs_kunit_late_mutation_without_metadata_downs_source(
 	kacs_rust_token_drop(token);
 }
 
+
+/*
+ * §5.10.4: the internal self-watch is not subject to the transaction burst
+ * suppressor. A batch one event over the burst limit leaves a key-fd
+ * watcher on the same key with a single OVERFLOW, while every event is
+ * still collected for the internal watch.
+ */
+static void pkm_lcs_kunit_transaction_watch_burst_spares_the_internal_watch(
+	struct kunit *test)
+{
+	static const char * const registry_path[] = {
+		"Machine", "System", "Registry",
+	};
+	static const u8 ancestors[3][PKM_LCS_GUID_BYTES] = {
+		{ 0xf1 }, { 0xf2 }, { 0xf3 },
+	};
+	static const u8 layers_guid[PKM_LCS_GUID_BYTES] = { 0xf4 };
+	static const char value_name[] = "RequestTimeoutMs";
+	struct reg_notify_args args = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct pkm_lcs_runtime_limits limits = { };
+	struct pkm_lcs_watch_dispatch_context *contexts;
+	u32 burst_limit = 256U;
+	u32 context_count = burst_limit + 1U;
+	u32 collected = 0;
+	u8 record[16] = { };
+	long fd;
+	u32 i;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_transaction_watch_event_burst = burst_limit;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_publish(&limits), 0L);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_internal_self_watch_disarm();
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_internal_self_watch_arm(
+				24, ancestors[0], true, ancestors[2], true,
+				layers_guid, true, pkm_lcs_kunit_kmes_watch_guid,
+				NULL),
+			0L);
+
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		24, KEY_NOTIFY, registry_path, ancestors, 3);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	KUNIT_ASSERT_EQ(test, pkm_lcs_kunit_key_fd_notify((int)fd, &args), 0L);
+
+	contexts = kcalloc(context_count, sizeof(*contexts), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, contexts);
+	for (i = 0; i < context_count; i++) {
+		contexts[i].changed_key_guid = ancestors[2];
+		contexts[i].ancestor_guids = ancestors;
+		contexts[i].resolved_path = registry_path;
+		contexts[i].path_component_count = 3;
+		contexts[i].event_type = REG_WATCH_VALUE_SET;
+		contexts[i].name = (const u8 *)value_name;
+		contexts[i].name_len = sizeof(value_name) - 1U;
+	}
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_dispatch_batch_collect_internal(
+				contexts, context_count, &collected),
+			0L);
+	KUNIT_EXPECT_EQ(test, collected, context_count);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)fd, record, sizeof(record),
+						  true),
+			(ssize_t)8);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(record + 4),
+			REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)fd, record, sizeof(record),
+						  true),
+			(ssize_t)-EAGAIN);
+
+	kfree(contexts);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_internal_self_watch_disarm();
+	pkm_lcs_runtime_limits_reset_defaults();
+}
+
+
 static struct kunit_case pkm_lcs_kunit_transaction_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_transaction_watch_burst_over_limit_overflows_once),
+	KUNIT_CASE(pkm_lcs_kunit_transaction_watch_burst_spares_the_internal_watch),
 	KUNIT_CASE(pkm_lcs_kunit_transaction_watch_batch_retains_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_publishes_active_unbound),
 	KUNIT_CASE(pkm_lcs_kunit_begin_transaction_ids_are_monotonic),

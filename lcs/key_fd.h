@@ -312,6 +312,13 @@ long pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limi
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 long pkm_lcs_kunit_key_fd_set_orphaned(int fd, bool orphaned);
+long pkm_lcs_kunit_build_watch_event_kind(
+	u32 event_type, const u8 *name, u32 name_len, bool subtree,
+	const u8 *const *components, const u32 *component_lens,
+	u32 component_count, u32 *kind_out, u32 *total_len_out);
+long pkm_lcs_kunit_dispatch_batch_collect_internal(
+	const struct pkm_lcs_watch_dispatch_context *contexts, u32 context_count,
+	u32 *collected_out);
 long pkm_lcs_kunit_key_fd_get_security(
 	int fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_get_security_args *args);

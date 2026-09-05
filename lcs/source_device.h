@@ -891,6 +891,9 @@ long pkm_lcs_open_copied_relative_path_for_token(
 	u32 layer_count,
 	const struct pkm_lcs_rsi_private_layer_view *private_layers,
 	u32 private_layer_count);
+long pkm_lcs_reg_open_key_as_current(const struct pkm_lcs_usercopy_ops *ops,
+				     int parent_fd, const char __user *path,
+				     u32 desired_access, u32 flags);
 long pkm_lcs_reg_open_key_for_token(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath, u32 desired_access, u32 flags);
@@ -1707,6 +1710,11 @@ long pkm_lcs_source_response_waiter_wait(
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void pkm_lcs_kunit_reset_source_table(void);
+void pkm_lcs_kunit_fail_next_start_audit(void);
+void pkm_lcs_kunit_fail_next_request_alloc(void);
+bool pkm_lcs_kunit_request_alloc_fail_pending(void);
+long pkm_lcs_kunit_layer_table_strip_owner(const char *layer_name,
+					   u32 layer_name_len);
 void pkm_lcs_kunit_reset_layer_table(void);
 void pkm_lcs_kunit_set_sequence_state(bool initialized, u64 next_sequence);
 void pkm_lcs_kunit_source_table_snapshot(

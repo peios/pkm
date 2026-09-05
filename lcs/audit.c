@@ -192,6 +192,29 @@ long pkm_lcs_emit_key_open_audit_for_token(
 	return 0;
 }
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+/* Fails the next backup/restore START emission, as a KMES outage would. */
+static bool pkm_lcs_kunit_start_audit_fail_next;
+
+void pkm_lcs_kunit_fail_next_start_audit(void)
+{
+	WRITE_ONCE(pkm_lcs_kunit_start_audit_fail_next, true);
+}
+
+static bool pkm_lcs_kunit_start_audit_should_fail(void)
+{
+	if (!READ_ONCE(pkm_lcs_kunit_start_audit_fail_next))
+		return false;
+	WRITE_ONCE(pkm_lcs_kunit_start_audit_fail_next, false);
+	return true;
+}
+#else
+static inline bool pkm_lcs_kunit_start_audit_should_fail(void)
+{
+	return false;
+}
+#endif
+
 long pkm_lcs_emit_backup_start_audit_for_token(
 	const void *token, const u8 key_guid[16], int output_fd)
 {
@@ -203,6 +226,8 @@ long pkm_lcs_emit_backup_start_audit_for_token(
 
 	if (!token || !key_guid)
 		return -EINVAL;
+	if (pkm_lcs_kunit_start_audit_should_fail())
+		return -EIO;
 
 	ret = pkm_lcs_build_audit_caller_summary(token, &caller);
 	if (ret)
@@ -294,6 +319,8 @@ long pkm_lcs_emit_restore_start_audit_for_token(
 
 	if (!token || !key_guid)
 		return -EINVAL;
+	if (pkm_lcs_kunit_start_audit_should_fail())
+		return -EIO;
 
 	ret = pkm_lcs_build_audit_caller_summary(token, &caller);
 	if (ret)

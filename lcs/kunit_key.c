@@ -13774,7 +13774,7 @@ static void pkm_lcs_kunit_key_fd_restore_non_root_guid_collision_aborts(
 }
 
 
-static void pkm_lcs_kunit_key_fd_restore_generation_overflow_downs_source(
+static void pkm_lcs_kunit_key_fd_restore_generation_overflow_is_eoverflow(
 	struct kunit *test)
 {
 	static const u8 root_guid[PKM_LCS_GUID_BYTES] = { 1 };
@@ -13837,15 +13837,16 @@ static void pkm_lcs_kunit_key_fd_restore_generation_overflow_downs_source(
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_restore_for_token(
 				(int)key_fd, token, &args),
-			(long)-EIO);
+			(long)-EOVERFLOW);
 	thread_ret = pkm_lcs_kunit_kthread_stop(task);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_TRUE(test, script.saw_commit);
 	KUNIT_EXPECT_FALSE(test, script.saw_abort);
 	pkm_lcs_kunit_source_table_snapshot(&source_snapshot);
-	KUNIT_EXPECT_EQ(test, source_snapshot.active_count, 0U);
-	KUNIT_EXPECT_EQ(test, source_snapshot.down_count, 1U);
+	/* A saturated counter is EOVERFLOW (§5.5.3); the slot stays Active. */
+	KUNIT_EXPECT_EQ(test, source_snapshot.active_count, 1U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.down_count, 0U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -17469,6 +17470,268 @@ static void pkm_lcs_kunit_sequence_allocation_fails_closed(struct kunit *test)
 	pkm_lcs_kunit_reset_source_table();
 }
 
+
+/*
+ * §5.5.3 (hive generation): a counter that has reached U64_MAX cannot record
+ * another mutation; the ioctl reports EOVERFLOW, and the source stays Active.
+ */
+static void pkm_lcs_kunit_key_fd_set_value_generation_saturation_is_eoverflow(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7a },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 data[] = { 0x2a, 0x00, 0x00, 0x00 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_value_args args = {
+		.name_len = strlen(value_name),
+		.name_ptr = (u64)(unsigned long)value_name,
+		.type = REG_BINARY,
+		.data_len = sizeof(data),
+		.data_ptr = (u64)(unsigned long)data,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_kunit_set_value_ioctl_source_script script = {
+		.expected_guid = ancestors[1],
+		.expected_value_name = value_name,
+		.expected_layer_name = "base",
+		.expected_data = data,
+		.expected_data_len = sizeof(data),
+		.expected_value_type = REG_BINARY,
+		.set_value_status = RSI_OK,
+	};
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	struct task_struct *task;
+	u64 generation = 0;
+	u64 sequence_before = 0;
+	long mutation_fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	script.file = &file;
+
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_next_sequence_snapshot(&sequence_before),
+			0L);
+	script.expected_sequence = sequence_before;
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_set(
+				1, ancestors[0], U64_MAX),
+			0L);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_value_ioctl_source_thread, &script,
+		"pkm-lcs-kunit-set-value-saturated");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_set_value_for_token(
+		(int)mutation_fd, admin_token, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, (long)-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	/* The slot is still Active: its generation can still be read. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation, U64_MAX);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
+
+/*
+ * §5.5.3 (common errors): a kernel allocation failure inside an ioctl is
+ * ENOMEM. The request record every source round trip needs is the
+ * allocation that fails here, before anything reaches the source.
+ */
+static void pkm_lcs_kunit_key_fd_set_value_allocation_failure_is_enomem(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x7b },
+	};
+	static const char value_name[] = "Answer";
+	static const u8 data[] = { 0x01 };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_set_value_args args = {
+		.name_len = strlen(value_name),
+		.name_ptr = (u64)(unsigned long)value_name,
+		.type = REG_BINARY,
+		.data_len = sizeof(data),
+		.data_ptr = (u64)(unsigned long)data,
+		.txn_fd = -1,
+	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
+	struct file file = { };
+	const void *source_token;
+	const void *admin_token;
+	long mutation_fd;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	admin_token = kacs_rust_kunit_create_local_administrator_token();
+	KUNIT_ASSERT_NOT_NULL(test, admin_token);
+	mutation_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_SET_VALUE, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, mutation_fd >= 0);
+
+	pkm_lcs_kunit_fail_next_request_alloc();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_value_for_token(
+				(int)mutation_fd, admin_token, &ops, &args),
+			(long)-ENOMEM);
+	KUNIT_EXPECT_FALSE(test, pkm_lcs_kunit_request_alloc_fail_pending());
+	/* Nothing was queued for the source. */
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)mutation_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(admin_token);
+	kacs_rust_token_drop(source_token);
+}
+
+
+/*
+ * §5.4.4: if LCS_BACKUP_START cannot be emitted, the backup returns EIO and
+ * does not start — nothing is read from the subtree and nothing is written
+ * to the output fd. The snapshot that was opened to find out is released.
+ */
+static void pkm_lcs_kunit_key_fd_backup_start_audit_failure_is_eio(
+	struct kunit *test)
+{
+	struct reg_backup_args args = { };
+	struct pkm_lcs_kunit_backup_snapshot_source_script script = {
+		.begin_status = RSI_OK,
+		.abort_status = RSI_OK,
+		.expect_export_reads = false,
+	};
+	struct pkm_lcs_kunit_backup_output_file output = { };
+	struct pkm_kmes_kunit_snapshot kmes = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	const void *source_token;
+	long key_fd;
+	int output_fd;
+	int thread_ret;
+
+	pkm_kmes_kunit_reset_all();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	token = kacs_rust_kunit_create_logon_type_token(
+		KACS_LOGON_TYPE_SERVICE, KACS_SE_BACKUP_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	key_fd = pkm_lcs_kunit_publish_source_one_backup_key_fd();
+	KUNIT_ASSERT_TRUE(test, key_fd >= 0);
+	output_fd = pkm_lcs_kunit_backup_output_fd(&output);
+	KUNIT_ASSERT_TRUE(test, output_fd >= 0);
+	args.output_fd = output_fd;
+
+	script.file = &file;
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_backup_snapshot_source_thread, &script,
+		"pkm-lcs-kunit-backup-audit-fail");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	pkm_lcs_kunit_fail_next_start_audit();
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_backup_for_token(
+				(int)key_fd, token, &args),
+			(long)-EIO);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_TRUE(test, script.saw_abort);
+	KUNIT_EXPECT_EQ(test, output.len, (size_t)0);
+	/* Neither START nor COMPLETE reached KMES. */
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&kmes),
+			-ENOENT);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(source_token);
+}
+
+
+/*
+ * §5.6.2 (length limits): a name or path component that does not fit a
+ * 16-bit length is never emitted truncated; the record becomes an OVERFLOW.
+ */
+static void pkm_lcs_kunit_watch_event_unrepresentable_length_is_overflow(
+	struct kunit *test)
+{
+	static const char short_name[] = "Answer";
+	const u8 *components[1];
+	u32 component_lens[1];
+	u8 *huge;
+	u32 kind = 0;
+	u32 total = 0;
+
+	huge = kvmalloc(70000, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, huge);
+	memset(huge, 'a', 70000);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_build_watch_event_kind(
+				REG_WATCH_VALUE_SET, (const u8 *)short_name,
+				sizeof(short_name) - 1, false, NULL, NULL, 0,
+				&kind, &total),
+			0L);
+	KUNIT_EXPECT_EQ(test, kind, REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test, total,
+			(u32)(REG_WATCH_EVENT_MIN_SIZE + sizeof(short_name) - 1));
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_build_watch_event_kind(
+				REG_WATCH_VALUE_SET, huge, 70000, false, NULL,
+				NULL, 0, &kind, &total),
+			0L);
+	KUNIT_EXPECT_EQ(test, kind, REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, total, (u32)REG_WATCH_EVENT_MIN_SIZE);
+
+	components[0] = huge;
+	component_lens[0] = 70000;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_build_watch_event_kind(
+				REG_WATCH_VALUE_SET, (const u8 *)short_name,
+				sizeof(short_name) - 1, true, components,
+				component_lens, 1, &kind, &total),
+			0L);
+	KUNIT_EXPECT_EQ(test, kind, REG_WATCH_OVERFLOW);
+	KUNIT_EXPECT_EQ(test, total, (u32)REG_WATCH_EVENT_MIN_SIZE);
+
+	kvfree(huge);
+}
+
+
 static struct kunit_case pkm_lcs_kunit_key_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_reflects_active_and_down_slots),
 	KUNIT_CASE(pkm_lcs_kunit_hive_route_private_scope_shadows_global),
@@ -17546,6 +17809,10 @@ static struct kunit_case pkm_lcs_kunit_key_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_transactional_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_cas_failure_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_fails_before_source),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_generation_saturation_is_eoverflow),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_allocation_failure_is_enomem),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_backup_start_audit_failure_is_eio),
+	KUNIT_CASE(pkm_lcs_kunit_watch_event_unrepresentable_length_is_overflow),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_runtime_limits_fail_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_runtime_limits_source_frames),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_value_precedence_tcb_gate),
@@ -17608,7 +17875,7 @@ static struct kunit_case pkm_lcs_kunit_key_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_root_section_replays),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_non_root_key_replays),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_non_root_guid_collision_aborts),
-	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_generation_overflow_downs_source),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_generation_overflow_is_eoverflow),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_overflow_reaches_descendant_watch),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_commit_failure_no_effects),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_restore_readwrite_unsupported),
