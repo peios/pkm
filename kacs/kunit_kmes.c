@@ -1633,6 +1633,457 @@ static void pkm_kunit_kmes_runtime_rate_change_clamps_live_bucket(
 	kacs_rust_token_drop(token);
 }
 
+/*
+ * PKM *ring.tail-resync-guard. A size field at the tail reading zero or
+ * larger than the ring is a corrupt ring, not an event to reclaim: the walk
+ * is abandoned, tail_pos jumps to write_pos, the discarded window is not
+ * itemised in the drop counter, and the incoming event is written intact.
+ */
+static void pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size(
+	struct kunit *test)
+{
+	static const u32 corrupt_sizes[] = { 0U, U32_MAX };
+	struct pkm_kmes_kunit_snapshot before = { };
+	struct pkm_kmes_kunit_snapshot after = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	u8 *buffer;
+	u8 *payload;
+	size_t written = 0;
+	__le32 planted;
+	int variant;
+	int i;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_DOWNSIZE_CAPACITY,
+			       GFP_KERNEL);
+	payload = kunit_kzalloc(test, 32000, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_NOT_NULL(test, payload);
+
+	for (variant = 0; variant < ARRAY_SIZE(corrupt_sizes); variant++) {
+		pkm_kunit_reset_kmes();
+		KUNIT_ASSERT_EQ(test,
+				pkm_kmes_kunit_swap_capacity(
+					PKM_KUNIT_KMES_DOWNSIZE_CAPACITY),
+				0);
+
+		/* Four 32000-byte events fit a 128 KiB ring; a fifth does not. */
+		for (i = 0; i < 4; i++) {
+			payload[0] = (u8)(i + 1);
+			pkm_kmes_emit_kernel(KMES_ORIGIN_KACS,
+					     PKM_KUNIT_KMES_DIRECT_TYPE,
+					     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1,
+					     payload, 32000);
+		}
+		KUNIT_ASSERT_EQ(test,
+				pkm_kmes_kunit_snapshot_single_active(&before),
+				0);
+		KUNIT_ASSERT_EQ(test, before.dropped_events, 0ULL);
+		KUNIT_ASSERT_EQ(test, before.last_sequence, 4ULL);
+		KUNIT_ASSERT_EQ(test, before.tail_pos, 0ULL);
+
+		planted = cpu_to_le32(corrupt_sizes[variant]);
+		KUNIT_ASSERT_EQ(test,
+				pkm_kmes_kunit_poke_single_ring(before.tail_pos,
+								&planted,
+								sizeof(planted)),
+				0);
+
+		payload[0] = 5;
+		pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+				     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1,
+				     payload, 32000);
+
+		KUNIT_ASSERT_EQ(test,
+				pkm_kmes_kunit_copy_single_buffer(
+					buffer, PKM_KUNIT_KMES_DOWNSIZE_CAPACITY,
+					&written, &after),
+				0);
+		/* The whole surviving window went in one step ... */
+		KUNIT_EXPECT_EQ(test, after.tail_pos, before.write_pos);
+		/* ... uncounted ... */
+		KUNIT_EXPECT_EQ(test, after.dropped_events, 0ULL);
+		/* ... and the incoming event landed after it, intact. */
+		KUNIT_EXPECT_EQ(test, after.last_sequence, 5ULL);
+		KUNIT_ASSERT_TRUE(test,
+				  pkm_kunit_parse_kmes_event(buffer, written,
+							     &view));
+		KUNIT_EXPECT_EQ(test, written, (size_t)view.event_size);
+		KUNIT_EXPECT_EQ(test, after.write_pos,
+				before.write_pos + view.event_size);
+		KUNIT_EXPECT_EQ(test, view.sequence, 5ULL);
+		KUNIT_EXPECT_EQ(test, view.payload_ptr[0], (u8)5);
+	}
+}
+
+
+/*
+ * PKM *ring.swap.abort-emits-no-event. A corrupt size field met inside the
+ * quiesced migration abandons the swap like an allocation failure -- old
+ * rings live, generation unchanged, capacity retained -- but the failure is
+ * not -ENOMEM, so no KMES_BUFFER_SWAP_FAILED event is emitted.
+ */
+static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_stays_silent(
+	struct kunit *test)
+{
+	static const char swap_failed_type[] = "KMES_BUFFER_SWAP_FAILED";
+	static const u8 payload[] = { 0xc0 };
+	struct pkm_kmes_runtime_config config;
+	struct pkm_kmes_runtime_config snapshot = { };
+	struct pkm_kmes_kunit_snapshot ring = { };
+	struct pkm_kmes_kunit_fd_snapshot fd_before = { };
+	struct pkm_kmes_kunit_fd_snapshot fd_after = { };
+	const void *token;
+	int *fds;
+	int count = nr_cpu_ids;
+	u64 capacity = 0;
+	u8 original_size[sizeof(u32)];
+	u8 zero_size[sizeof(u32)] = { 0 };
+	u8 scratch[256];
+	size_t written = 0;
+	int fd;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	fds = kunit_kcalloc(test, nr_cpu_ids, sizeof(*fds), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fds);
+	memset(fds, 0xff, nr_cpu_ids * sizeof(*fds));
+
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(scratch, sizeof(scratch),
+							  &written, &ring),
+			0);
+	KUNIT_ASSERT_GE(test, written, sizeof(u32));
+	memcpy(original_size, scratch, sizeof(original_size));
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kunit_kmes_attach_all(token, fds, &count, &capacity),
+			0L);
+	fd = pkm_kunit_find_current_kmes_fd(test, fds, count, &fd_before);
+	KUNIT_ASSERT_GE(test, fd, 0);
+
+	/* Corrupt the one live event's size, then ask for a swap. */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_poke_single_ring(ring.tail_pos, zero_size,
+							sizeof(zero_size)),
+			0);
+	config = pkm_kunit_kmes_default_config();
+	config.buffer_capacity = PKM_KUNIT_KMES_SWAP_CAPACITY;
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
+			(long)-EIO);
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fd, &fd_after), 0);
+	KUNIT_EXPECT_EQ(test, fd_after.generation, fd_before.generation);
+	KUNIT_EXPECT_EQ(test, fd_after.capacity, fd_before.capacity);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_runtime_config_snapshot(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.buffer_capacity,
+			(u64)PKM_KUNIT_KMES_DEFAULT_CAPACITY);
+
+	/*
+	 * Repair the planted corruption so the ring parses again, then look
+	 * for the event that must not be there. Had it been emitted it would
+	 * sit after the repaired event and still be found.
+	 */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_poke_single_ring(ring.tail_pos,
+							original_size,
+							sizeof(original_size)),
+			0);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_KMES, swap_failed_type,
+				sizeof(swap_failed_type) - 1, scratch,
+				sizeof(scratch), &written, NULL),
+			-ENOENT);
+
+	pkm_kunit_close_fds(test, fds, count);
+	kacs_rust_token_drop(token);
+}
+
+
+/*
+ * PKM *kernel-emit.pre-init-silent. With the ready flag cleared, kernel
+ * emission consumes no sequence number and counts no ring drop; the loss is
+ * tallied only in the private pre-initialisation counter.
+ */
+static void pkm_kunit_kmes_pre_init_kernel_emit_is_silent(struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	struct pkm_kmes_kernel_event events[] = {
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE0,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1,
+			.payload = payload,
+			.payload_len = sizeof(payload),
+		},
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE1,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE1) - 1,
+			.payload = payload,
+			.payload_len = sizeof(payload),
+		},
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u64 lost_before;
+	bool was_ready;
+
+	pkm_kunit_reset_kmes();
+	lost_before = pkm_kmes_kunit_pre_init_drops();
+
+	was_ready = pkm_kmes_kunit_set_ready(false);
+	KUNIT_ASSERT_TRUE(test, was_ready);
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	pkm_kmes_emit_kernel_batch(KMES_ORIGIN_KACS, events,
+				   ARRAY_SIZE(events));
+	pkm_kmes_kunit_set_ready(true);
+
+	/* No ring became active: nothing consumed, nothing counted. */
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	KUNIT_EXPECT_GE(test, pkm_kmes_kunit_pre_init_drops() - lost_before,
+			3ULL);
+
+	/* And the window closing restores normal service. */
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+}
+
+
+/*
+ * PKM *syscalls.pre-init-fail-closed. Before KMES initialises all three
+ * syscalls fail -ENOMEM, the slot-count query included; before KACS
+ * initialises there is no token to check, and the emit pair fails -EPERM.
+ */
+static void pkm_kunit_kmes_pre_init_syscalls_fail_closed(struct kunit *test)
+{
+	static const u8 payload[] = { 0x81, 0xa1, 0x6b, 0xc0 };
+	struct kmes_emit_entry entry = {
+		.event_type = (u64)(uintptr_t)PKM_KUNIT_KMES_USER_TYPE,
+		.event_type_len = sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1,
+		.payload = (u64)(uintptr_t)payload,
+		.payload_len = sizeof(payload),
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	const void *token;
+	u32 emitted = 99;
+	u64 capacity = 0;
+	int fd = -1;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_TRUE(test, pkm_kmes_kunit_set_ready(false));
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1, payload,
+				sizeof(payload)),
+			(long)-ENOMEM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_batch_for_token(token, &entry, 1,
+							    &emitted),
+			(long)-ENOMEM);
+	KUNIT_EXPECT_EQ(test, emitted, 0U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token, 0, &fd, &capacity),
+			(long)-ENOMEM);
+	KUNIT_EXPECT_EQ(test, fd, -1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token,
+							KMES_ATTACH_QUERY_SLOTS,
+							&fd, &capacity),
+			(long)-ENOMEM);
+
+	/* Without a token -- KACS not yet up -- the emit pair fails closed. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_for_token(
+				NULL, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1, payload,
+				sizeof(payload)),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_emit_batch_for_token(NULL, &entry, 1,
+							    &emitted),
+			(long)-EPERM);
+
+	pkm_kmes_kunit_set_ready(true);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+	kacs_rust_token_drop(token);
+}
+
+
+/*
+ * PKM *kernel-emit.cpu-mismatch-discard. A ring whose recorded cpu_id
+ * disagrees with the executing CPU is an untrustworthy selection: every
+ * emission path returns early, consuming no sequence number and counting
+ * no drop.
+ */
+static void pkm_kunit_kmes_cpu_mismatch_discards_on_every_path(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0x81, 0xa1, 0x6b, 0xc0 };
+	struct pkm_kmes_kernel_event events[] = {
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE0,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE0) - 1,
+			.payload = payload,
+			.payload_len = sizeof(payload),
+		},
+		{
+			.event_type = PKM_KUNIT_KMES_BATCH_TYPE1,
+			.event_type_len = sizeof(PKM_KUNIT_KMES_BATCH_TYPE1) - 1,
+			.payload = payload,
+			.payload_len = sizeof(payload),
+		},
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	const void *token;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	pkm_kmes_kunit_set_ring_cpu_id_skew(true);
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	pkm_kmes_emit_kernel_batch(KMES_ORIGIN_KACS, events,
+				   ARRAY_SIZE(events));
+	KUNIT_EXPECT_LT(test,
+			pkm_kmes_kunit_emit_for_token(
+				token, PKM_KUNIT_KMES_USER_TYPE,
+				sizeof(PKM_KUNIT_KMES_USER_TYPE) - 1, payload,
+				sizeof(payload)),
+			0L);
+
+	pkm_kmes_kunit_set_ring_cpu_id_skew(false);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+
+	/* Identity restored, the same emission is written. */
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	kacs_rust_token_drop(token);
+}
+
+
+/*
+ * PKM *ring.wake-skipped-before-attach. A capacity swap mints rings no
+ * consumer has attached to, so the shmem producer page does not exist. An
+ * armed wake still advances the private counter; the futex wake itself is
+ * skipped because there is no shared page to key it on.
+ */
+static void pkm_kunit_kmes_wake_before_attach_advances_private_counter_only(
+	struct kunit *test)
+{
+	static const u8 payload[] = { 0xc0 };
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(
+		test,
+		pkm_kmes_kunit_swap_capacity(PKM_KUNIT_KMES_DOWNSIZE_CAPACITY),
+		0);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_set_all_need_wake(1), 0);
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.shared_page_present, (u8)0);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 2ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.futex_counter, 2U);
+
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_set_all_need_wake(0), 0);
+}
+
+
+/*
+ * PKM *attach.enumeration-skips-holes. A slot inside the array with no live
+ * ring answers -EINVAL exactly as an index past the array does; the slot
+ * count is unchanged by it, and the slots beyond it still attach.
+ */
+static void pkm_kunit_kmes_attach_hole_is_einval_and_enumeration_continues(
+	struct kunit *test)
+{
+	const void *token;
+	u64 slots_before = 0;
+	u64 slots_during = 0;
+	u64 capacity = 0;
+	int fd = -1;
+
+	token = kacs_rust_kunit_create_query_only_token();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token,
+							KMES_ATTACH_QUERY_SLOTS,
+							&fd, &slots_before),
+			0L);
+	KUNIT_ASSERT_GE(test, slots_before, 1ULL);
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_set_slot_hole(0, true), 0);
+
+	fd = -1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token, 0, &fd, &capacity),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, fd, -1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token,
+							KMES_ATTACH_QUERY_SLOTS,
+							&fd, &slots_during),
+			0L);
+	KUNIT_EXPECT_EQ(test, slots_during, slots_before);
+	if (slots_before > 1) {
+		fd = -1;
+		KUNIT_EXPECT_EQ(test,
+				pkm_kmes_kunit_attach_for_token(token, 1, &fd,
+								&capacity),
+				0L);
+		KUNIT_EXPECT_GE(test, fd, 0);
+		if (fd >= 0)
+			KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	}
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_set_slot_hole(0, false), 0);
+	fd = -1;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_attach_for_token(token, 0, &fd, &capacity),
+			0L);
+	KUNIT_EXPECT_GE(test, fd, 0);
+	if (fd >= 0)
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	kacs_rust_token_drop(token);
+}
+
+
 static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_direct_emit_writes_single_event),
 	KUNIT_CASE(pkm_kunit_kmes_identity_stamps_match_kacs_state),
@@ -1671,6 +2122,13 @@ static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_runtime_max_event_size_controls_syscall),
 	KUNIT_CASE(pkm_kunit_kmes_runtime_nesting_depth_controls_validation),
 	KUNIT_CASE(pkm_kunit_kmes_runtime_rate_change_clamps_live_bucket),
+	KUNIT_CASE(pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size),
+	KUNIT_CASE(pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_stays_silent),
+	KUNIT_CASE(pkm_kunit_kmes_pre_init_kernel_emit_is_silent),
+	KUNIT_CASE(pkm_kunit_kmes_pre_init_syscalls_fail_closed),
+	KUNIT_CASE(pkm_kunit_kmes_cpu_mismatch_discards_on_every_path),
+	KUNIT_CASE(pkm_kunit_kmes_wake_before_attach_advances_private_counter_only),
+	KUNIT_CASE(pkm_kunit_kmes_attach_hole_is_einval_and_enumeration_continues),
 	{}
 };
 

@@ -113,6 +113,9 @@ struct pkm_kmes_kunit_snapshot {
 	u64 tail_pos;
 	u64 last_sequence;
 	u64 dropped_events;
+	u32 futex_counter;
+	u8 shared_page_present;
+	u8 _padding[3];
 };
 
 struct pkm_kmes_kunit_fd_snapshot {
@@ -162,6 +165,15 @@ int pkm_kmes_kunit_runtime_config_snapshot(
 	struct pkm_kmes_runtime_config *out);
 long pkm_kmes_kunit_runtime_config_apply(
 	const struct pkm_kmes_runtime_config *config);
+long pkm_kmes_kunit_publish_self_config_plan(
+	const struct pkm_kmes_self_config_apply_plan *plan,
+	struct pkm_kmes_self_config_apply_plan *result_out);
+int pkm_kmes_kunit_poke_single_ring(u64 pos, const void *bytes, size_t len);
+bool pkm_kmes_kunit_set_ready(bool ready);
+u64 pkm_kmes_kunit_pre_init_drops(void);
+void pkm_kmes_kunit_set_ring_cpu_id_skew(bool skew);
+int pkm_kmes_kunit_set_all_need_wake(u8 value);
+int pkm_kmes_kunit_set_slot_hole(u32 cpu_id, bool hole);
 #endif
 
 #endif /* _SECURITY_PKM_KMES_H */

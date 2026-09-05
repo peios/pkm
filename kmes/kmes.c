@@ -170,6 +170,14 @@ struct pkm_kmes_kunit_process_override {
 
 static struct pkm_kmes_kunit_process_override pkm_kmes_override;
 static bool pkm_kmes_kunit_fail_next_ring_alloc;
+/* Test-planted faults: rings whose cpu_id disagrees with their slot, and a
+ * slot emptied to stand in for a hole in a sparse possible-CPU mask. Both
+ * are undone by pkm_kmes_kunit_reset_all() so a failing case cannot leak
+ * them into the next.
+ */
+static bool pkm_kmes_kunit_cpu_id_skewed;
+static struct pkm_kmes_cpu_state *pkm_kmes_kunit_holed_ring;
+static u32 pkm_kmes_kunit_holed_slot;
 #endif
 
 static size_t pkm_kmes_mapping_size(u64 capacity)
@@ -2941,6 +2949,21 @@ static int pkm_kmes_find_single_active_cpu(struct pkm_kmes_cpu_state **out_cpu)
 	return 0;
 }
 
+static void pkm_kmes_kunit_fill_snapshot(const struct pkm_kmes_cpu_state *cpu,
+					 struct pkm_kmes_kunit_snapshot *out)
+{
+	out->cpu_id = cpu->cpu_id;
+	out->_reserved = 0;
+	out->capacity = cpu->capacity;
+	out->write_pos = cpu->write_pos;
+	out->tail_pos = cpu->tail_pos;
+	out->last_sequence = cpu->sequence;
+	out->dropped_events = cpu->dropped_events;
+	out->futex_counter = cpu->futex_counter;
+	out->shared_page_present = cpu->producer_shared_page ? 1 : 0;
+	memset(out->_padding, 0, sizeof(out->_padding));
+}
+
 void pkm_kmes_kunit_reset_all(void)
 {
 	unsigned int cpu;
@@ -2948,6 +2971,10 @@ void pkm_kmes_kunit_reset_all(void)
 	struct pkm_kmes_runtime_config defaults = { };
 
 	WRITE_ONCE(pkm_kmes_kunit_fail_next_ring_alloc, false);
+	pkm_kmes_kunit_set_ring_cpu_id_skew(false);
+	if (pkm_kmes_kunit_holed_ring)
+		(void)pkm_kmes_kunit_set_slot_hole(pkm_kmes_kunit_holed_slot,
+						   false);
 	pkm_kmes_runtime_config_defaults(&defaults);
 	mutex_lock(&pkm_kmes_topology_lock);
 	pkm_kmes_runtime_config_store_locked(&defaults);
@@ -2997,13 +3024,7 @@ int pkm_kmes_kunit_snapshot_single_active(struct pkm_kmes_kunit_snapshot *out)
 	if (ret)
 		return ret;
 
-	out->cpu_id = cpu->cpu_id;
-	out->_reserved = 0;
-	out->capacity = cpu->capacity;
-	out->write_pos = cpu->write_pos;
-	out->tail_pos = cpu->tail_pos;
-	out->last_sequence = cpu->sequence;
-	out->dropped_events = cpu->dropped_events;
+	pkm_kmes_kunit_fill_snapshot(cpu, out);
 	return 0;
 }
 
@@ -3032,15 +3053,8 @@ int pkm_kmes_kunit_copy_single_buffer(u8 *out, size_t out_len,
 				      live_len);
 	*written_out = live_len;
 
-	if (out_snapshot) {
-		out_snapshot->cpu_id = cpu->cpu_id;
-		out_snapshot->_reserved = 0;
-		out_snapshot->capacity = cpu->capacity;
-		out_snapshot->write_pos = cpu->write_pos;
-		out_snapshot->tail_pos = cpu->tail_pos;
-		out_snapshot->last_sequence = cpu->sequence;
-		out_snapshot->dropped_events = cpu->dropped_events;
-	}
+	if (out_snapshot)
+		pkm_kmes_kunit_fill_snapshot(cpu, out_snapshot);
 
 	return 0;
 }
@@ -3140,15 +3154,8 @@ int pkm_kmes_kunit_copy_latest_matching_event(
 				      best_pos, out, best_event_size);
 	*written_out = best_event_size;
 
-	if (out_snapshot) {
-		out_snapshot->cpu_id = best_cpu->cpu_id;
-		out_snapshot->_reserved = 0;
-		out_snapshot->capacity = best_cpu->capacity;
-		out_snapshot->write_pos = best_cpu->write_pos;
-		out_snapshot->tail_pos = best_cpu->tail_pos;
-		out_snapshot->last_sequence = best_cpu->sequence;
-		out_snapshot->dropped_events = best_cpu->dropped_events;
-	}
+	if (out_snapshot)
+		pkm_kmes_kunit_fill_snapshot(best_cpu, out_snapshot);
 
 	return 0;
 }
@@ -3403,5 +3410,149 @@ long pkm_kmes_kunit_runtime_config_apply(
 	const struct pkm_kmes_runtime_config *config)
 {
 	return pkm_kmes_runtime_config_apply(config);
+}
+
+/*
+ * Hand a plan straight to the publisher, bypassing the Rust planner. The
+ * planner cannot build a plan with more than four audits or an out-of-range
+ * field, so the publisher's own gates are reachable only this way.
+ */
+long pkm_kmes_kunit_publish_self_config_plan(
+	const struct pkm_kmes_self_config_apply_plan *plan,
+	struct pkm_kmes_self_config_apply_plan *result_out)
+{
+	return pkm_kmes_runtime_config_publish_self_config_plan(plan,
+							       result_out);
+}
+
+/*
+ * Overwrite ring bytes at an absolute position. Consumers cannot write the
+ * data region -- mmap clears the write upgrade -- so the corruption the
+ * tail-resync guard and the migration abort defend against can only be
+ * planted from here.
+ */
+int pkm_kmes_kunit_poke_single_ring(u64 pos, const void *bytes, size_t len)
+{
+	struct pkm_kmes_cpu_state *cpu;
+	int ret;
+
+	if (!bytes || !len)
+		return -EINVAL;
+	if (!pkm_kmes_ready)
+		return -ENODEV;
+
+	ret = pkm_kmes_find_single_active_cpu(&cpu);
+	if (ret)
+		return ret;
+	if (len > cpu->capacity)
+		return -ERANGE;
+
+	pkm_kmes_write_bytes_at(cpu->data, cpu->capacity, pos, bytes, len);
+	return 0;
+}
+
+/* Reopen the pre-initialisation window; returns the flag's previous value. */
+bool pkm_kmes_kunit_set_ready(bool ready)
+{
+	bool was = READ_ONCE(pkm_kmes_ready);
+
+	WRITE_ONCE(pkm_kmes_ready, ready);
+	return was;
+}
+
+u64 pkm_kmes_kunit_pre_init_drops(void)
+{
+	return (u64)atomic64_read(&pkm_kmes_pre_init_drops);
+}
+
+/*
+ * Make every live ring's recorded cpu_id disagree with its slot by setting
+ * a bit no logical CPU index carries. The comparison under test is left
+ * untouched; only the datum it reads is falsified.
+ */
+void pkm_kmes_kunit_set_ring_cpu_id_skew(bool skew)
+{
+	unsigned int cpu;
+
+	if (!pkm_kmes_ready || !pkm_kmes_cpus)
+		return;
+
+	mutex_lock(&pkm_kmes_topology_lock);
+	if (skew != pkm_kmes_kunit_cpu_id_skewed) {
+		for_each_possible_cpu(cpu) {
+			struct pkm_kmes_cpu_state *ring = pkm_kmes_cpus[cpu].live;
+
+			if (!ring)
+				continue;
+			WRITE_ONCE(ring->cpu_id,
+				   skew ? (u16)(ring->cpu_id | 0x8000U) :
+					  (u16)(ring->cpu_id & 0x7fffU));
+		}
+		pkm_kmes_kunit_cpu_id_skewed = skew;
+	}
+	mutex_unlock(&pkm_kmes_topology_lock);
+}
+
+/*
+ * Arm (or disarm) the wake request on every live ring's consumer page. Before
+ * a consumer attaches nothing else can write that byte, which is exactly the
+ * window the pre-attach wake test needs.
+ */
+int pkm_kmes_kunit_set_all_need_wake(u8 value)
+{
+	unsigned int cpu;
+
+	if (!pkm_kmes_ready || !pkm_kmes_cpus)
+		return -ENODEV;
+
+	mutex_lock(&pkm_kmes_topology_lock);
+	for_each_possible_cpu(cpu) {
+		struct pkm_kmes_cpu_state *ring = pkm_kmes_cpus[cpu].live;
+
+		if (!ring || !ring->consumer_page)
+			continue;
+		WRITE_ONCE(*(u8 *)(ring->consumer_page +
+				   KMES_CONSUMER_NEED_WAKE_OFFSET),
+			   value);
+	}
+	mutex_unlock(&pkm_kmes_topology_lock);
+	return 0;
+}
+
+/*
+ * Empty one slot of the ring array, standing in for a CPU the possible mask
+ * skips. The ring is parked, not freed, and put back on the reverse call.
+ */
+int pkm_kmes_kunit_set_slot_hole(u32 cpu_id, bool hole)
+{
+	int ret = 0;
+
+	if (!pkm_kmes_ready || !pkm_kmes_cpus)
+		return -ENODEV;
+	if (cpu_id >= pkm_kmes_cpu_slots)
+		return -EINVAL;
+
+	mutex_lock(&pkm_kmes_topology_lock);
+	if (hole) {
+		if (pkm_kmes_kunit_holed_ring) {
+			ret = -EBUSY;
+			goto out;
+		}
+		pkm_kmes_kunit_holed_ring = pkm_kmes_cpus[cpu_id].live;
+		pkm_kmes_kunit_holed_slot = cpu_id;
+		WRITE_ONCE(pkm_kmes_cpus[cpu_id].live, NULL);
+	} else {
+		if (!pkm_kmes_kunit_holed_ring ||
+		    pkm_kmes_kunit_holed_slot != cpu_id) {
+			ret = -ENOENT;
+			goto out;
+		}
+		WRITE_ONCE(pkm_kmes_cpus[cpu_id].live,
+			   pkm_kmes_kunit_holed_ring);
+		pkm_kmes_kunit_holed_ring = NULL;
+	}
+out:
+	mutex_unlock(&pkm_kmes_topology_lock);
+	return ret;
 }
 #endif
