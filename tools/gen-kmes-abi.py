@@ -181,6 +181,11 @@ def syscall_signatures():
     return sigs
 
 
+def glibc_syscall_alias(name):
+    """The standard lowercase SYS_* spelling exported by Peios glibc."""
+    return "SYS_" + name.removeprefix("SYS_").lower()
+
+
 def probe(consts, structs, syscall_consts):
     """Compile a probe to resolve constant values and struct layouts."""
     src = ['#include <stdio.h>', '#include <stddef.h>', '#include <stdint.h>',
@@ -396,15 +401,20 @@ def build():
     w("## Syscall numbers [*abi.syscall-numbers]")
     w("")
     w("Signatures are read from the `SYSCALL_DEFINE` sites in `pkm/kmes/`.")
+    w("The PKM UAPI exports the uppercase constants in `<pkm/syscall.h>`. Peios")
+    w("glibc 2.44-5 and later exports the standard lowercase `SYS_kmes_*`")
+    w("aliases in `<sys/syscall.h>`; each alias has the same number as its PKM")
+    w("constant.")
     w("")
     sigs = syscall_signatures()
     rows = []
     for name, _, _, _, _ in syscall_consts:
         fn = name.replace("SYS_", "").lower()
         sig = sigs.get(fn)
-        rows.append([VALUES[name], f"`{name}`",
+        rows.append([VALUES[name], f"`{name}`", f"`{glibc_syscall_alias(name)}`",
                      f"`{fn}({sig})`" if sig else ""])
-    o += table(["Number", "Constant", "Signature"], sorted(rows))
+    o += table(["Number", "PKM constant", "glibc alias", "Signature"],
+               sorted(rows))
     w("")
 
     # --- structures -----------------------------------------------------

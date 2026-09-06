@@ -276,6 +276,11 @@ def syscall_signatures():
     return sigs
 
 
+def glibc_syscall_alias(name):
+    """The standard lowercase SYS_* spelling exported by Peios glibc."""
+    return "SYS_" + name.removeprefix("SYS_").lower()
+
+
 def probe(all_consts, all_structs):
     """Compile a probe to resolve constant values and struct layouts."""
     src = ['#include <stdio.h>', '#include <stddef.h>', '#include <stdint.h>']
@@ -407,16 +412,22 @@ def main():
     w("## Syscall numbers [*kacs-abi.syscall-numbers]")
     w("")
     w("Signatures are read from the `SYSCALL_DEFINE` sites in `pkm/kacs/`.")
+    w("The PKM UAPI exports the uppercase constants in `<pkm/syscall.h>`. Peios")
+    w("glibc 2.44-5 and later exports the standard lowercase `SYS_kacs_*`")
+    w("aliases in `<sys/syscall.h>`; each alias has the same number as its PKM")
+    w("constant.")
     w("")
-    w("| Number | Constant | Signature |")
-    w("|---:|---|---|")
+    w("| Number | PKM constant | glibc alias | Signature |")
+    w("|---:|---|---|---|")
     sigs = syscall_signatures()
     sysc = [(values[n], n) for n, a, r, c, g in per_header["syscall.h"][0]
             if n in values and n.startswith("SYS_KACS_")]
     for v, n in sorted(sysc):
         fn = n.replace("SYS_", "").lower()
         sig = sigs.get(fn)
-        w(f"| {v} | `{n}` | " + (f"`{fn}({sig})`" if sig else "") + " |")
+        alias = glibc_syscall_alias(n)
+        w(f"| {v} | `{n}` | `{alias}` | "
+          + (f"`{fn}({sig})`" if sig else "") + " |")
     w("")
     others = sorted((values[n], n) for n, a, r, c, g in per_header["syscall.h"][0]
                     if n in values and not n.startswith("SYS_KACS_"))
