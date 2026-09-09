@@ -850,7 +850,8 @@ M.LCS_TXN_ST_SOURCE_DOWN = 5
 M.LCS_TXN_ST_TIMED_OUT = 4
 M.MAXIMUM_ALLOWED = 33554432
 M.OWNER_SECURITY_INFORMATION = 1
-M.PEIOS_PNP_ABI_VERSION = 3
+M.PEIOS_PNP_ABI_VERSION = 4
+M.PEIOS_PNP_COMM_LEN = 16
 M.PEIOS_PNP_COUNTER_MAX_WINDOWS = 8
 M.PEIOS_PNP_COUNTER_NAME_LEN = 64
 M.PEIOS_PNP_EV_ATTR_LEN = 96
@@ -864,11 +865,17 @@ M.PEIOS_PNP_EV_FLOW_RELATED = 3
 M.PEIOS_PNP_EV_FLOW_UNTRACKED = 5
 M.PEIOS_PNP_EV_F_BACKSTOP = 1
 M.PEIOS_PNP_EV_F_FAIL_CLOSED = 2
+M.PEIOS_PNP_EV_F_IDENTITY_UNRESOLVED = 16
 M.PEIOS_PNP_EV_F_REJECT_DEGRADED = 4
 M.PEIOS_PNP_EV_F_REJUDGED = 8
 M.PEIOS_PNP_EV_LAYER_FLOW = 2
 M.PEIOS_PNP_EV_LAYER_PACKET = 0
 M.PEIOS_PNP_EV_LAYER_RAWPACKET = 1
+M.PEIOS_PNP_EV_LOCAL_ABSENT = 0
+M.PEIOS_PNP_EV_LOCAL_KERNEL = 2
+M.PEIOS_PNP_EV_LOCAL_NONE = 4
+M.PEIOS_PNP_EV_LOCAL_PROGRAM = 1
+M.PEIOS_PNP_EV_LOCAL_SHARED = 3
 M.PEIOS_PNP_EV_REJECT_PROHIBITED = 1
 M.PEIOS_PNP_EV_REJECT_REFUSED = 0
 M.PEIOS_PNP_EV_SEAT_EGRESS = 2
@@ -880,16 +887,21 @@ M.PEIOS_PNP_EV_VERDICT_PASS = 0
 M.PEIOS_PNP_EV_VERDICT_REJECT = 1
 M.PEIOS_PNP_FLOW_MAX_TAGS = 8
 M.PEIOS_PNP_FLOW_SENTENCES = 2
+M.PEIOS_PNP_GUID_LEN = 16
 M.PEIOS_PNP_IOC_COUNTERS = 3222818306
 M.PEIOS_PNP_IOC_COUNTERS_NR = 2
 M.PEIOS_PNP_IOC_FLOWS = 3222818307
 M.PEIOS_PNP_IOC_FLOWS_NR = 3
+M.PEIOS_PNP_IOC_LISTENERS = 3222818308
+M.PEIOS_PNP_IOC_LISTENERS_NR = 4
 M.PEIOS_PNP_IOC_STATUS = 2170572289
 M.PEIOS_PNP_IOC_STATUS_NR = 1
 M.PEIOS_PNP_IOC_TYPE = 78
 M.PEIOS_PNP_KEY_DST_ADDR = 2
 M.PEIOS_PNP_KEY_INTERFACE = 4
 M.PEIOS_PNP_KEY_SRC_ADDR = 1
+M.PEIOS_PNP_SERVICE_SID_LEN = 32
+M.PEIOS_PNP_SID_LEN = 68
 M.READ_CONTROL = 131072
 M.REG_BACKUP_ARGS_SIZE = 4
 M.REG_BACKUP_BLANKET_TOMBSTONE = 6
@@ -1331,9 +1343,9 @@ M.struct = {
     },
   },
   ["peios_pnp_event"] = {
-    size = 176,
-    pack = "<I8I8I1I1I1I1I1I1I1I1I4I2I2I2I1xc16c16I4I4I1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    fields = {"seq", "t_ns", "seat", "layer", "verdict", "flags", "direction", "addr_family", "protocol", "flow_state", "ifindex", "src_port", "dst_port", "ether_type", "reject_kind", "src_addr", "dst_addr", "length", "effects", "attributed"},
+    size = 456,
+    pack = "<I8I8I1I1I1I1I1I1I1I1I4I2I2I2I1xc16c16I4I4I1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI1I1I1I1i4i4I1xxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"seq", "t_ns", "seat", "layer", "verdict", "flags", "direction", "addr_family", "protocol", "flow_state", "ifindex", "src_port", "dst_port", "ether_type", "reject_kind", "src_addr", "dst_addr", "length", "effects", "attributed", "local_kind", "remote_kind", "local_unresolved", "remote_unresolved", "local_pid", "remote_pid", "local_guid", "remote_guid", "local_comm", "remote_comm", "local_user", "remote_user", "local_service", "remote_service"},
     field = {
       seq = {offset = 0, size = 8, signed = false, kind = "uint"},
       t_ns = {offset = 8, size = 8, signed = false, kind = "uint"},
@@ -1355,12 +1367,26 @@ M.struct = {
       length = {offset = 68, size = 4, signed = false, kind = "uint"},
       effects = {offset = 72, size = 4, signed = false, kind = "uint"},
       attributed = {offset = 76, size = 1, signed = false, kind = "uint"},
+      local_kind = {offset = 176, size = 1, signed = false, kind = "uint"},
+      remote_kind = {offset = 177, size = 1, signed = false, kind = "uint"},
+      local_unresolved = {offset = 178, size = 1, signed = false, kind = "uint"},
+      remote_unresolved = {offset = 179, size = 1, signed = false, kind = "uint"},
+      local_pid = {offset = 180, size = 4, signed = true, kind = "int"},
+      remote_pid = {offset = 184, size = 4, signed = true, kind = "int"},
+      local_guid = {offset = 188, size = 1, signed = false, kind = "uint"},
+      remote_guid = {offset = 204, size = 1, signed = false, kind = "uint"},
+      local_comm = {offset = 220, size = 1, signed = false, kind = "uint"},
+      remote_comm = {offset = 236, size = 1, signed = false, kind = "uint"},
+      local_user = {offset = 252, size = 1, signed = false, kind = "uint"},
+      remote_user = {offset = 320, size = 1, signed = false, kind = "uint"},
+      local_service = {offset = 388, size = 1, signed = false, kind = "uint"},
+      remote_service = {offset = 420, size = 1, signed = false, kind = "uint"},
     },
   },
   ["peios_pnp_flow_rec"] = {
-    size = 288,
-    pack = "<I4I1I1I1I1I1I1I1I1i4I4c16c16I2I2I1I1I1xxxxxI8I8I8I8I8I8xxxxxxxxi8xxxxxxxxI8xxxxxxxxI1xI1xxxxxI8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-    fields = {"id", "family", "protocol", "direction", "loopback", "seen_reply", "assured", "related", "judged", "ifindex", "timeout_secs", "src_addr", "dst_addr", "src_port", "dst_port", "icmp_type", "icmp_code", "n_tags", "start_secs", "packets", "bytes", "sentence_generation", "sentence_expires_at", "sentence_rule_hash", "sentence_verdict", "sentence_reject_kind", "tag_hash", "tag_value"},
+    size = 568,
+    pack = "<I4I1I1I1I1I1I1I1I1i4I4c16c16I2I2I1I1I1xxxxxI8I8I8I8I8I8xxxxxxxxi8xxxxxxxxI8xxxxxxxxI1xI1xxxxxI8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI8xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI1xI1xxxxxi4xxxxc32c32c136c64",
+    fields = {"id", "family", "protocol", "direction", "loopback", "seen_reply", "assured", "related", "judged", "ifindex", "timeout_secs", "src_addr", "dst_addr", "src_port", "dst_port", "icmp_type", "icmp_code", "n_tags", "start_secs", "packets", "bytes", "sentence_generation", "sentence_expires_at", "sentence_rule_hash", "sentence_verdict", "sentence_reject_kind", "tag_hash", "tag_value", "owner_kind", "owner_unresolved", "owner_pid", "owner_guid", "owner_comm", "owner_user", "owner_service"},
     field = {
       id = {offset = 0, size = 4, signed = false, kind = "uint"},
       family = {offset = 4, size = 1, signed = false, kind = "uint"},
@@ -1390,6 +1416,13 @@ M.struct = {
       sentence_reject_kind = {offset = 154, size = 1, signed = false, kind = "uint"},
       tag_hash = {offset = 160, size = 8, signed = false, kind = "uint"},
       tag_value = {offset = 224, size = 8, signed = false, kind = "uint"},
+      owner_kind = {offset = 288, size = 1, signed = false, kind = "uint"},
+      owner_unresolved = {offset = 290, size = 1, signed = false, kind = "uint"},
+      owner_pid = {offset = 296, size = 4, signed = true, kind = "int"},
+      owner_guid = {offset = 304, size = 32, signed = false, kind = "bytes"},
+      owner_comm = {offset = 336, size = 32, signed = false, kind = "bytes"},
+      owner_user = {offset = 368, size = 136, signed = false, kind = "bytes"},
+      owner_service = {offset = 504, size = 64, signed = false, kind = "bytes"},
     },
   },
   ["peios_pnp_flows_query"] = {
@@ -1403,10 +1436,43 @@ M.struct = {
       total = {offset = 16, size = 4, signed = false, kind = "uint"},
     },
   },
+  ["peios_pnp_listener_rec"] = {
+    size = 168,
+    pack = "<I1I1I1I1I1I1I1xI2xxi4c16i4I1xxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxI1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    fields = {"family", "protocol", "reuseport", "connected", "v6only", "owner_kind", "owner_unresolved", "port", "ifindex", "addr", "owner_pid", "owner_guid", "owner_comm", "owner_user", "owner_service"},
+    field = {
+      family = {offset = 0, size = 1, signed = false, kind = "uint"},
+      protocol = {offset = 1, size = 1, signed = false, kind = "uint"},
+      reuseport = {offset = 2, size = 1, signed = false, kind = "uint"},
+      connected = {offset = 3, size = 1, signed = false, kind = "uint"},
+      v6only = {offset = 4, size = 1, signed = false, kind = "uint"},
+      owner_kind = {offset = 5, size = 1, signed = false, kind = "uint"},
+      owner_unresolved = {offset = 6, size = 1, signed = false, kind = "uint"},
+      port = {offset = 8, size = 2, signed = false, kind = "uint"},
+      ifindex = {offset = 12, size = 4, signed = true, kind = "int"},
+      addr = {offset = 16, size = 16, signed = false, kind = "bytes"},
+      owner_pid = {offset = 32, size = 4, signed = true, kind = "int"},
+      owner_guid = {offset = 36, size = 1, signed = false, kind = "uint"},
+      owner_comm = {offset = 52, size = 1, signed = false, kind = "uint"},
+      owner_user = {offset = 68, size = 1, signed = false, kind = "uint"},
+      owner_service = {offset = 136, size = 1, signed = false, kind = "uint"},
+    },
+  },
+  ["peios_pnp_listeners_query"] = {
+    size = 24,
+    pack = "<I8I4I4I4xxxx",
+    fields = {"buf", "buf_len", "count", "total"},
+    field = {
+      buf = {offset = 0, size = 8, signed = false, kind = "uint"},
+      buf_len = {offset = 8, size = 4, signed = false, kind = "uint"},
+      count = {offset = 12, size = 4, signed = false, kind = "uint"},
+      total = {offset = 16, size = 4, signed = false, kind = "uint"},
+    },
+  },
   ["peios_pnp_status"] = {
     size = 352,
-    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxxxxxxxxxx",
-    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns", "tag_writes", "tag_untracked", "tag_refused", "count_writes", "count_key_absent", "count_refused", "reports_emitted", "counter_cells", "reporting_level", "seen_local_out", "flow_judged", "flow_cached", "flow_rejudged", "flow_expired", "flow_uncached", "refusals_emitted", "refusals_bypassed", "teardowns_emitted"},
+    pack = "<I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8I8xxxxxxxxxxxxxxxx",
+    fields = {"abi", "generation", "enforcing", "events_dropped", "seen_ingress", "seen_egress", "seen_local_in", "deferred", "fallback_judged", "parse_errors", "judged", "permissive", "fail_closed", "verdict_pass", "verdict_drop", "verdict_reject", "reject_degraded", "fx_tags", "fx_counts", "fx_reports", "fx_prompts", "last_ingest_error", "last_ingest_t_ns", "tag_writes", "tag_untracked", "tag_refused", "count_writes", "count_key_absent", "count_refused", "reports_emitted", "counter_cells", "reporting_level", "seen_local_out", "flow_judged", "flow_cached", "flow_rejudged", "flow_expired", "flow_uncached", "refusals_emitted", "refusals_bypassed", "teardowns_emitted", "identity_unresolved"},
     field = {
       abi = {offset = 0, size = 8, signed = false, kind = "uint"},
       generation = {offset = 8, size = 8, signed = false, kind = "uint"},
@@ -1449,6 +1515,7 @@ M.struct = {
       refusals_emitted = {offset = 304, size = 8, signed = false, kind = "uint"},
       refusals_bypassed = {offset = 312, size = 8, signed = false, kind = "uint"},
       teardowns_emitted = {offset = 320, size = 8, signed = false, kind = "uint"},
+      identity_unresolved = {offset = 328, size = 8, signed = false, kind = "uint"},
     },
   },
   ["reg_backup_args"] = {

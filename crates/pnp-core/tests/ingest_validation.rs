@@ -21,7 +21,11 @@ fn unknown_facts_and_operators_are_rejected() {
         BuildError::UnknownFact { .. }
     ));
     assert!(matches!(
-        build_err(rb("r").s("SrcAddr.GreaterThan", "10.0.0.1").actions(&["PASS"])),
+        build_err(
+            rb("r")
+                .s("SrcAddr.GreaterThan", "10.0.0.1")
+                .actions(&["PASS"])
+        ),
         BuildError::BadOperator { .. }
     ));
     assert!(matches!(
@@ -87,7 +91,11 @@ fn reject_kinds_are_exactly_the_minted_two() {
 
 #[test]
 fn counter_view_keys_are_validated_with_the_offending_key() {
-    match build_err(rb("r").int("Counter.x(2d).GreaterThan", 1).actions(&["PASS"])) {
+    match build_err(
+        rb("r")
+            .int("Counter.x(2d).GreaterThan", 1)
+            .actions(&["PASS"]),
+    ) {
         BuildError::BadCounterView { rule, key } => {
             assert_eq!(rule.as_str(), "r");
             assert_eq!(key.as_str(), "Counter.x(2d).GreaterThan");
@@ -132,8 +140,14 @@ fn port_lists_mix_scalars_and_ranges() {
             .list("DstPort.Equal", &["80-87", "89", "443"])
             .actions(&["PASS"])]
     };
-    for (port, pass) in [(80, true), (85, true), (88, false), (89, true), (443, true), (8080, false)]
-    {
+    for (port, pass) in [
+        (80, true),
+        (85, true),
+        (88, false),
+        (89, true),
+        (443, true),
+        (8080, false),
+    ] {
         let ev = judge(roots(), &tcp_in("10.0.0.9", 5555, "10.0.0.5", port));
         assert_eq!(ev.verdict == Verdict::Pass, pass, "port {port}");
     }
@@ -166,8 +180,12 @@ fn address_patterns_cover_exact_range_and_cidr() {
 fn v6_prefixes_never_match_v4_addresses_and_vice_versa() {
     let roots = || {
         vec![
-            rb("v6-lan").s("SrcAddr.Equal", "fd00::/8").actions(&["PASS"]),
-            rb("v4-any").s("SrcAddr.Equal", "0.0.0.0/0").actions(&["REJECT"]),
+            rb("v6-lan")
+                .s("SrcAddr.Equal", "fd00::/8")
+                .actions(&["PASS"]),
+            rb("v4-any")
+                .s("SrcAddr.Equal", "0.0.0.0/0")
+                .actions(&["REJECT"]),
         ]
     };
     let mut v6 = tcp_in("10.0.0.9", 5555, "10.0.0.5", 22);
@@ -254,7 +272,11 @@ fn rules_without_actions_are_null_rules() {
 fn empty_condition_lists_are_rejected() {
     let empty: Vec<RegValue> = Vec::new();
     assert!(matches!(
-        build_err(rb("r").val("DstPort.Equal", RegValue::List(empty.into())).actions(&["PASS"])),
+        build_err(
+            rb("r")
+                .val("DstPort.Equal", RegValue::List(empty.into()))
+                .actions(&["PASS"])
+        ),
         BuildError::BadPattern { .. }
     ));
 }

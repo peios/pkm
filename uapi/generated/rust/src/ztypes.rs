@@ -3026,6 +3026,21 @@ pub struct peios_pnp_event {
     pub effects: __u32,
     pub attributed: [__u8; 96usize],
     pub _pad1: __u32,
+    pub local_kind: __u8,
+    pub remote_kind: __u8,
+    pub local_unresolved: __u8,
+    pub remote_unresolved: __u8,
+    pub local_pid: __s32,
+    pub remote_pid: __s32,
+    pub local_guid: [__u8; 16usize],
+    pub remote_guid: [__u8; 16usize],
+    pub local_comm: [__u8; 16usize],
+    pub remote_comm: [__u8; 16usize],
+    pub local_user: [__u8; 68usize],
+    pub remote_user: [__u8; 68usize],
+    pub local_service: [__u8; 32usize],
+    pub remote_service: [__u8; 32usize],
+    pub _pad2: __u32,
 }
 #[test]
 fn bindgen_test_layout_peios_pnp_event() {
@@ -3033,7 +3048,7 @@ fn bindgen_test_layout_peios_pnp_event() {
     let ptr = UNINIT.as_ptr();
     assert_eq!(
         ::core::mem::size_of::<peios_pnp_event>(),
-        176usize,
+        456usize,
         concat!("Size of: ", stringify!(peios_pnp_event))
     );
     assert_eq!(
@@ -3261,6 +3276,156 @@ fn bindgen_test_layout_peios_pnp_event() {
             stringify!(_pad1)
         )
     );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).local_kind) as usize - ptr as usize },
+        176usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(local_kind)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).remote_kind) as usize - ptr as usize },
+        177usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(remote_kind)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).local_unresolved) as usize - ptr as usize },
+        178usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(local_unresolved)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).remote_unresolved) as usize - ptr as usize },
+        179usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(remote_unresolved)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).local_pid) as usize - ptr as usize },
+        180usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(local_pid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).remote_pid) as usize - ptr as usize },
+        184usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(remote_pid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).local_guid) as usize - ptr as usize },
+        188usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(local_guid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).remote_guid) as usize - ptr as usize },
+        204usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(remote_guid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).local_comm) as usize - ptr as usize },
+        220usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(local_comm)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).remote_comm) as usize - ptr as usize },
+        236usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(remote_comm)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).local_user) as usize - ptr as usize },
+        252usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(local_user)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).remote_user) as usize - ptr as usize },
+        320usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(remote_user)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).local_service) as usize - ptr as usize },
+        388usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(local_service)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).remote_service) as usize - ptr as usize },
+        420usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(remote_service)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad2) as usize - ptr as usize },
+        452usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_event),
+            "::",
+            stringify!(_pad2)
+        )
+    );
 }
 impl Default for peios_pnp_event {
     fn default() -> Self {
@@ -3315,7 +3480,8 @@ pub struct peios_pnp_status {
     pub refusals_emitted: __u64,
     pub refusals_bypassed: __u64,
     pub teardowns_emitted: __u64,
-    pub _reserved: [__u64; 3usize],
+    pub identity_unresolved: __u64,
+    pub _reserved: [__u64; 2usize],
 }
 #[test]
 fn bindgen_test_layout_peios_pnp_status() {
@@ -3742,8 +3908,18 @@ fn bindgen_test_layout_peios_pnp_status() {
         )
     );
     assert_eq!(
-        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        unsafe { ::core::ptr::addr_of!((*ptr).identity_unresolved) as usize - ptr as usize },
         328usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_status),
+            "::",
+            stringify!(identity_unresolved)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        336usize,
         concat!(
             "Offset of field: ",
             stringify!(peios_pnp_status),
@@ -4011,7 +4187,7 @@ fn bindgen_test_layout_peios_pnp_counters_query() {
     );
 }
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct peios_pnp_flow_rec {
     pub id: __u32,
     pub family: __u8,
@@ -4043,6 +4219,14 @@ pub struct peios_pnp_flow_rec {
     pub _pad1: [__u8; 4usize],
     pub tag_hash: [__u64; 8usize],
     pub tag_value: [__u64; 8usize],
+    pub owner_kind: [__u8; 2usize],
+    pub owner_unresolved: [__u8; 2usize],
+    pub _pad2: [__u8; 4usize],
+    pub owner_pid: [__s32; 2usize],
+    pub owner_guid: [__u8; 32usize],
+    pub owner_comm: [__u8; 32usize],
+    pub owner_user: [__u8; 136usize],
+    pub owner_service: [__u8; 64usize],
 }
 #[test]
 fn bindgen_test_layout_peios_pnp_flow_rec() {
@@ -4050,7 +4234,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
     let ptr = UNINIT.as_ptr();
     assert_eq!(
         ::core::mem::size_of::<peios_pnp_flow_rec>(),
-        288usize,
+        568usize,
         concat!("Size of: ", stringify!(peios_pnp_flow_rec))
     );
     assert_eq!(
@@ -4358,6 +4542,95 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
             stringify!(tag_value)
         )
     );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_kind) as usize - ptr as usize },
+        288usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(owner_kind)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_unresolved) as usize - ptr as usize },
+        290usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(owner_unresolved)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad2) as usize - ptr as usize },
+        292usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(_pad2)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_pid) as usize - ptr as usize },
+        296usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(owner_pid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_guid) as usize - ptr as usize },
+        304usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(owner_guid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_comm) as usize - ptr as usize },
+        336usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(owner_comm)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_user) as usize - ptr as usize },
+        368usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(owner_user)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_service) as usize - ptr as usize },
+        504usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_flow_rec),
+            "::",
+            stringify!(owner_service)
+        )
+    );
+}
+impl Default for peios_pnp_flow_rec {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -4429,6 +4702,297 @@ fn bindgen_test_layout_peios_pnp_flows_query() {
         concat!(
             "Offset of field: ",
             stringify!(peios_pnp_flows_query),
+            "::",
+            stringify!(_pad0)
+        )
+    );
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct peios_pnp_listener_rec {
+    pub family: __u8,
+    pub protocol: __u8,
+    pub reuseport: __u8,
+    pub connected: __u8,
+    pub v6only: __u8,
+    pub owner_kind: __u8,
+    pub owner_unresolved: __u8,
+    pub _pad0: __u8,
+    pub port: __u16,
+    pub _pad1: __u16,
+    pub ifindex: __s32,
+    pub addr: [__u8; 16usize],
+    pub owner_pid: __s32,
+    pub owner_guid: [__u8; 16usize],
+    pub owner_comm: [__u8; 16usize],
+    pub owner_user: [__u8; 68usize],
+    pub owner_service: [__u8; 32usize],
+}
+#[test]
+fn bindgen_test_layout_peios_pnp_listener_rec() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_listener_rec> =
+        ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<peios_pnp_listener_rec>(),
+        168usize,
+        concat!("Size of: ", stringify!(peios_pnp_listener_rec))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<peios_pnp_listener_rec>(),
+        4usize,
+        concat!("Alignment of ", stringify!(peios_pnp_listener_rec))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).family) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(family)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).protocol) as usize - ptr as usize },
+        1usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(protocol)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).reuseport) as usize - ptr as usize },
+        2usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(reuseport)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).connected) as usize - ptr as usize },
+        3usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(connected)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).v6only) as usize - ptr as usize },
+        4usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(v6only)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_kind) as usize - ptr as usize },
+        5usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(owner_kind)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_unresolved) as usize - ptr as usize },
+        6usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(owner_unresolved)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad0) as usize - ptr as usize },
+        7usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(_pad0)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).port) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(port)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad1) as usize - ptr as usize },
+        10usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(_pad1)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).ifindex) as usize - ptr as usize },
+        12usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(ifindex)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).addr) as usize - ptr as usize },
+        16usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(addr)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_pid) as usize - ptr as usize },
+        32usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(owner_pid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_guid) as usize - ptr as usize },
+        36usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(owner_guid)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_comm) as usize - ptr as usize },
+        52usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(owner_comm)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_user) as usize - ptr as usize },
+        68usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(owner_user)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).owner_service) as usize - ptr as usize },
+        136usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listener_rec),
+            "::",
+            stringify!(owner_service)
+        )
+    );
+}
+impl Default for peios_pnp_listener_rec {
+    fn default() -> Self {
+        let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
+        unsafe {
+            ::core::ptr::write_bytes(s.as_mut_ptr(), 0, 1);
+            s.assume_init()
+        }
+    }
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct peios_pnp_listeners_query {
+    pub buf: __u64,
+    pub buf_len: __u32,
+    pub count: __u32,
+    pub total: __u32,
+    pub _pad0: __u32,
+}
+#[test]
+fn bindgen_test_layout_peios_pnp_listeners_query() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_listeners_query> =
+        ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<peios_pnp_listeners_query>(),
+        24usize,
+        concat!("Size of: ", stringify!(peios_pnp_listeners_query))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<peios_pnp_listeners_query>(),
+        8usize,
+        concat!("Alignment of ", stringify!(peios_pnp_listeners_query))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).buf) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listeners_query),
+            "::",
+            stringify!(buf)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).buf_len) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listeners_query),
+            "::",
+            stringify!(buf_len)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).count) as usize - ptr as usize },
+        12usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listeners_query),
+            "::",
+            stringify!(count)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).total) as usize - ptr as usize },
+        16usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listeners_query),
+            "::",
+            stringify!(total)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._pad0) as usize - ptr as usize },
+        20usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_pnp_listeners_query),
             "::",
             stringify!(_pad0)
         )

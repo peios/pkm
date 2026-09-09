@@ -665,9 +665,12 @@ impl Condition {
             FactId::TimeSecond => (time.second, 60, 1, now),
             FactId::TimeMinute => (time.minute, 60, 60, now - now.rem_euclid(60)),
             FactId::TimeHour => (time.hour, 24, 3600, now - now.rem_euclid(3600)),
-            FactId::TimeDayOfWeek => {
-                (time.day_of_week - 1, 7, 86_400, now - now.rem_euclid(86_400))
-            }
+            FactId::TimeDayOfWeek => (
+                time.day_of_week - 1,
+                7,
+                86_400,
+                now - now.rem_euclid(86_400),
+            ),
             _ => return Some(now - now.rem_euclid(86_400) + 86_400),
         };
         let offset = if fact == FactId::TimeDayOfWeek { 1 } else { 0 };

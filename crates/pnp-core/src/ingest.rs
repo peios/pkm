@@ -97,11 +97,7 @@ impl Collector {
     }
 
     fn note_tag_read(&mut self, name: &str, rule: &PkmString) -> Result<(), BuildError> {
-        if self
-            .tag_read_sites
-            .iter()
-            .any(|(_, n)| n.as_str() == name)
-        {
+        if self.tag_read_sites.iter().any(|(_, n)| n.as_str() == name) {
             return Ok(());
         }
         self.tag_read_sites
@@ -548,9 +544,7 @@ fn parse_condition(
             CondOp::Lt(scalar_int_named(value, fact_for_names).ok_or_else(bad_pattern)?)
         }
         ("Has", FactFamily::Flags) => CondOp::Has(flag_mask(value).ok_or_else(bad_pattern)?),
-        ("Hasnt", FactFamily::Flags) => {
-            CondOp::Hasnt(flag_mask(value).ok_or_else(bad_pattern)?)
-        }
+        ("Hasnt", FactFamily::Flags) => CondOp::Hasnt(flag_mask(value).ok_or_else(bad_pattern)?),
         _ => return Err(bad_op()),
     };
 
@@ -560,10 +554,7 @@ fn parse_condition(
 /// Builds a `BadPattern`/`BadOperator` error; if allocating the message
 /// context itself fails, degrades to `Alloc`.
 fn mk_error(path: &PkmString, key: &str, pattern: bool) -> BuildError {
-    match (
-        crate::pkm_alloc::TryClone::try_clone(path),
-        str_to_pkm(key),
-    ) {
+    match (crate::pkm_alloc::TryClone::try_clone(path), str_to_pkm(key)) {
         (Ok(rule), Ok(key)) => {
             if pattern {
                 BuildError::BadPattern { rule, key }
@@ -757,8 +748,9 @@ fn parse_mac(s: &str) -> Option<[u8; 6]> {
 fn flag_mask(value: &RegValue) -> Option<u8> {
     let mut mask = 0u8;
     let mut ok = true;
-    let result = for_each_element(value, &mut |el| {
-        match el.as_str().and_then(tcp_flags::from_name) {
+    let result = for_each_element(
+        value,
+        &mut |el| match el.as_str().and_then(tcp_flags::from_name) {
             Some(bit) => {
                 mask |= bit;
                 Ok(())
@@ -767,8 +759,8 @@ fn flag_mask(value: &RegValue) -> Option<u8> {
                 ok = false;
                 Err(())
             }
-        }
-    });
+        },
+    );
     if result.is_err() || !ok || mask == 0 {
         return None;
     }
@@ -810,10 +802,12 @@ fn lint_condition(
         }
         // The RawPacket seat stands before conntrack (inbound) and reads no
         // other layer's state in either direction (ratified visibility law).
-        Layer::RawPacket => matches!(
-            condition.key,
-            CondKey::Fact(FactId::FlowState) | CondKey::Tag { .. }
-        ) || matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_only()),
+        Layer::RawPacket => {
+            matches!(
+                condition.key,
+                CondKey::Fact(FactId::FlowState) | CondKey::Tag { .. }
+            ) || matches!(condition.key, CondKey::Fact(f) if f.is_flow_only() || f.is_interface_only())
+        }
         // A Flow fact is one identical for every packet of the flow; the
         // per-packet facts are never given to a Flow snapshot.
         Layer::Flow => matches!(

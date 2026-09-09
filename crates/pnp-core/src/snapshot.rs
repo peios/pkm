@@ -351,10 +351,7 @@ pub struct Snapshot<'a> {
 impl<'a> Snapshot<'a> {
     /// Looks up a visible flow tag by its name hash.
     pub fn tag(&self, hash: u64) -> Option<u64> {
-        self.tags
-            .iter()
-            .find(|(h, _)| *h == hash)
-            .map(|(_, v)| *v)
+        self.tags.iter().find(|(h, _)| *h == hash).map(|(_, v)| *v)
     }
 
     /// Looks up a resolved counter view by index.

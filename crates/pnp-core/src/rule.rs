@@ -133,9 +133,7 @@ impl Rule {
     /// This is what makes a rule eligible to speak for an abstaining
     /// descendant in the parentage walk.
     pub fn has_direct_verdict(&self) -> bool {
-        self.actions
-            .iter()
-            .any(|a| matches!(a, Action::Verdict(_)))
+        self.actions.iter().any(|a| matches!(a, Action::Verdict(_)))
     }
 
     /// The strictest direct verdict, if any.

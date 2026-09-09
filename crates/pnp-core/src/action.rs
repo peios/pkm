@@ -249,9 +249,7 @@ impl From<AllocError> for ParseFailure {
 }
 
 fn parse_one(input: &str, prompt_depth: usize) -> Result<(Action, &str), ParseFailure> {
-    let name_end = input
-        .find(['(', ',', ')'])
-        .unwrap_or(input.len());
+    let name_end = input.find(['(', ',', ')']).unwrap_or(input.len());
     let name = &input[..name_end];
     let rest = &input[name_end..];
 
@@ -350,9 +348,9 @@ fn parse_one(input: &str, prompt_depth: usize) -> Result<(Action, &str), ParseFa
             }
             let op_name = args[1];
             let operand = match args.get(2) {
-                Some(a) => Some(
-                    parse_uint(a).ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?,
-                ),
+                Some(a) => {
+                    Some(parse_uint(a).ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?)
+                }
                 None => None,
             };
             let op = if upper_eq(op_name, "SET") {
@@ -391,8 +389,8 @@ fn parse_one(input: &str, prompt_depth: usize) -> Result<(Action, &str), ParseFa
         }
         "REPORT" => {
             expect_arity(&args, 1)?;
-            let level = parse_int(args[0])
-                .ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?;
+            let level =
+                parse_int(args[0]).ok_or(ParseFailure::Parse(ActionParseError::BadArgument))?;
             if !(1..=5).contains(&level) {
                 return Err(ParseFailure::Parse(ActionParseError::BadArgument));
             }

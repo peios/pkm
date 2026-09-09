@@ -1,7 +1,7 @@
 use crate::access_mask::GenericMapping;
-use crate::condition::{OwnerMatch, 
+use crate::condition::{
     evaluate_conditional_expression, validate_conditional_expression_structure, ConditionalContext,
-    ConditionalResult,
+    ConditionalResult, OwnerMatch,
 };
 use crate::error::{KacsError, KacsResult};
 use crate::evaluate_sd::{

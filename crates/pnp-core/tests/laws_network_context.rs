@@ -61,7 +61,9 @@ fn no_network_means_the_condition_is_false_and_the_backstop_answers() {
     // shipped baseline applies unchanged; nothing opens by accident.
     let e = judge_in(
         Layer::Flow,
-        vec![rb("home-ssh").s("Network.Trust.Equal", "home").actions(&["PASS"])],
+        vec![rb("home-ssh")
+            .s("Network.Trust.Equal", "home")
+            .actions(&["PASS"])],
         &nowhere(),
     );
     assert_eq!(e.verdict, Verdict::Drop);
@@ -77,7 +79,11 @@ fn an_exception_can_open_a_door_on_one_network_only() {
             .s("Direction.Equal", "in")
             .int("DstPort.Equal", 22)
             .actions(&["DROP"])
-            .child(rb("home").s("Network.Trust.Equal", "home").actions(&["PASS"]))]
+            .child(
+                rb("home")
+                    .s("Network.Trust.Equal", "home")
+                    .actions(&["PASS"]),
+            )]
     };
     let e = judge_in(Layer::Flow, rules(), &at_home());
     assert_eq!(e.verdict, Verdict::Pass);
@@ -98,7 +104,11 @@ fn an_exception_can_open_a_door_on_one_network_only() {
 fn present_can_ask_whether_any_network_is_known() {
     // `Network.Id Present = 0` is the honest "not on any identified
     // network" — legal now that the fact exists at the packet layers.
-    let rules = || vec![rb("unknown-network").int("Network.Id.Present", 0).actions(&["DROP"])];
+    let rules = || {
+        vec![rb("unknown-network")
+            .int("Network.Id.Present", 0)
+            .actions(&["DROP"])]
+    };
     let e = judge_in(Layer::Packet, rules(), &nowhere());
     assert_eq!(e.verdict, Verdict::Drop);
     assert_eq!(e.attributed_to.as_str(), "unknown-network");
@@ -127,9 +137,17 @@ fn the_rest_of_the_interface_vocabulary_stays_off_the_packet_layers() {
             );
         }
     }
-    let inputs: Vec<RuleInput> = vec![rb("r").int("Interface.Kind.Present", 1).actions(&["PASS"]).0];
+    let inputs: Vec<RuleInput> = vec![
+        rb("r")
+            .int("Interface.Kind.Present", 1)
+            .actions(&["PASS"])
+            .0,
+    ];
     let err = build_forest(Layer::Packet, &inputs).err().expect("refused");
-    assert!(matches!(err, BuildError::PresentNeverAtLayer { .. }), "{err:?}");
+    assert!(
+        matches!(err, BuildError::PresentNeverAtLayer { .. }),
+        "{err:?}"
+    );
 }
 
 #[test]

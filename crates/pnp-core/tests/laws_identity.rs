@@ -104,7 +104,9 @@ fn a_service_is_named_by_its_name_or_its_sid() {
     assert_eq!(judge_in(Layer::Flow, by_sid, &snap).verdict, Verdict::Pass);
 
     // Another service's name is a different SID: no match, backstop.
-    let other = vec![rb("netd").s("Local.Service.Equal", "netd").actions(&["PASS"])];
+    let other = vec![rb("netd")
+        .s("Local.Service.Equal", "netd")
+        .actions(&["PASS"])];
     assert!(judge_in(Layer::Flow, other, &snap).backstop);
 }
 
@@ -170,7 +172,10 @@ fn integrity_is_an_integer_with_named_levels() {
             rb("rest").actions(&["PASS"]),
         ]
     };
-    assert!(matches!(judge_in(Layer::Flow, roots(), &snap).verdict, Verdict::Reject(_)));
+    assert!(matches!(
+        judge_in(Layer::Flow, roots(), &snap).verdict,
+        Verdict::Reject(_)
+    ));
 
     let p = resolvd();
     let snap = flow_from(&p, "93.184.216.34", 443);
@@ -178,7 +183,9 @@ fn integrity_is_an_integer_with_named_levels() {
 
     let ev = judge_in(
         Layer::Flow,
-        vec![rb("exact").int("Local.Integrity.Equal", 8192).actions(&["PASS"])],
+        vec![rb("exact")
+            .int("Local.Integrity.Equal", 8192)
+            .actions(&["PASS"])],
         &snap,
     );
     assert_eq!(ev.verdict, Verdict::Pass);
@@ -201,7 +208,9 @@ fn confinement_and_capabilities_shape_the_sandbox() {
                         .s("DstAddr.Equal", "10.0.0.0/8")
                         .actions(&["PASS"]),
                 ),
-            rb("unconfined").int("Local.Confinement.Present", 0).actions(&["PASS"]),
+            rb("unconfined")
+                .int("Local.Confinement.Present", 0)
+                .actions(&["PASS"]),
         ]
     };
     let ev = judge_in(Layer::Flow, roots(), &snap);
@@ -240,7 +249,10 @@ fn the_process_guid_is_a_fact_for_runtime_authors() {
     let ev = judge_in(
         Layer::Flow,
         vec![rb("this-process")
-            .s("Local.Process.Equal", "0F3A9C2E-1B4D-4E5F-8A6B-7C8D9E0F1A2B")
+            .s(
+                "Local.Process.Equal",
+                "0F3A9C2E-1B4D-4E5F-8A6B-7C8D9E0F1A2B",
+            )
             .actions(&["DROP"])],
         &snap,
     );
@@ -254,8 +266,12 @@ fn local_is_a_tristate_plus_one_and_always_present_at_the_flow_layer() {
             rb("unowned-inbound")
                 .list("Local.Equal", &["none", "kernel"])
                 .actions(&["REJECT"]),
-            rb("multicast").s("Local.Equal", "shared").actions(&["PASS"]),
-            rb("programs").s("Local.Equal", "program").actions(&["PASS"]),
+            rb("multicast")
+                .s("Local.Equal", "shared")
+                .actions(&["PASS"]),
+            rb("programs")
+                .s("Local.Equal", "program")
+                .actions(&["PASS"]),
         ]
     };
     assert!(matches!(
@@ -267,7 +283,9 @@ fn local_is_a_tristate_plus_one_and_always_present_at_the_flow_layer() {
         Verdict::Reject(_)
     ));
     assert_eq!(
-        judge_in(Layer::Flow, roots(), &flow_kind(EndpointKind::Shared)).attributed_to.as_str(),
+        judge_in(Layer::Flow, roots(), &flow_kind(EndpointKind::Shared))
+            .attributed_to
+            .as_str(),
         "multicast"
     );
     let p = resolvd();
@@ -283,8 +301,12 @@ fn local_is_a_tristate_plus_one_and_always_present_at_the_flow_layer() {
     let ev = judge_in(
         Layer::Flow,
         vec![
-            rb("system").s("Local.User.Equal", "SYSTEM").actions(&["PASS"]),
-            rb("any-service").int("Local.Service.Present", 1).actions(&["PASS"]),
+            rb("system")
+                .s("Local.User.Equal", "SYSTEM")
+                .actions(&["PASS"]),
+            rb("any-service")
+                .int("Local.Service.Present", 1)
+                .actions(&["PASS"]),
         ],
         &flow_kind(EndpointKind::Kernel),
     );
@@ -300,12 +322,20 @@ fn present_looks_through_the_absent_fact_law() {
     // "Every outbound flow must have an owner" is statable.
     let roots = || {
         vec![
-            rb("no-owner").int("Local.User.Present", 0).actions(&["DROP"]),
+            rb("no-owner")
+                .int("Local.User.Present", 0)
+                .actions(&["DROP"]),
             rb("owned").int("Local.User.Present", 1).actions(&["PASS"]),
         ]
     };
-    assert_eq!(judge_in(Layer::Flow, roots(), &owned).verdict, Verdict::Pass);
-    assert_eq!(judge_in(Layer::Flow, roots(), &kernel).verdict, Verdict::Drop);
+    assert_eq!(
+        judge_in(Layer::Flow, roots(), &owned).verdict,
+        Verdict::Pass
+    );
+    assert_eq!(
+        judge_in(Layer::Flow, roots(), &kernel).verdict,
+        Verdict::Drop
+    );
 
     // A user program is a program with no service SID.
     let mut user_program = resolvd();
@@ -431,11 +461,7 @@ fn unresolvable_names_are_refused_not_guessed() {
     // Operators the family does not have are refused as such.
     let input = RuleInput {
         name: "r".into(),
-        values: vec![(
-            "Local.User.GreaterThan".into(),
-            pnp_core::RegValue::Int(1),
-        )]
-        .into(),
+        values: vec![("Local.User.GreaterThan".into(), pnp_core::RegValue::Int(1))].into(),
         children: vec![].into(),
     };
     assert!(matches!(
@@ -458,7 +484,10 @@ fn remote_exists_only_on_loopback() {
     let roots = || {
         vec![
             rb("only-resolvd-reaches-it")
-                .s("Remote.Process.Equal", "11111111-2222-3333-4444-555555555555")
+                .s(
+                    "Remote.Process.Equal",
+                    "11111111-2222-3333-4444-555555555555",
+                )
                 .actions(&["DROP"])
                 .child(
                     rb("resolvd")
@@ -470,10 +499,7 @@ fn remote_exists_only_on_loopback() {
     };
     let ev = judge_in(Layer::Flow, roots(), &snap);
     assert_eq!(ev.verdict, Verdict::Pass);
-    assert_eq!(
-        ev.attributed_to.as_str(),
-        "only-resolvd-reaches-it/resolvd"
-    );
+    assert_eq!(ev.attributed_to.as_str(), "only-resolvd-reaches-it/resolvd");
 
     // Off loopback nothing is provable about the other end: Remote is
     // absent, and Remote.Present = 0 says so.

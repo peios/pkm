@@ -78,9 +78,7 @@ fn a_consulted_true_time_condition_expires_at_its_next_flip() {
     // Working hours: true at 10:30, flips false at 18:00.
     let ev = judge_in(
         Layer::Flow,
-        vec![rb("hours")
-            .s("Time.Hour.Equal", "9-17")
-            .actions(&["PASS"])],
+        vec![rb("hours").s("Time.Hour.Equal", "9-17").actions(&["PASS"])],
         &flow_out("192.0.2.9", 443),
     );
     assert_eq!(ev.verdict, Verdict::Pass);
@@ -195,17 +193,29 @@ fn flip_moments_are_exact_for_bounded_cycles_and_daily_otherwise() {
         Some(MIDNIGHT + 3 * 86_400)
     );
     // Sunday only, on a Wednesday: true at Sunday midnight.
-    assert_eq!(expiry("Time.DayOfWeek.Equal", "7"), Some(MIDNIGHT + 4 * 86_400));
+    assert_eq!(
+        expiry("Time.DayOfWeek.Equal", "7"),
+        Some(MIDNIGHT + 4 * 86_400)
+    );
     // Calendar facts: conservatively, next midnight.
-    assert_eq!(expiry("Time.DayOfMonth.Equal", "2"), Some(MIDNIGHT + 86_400));
+    assert_eq!(
+        expiry("Time.DayOfMonth.Equal", "2"),
+        Some(MIDNIGHT + 86_400)
+    );
     assert_eq!(expiry("Time.Month.Equal", "9"), Some(MIDNIGHT + 86_400));
     assert_eq!(expiry("Time.Year.Equal", "2026"), Some(MIDNIGHT + 86_400));
     // Constant over its whole cycle: never flips.
     assert_eq!(expiry("Time.Hour.LessThan", "24"), None);
     assert_eq!(expiry("Time.Hour.Equal", "0-23"), None);
     // Operators other than Equal flip too.
-    assert_eq!(expiry("Time.Hour.GreaterThan", "17"), Some(MIDNIGHT + 18 * 3600));
-    assert_eq!(expiry("Time.Hour.LessThan", "10"), Some(MIDNIGHT + 24 * 3600));
+    assert_eq!(
+        expiry("Time.Hour.GreaterThan", "17"),
+        Some(MIDNIGHT + 18 * 3600)
+    );
+    assert_eq!(
+        expiry("Time.Hour.LessThan", "10"),
+        Some(MIDNIGHT + 24 * 3600)
+    );
 }
 
 #[test]
@@ -324,7 +334,12 @@ fn per_packet_layers_lint_flow_only_facts() {
     );
     assert_eq!(
         keys,
-        vec!["Related.Equal", "Start.Minute.Equal", "FlowState.Equal", "Tag.x.Equal"]
+        vec![
+            "Related.Equal",
+            "Start.Minute.Equal",
+            "FlowState.Equal",
+            "Tag.x.Equal"
+        ]
     );
 }
 

@@ -873,12 +873,7 @@ fn deny_only_group_owner_still_matches_owner_rights_deny_aces() {
     }];
     let dacl = acl_bytes(&[
         basic_ace(ACCESS_DENIED_ACE_TYPE, 0, WRITE_DAC, &owner_rights),
-        basic_ace(
-            ACCESS_ALLOWED_ACE_TYPE,
-            0,
-            READ_CONTROL | WRITE_DAC,
-            &user,
-        ),
+        basic_ace(ACCESS_ALLOWED_ACE_TYPE, 0, READ_CONTROL | WRITE_DAC, &user),
     ]);
     let sd_bytes = sd_with_dacl(&administrators, Some(&dacl));
     let sd = SecurityDescriptor::parse(&sd_bytes).expect("sd should parse");

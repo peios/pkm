@@ -72,7 +72,11 @@ fn shadowing_exists_only_within_a_lineage() {
     // on the same packet, regardless of anyone's depth.
     let ssh = tcp_in("10.0.0.7", 5555, "10.0.0.5", 22);
     let mut roots = inbound_drop_with_ssh_exception();
-    roots.push(rb("watcher").int("DstPort.Equal", 22).actions(&["REPORT(3)", "PASS"]));
+    roots.push(
+        rb("watcher")
+            .int("DstPort.Equal", 22)
+            .actions(&["REPORT(3)", "PASS"]),
+    );
 
     let ev = judge(roots, &ssh);
     // Both branches yielded PASS; the watcher's report fired.
@@ -87,7 +91,11 @@ fn abstention_walks_up_to_the_nearest_verdict_bearing_ancestor() {
     let roots = vec![rb("no-inbound")
         .s("Direction.Equal", "in")
         .actions(&["DROP", "REPORT(2)"])
-        .child(rb("interesting").int("DstPort.Equal", 22).actions(&["NULL", "COUNT(ssh-seen)"]))];
+        .child(
+            rb("interesting")
+                .int("DstPort.Equal", 22)
+                .actions(&["NULL", "COUNT(ssh-seen)"]),
+        )];
 
     let ev = judge(roots, &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22));
     assert_eq!(ev.verdict, Verdict::Drop);
@@ -129,19 +137,21 @@ fn a_speaker_executes_once_for_multiple_abstaining_descendants() {
     // Packet matches both overlapping abstaining siblings.
     let ev = judge(roots, &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22));
     assert_eq!(ev.verdict, Verdict::Drop);
-    assert_eq!(reports(&ev).len(), 1, "speaker spoke once, not per-abstainer");
+    assert_eq!(
+        reports(&ev).len(),
+        1,
+        "speaker spoke once, not per-abstainer"
+    );
     assert_eq!(ev.candidates.len(), 1);
 }
 
 #[test]
 fn no_speaker_in_parentage_falls_through_to_other_trees_or_backstop() {
     // A whole tree of abstainers contributes nothing dispositive.
-    let roots = vec![
-        rb("observers")
-            .s("Direction.Equal", "in")
-            .actions(&["COUNT(inbound)"]) // side effects only, no verdict
-            .child(rb("ssh").int("DstPort.Equal", 22).actions(&["COUNT(ssh)"])),
-    ];
+    let roots = vec![rb("observers")
+        .s("Direction.Equal", "in")
+        .actions(&["COUNT(inbound)"]) // side effects only, no verdict
+        .child(rb("ssh").int("DstPort.Equal", 22).actions(&["COUNT(ssh)"]))];
     let ev = judge(roots, &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22));
     assert_eq!(ev.verdict, Verdict::Drop);
     assert!(ev.backstop);
@@ -170,13 +180,11 @@ fn priority_inherits_down_the_tree() {
 
 #[test]
 fn disabled_rules_do_not_match_and_take_their_subtree_with_them() {
-    let roots = vec![
-        rb("gone")
-            .int("Enabled", 0)
-            .s("Direction.Equal", "in")
-            .actions(&["DROP"])
-            .child(rb("child-too").actions(&["PASS", "REPORT(5)"])),
-    ];
+    let roots = vec![rb("gone")
+        .int("Enabled", 0)
+        .s("Direction.Equal", "in")
+        .actions(&["DROP"])
+        .child(rb("child-too").actions(&["PASS", "REPORT(5)"]))];
     let ev = judge(roots, &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22));
     assert!(ev.backstop);
     assert!(reports(&ev).is_empty());

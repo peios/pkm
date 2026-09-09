@@ -75,7 +75,11 @@ fn multiple_verdicts_in_one_rule_reduce_to_the_strictest() {
 fn shipped_policy_shape_outbound_pass_over_backstop() {
     // The ratified shipped-policy shape: permissiveness is a visible rule,
     // the backstop stays DROP.
-    let roots = || vec![rb("outbound-ok").s("Direction.Equal", "out").actions(&["PASS"])];
+    let roots = || {
+        vec![rb("outbound-ok")
+            .s("Direction.Equal", "out")
+            .actions(&["PASS"])]
+    };
 
     let out = judge(roots(), &tcp_out("93.184.216.34", 443));
     assert_eq!(out.verdict, Verdict::Pass);

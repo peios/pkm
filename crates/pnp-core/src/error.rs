@@ -24,7 +24,10 @@ pub enum BuildError {
     /// The `Actions` value is missing, not a list, or contains a non-string.
     BadActionsValue { rule: PkmString },
     /// One action expression could not be parsed.
-    BadAction { rule: PkmString, detail: ActionParseError },
+    BadAction {
+        rule: PkmString,
+        detail: ActionParseError,
+    },
     /// PROMPT fallbacks nest deeper than the compiled-in chain cap.
     PromptChainTooDeep { rule: PkmString },
     /// `Priority` is present but not an integer.

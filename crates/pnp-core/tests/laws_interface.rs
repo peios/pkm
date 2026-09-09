@@ -39,7 +39,9 @@ fn tunnel() -> Snapshot<'static> {
 fn join_names_a_profile_through_the_forest_table() {
     let (forest, _) = build(
         Layer::Interface,
-        vec![rb("wired").s("Interface.Kind.Equal", "wired").actions(&["JOIN(office/london)"])],
+        vec![rb("wired")
+            .s("Interface.Kind.Equal", "wired")
+            .actions(&["JOIN(office/london)"])],
     );
     assert_eq!(forest.profiles.len(), 1);
     assert_eq!(forest.profiles[0].as_str(), "office/london");
@@ -55,9 +57,15 @@ fn a_backslash_path_is_folded_and_the_same_profile_is_interned_once() {
     let (forest, _) = build(
         Layer::Interface,
         vec![
-            rb("a").s("Interface.Kind.Equal", "wired").actions(&["JOIN(office\\london)"]),
-            rb("b").s("Interface.Kind.Equal", "wireless").actions(&["JOIN(office/london)"]),
-            rb("c").s("Interface.Kind.Equal", "tunnel").actions(&["JOIN(vpn)"]),
+            rb("a")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["JOIN(office\\london)"]),
+            rb("b")
+                .s("Interface.Kind.Equal", "wireless")
+                .actions(&["JOIN(office/london)"]),
+            rb("c")
+                .s("Interface.Kind.Equal", "tunnel")
+                .actions(&["JOIN(vpn)"]),
         ],
     );
     let names: Vec<&str> = forest.profiles.iter().map(|p| p.as_str()).collect();
@@ -68,7 +76,9 @@ fn a_backslash_path_is_folded_and_the_same_profile_is_interned_once() {
 fn the_backstop_is_ignore() {
     let e = judge_in(
         Layer::Interface,
-        vec![rb("radio").s("Interface.Kind.Equal", "wireless").actions(&["JOIN(default)"])],
+        vec![rb("radio")
+            .s("Interface.Kind.Equal", "wireless")
+            .actions(&["JOIN(default)"])],
         &wired(),
     );
     assert_eq!(e.verdict, Verdict::Ignore);
@@ -111,7 +121,11 @@ fn every_interface_fact_matches_and_absent_facts_are_false() {
             vec![rb("r").s(key, value).actions(&["JOIN(p)"])],
             &tunnel(),
         );
-        assert_eq!(e.verdict, Verdict::Ignore, "{key} must be false on a tunnel");
+        assert_eq!(
+            e.verdict,
+            Verdict::Ignore,
+            "{key} must be false on a tunnel"
+        );
     }
     // Present looks through the law.
     let e = judge_in(
@@ -141,7 +155,9 @@ fn strictness_is_down_over_ignore_over_join_and_priority_beats_it() {
     let e = judge_in(
         Layer::Interface,
         vec![
-            rb("dark").s("Interface.Kind.Equal", "wired").actions(&["DOWN"]),
+            rb("dark")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["DOWN"]),
             rb("this-one")
                 .s("Interface.Id.Equal", "3f2a1b")
                 .int("Priority", 100)
@@ -158,8 +174,12 @@ fn two_joins_tied_on_priority_are_a_conflict_not_a_choice() {
     let e = judge_in(
         Layer::Interface,
         vec![
-            rb("a").s("Interface.Kind.Equal", "wired").actions(&["JOIN(x)"]),
-            rb("b").s("Interface.Kind.Equal", "wired").actions(&["JOIN(y)"]),
+            rb("a")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["JOIN(x)"]),
+            rb("b")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["JOIN(y)"]),
         ],
         &wired(),
     );
@@ -169,8 +189,12 @@ fn two_joins_tied_on_priority_are_a_conflict_not_a_choice() {
     let e = judge_in(
         Layer::Interface,
         vec![
-            rb("a").s("Interface.Kind.Equal", "wired").actions(&["JOIN(x)"]),
-            rb("b").s("Interface.Kind.Equal", "wired").actions(&["JOIN(x)"]),
+            rb("a")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["JOIN(x)"]),
+            rb("b")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["JOIN(x)"]),
         ],
         &wired(),
     );
@@ -179,8 +203,13 @@ fn two_joins_tied_on_priority_are_a_conflict_not_a_choice() {
     let e = judge_in(
         Layer::Interface,
         vec![
-            rb("a").s("Interface.Kind.Equal", "wired").actions(&["JOIN(x)"]),
-            rb("b").s("Interface.Kind.Equal", "wired").int("Priority", 5).actions(&["JOIN(y)"]),
+            rb("a")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["JOIN(x)"]),
+            rb("b")
+                .s("Interface.Kind.Equal", "wired")
+                .int("Priority", 5)
+                .actions(&["JOIN(y)"]),
         ],
         &wired(),
     );
@@ -193,12 +222,22 @@ fn an_exception_names_a_different_profile_and_the_laptop_case_reads() {
     let rules = vec![rb("radio")
         .s("Interface.Kind.Equal", "wired")
         .actions(&["JOIN(untrusted)"])
-        .child(rb("home").s("Network.Name.Equal", "palfrey-home").actions(&["JOIN(home)"]))
-        .child(rb("office").s("Network.Trust.Equal", "corporate").actions(&["JOIN(corp)"]))];
+        .child(
+            rb("home")
+                .s("Network.Name.Equal", "palfrey-home")
+                .actions(&["JOIN(home)"]),
+        )
+        .child(
+            rb("office")
+                .s("Network.Trust.Equal", "corporate")
+                .actions(&["JOIN(corp)"]),
+        )];
     let (forest, _) = build(Layer::Interface, rules);
     let e = pnp_core::evaluate(&forest, &wired(), &Default::default()).unwrap();
     assert_eq!(e.attributed_to.as_str(), "radio/office");
-    let Verdict::Join(i) = e.verdict else { panic!("expected JOIN") };
+    let Verdict::Join(i) = e.verdict else {
+        panic!("expected JOIN")
+    };
     assert_eq!(forest.profiles[i as usize].as_str(), "corp");
 
     let mut cafe = wired();
@@ -206,7 +245,9 @@ fn an_exception_names_a_different_profile_and_the_laptop_case_reads() {
     cafe.network_trust = Some("public".into());
     let e = pnp_core::evaluate(&forest, &cafe, &Default::default()).unwrap();
     assert_eq!(e.attributed_to.as_str(), "radio");
-    let Verdict::Join(i) = e.verdict else { panic!("expected JOIN") };
+    let Verdict::Join(i) = e.verdict else {
+        panic!("expected JOIN")
+    };
     assert_eq!(forest.profiles[i as usize].as_str(), "untrusted");
 }
 
@@ -219,7 +260,11 @@ fn an_abstaining_exception_lets_its_parent_speak() {
         vec![rb("wired")
             .s("Interface.Kind.Equal", "wired")
             .actions(&["JOIN(default)"])
-            .child(rb("slot3").s("Interface.Path.Equal", "pci-0000:00:03.0").actions(&["NULL"]))],
+            .child(
+                rb("slot3")
+                    .s("Interface.Path.Equal", "pci-0000:00:03.0")
+                    .actions(&["NULL"]),
+            )],
         &wired(),
     );
     assert_eq!(e.verdict, Verdict::Join(0));
@@ -230,7 +275,9 @@ fn an_abstaining_exception_lets_its_parent_speak() {
 fn report_is_the_one_effect_the_layer_keeps() {
     let e = judge_in(
         Layer::Interface,
-        vec![rb("wired").s("Interface.Kind.Equal", "wired").actions(&["JOIN(p)", "REPORT(3)"])],
+        vec![rb("wired")
+            .s("Interface.Kind.Equal", "wired")
+            .actions(&["JOIN(p)", "REPORT(3)"])],
         &wired(),
     );
     assert_eq!(e.effects.len(), 1);
@@ -243,14 +290,27 @@ fn refused(layer: Layer, rule: common::Rb) -> BuildError {
 
 #[test]
 fn the_interface_layer_refuses_packet_actions_and_the_packet_layers_refuse_its_verdicts() {
-    for action in ["PASS", "DROP", "REJECT", "TAG(t, Set)", "COUNT(c)", "PROMPT(h, DROP)"] {
+    for action in [
+        "PASS",
+        "DROP",
+        "REJECT",
+        "TAG(t, Set)",
+        "COUNT(c)",
+        "PROMPT(h, DROP)",
+    ] {
         let err = refused(Layer::Interface, rb("r").actions(&[action]));
-        assert!(matches!(err, BuildError::ActionNotAtLayer { .. }), "{action}: {err:?}");
+        assert!(
+            matches!(err, BuildError::ActionNotAtLayer { .. }),
+            "{action}: {err:?}"
+        );
     }
     for layer in [Layer::Packet, Layer::RawPacket, Layer::Flow] {
         for action in ["JOIN(p)", "IGNORE", "DOWN", "PROMPT(h, DOWN)"] {
             let err = refused(layer, rb("r").actions(&[action]));
-            assert!(matches!(err, BuildError::ActionNotAtLayer { .. }), "{action}: {err:?}");
+            assert!(
+                matches!(err, BuildError::ActionNotAtLayer { .. }),
+                "{action}: {err:?}"
+            );
         }
     }
 }
@@ -259,15 +319,24 @@ fn the_interface_layer_refuses_packet_actions_and_the_packet_layers_refuse_its_v
 fn a_join_path_must_be_a_path() {
     for bad in ["JOIN()", "JOIN(/x)", "JOIN(x/)", "JOIN(a//b)", "JOIN(a, b)"] {
         let err = refused(Layer::Interface, rb("r").actions(&[bad]));
-        assert!(matches!(err, BuildError::BadAction { .. }), "{bad}: {err:?}");
+        assert!(
+            matches!(err, BuildError::BadAction { .. }),
+            "{bad}: {err:?}"
+        );
     }
 }
 
 #[test]
 fn tags_and_counters_do_not_exist_at_the_interface_layer() {
-    let err = refused(Layer::Interface, rb("r").int("Tag.x.GreaterThan", 0).actions(&["DOWN"]));
+    let err = refused(
+        Layer::Interface,
+        rb("r").int("Tag.x.GreaterThan", 0).actions(&["DOWN"]),
+    );
     assert!(matches!(err, BuildError::KeyNotAtLayer { .. }), "{err:?}");
-    let err = refused(Layer::Interface, rb("r").int("Counter.c.GreaterThan", 0).actions(&["DOWN"]));
+    let err = refused(
+        Layer::Interface,
+        rb("r").int("Counter.c.GreaterThan", 0).actions(&["DOWN"]),
+    );
     assert!(matches!(err, BuildError::KeyNotAtLayer { .. }), "{err:?}");
 }
 
@@ -279,19 +348,33 @@ fn packet_facts_are_dead_at_the_interface_layer_and_vice_versa() {
     );
     assert_eq!(lints.len(), 1);
     assert_eq!(lints[0].kind, LintKind::FactNeverPresentAtLayer);
-    let err = refused(Layer::Interface, rb("r").int("DstPort.Present", 1).actions(&["DOWN"]));
-    assert!(matches!(err, BuildError::PresentNeverAtLayer { .. }), "{err:?}");
+    let err = refused(
+        Layer::Interface,
+        rb("r").int("DstPort.Present", 1).actions(&["DOWN"]),
+    );
+    assert!(
+        matches!(err, BuildError::PresentNeverAtLayer { .. }),
+        "{err:?}"
+    );
 
     for layer in [Layer::Packet, Layer::RawPacket, Layer::Flow] {
         let (_, lints) = build(
             layer,
-            vec![rb("r").s("Interface.Kind.Equal", "wired").actions(&["DROP"])],
+            vec![rb("r")
+                .s("Interface.Kind.Equal", "wired")
+                .actions(&["DROP"])],
         );
         assert_eq!(lints.len(), 1, "{layer:?}");
         // The network context (`Network.Id/Name/Trust`) is a packet fact
         // too (laws_network_context.rs); `Network.Kind` is not.
-        let err = refused(layer, rb("r").int("Network.Kind.Present", 1).actions(&["DROP"]));
-        assert!(matches!(err, BuildError::PresentNeverAtLayer { .. }), "{layer:?}: {err:?}");
+        let err = refused(
+            layer,
+            rb("r").int("Network.Kind.Present", 1).actions(&["DROP"]),
+        );
+        assert!(
+            matches!(err, BuildError::PresentNeverAtLayer { .. }),
+            "{layer:?}: {err:?}"
+        );
     }
     // The interface name itself is shared with the packet layers.
     let (_, lints) = build(

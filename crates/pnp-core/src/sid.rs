@@ -272,7 +272,9 @@ mod tests {
         assert!(Sid::from_bytes(&[2, 0, 0, 0, 0, 0, 0, 5]).is_none()); // revision
         assert!(Sid::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 5, 0]).is_none()); // long
         assert_eq!(
-            Sid::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 5]).unwrap().to_string(),
+            Sid::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 5])
+                .unwrap()
+                .to_string(),
             "S-1-5"
         );
     }

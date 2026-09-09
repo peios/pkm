@@ -2,7 +2,7 @@ mod common;
 use common::{acl_bytes, basic_ace, mapping, sid_bytes};
 use kacs_core::{
     apply_mic, resolve_mandatory_label, IntegrityLevel, KacsError, MicEnforcementState,
-    PrivilegeProvenance, SecurityDescriptor, MAXIMUM_ALLOWED, READ_CONTROL, SE_RELABEL_PRIVILEGE,
+    PrivilegeProvenance, SecurityDescriptor, MAXIMUM_ALLOWED, SE_RELABEL_PRIVILEGE,
     SE_SACL_PRESENT, SE_SELF_RELATIVE, WRITE_DAC, WRITE_OWNER,
 };
 

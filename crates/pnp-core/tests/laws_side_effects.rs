@@ -10,8 +10,12 @@ use pnp_core::{evaluate, EvalContext, Layer, RejectKind, Verdict};
 fn side_effects_union_across_overlapping_rules() {
     let ev = judge(
         vec![
-            rb("tagger").int("DstPort.Equal", 22).actions(&["TAG(ssh, SET, 1)", "PASS"]),
-            rb("counter").s("Direction.Equal", "in").actions(&["COUNT(inbound)", "DROP"]),
+            rb("tagger")
+                .int("DstPort.Equal", 22)
+                .actions(&["TAG(ssh, SET, 1)", "PASS"]),
+            rb("counter")
+                .s("Direction.Equal", "in")
+                .actions(&["COUNT(inbound)", "DROP"]),
         ],
         &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22),
     );
@@ -28,9 +32,11 @@ fn priority_never_suppresses_side_effects() {
     let ev = judge(
         vec![
             rb("org-pass").int("Priority", 1000).actions(&["PASS"]),
-            rb("local-monitor")
-                .int("DstPort.Equal", 22)
-                .actions(&["REPORT(3)", "COUNT(ssh-attempts)", "DROP"]),
+            rb("local-monitor").int("DstPort.Equal", 22).actions(&[
+                "REPORT(3)",
+                "COUNT(ssh-attempts)",
+                "DROP",
+            ]),
         ],
         &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22),
     );
@@ -70,7 +76,9 @@ fn reporting_level_threshold_gates_emission() {
 #[test]
 fn prompt_unanswered_takes_the_fallback_and_is_visible() {
     let ev = judge(
-        vec![rb("ask-first").int("DstPort.Equal", 22).actions(&["PROMPT(user, DROP)"])],
+        vec![rb("ask-first")
+            .int("DstPort.Equal", 22)
+            .actions(&["PROMPT(user, DROP)"])],
         &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22),
     );
     assert_eq!(ev.verdict, Verdict::Drop);
@@ -87,7 +95,11 @@ fn prompt_with_null_fallback_abstains_into_the_parentage_walk() {
         vec![rb("no-inbound")
             .s("Direction.Equal", "in")
             .actions(&["DROP"])
-            .child(rb("ask").int("DstPort.Equal", 22).actions(&["PROMPT(user)"]))],
+            .child(
+                rb("ask")
+                    .int("DstPort.Equal", 22)
+                    .actions(&["PROMPT(user)"]),
+            )],
         &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22),
     );
     // Unanswered, fallback NULL: the parent speaks.

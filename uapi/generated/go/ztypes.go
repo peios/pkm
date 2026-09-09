@@ -150,28 +150,43 @@ type Peios_pnp_counters_query struct {
 	_       uint32
 }
 type Peios_pnp_event struct {
-	Seq         uint64
-	T_ns        uint64
-	Seat        uint8
-	Layer       uint8
-	Verdict     uint8
-	Flags       uint8
-	Direction   uint8
-	Addr_family uint8
-	Protocol    uint8
-	Flow_state  uint8
-	Ifindex     uint32
-	Src_port    uint16
-	Dst_port    uint16
-	Ether_type  uint16
-	Reject_kind uint8
-	_           uint8
-	Src_addr    [16]uint8
-	Dst_addr    [16]uint8
-	Length      uint32
-	Effects     uint32
-	Attributed  [96]uint8
-	_           uint32
+	Seq               uint64
+	T_ns              uint64
+	Seat              uint8
+	Layer             uint8
+	Verdict           uint8
+	Flags             uint8
+	Direction         uint8
+	Addr_family       uint8
+	Protocol          uint8
+	Flow_state        uint8
+	Ifindex           uint32
+	Src_port          uint16
+	Dst_port          uint16
+	Ether_type        uint16
+	Reject_kind       uint8
+	_                 uint8
+	Src_addr          [16]uint8
+	Dst_addr          [16]uint8
+	Length            uint32
+	Effects           uint32
+	Attributed        [96]uint8
+	_                 uint32
+	Local_kind        uint8
+	Remote_kind       uint8
+	Local_unresolved  uint8
+	Remote_unresolved uint8
+	Local_pid         int32
+	Remote_pid        int32
+	Local_guid        [16]uint8
+	Remote_guid       [16]uint8
+	Local_comm        [16]uint8
+	Remote_comm       [16]uint8
+	Local_user        [68]uint8
+	Remote_user       [68]uint8
+	Local_service     [32]uint8
+	Remote_service    [32]uint8
+	_                 uint32
 }
 type Peios_pnp_flow_rec struct {
 	Id                   uint32
@@ -204,6 +219,14 @@ type Peios_pnp_flow_rec struct {
 	_                    [4]uint8
 	Tag_hash             [8]uint64
 	Tag_value            [8]uint64
+	Owner_kind           [2]uint8
+	Owner_unresolved     [2]uint8
+	_                    [4]uint8
+	Owner_pid            [2]int32
+	Owner_guid           [32]uint8
+	Owner_comm           [32]uint8
+	Owner_user           [136]uint8
+	Owner_service        [64]uint8
 }
 type Peios_pnp_flows_query struct {
 	Buf     uint64
@@ -212,49 +235,76 @@ type Peios_pnp_flows_query struct {
 	Total   uint32
 	_       uint32
 }
+type Peios_pnp_listener_rec struct {
+	Family           uint8
+	Protocol         uint8
+	Reuseport        uint8
+	Connected        uint8
+	V6only           uint8
+	Owner_kind       uint8
+	Owner_unresolved uint8
+	_                uint8
+	Port             uint16
+	_                uint16
+	Ifindex          int32
+	Addr             [16]uint8
+	Owner_pid        int32
+	Owner_guid       [16]uint8
+	Owner_comm       [16]uint8
+	Owner_user       [68]uint8
+	Owner_service    [32]uint8
+}
+type Peios_pnp_listeners_query struct {
+	Buf     uint64
+	Buf_len uint32
+	Count   uint32
+	Total   uint32
+	_       uint32
+}
 type Peios_pnp_status struct {
-	Abi               uint64
-	Generation        uint64
-	Enforcing         uint64
-	Events_dropped    uint64
-	Seen_ingress      uint64
-	Seen_egress       uint64
-	Seen_local_in     uint64
-	Deferred          uint64
-	Fallback_judged   uint64
-	Parse_errors      uint64
-	Judged            uint64
-	Permissive        uint64
-	Fail_closed       uint64
-	Verdict_pass      uint64
-	Verdict_drop      uint64
-	Verdict_reject    uint64
-	Reject_degraded   uint64
-	Fx_tags           uint64
-	Fx_counts         uint64
-	Fx_reports        uint64
-	Fx_prompts        uint64
-	Last_ingest_error uint64
-	Last_ingest_t_ns  uint64
-	Tag_writes        uint64
-	Tag_untracked     uint64
-	Tag_refused       uint64
-	Count_writes      uint64
-	Count_key_absent  uint64
-	Count_refused     uint64
-	Reports_emitted   uint64
-	Counter_cells     uint64
-	Reporting_level   uint64
-	Seen_local_out    uint64
-	Flow_judged       uint64
-	Flow_cached       uint64
-	Flow_rejudged     uint64
-	Flow_expired      uint64
-	Flow_uncached     uint64
-	Refusals_emitted  uint64
-	Refusals_bypassed uint64
-	Teardowns_emitted uint64
-	_                 [3]uint64
+	Abi                 uint64
+	Generation          uint64
+	Enforcing           uint64
+	Events_dropped      uint64
+	Seen_ingress        uint64
+	Seen_egress         uint64
+	Seen_local_in       uint64
+	Deferred            uint64
+	Fallback_judged     uint64
+	Parse_errors        uint64
+	Judged              uint64
+	Permissive          uint64
+	Fail_closed         uint64
+	Verdict_pass        uint64
+	Verdict_drop        uint64
+	Verdict_reject      uint64
+	Reject_degraded     uint64
+	Fx_tags             uint64
+	Fx_counts           uint64
+	Fx_reports          uint64
+	Fx_prompts          uint64
+	Last_ingest_error   uint64
+	Last_ingest_t_ns    uint64
+	Tag_writes          uint64
+	Tag_untracked       uint64
+	Tag_refused         uint64
+	Count_writes        uint64
+	Count_key_absent    uint64
+	Count_refused       uint64
+	Reports_emitted     uint64
+	Counter_cells       uint64
+	Reporting_level     uint64
+	Seen_local_out      uint64
+	Flow_judged         uint64
+	Flow_cached         uint64
+	Flow_rejudged       uint64
+	Flow_expired        uint64
+	Flow_uncached       uint64
+	Refusals_emitted    uint64
+	Refusals_bypassed   uint64
+	Teardowns_emitted   uint64
+	Identity_unresolved uint64
+	_                   [2]uint64
 }
 type Reg_backup_args struct {
 	Output_fd int32

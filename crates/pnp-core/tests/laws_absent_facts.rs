@@ -24,7 +24,9 @@ fn port_conditions_never_match_portless_packets() {
 fn arp_frames_match_only_facts_they_have() {
     let roots = || {
         vec![
-            rb("flow-pass").s("FlowState.Equal", "established").actions(&["PASS"]),
+            rb("flow-pass")
+                .s("FlowState.Equal", "established")
+                .actions(&["PASS"]),
             rb("arp-ok").s("EtherType.Equal", "arp").actions(&["PASS"]),
         ]
     };
@@ -35,7 +37,9 @@ fn arp_frames_match_only_facts_they_have() {
     // With neither matching (no arp rule), the backstop answers: absent
     // facts silently fail conditions rather than erroring.
     let ev = judge(
-        vec![rb("flow-pass").s("FlowState.Equal", "established").actions(&["PASS"])],
+        vec![rb("flow-pass")
+            .s("FlowState.Equal", "established")
+            .actions(&["PASS"])],
         &arp_in(),
     );
     assert!(ev.backstop);
@@ -44,9 +48,9 @@ fn arp_frames_match_only_facts_they_have() {
 #[test]
 fn established_pass_is_the_cornerstone_rule() {
     let roots = || {
-        vec![
-            rb("established").s("FlowState.Equal", "established").actions(&["PASS"]),
-        ]
+        vec![rb("established")
+            .s("FlowState.Equal", "established")
+            .actions(&["PASS"])]
     };
     let mut snap = tcp_in("93.184.216.34", 443, "10.0.0.5", 40000);
     snap.flow_state = Some(FlowState::Established);
@@ -62,8 +66,12 @@ fn established_pass_is_the_cornerstone_rule() {
 fn tag_and_counter_conditions_read_the_snapshot() {
     let roots = || {
         vec![
-            rb("trusted").int("Tag.lan-trusted.Equal", 1).actions(&["PASS"]),
-            rb("flooded").int("Counter.synburst.GreaterThan", 100).actions(&["DROP"]),
+            rb("trusted")
+                .int("Tag.lan-trusted.Equal", 1)
+                .actions(&["PASS"]),
+            rb("flooded")
+                .int("Counter.synburst.GreaterThan", 100)
+                .actions(&["DROP"]),
         ]
     };
 

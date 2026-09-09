@@ -33,20 +33,36 @@ fn sel(name: &str) -> PortSelector {
 fn selector_grammar_accepts_every_documented_form() {
     assert_eq!(
         sel("tcp:80"),
-        PortSelector { protocols: PORT_PROTO_TCP, lo: 80, hi: 80 }
+        PortSelector {
+            protocols: PORT_PROTO_TCP,
+            lo: 80,
+            hi: 80
+        }
     );
     assert_eq!(
         sel("udp:53"),
-        PortSelector { protocols: PORT_PROTO_UDP, lo: 53, hi: 53 }
+        PortSelector {
+            protocols: PORT_PROTO_UDP,
+            lo: 53,
+            hi: 53
+        }
     );
     assert_eq!(
         sel("tcp,udp:1-1023"),
-        PortSelector { protocols: PORT_PROTO_ALL, lo: 1, hi: 1023 }
+        PortSelector {
+            protocols: PORT_PROTO_ALL,
+            lo: 1,
+            hi: 1023
+        }
     );
     assert_eq!(sel("udp,tcp:1-1023"), sel("tcp,udp:1-1023"));
     assert_eq!(
         sel("*:8080"),
-        PortSelector { protocols: PORT_PROTO_ALL, lo: 8080, hi: 8080 }
+        PortSelector {
+            protocols: PORT_PROTO_ALL,
+            lo: 8080,
+            hi: 8080
+        }
     );
     assert_eq!(sel("TCP:443"), sel("tcp:443"));
     assert_eq!(sel("tcp,udp:65535-65535").width(), 1);
@@ -56,9 +72,24 @@ fn selector_grammar_accepts_every_documented_form() {
 #[test]
 fn selector_grammar_rejects_malformed_names() {
     for bad in [
-        "", "tcp", "tcp:", ":80", "tcp:0", "tcp:080", "tcp:65536", "tcp:80-", "tcp:-80",
-        "tcp:443-80", "sctp:80", "tcp,tcp:80", "*,tcp:80", "tcp,:80", "tcp:8 0", "tcp:80:90",
-        "tcp:1-2-3", "tcp,udp:65535-655350",
+        "",
+        "tcp",
+        "tcp:",
+        ":80",
+        "tcp:0",
+        "tcp:080",
+        "tcp:65536",
+        "tcp:80-",
+        "tcp:-80",
+        "tcp:443-80",
+        "sctp:80",
+        "tcp,tcp:80",
+        "*,tcp:80",
+        "tcp,:80",
+        "tcp:8 0",
+        "tcp:80:90",
+        "tcp:1-2-3",
+        "tcp,udp:65535-655350",
     ] {
         assert!(
             PortSelector::parse(bad.as_bytes()).is_err(),
@@ -192,8 +223,14 @@ fn lookup_order_independence() {
 #[test]
 fn fallback_descriptor_is_well_formed_and_matches_the_test_encoder() {
     let parsed = SecurityDescriptor::parse(PORT_FALLBACK_DEFAULT_SD).expect("fallback parses");
-    assert_eq!(parsed.owner().map(|s| s.as_bytes()), Some(SYSTEM.as_slice()));
-    assert_eq!(parsed.group().map(|s| s.as_bytes()), Some(SYSTEM.as_slice()));
+    assert_eq!(
+        parsed.owner().map(|s| s.as_bytes()),
+        Some(SYSTEM.as_slice())
+    );
+    assert_eq!(
+        parsed.group().map(|s| s.as_bytes()),
+        Some(SYSTEM.as_slice())
+    );
     assert!(parsed.dacl().is_some());
     // The shared encoder emits ACL_REVISION_DS; the fallback uses the plain
     // ACL_REVISION that a basic-ACE ACL should carry. Everything else must be
@@ -204,18 +241,33 @@ fn fallback_descriptor_is_well_formed_and_matches_the_test_encoder() {
 
     let table = port_fallback_table().expect("fallback table");
     assert_eq!(table.reservations().len(), 0);
-    assert_eq!(table.lookup(PortProtocol::Tcp, 80), PORT_FALLBACK_DEFAULT_SD);
-    assert_eq!(table.lookup(PortProtocol::Udp, 60000), PORT_FALLBACK_DEFAULT_SD);
+    assert_eq!(
+        table.lookup(PortProtocol::Tcp, 80),
+        PORT_FALLBACK_DEFAULT_SD
+    );
+    assert_eq!(
+        table.lookup(PortProtocol::Udp, 60000),
+        PORT_FALLBACK_DEFAULT_SD
+    );
 }
 
 #[test]
 fn port_rights_and_mapping_match_the_uapi() {
     assert_eq!(PORT_BIND, 0x0000_0001);
     assert_eq!(PORT_ALL_ACCESS, PORT_BIND | READ_CONTROL);
-    assert_eq!(PORT_GENERIC_MAPPING.map_mask(GENERIC_EXECUTE).unwrap(), PORT_BIND);
-    assert_eq!(PORT_GENERIC_MAPPING.map_mask(GENERIC_READ).unwrap(), READ_CONTROL);
+    assert_eq!(
+        PORT_GENERIC_MAPPING.map_mask(GENERIC_EXECUTE).unwrap(),
+        PORT_BIND
+    );
+    assert_eq!(
+        PORT_GENERIC_MAPPING.map_mask(GENERIC_READ).unwrap(),
+        READ_CONTROL
+    );
     assert_eq!(PORT_GENERIC_MAPPING.map_mask(GENERIC_WRITE).unwrap(), 0);
-    assert_eq!(PORT_GENERIC_MAPPING.map_mask(GENERIC_ALL).unwrap(), PORT_ALL_ACCESS);
+    assert_eq!(
+        PORT_GENERIC_MAPPING.map_mask(GENERIC_ALL).unwrap(),
+        PORT_ALL_ACCESS
+    );
     assert_eq!(PORT_SELECTOR_MAX_LEN, "tcp,udp:65535-65535".len());
 }
 
@@ -245,13 +297,20 @@ fn streaming_lookup_agrees_with_the_table() {
     }
     // No default at all: nothing to fall back on.
     assert_eq!(
-        lookup_values([(b"tcp:80".as_slice(), web.as_slice())], PortProtocol::Udp, 9),
+        lookup_values(
+            [(b"tcp:80".as_slice(), web.as_slice())],
+            PortProtocol::Udp,
+            9
+        ),
         None
     );
     // A malformed name is skipped, not fatal, once past validation.
     assert_eq!(
         lookup_values(
-            [(b"bogus".as_slice(), web.as_slice()), (PORT_DEFAULT_SELECTOR, default.as_slice())],
+            [
+                (b"bogus".as_slice(), web.as_slice()),
+                (PORT_DEFAULT_SELECTOR, default.as_slice())
+            ],
             PortProtocol::Tcp,
             80
         ),

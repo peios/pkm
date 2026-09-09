@@ -6,8 +6,8 @@ mod common;
 
 use common::*;
 use pnp_core::{
-    check_forests, evaluate, keyspec, name_hash, BuildError, Effect, EvalContext, Layer,
-    NamedHash, RejectKind, Verdict,
+    check_forests, evaluate, keyspec, name_hash, BuildError, Effect, EvalContext, Layer, NamedHash,
+    RejectKind, Verdict,
 };
 
 #[test]
@@ -47,8 +47,12 @@ fn forest_collects_every_machinery_name_it_mentions() {
     let (forest, _) = build(
         Layer::Packet,
         vec![
-            rb("w")
-                .actions(&["TAG(seen, Set)", "COUNT(hits)", "PROMPT(u, TAG(asked, Add))", "PASS"]),
+            rb("w").actions(&[
+                "TAG(seen, Set)",
+                "COUNT(hits)",
+                "PROMPT(u, TAG(asked, Add))",
+                "PASS",
+            ]),
             rb("r")
                 .int("Tag.seen.Equal", 1)
                 .int("Counter.hits(10s, SrcAddr).GreaterThan", 5)
@@ -98,7 +102,9 @@ fn a_view_over_a_stream_nobody_writes_is_refused_across_forests() {
     // satisfies the read.
     let (writer, _) = build(
         Layer::RawPacket,
-        vec![rb("syn").list("TcpFlags.Has", &["SYN"]).actions(&["COUNT(synburst)", "PASS"])],
+        vec![rb("syn")
+            .list("TcpFlags.Has", &["SYN"])
+            .actions(&["COUNT(synburst)", "PASS"])],
     );
     check_forests(&[&reader, &writer]).expect("writer in another forest suffices");
     // Write-only streams are legal: audit is a consumer.
@@ -143,7 +149,12 @@ fn hash_collisions_among_distinct_names_are_refused() {
 #[test]
 fn effects_carry_store_identities_and_resolved_amounts() {
     let ev = judge(
-        vec![rb("w").actions(&["TAG(seen, Add, 3)", "COUNT(bytes, Length)", "COUNT(hits)", "PASS"])],
+        vec![rb("w").actions(&[
+            "TAG(seen, Add, 3)",
+            "COUNT(bytes, Length)",
+            "COUNT(hits)",
+            "PASS",
+        ])],
         &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22),
     );
     let mut saw_tag = false;
@@ -165,13 +176,19 @@ fn effects_carry_store_identities_and_resolved_amounts() {
     }
     assert!(saw_tag);
     // tcp_in() packets are 60 bytes; a literal stays literal.
-    assert_eq!(amounts, vec![("bytes".to_string(), 60), ("hits".to_string(), 1)]);
+    assert_eq!(
+        amounts,
+        vec![("bytes".to_string(), 60), ("hits".to_string(), 1)]
+    );
 
     // No length fact: the Length amount resolves to 0 (glue counts the
     // no-op).
     let mut snap = tcp_in("10.0.0.7", 5555, "10.0.0.5", 22);
     snap.length = None;
-    let ev = judge(vec![rb("w").actions(&["COUNT(bytes, Length)", "PASS"])], &snap);
+    let ev = judge(
+        vec![rb("w").actions(&["COUNT(bytes, Length)", "PASS"])],
+        &snap,
+    );
     assert!(ev
         .effects
         .iter()
@@ -186,7 +203,9 @@ fn this_packets_count_lands_after_its_own_reads() {
     let roots = || {
         vec![
             rb("count").actions(&["COUNT(x)", "PASS"]),
-            rb("limit").int("Counter.x.GreaterThan", 0).actions(&["DROP"]),
+            rb("limit")
+                .int("Counter.x.GreaterThan", 0)
+                .actions(&["DROP"]),
         ]
     };
     let ev = judge(roots(), &tcp_in("10.0.0.7", 5555, "10.0.0.5", 22));

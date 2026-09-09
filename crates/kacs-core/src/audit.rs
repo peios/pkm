@@ -144,7 +144,12 @@ fn handle_sacl_ace<'a>(
     match (ace.ace_type(), ace.kind()) {
         (SYSTEM_AUDIT_ACE_TYPE, AceKind::SingleSid { sid, .. })
         | (SYSTEM_AUDIT_OBJECT_ACE_TYPE, AceKind::Object { sid, .. }) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
+            if !audit_sid_matches(
+                token,
+                sid,
+                conditional_context.caller_is_owner.for_allow(false),
+                self_sid,
+            ) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {
@@ -171,7 +176,12 @@ fn handle_sacl_ace<'a>(
                 ..
             },
         ) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
+            if !audit_sid_matches(
+                token,
+                sid,
+                conditional_context.caller_is_owner.for_allow(false),
+                self_sid,
+            ) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {
@@ -193,7 +203,12 @@ fn handle_sacl_ace<'a>(
         }
         (SYSTEM_ALARM_ACE_TYPE, AceKind::SingleSid { sid, .. })
         | (SYSTEM_ALARM_OBJECT_ACE_TYPE, AceKind::Object { sid, .. }) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
+            if !audit_sid_matches(
+                token,
+                sid,
+                conditional_context.caller_is_owner.for_allow(false),
+                self_sid,
+            ) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {
@@ -217,7 +232,12 @@ fn handle_sacl_ace<'a>(
                 ..
             },
         ) => {
-            if !audit_sid_matches(token, sid, conditional_context.caller_is_owner.for_allow(false), self_sid) {
+            if !audit_sid_matches(
+                token,
+                sid,
+                conditional_context.caller_is_owner.for_allow(false),
+                self_sid,
+            ) {
                 return Ok(());
             }
             if !audit_target_matches(ace, object_tree) {

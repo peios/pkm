@@ -135,7 +135,14 @@ pub fn evaluate(
     for root in forest.roots.iter() {
         let mut chain: PkmVec<&Rule> = PkmVec::new();
         walk(
-            root, &mut chain, "", snap, ctx, &mut effects, &mut candidates, &mut spoken,
+            root,
+            &mut chain,
+            "",
+            snap,
+            ctx,
+            &mut effects,
+            &mut candidates,
+            &mut spoken,
             &mut trace,
         )?;
     }
@@ -212,7 +219,15 @@ fn walk<'a>(
     chain.push(rule)?;
     for child in rule.children.iter() {
         any_child |= walk(
-            child, chain, path.as_str(), snap, ctx, effects, candidates, spoken, trace,
+            child,
+            chain,
+            path.as_str(),
+            snap,
+            ctx,
+            effects,
+            candidates,
+            spoken,
+            trace,
         )?;
     }
     chain.pop();
@@ -293,7 +308,15 @@ fn resolve_rule(
     let mut verdict: Option<Verdict> = None;
     let mut best_report: Option<u8> = None;
     for action in rule.actions.iter() {
-        resolve_action(action, path, snap, effects, &mut verdict, &mut best_report, 0)?;
+        resolve_action(
+            action,
+            path,
+            snap,
+            effects,
+            &mut verdict,
+            &mut best_report,
+            0,
+        )?;
     }
     if let Some(level) = best_report {
         if level >= ctx.reporting_level {
