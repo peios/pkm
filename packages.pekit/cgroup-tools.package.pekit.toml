@@ -1,18 +1,22 @@
-# cgroup-tools — drgn-based cgroup diagnostic scripts (iocost_coef_gen,
-# iocost_monitor, memcg_shrinker, memcg_slabinfo). Standalone Python scripts (no
-# compiled code), from tools/cgroup. Installed unsuffixed.
+# cgroup-tools — the standalone cgroup diagnostic scripts which only require
+# Python's standard library. The drgn-based iocost_monitor and memcg_slabinfo
+# remain in the corresponding-source package until Peios packages drgn.
 #
-# Note: these introspect live kernel state via drgn; useful for kernel debugging,
-# niche for a deployed system — shipped for completeness.
-#
-# Runtime deps (TODO — see D4): python3 interpreter + drgn (a Peios python-packaging
-# concern — see D1).
-
 [package]
-description = "cgroup-tools - drgn-based cgroup diagnostics (from Linux 7.0.9 tools/cgroup)"
+name = "dev.peios.cgroup-tools"
+architecture = "noarch"
+description = "cgroup-tools - standalone cgroup diagnostics (from Linux 7.0.9 tools/cgroup)"
+
+[dependencies]
+"org.python.python3" = ">= 3.14, < 3.15"
+
+[provides]
+"cgroup-tools" = "{{version}}-1"
+
+[replaces]
+"cgroup-tools" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.cgroup-tools/COPYING"
 "tools:usr/bin/iocost_coef_gen" = "usr/bin/iocost_coef_gen"
-"tools:usr/bin/iocost_monitor"  = "usr/bin/iocost_monitor"
 "tools:usr/bin/memcg_shrinker"  = "usr/bin/memcg_shrinker"
-"tools:usr/bin/memcg_slabinfo"  = "usr/bin/memcg_slabinfo"

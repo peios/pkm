@@ -12,12 +12,20 @@ excludes = ["tools:usr/include/perf/perf_dlfilter.h"]
 side_effects = ["man-db"]
 
 [package]
+name = "dev.peios.libperf-devel"
 description = "libperf - development files (headers, static lib, pkg-config)"
 
 [dependencies]
-libperf = "{{version}}"
+"dev.peios.libperf" = "= {{version}}-1"
+
+[provides]
+"libperf-devel" = "{{version}}-1"
+
+[replaces]
+"libperf-devel" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.libperf-devel/COPYING"
 "tools:usr/lib/x86_64-linux-peios/libperf.so"           = "usr/lib/x86_64-linux-peios/libperf.so"
 "tools:usr/lib/x86_64-linux-peios/libperf.a"            = "usr/lib/x86_64-linux-peios/libperf.a"
 "tools:usr/lib/x86_64-linux-peios/pkgconfig/libperf.pc" = "usr/lib/x86_64-linux-peios/pkgconfig/libperf.pc"

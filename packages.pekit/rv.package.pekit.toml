@@ -1,7 +1,7 @@
 # rv — Runtime Verification: userspace front-end for the in-kernel RV monitors.
 # Built from the in-tree tools/verification/rv (build.tools).
 #
-# Runtime shared-lib deps (TODO — see D4): libtraceevent libtracefs libbpf
+# Runtime ELF dependencies are derived from the staged binary.
 # (libbpf.so.1) libc. libbpf is the BPF backend, enabled by the build image's
 # libbpf-dev. (No libcpupower — CPU idle-state control is rtla-specific.)
 
@@ -12,8 +12,16 @@
 side_effects = ["man-db"]
 
 [package]
+name = "dev.peios.rv"
 description = "rv - runtime verification monitor front-end (from Linux 7.0.9 tools/verification/rv)"
 
+[provides]
+"rv" = "{{version}}-1"
+
+[replaces]
+"rv" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.rv/COPYING"
 "tools:usr/bin/rv" = "usr/bin/rv"
 "tools:usr/share/man/man1/rv*.1" = "usr/share/man/man1"

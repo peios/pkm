@@ -6,7 +6,8 @@
 # usr/lib/systemd/system/cpupower.service, etc/cpupower-service.conf) — Peios is
 # not systemd-based.
 #
-# Runtime shared-lib deps (TODO — see D4): libcpupower libpci libc
+# Runtime ELF dependencies are derived from the staged binary; the exact
+# sibling libcpupower package is declared below.
 
 # PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
 # `man -k` and `apropos` find them instead of falling back to a filesystem
@@ -15,12 +16,20 @@
 side_effects = ["man-db"]
 
 [package]
+name = "dev.peios.cpupower"
 description = "cpupower - CPU frequency/idle control (from Linux 7.0.9 tools/power/cpupower)"
 
 [dependencies]
-cpupower-libs = "{{version}}"
+"dev.peios.cpupower-libs" = "= {{version}}-1"
+
+[provides]
+"cpupower" = "{{version}}-1"
+
+[replaces]
+"cpupower" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.cpupower/COPYING"
 "tools:usr/bin/cpupower" = "usr/bin/cpupower"
 "tools:usr/share/bash-completion/completions/cpupower" = "usr/share/bash-completion/completions/cpupower"
 "tools:usr/share/locale/**" = "usr/share/locale/"

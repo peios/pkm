@@ -2,15 +2,23 @@
 # applies a libconfig policy). Built from tools/thermal/thermal-engine (build.tools;
 # no install target, so the binary is copied).
 #
-# Runtime shared-lib deps (TODO — see D4):
-#   libthermal_tools libthermal libnl-genl-3 libnl-3 libconfig libc
+# Runtime ELF dependencies are derived from the staged binary; exact sibling
+# library packages are declared below.
 
 [package]
+name = "dev.peios.thermal-engine"
 description = "thermal-engine - userspace thermal management daemon (from Linux 7.0.9 tools/thermal)"
 
 [dependencies]
-libthermal       = "{{version}}"
-libthermal-tools = "{{version}}"
+"dev.peios.libthermal"       = "= {{version}}-1"
+"dev.peios.libthermal-tools" = "= {{version}}-1"
+
+[provides]
+"thermal-engine" = "{{version}}-1"
+
+[replaces]
+"thermal-engine" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.thermal-engine/COPYING"
 "tools:usr/bin/thermal-engine" = "usr/bin/thermal-engine"

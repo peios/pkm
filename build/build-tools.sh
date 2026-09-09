@@ -204,13 +204,10 @@ make -C tools/power/x86/intel-speed-select -j"$jobs"
 make -C tools/power/x86/intel-speed-select \
 	DESTDIR="$dest" prefix=/usr bindir=/usr/bin install
 
-# pstate tracers are standalone python scripts (no build); install under bin
-# without the .py suffix (matches Fedora's naming).
-log "pstate-tracers"
-install -D -m755 tools/power/x86/amd_pstate_tracer/amd_pstate_trace.py \
-	"$dest/usr/bin/amd_pstate_tracer"
-install -D -m755 tools/power/x86/intel_pstate_tracer/intel_pstate_tracer.py \
-	"$dest/usr/bin/intel_pstate_tracer"
+# The pstate plotting scripts require NumPy plus the unmaintained Gnuplot.py
+# bindings, neither of which is in the Peios runtime catalogue. They remain in
+# the corresponding-source package instead of producing uninstallable binary
+# packages whose entry points fail immediately.
 
 # =========================================================================
 # Phase 3 — broad sweep. PSD-009 is bin-only, so daemons/tools that default to
@@ -307,6 +304,14 @@ make -C tools/kvm/kvm_stat \
 log "libthermal + thermal-engine + thermometer"
 make -C tools/lib/thermal -j"$jobs"
 make -C tools/lib/thermal install DESTDIR="$dest" prefix=/usr libdir=/usr/lib/$triplet
+# Upstream's install target ignores prefix/libdir when generating libthermal.pc
+# and emits prefix= plus libdir=/lib64. Rewrite the installed metadata to the
+# same target-triplet location as the actual library before packaging it.
+thermal_pc="$dest/usr/lib/$triplet/pkgconfig/libthermal.pc"
+sed -i \
+	-e 's#^prefix=.*#prefix=/usr#' \
+	-e 's#^libdir=.*#libdir=${prefix}/lib/'"$triplet"'#' \
+	"$thermal_pc"
 make -C tools/thermal/lib -j"$jobs"
 # install_lib only: libthermal_tools is a private helper with no public header, so
 # its install_headers step (install/thermal.h) is broken — we just need the .so.

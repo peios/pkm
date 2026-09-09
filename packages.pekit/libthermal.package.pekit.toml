@@ -5,12 +5,21 @@
 # the runtime package (not just in -devel) — consumers like thermal-engine record
 # NEEDED=libthermal.so and resolve it at runtime.
 #
-# Runtime shared-lib deps (TODO — see D4): libnl-3 libnl-genl-3 libc
+# Runtime ELF dependencies are derived from the staged library.
 
 [package]
+name = "dev.peios.libthermal"
+license = "LGPL-2.1-or-later"
 description = "libthermal - kernel thermal-netlink client library"
 
+[provides]
+"libthermal" = "{{version}}-1"
+
+[replaces]
+"libthermal" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.libthermal/COPYING"
 "tools:usr/lib/x86_64-linux-peios/libthermal.so"       = "usr/lib/x86_64-linux-peios/libthermal.so"
 "tools:usr/lib/x86_64-linux-peios/libthermal.so.0"     = "usr/lib/x86_64-linux-peios/libthermal.so.0"
 "tools:usr/lib/x86_64-linux-peios/libthermal.so.0.0.1" = "usr/lib/x86_64-linux-peios/libthermal.so.0.0.1"

@@ -986,8 +986,7 @@ static void test_mount_option_escapes_and_reporting(void)
 	static const char option[] =
 		"strata=/lower0/escape\\:plus\\+\\,comma\\\\back+ro";
 	static const char reported[] =
-		"strata=/lower0/escape\\134:plus\\134+\\134\\054comma"
-		"\\134\\134back+ro";
+		"strata=/lower0/escape\\:plus\\+\\,comma\\\\back+ro";
 	char origin[256];
 	ssize_t length;
 

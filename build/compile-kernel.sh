@@ -51,12 +51,28 @@ if [[ "$llvm" == 1 ]]; then cc=clang; else cc="clang${llvm}"; fi
 command -v ccache >/dev/null 2>&1 && cc="ccache $cc"
 hostcc=()
 [[ -n "${PKM_HOSTCC:-}" ]] && hostcc=(HOSTCC="$PKM_HOSTCC")
+# Normalize compiler-recorded paths before they enter DWARF.  debugedit in the
+# reference build image does not understand rustc's .debug_names section, so a
+# post-link rewrite alone can leave the absolute Pekit worktree in vmlinux.
+# Use the same source root the debuginfo package installs, making both C and
+# Rust debug information reproducible and usable without disclosing the build
+# host's directory layout.
+basever=$(make -s kernelversion)
+debug_root="/usr/src/debug/kernel-$basever"
+# Clang otherwise embeds its entire command line in DW_AT_producer, including
+# the left-hand (host) path of -fdebug-prefix-map.  The remap fixes source
+# references; suppressing recorded switches makes the debug artifact itself
+# independent of the workspace path too.
+kcflags="-gno-record-gcc-switches -fdebug-prefix-map=$tree=$debug_root -fmacro-prefix-map=$tree=$debug_root"
+krustflags="--remap-path-prefix=$tree=$debug_root"
 # PKM_JOBS caps parallelism. The default is every core, which is right on a
 # build farm and wrong on a workstation sharing the machine: twelve concurrent
 # clang processes through the vmlinux link and module generation is what took
 # this build out to the OOM killer once, with no error in the log -- the build
 # simply stopped mid-line, because the whole process group was signalled.
-make LLVM="$llvm" CC="$cc" "${hostcc[@]}" -j"${PKM_JOBS:-$(nproc)}"
+make LLVM="$llvm" CC="$cc" "${hostcc[@]}" \
+	KCFLAGS="$kcflags" KRUSTFLAGS="$krustflags" \
+	-j"${PKM_JOBS:-$(nproc)}"
 
 echo ""
 echo "compile-kernel: built"

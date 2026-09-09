@@ -3,8 +3,7 @@
 # daemon is redirected to bin (--sbindir). Headers + static lib + dev symlink are
 # split into usbip-devel.
 #
-# Runtime shared-lib deps (TODO — see D4):
-#   usbip/usbipd: libusbip libudev libc    libusbip: libudev libc
+# Runtime ELF dependencies are derived from the staged binaries and library.
 
 # PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
 # `man -k` and `apropos` find them instead of falling back to a filesystem
@@ -13,9 +12,17 @@
 side_effects = ["man-db"]
 
 [package]
+name = "dev.peios.usbip"
 description = "usbip - USB/IP client and daemon + libusbip (from Linux 7.0.9 tools/usb/usbip)"
 
+[provides]
+"usbip" = "{{version}}-1"
+
+[replaces]
+"usbip" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.usbip/COPYING"
 "tools:usr/bin/usbip"  = "usr/bin/usbip"
 "tools:usr/bin/usbipd" = "usr/bin/usbipd"
 "tools:usr/lib/x86_64-linux-peios/libusbip.so.0"     = "usr/lib/x86_64-linux-peios/libusbip.so.0"

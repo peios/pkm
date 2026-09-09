@@ -1,7 +1,7 @@
 # turbostat — report processor frequency, idle residency, and power telemetry.
 # Built from the in-tree tools/power/x86/turbostat (build.tools).
 #
-# Runtime shared-lib deps (TODO — see D4): libcap libc
+# Runtime ELF dependencies are derived from the staged binary.
 
 # PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
 # `man -k` and `apropos` find them instead of falling back to a filesystem
@@ -10,8 +10,16 @@
 side_effects = ["man-db"]
 
 [package]
+name = "dev.peios.turbostat"
 description = "turbostat - CPU frequency/idle/power telemetry (from Linux 7.0.9 tools/power/x86/turbostat)"
 
+[provides]
+"turbostat" = "{{version}}-1"
+
+[replaces]
+"turbostat" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.turbostat/COPYING"
 "tools:usr/bin/turbostat" = "usr/bin/turbostat"
 "tools:usr/share/man/man8/turbostat.8" = "usr/share/man/man8/turbostat.8"

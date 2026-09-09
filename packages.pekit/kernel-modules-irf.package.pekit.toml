@@ -44,6 +44,7 @@
 side_effects = ["depmod"]
 
 [package]
+name = "dev.peios.kernel-modules-irf"
 # Inside [package], unlike side_effects which is a top-level key — this places
 # the package in the initramfs root the way prelude and intel-ucode do, so the
 # initramfs composes itself out of the dependency graph rather than an explicit
@@ -55,7 +56,14 @@ description  = "Peios Kernel - initramfs module set (based on Linux 7.0.9)"
 # and symbol CRCs bind a module tree to one vmlinux. The initramfs and the real
 # root must also agree with each other, since both are produced by this build.
 [dependencies]
-kernel = "{{version}}"
+"dev.peios.kernel" = "= {{version}}-1"
+
+[provides]
+"kernel-modules-irf" = "{{version}}-1"
+
+[replaces]
+"kernel-modules-irf" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.kernel-modules-irf/COPYING"
 "kernel:modules-irf-root/lib/modules/7.0.9-peios-{{version}}/**" = "usr/lib/modules/7.0.9-peios-{{version}}/"

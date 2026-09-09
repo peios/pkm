@@ -3,12 +3,21 @@
 # tools/thermal/lib (build.tools). No public headers (private API), so no -devel;
 # its unversioned SONAME means the .so ships in this runtime package.
 #
-# Runtime shared-lib deps (TODO — see D4): libc
+# Runtime ELF dependencies are derived from the staged library.
 
 [package]
+name = "dev.peios.libthermal-tools"
+license = "LGPL-2.1-or-later"
 description = "libthermal_tools - private helper library for the thermal tools"
 
+[provides]
+"libthermal-tools" = "{{version}}-1"
+
+[replaces]
+"libthermal-tools" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.libthermal-tools/COPYING"
 "tools:usr/lib/x86_64-linux-peios/libthermal_tools.so"       = "usr/lib/x86_64-linux-peios/libthermal_tools.so"
 "tools:usr/lib/x86_64-linux-peios/libthermal_tools.so.0"     = "usr/lib/x86_64-linux-peios/libthermal_tools.so.0"
 "tools:usr/lib/x86_64-linux-peios/libthermal_tools.so.0.0.2" = "usr/lib/x86_64-linux-peios/libthermal_tools.so.0.0.2"

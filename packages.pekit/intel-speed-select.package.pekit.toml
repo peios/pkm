@@ -1,10 +1,18 @@
 # intel-speed-select — configure Intel Speed Select Technology (per-core P-states,
 # priority, turbo). Built from tools/power/x86/intel-speed-select (build.tools).
 #
-# Runtime shared-lib deps (TODO — see D4): libnl-genl-3 libnl-3 libc
+# Runtime ELF dependencies are derived from the staged binary.
 
 [package]
+name = "dev.peios.intel-speed-select"
 description = "intel-speed-select - Intel Speed Select Technology control (from Linux 7.0.9 tools/power/x86)"
 
+[provides]
+"intel-speed-select" = "{{version}}-1"
+
+[replaces]
+"intel-speed-select" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.intel-speed-select/COPYING"
 "tools:usr/bin/intel-speed-select" = "usr/bin/intel-speed-select"

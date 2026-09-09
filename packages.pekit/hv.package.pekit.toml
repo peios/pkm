@@ -9,14 +9,24 @@
 # Note: only useful when Peios runs as a guest ON Microsoft Hyper-V; dead weight
 # otherwise — shipped for completeness.
 #
-# Runtime shared-lib deps (TODO — see D4):
-#   hv_kvp_daemon / hv_vss_daemon / hv_fcopy_uio_daemon: libc
-#   lsvmbus: python3 interpreter
+# ELF dependencies are derived from the staged daemons. lsvmbus additionally
+# needs the packaged Python interpreter.
 
 [package]
+name = "dev.peios.hv"
 description = "hv - Linux Hyper-V guest integration daemons + tools (from Linux 7.0.9 tools/hv)"
 
+[dependencies]
+"org.python.python3" = ">= 3.14, < 3.15"
+
+[provides]
+"hv" = "{{version}}-1"
+
+[replaces]
+"hv" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.hv/COPYING"
 "tools:usr/bin/hv_kvp_daemon"       = "usr/bin/hv_kvp_daemon"
 "tools:usr/bin/hv_vss_daemon"       = "usr/bin/hv_vss_daemon"
 "tools:usr/bin/hv_fcopy_uio_daemon" = "usr/bin/hv_fcopy_uio_daemon"

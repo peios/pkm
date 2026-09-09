@@ -2,8 +2,6 @@
 # counters). A standalone Python script, from tools/kvm/kvm_stat (build.tools).
 # The bundled kvm_stat.service systemd unit is not shipped (Peios is not systemd).
 #
-# Runtime deps (TODO — see D4): python3 interpreter
-
 # PSPU §5.24: a payload carrying man pages SHOULD declare man-db, so that
 # `man -k` and `apropos` find them instead of falling back to a filesystem
 # scan. Top-level, not inside a table -- TOML would otherwise scope it to
@@ -11,8 +9,20 @@
 side_effects = ["man-db"]
 
 [package]
+name = "dev.peios.kvm-stat"
+architecture = "noarch"
 description = "kvm_stat - KVM event monitor (from Linux 7.0.9 tools/kvm/kvm_stat)"
 
+[dependencies]
+"org.python.python3" = ">= 3.14, < 3.15"
+
+[provides]
+"kvm-stat" = "{{version}}-1"
+
+[replaces]
+"kvm-stat" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.kvm-stat/COPYING"
 "tools:usr/bin/kvm_stat"                = "usr/bin/kvm_stat"
 "tools:usr/share/man/man1/kvm_stat.1"   = "usr/share/man/man1/kvm_stat.1"

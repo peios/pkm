@@ -1,11 +1,19 @@
 # spi-utils — SPI userspace test tools (spidev_test, spidev_fdx). Built from
 # tools/spi (build.tools).
 #
-# Runtime shared-lib deps (TODO — see D4): libc
+# Runtime ELF dependencies are derived from the staged binaries.
 
 [package]
+name = "dev.peios.spi-utils"
 description = "spi-utils - SPI userspace test tools (from Linux 7.0.9 tools/spi)"
 
+[provides]
+"spi-utils" = "{{version}}-1"
+
+[replaces]
+"spi-utils" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.spi-utils/COPYING"
 "tools:usr/bin/spidev_test" = "usr/bin/spidev_test"
 "tools:usr/bin/spidev_fdx"  = "usr/bin/spidev_fdx"

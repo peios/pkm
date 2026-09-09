@@ -63,7 +63,8 @@ format = "peipkg"
 # change); an identical one does not. The rules walk now digests what it fed the
 # builder and skips republishing an unchanged forest. The LCS watch target moves
 # from the Rules key to the Network key.
-version      = "{{version}}-26"
+version      = "{{version}}-1"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
+license_class = "free"
 homepage     = "https://github.com/peios/pkm"

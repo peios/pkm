@@ -5,6 +5,7 @@
 # output; files named by the kernel release (uname), package by the Peios version.
 
 [package]
+name = "dev.peios.kernel"
 description = "Peios Kernel - bootable image (based on Linux 7.0.9)"
 
 # The Linux version this kernel is built from, as a versioned virtual name —
@@ -16,6 +17,7 @@ description = "Peios Kernel - bootable image (based on Linux 7.0.9)"
 # MUST equal [env] KERNEL_VERSION in the recipe, without the leading "v";
 # build.kernel asserts it.
 [provides]
+kernel = "{{version}}-1"
 linux-kernel = "7.0.9"
 
 # The kernel image ships beside its own modules, under the release-named
@@ -23,7 +25,11 @@ linux-kernel = "7.0.9"
 # kernel is ordinary package content rather than something /boot must hold.
 # Filenames keep the release suffix, so a tree carrying two kernels stays
 # self-describing and the `vmlinuz-*` globs that locate it still work.
+[replaces]
+kernel = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.kernel/COPYING"
 "kernel:arch/x86/boot/bzImage" = "usr/lib/modules/7.0.9-peios-{{version}}/vmlinuz-7.0.9-peios-{{version}}"
 "kernel:System.map"            = "usr/lib/modules/7.0.9-peios-{{version}}/System.map-7.0.9-peios-{{version}}"
 "kernel:.config"               = "usr/lib/modules/7.0.9-peios-{{version}}/config-7.0.9-peios-{{version}}"

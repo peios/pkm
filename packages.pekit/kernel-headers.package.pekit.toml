@@ -3,6 +3,7 @@
 # Produced by build.headers (make headers_install); no runtime dep on the kernel.
 
 [package]
+name = "dev.peios.kernel-headers"
 description = "Peios Kernel - userspace API headers"
 # Overrides the GPL-2.0-only inherited from the shared base, which is right for
 # the kernel image but wrong for these headers. The syscall-note exception is
@@ -26,7 +27,12 @@ license = "GPL-2.0-only WITH Linux-syscall-note"
 # and fails the build rather than shipping a provide that lies about which
 # kernel's UAPI is in the payload.
 [provides]
+kernel-headers = "{{version}}-1"
 linux-kernel-headers = "7.0.9"
 
+[replaces]
+kernel-headers = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.kernel-headers/COPYING"
 "headers:usr/include/**" = "usr/include/"

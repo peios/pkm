@@ -2,13 +2,22 @@
 # policy). Built from tools/thermal/thermometer (build.tools; no install target,
 # so the binary is copied).
 #
-# Runtime shared-lib deps (TODO — see D4): libthermal_tools libconfig libc
+# Runtime ELF dependencies are derived from the staged binary; the exact
+# sibling helper-library package is declared below.
 
 [package]
+name = "dev.peios.thermometer"
 description = "thermometer - thermal-zone temperature logger (from Linux 7.0.9 tools/thermal)"
 
 [dependencies]
-libthermal-tools = "{{version}}"
+"dev.peios.libthermal-tools" = "= {{version}}-1"
+
+[provides]
+"thermometer" = "{{version}}-1"
+
+[replaces]
+"thermometer" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.thermometer/COPYING"
 "tools:usr/bin/thermometer" = "usr/bin/thermometer"

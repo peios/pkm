@@ -1,10 +1,18 @@
 # cpupower-libs — libcpupower runtime shared library (SONAME + real).
 #
-# Runtime shared-lib deps (TODO — see D4): libc
+# Runtime ELF dependencies are derived from the staged library.
 
 [package]
+name = "dev.peios.cpupower-libs"
 description = "libcpupower - cpupower shared library"
 
+[provides]
+"cpupower-libs" = "{{version}}-1"
+
+[replaces]
+"cpupower-libs" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.cpupower-libs/COPYING"
 "tools:usr/lib/x86_64-linux-peios/libcpupower.so.1"     = "usr/lib/x86_64-linux-peios/libcpupower.so.1"
 "tools:usr/lib/x86_64-linux-peios/libcpupower.so.1.0.1" = "usr/lib/x86_64-linux-peios/libcpupower.so.1.0.1"

@@ -5,10 +5,18 @@
 # Note: only useful on physical laptops with the relevant accelerometer; dead
 # weight for a server/VM deployment — shipped for completeness.
 #
-# Runtime shared-lib deps (TODO — see D4): libc
+# Runtime ELF dependencies are derived from the staged daemon.
 
 [package]
+name = "dev.peios.freefall"
 description = "freefall - laptop free-fall disk protection daemon (from Linux 7.0.9 tools/laptop)"
 
+[provides]
+"freefall" = "{{version}}-1"
+
+[replaces]
+"freefall" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.freefall/COPYING"
 "tools:usr/sbin/freefall" = "usr/bin/freefall"

@@ -1,12 +1,20 @@
 # iio-utils — Industrial I/O userspace tools (iio_event_monitor,
 # iio_generic_buffer, lsiio). Built from tools/iio (build.tools).
 #
-# Runtime shared-lib deps (TODO — see D4): libc
+# Runtime ELF dependencies are derived from the staged binaries.
 
 [package]
+name = "dev.peios.iio-utils"
 description = "iio-utils - Industrial I/O userspace tools (from Linux 7.0.9 tools/iio)"
 
+[provides]
+"iio-utils" = "{{version}}-1"
+
+[replaces]
+"iio-utils" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.iio-utils/COPYING"
 "tools:usr/bin/iio_event_monitor"  = "usr/bin/iio_event_monitor"
 "tools:usr/bin/iio_generic_buffer" = "usr/bin/iio_generic_buffer"
 "tools:usr/bin/lsiio"              = "usr/bin/lsiio"

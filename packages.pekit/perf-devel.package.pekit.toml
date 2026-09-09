@@ -2,10 +2,18 @@
 # Split out of perf so the runtime package carries no headers.
 
 [package]
+name = "dev.peios.perf-devel"
 description = "perf - dlfilter development header"
 
 [dependencies]
-perf = "{{version}}"
+"dev.peios.perf" = "= {{version}}-1"
+
+[provides]
+"perf-devel" = "{{version}}-1"
+
+[replaces]
+"perf-devel" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.perf-devel/COPYING"
 "tools:usr/include/perf/perf_dlfilter.h" = "usr/include/perf/perf_dlfilter.h"

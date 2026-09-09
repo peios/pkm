@@ -66,6 +66,35 @@ grep -Fq  "$suite_marker" "$log" || { echo "  MISSING: KUnit smoke marker"; fail
 grep -Eq  "$summary_re"   "$log" || { echo "  MISSING: passing suite summary"; fail=1; }
 grep -Eq  "$fatal_re"     "$log" && { echo "  FOUND: kernel/KUnit failure signature"; fail=1; }
 
+# A partial serial log can contain the early smoke marker and one passing suite
+# even though QEMU later hangs, crashes, or is killed by timeout. Require a
+# successful poweroff and complete top-level KTAP accounting before accepting
+# the run. Top-level records have no indentation after printk's timestamp;
+# nested case records do, so they are deliberately excluded here.
+if [[ $status -ne 0 ]]; then
+	echo "  QEMU exited with status $status"
+	fail=1
+fi
+grep -Fq 'reboot: Power down' "$log" || {
+	echo "  MISSING: clean KUnit poweroff"
+	fail=1
+}
+plan=$(sed -nE 's/^\[[^]]+\] 1\.\.([0-9]+).*$/\1/p' "$log" | head -n 1)
+if [[ -z "$plan" ]]; then
+	echo "  MISSING: top-level KTAP plan"
+	fail=1
+else
+	results=$(grep -Ec '^\[[^]]+\] (ok|not ok) [0-9]+ ' "$log" || true)
+	if [[ $results -ne $plan ]]; then
+		echo "  INCOMPLETE: top-level KTAP planned $plan suites, reported $results"
+		fail=1
+	fi
+	grep -Eq "^\\[[^]]+\\] ok $plan " "$log" || {
+		echo "  MISSING: final top-level KTAP result ok $plan"
+		fail=1
+	}
+fi
+
 if [[ $fail -ne 0 ]]; then
 	echo "test-kunit: FAILED (qemu exit $status, log $log)" >&2
 	echo "----- log tail -----" >&2

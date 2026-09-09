@@ -3,10 +3,18 @@
 # the kernel's own exported UAPI headers (the build image's older taskstats.h
 # lacks fields this kernel adds, e.g. cpu_delay_max).
 #
-# Runtime shared-lib deps (TODO — see D4): libc
+# Runtime ELF dependencies are derived from the staged binary.
 
 [package]
+name = "dev.peios.getdelays"
 description = "getdelays - taskstats delay-accounting demo (from Linux 7.0.9 tools/accounting)"
 
+[provides]
+"getdelays" = "{{version}}-1"
+
+[replaces]
+"getdelays" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.getdelays/COPYING"
 "tools:usr/bin/getdelays" = "usr/bin/getdelays"

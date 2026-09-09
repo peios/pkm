@@ -1,5 +1,11 @@
 out_dir = "out"
 
+# One corresponding-source artifact covers the kernel and every in-tree tool
+# package. Keep its public identity stable even when the catalogue delegates
+# into this recipe from a differently named directory.
+[source_package]
+name = "dev.peios.kernel-source"
+
 # Single source of truth for the upstream Linux version, exported into every
 # build stage's environment (build.upstream clones this tag). Bump it here, in
 # lockstep with the patch series — kernel/patches are generated against this
@@ -60,6 +66,13 @@ python3 = "*"
 [build.kunit]
 needs = ["source"]
 command = """
+. ./build/toolchain.lock
+actual_rust=$(rustc --version | cut -d' ' -f2)
+test "$actual_rust" = "$RUST_VERSION" || {
+	echo "pkm: selected rustc $actual_rust, kernel requires $RUST_VERSION" >&2
+	exit 1
+}
+
 cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
 # Stage the module-signing key into the tree. certs/Makefile extracts the
 # cert from CONFIG_MODULE_SIG_KEY and links it into .builtin_trusted_keys, so
@@ -83,31 +96,31 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 # declared below; the kernel enter wrapper points RUST_LIB_SRC at the
 # triplet-dir rustlib the rust package ships.
 [build.kunit.dependencies.peipkg]
-build-essentials = "*"
+"dev.peios.build-essentials" = "*"
 "org.gnu.bash" = "*"
-gzip = "*"
-zstd = "*"
-rust = "*"
+"org.gnu.gzip" = "*"
+"com.facebook.zstd" = "*"
+"org.rust-lang.rust" = "= 1.83.0"
 "io.github.rust-lang.bindgen" = "*"
-gcc = "*"
-"gcc-c++" = "*"
-make = "*"
-clang = "*"
-lld = "*"
-llvm = "*"
+"org.gnu.gcc" = "*"
+"org.gnu.gcc-c++" = "*"
+"org.gnu.make" = "*"
+"org.llvm.clang" = "= 18.1.8"
+"org.llvm.lld" = "= 18.1.8"
+"org.llvm.llvm" = "= 18.1.8"
 "org.gnu.bc" = "*"
 "org.gnu.bison" = "*"
-flex = "*"
-"elfutils-devel" = "*"
-openssl-devel = "*"
-openssl = "*"
-pahole = "*"
-cpio = "*"
-kmod = "*"
-python3 = "*"
-perl = "*"
-tar = "*"
-xz = "*"
+"io.github.westes.flex" = "*"
+"org.sourceware.elfutils-devel" = "*"
+"org.openssl.openssl-devel" = "*"
+"org.openssl.openssl" = "*"
+"org.kernel.pahole" = "*"
+"org.gnu.cpio" = "*"
+"org.kernel.kmod" = "*"
+"org.python.python3" = "*"
+"org.perl.perl" = "*"
+"org.gnu.tar" = "*"
+"org.tukaani.xz" = "*"
 
 [build.kunit.dependencies.apt]
 build-essential = "*"
@@ -132,6 +145,13 @@ xz-utils = "*"
 [build.kernel]
 needs = ["source"]
 command = """
+. ./build/toolchain.lock
+actual_rust=$(rustc --version | cut -d' ' -f2)
+test "$actual_rust" = "$RUST_VERSION" || {
+	echo "pkm: selected rustc $actual_rust, kernel requires $RUST_VERSION" >&2
+	exit 1
+}
+
 # Same assertion as build.headers, for `linux-kernel` — see that stage.
 sh ./kernel/verify-linux-provide.sh \
 	packages.pekit/kernel.package.pekit.toml \
@@ -162,31 +182,31 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 # Same toolchain as build.kunit (production profile); the keygen step adds python3
 # (already required). Rust toolchain comes from the build env/wrap, as above.
 [build.kernel.dependencies.peipkg]
-build-essentials = "*"
+"dev.peios.build-essentials" = "*"
 "org.gnu.bash" = "*"
-gzip = "*"
-zstd = "*"
-rust = "*"
+"org.gnu.gzip" = "*"
+"com.facebook.zstd" = "*"
+"org.rust-lang.rust" = "= 1.83.0"
 "io.github.rust-lang.bindgen" = "*"
-gcc = "*"
-"gcc-c++" = "*"
-make = "*"
-clang = "*"
-lld = "*"
-llvm = "*"
+"org.gnu.gcc" = "*"
+"org.gnu.gcc-c++" = "*"
+"org.gnu.make" = "*"
+"org.llvm.clang" = "= 18.1.8"
+"org.llvm.lld" = "= 18.1.8"
+"org.llvm.llvm" = "= 18.1.8"
 "org.gnu.bc" = "*"
 "org.gnu.bison" = "*"
-flex = "*"
-"elfutils-devel" = "*"
-openssl-devel = "*"
-openssl = "*"
-pahole = "*"
-cpio = "*"
-kmod = "*"
-python3 = "*"
-perl = "*"
-tar = "*"
-xz = "*"
+"io.github.westes.flex" = "*"
+"org.sourceware.elfutils-devel" = "*"
+"org.openssl.openssl-devel" = "*"
+"org.openssl.openssl" = "*"
+"org.kernel.pahole" = "*"
+"org.gnu.cpio" = "*"
+"org.kernel.kmod" = "*"
+"org.python.python3" = "*"
+"org.perl.perl" = "*"
+"org.gnu.tar" = "*"
+"org.tukaani.xz" = "*"
 
 [build.kernel.dependencies.apt]
 build-essential = "*"
@@ -236,13 +256,13 @@ make -C "$PEKIT_SOURCE_OUT" O="$PEKIT_OUT" LLVM="${PKM_LLVM:--18}" ${PKM_HOSTCC:
 # rationale), so it needs make + the clang toolchain (no kernel C libs);
 # the final INSTALL step copies the tree with rsync.
 [build.headers.dependencies.peipkg]
-build-essentials = "*"
-gcc = "*"
-make = "*"
-clang = "*"
-lld = "*"
-llvm = "*"
-rsync = "*"
+"dev.peios.build-essentials" = "*"
+"org.gnu.gcc" = "*"
+"org.gnu.make" = "*"
+"org.llvm.clang" = "= 18.1.8"
+"org.llvm.lld" = "= 18.1.8"
+"org.llvm.llvm" = "= 18.1.8"
+"org.samba.rsync" = "*"
 
 [build.headers.dependencies.apt]
 build-essential = "*"
@@ -264,11 +284,11 @@ command = """
 
 # Splits vmlinux debug info: debugedit + binutils (readelf/strip/objcopy).
 [build.debuginfo.dependencies.peipkg]
-build-essentials = "*"
+"dev.peios.build-essentials" = "*"
 "org.gnu.bash" = "*"
 "org.gnu.binutils" = "*"
-debugedit = "*"
-cpio = "*"
+"org.sourceware.debugedit" = "*"
+"org.gnu.cpio" = "*"
 
 [build.debuginfo.dependencies.apt]
 binutils = "*"
@@ -293,52 +313,52 @@ command = """
 # own parsers; the rest are the -dev libs perf/rtla/rv link (see build/Containerfile
 # for the per-library rationale).
 [build.tools.dependencies.peipkg]
-build-essentials = "*"
+"dev.peios.build-essentials" = "*"
 "org.gnu.bash" = "*"
-which = "*"
-rsync = "*"
-"openssl-devel" = "*"
-gcc = "*"
-"gcc-c++" = "*"
-make = "*"
+"org.gnu.which" = "*"
+"org.samba.rsync" = "*"
+"org.openssl.openssl-devel" = "*"
+"org.gnu.gcc" = "*"
+"org.gnu.gcc-c++" = "*"
+"org.gnu.make" = "*"
 "org.gnu.bison" = "*"
-flex = "*"
-pkgconf = "*"
-"elfutils-devel" = "*"
-"zlib-devel" = "*"
-"zstd-devel" = "*"
-"libcap-devel" = "*"
-"numactl-devel" = "*"
-"slang-devel" = "*"
-"libtraceevent-devel" = "*"
-"libtracefs-devel" = "*"
-"pciutils-devel" = "*"
-gettext = "*"
-perl = "*"
+"io.github.westes.flex" = "*"
+"org.pkgconf.pkgconf" = "*"
+"org.sourceware.elfutils-devel" = "*"
+"io.github.zlib-ng.zlib-ng-compat-devel" = "*"
+"com.facebook.zstd-devel" = "*"
+"org.kernel.libcap-devel" = "*"
+"io.github.numactl.libnuma-devel" = "*"
+"org.jedsoft.slang-devel" = "*"
+"org.linux.traceevent-devel" = "*"
+"org.linux.tracefs-devel" = "*"
+"cz.ucw.libpci-devel" = "*"
+"org.gnu.gettext" = "*"
+"org.perl.perl" = "*"
 "org.gnu.binutils" = "*"
-python3 = "*"
-"libpfm-devel" = "*"
-"libudev-devel" = "*"
-"ncurses-devel" = "*"
-"libnl-devel" = "*"
-"libconfig-devel" = "*"
+"org.python.python3" = "*"
+"net.sourceforge.perfmon2.libpfm-devel" = "*"
+"io.github.eudev-project.eudev-devel" = "*"
+"org.gnu.ncurses-devel" = "*"
+"io.github.thom311.libnl-devel" = "*"
+"io.github.hyperrealm.libconfig-devel" = "*"
 "org.gnu.autoconf" = "*"
 "org.gnu.automake" = "*"
-libtool = "*"
+"org.gnu.libtool" = "*"
 "org.capstone-engine.capstone-devel" = "*"
-"llvm-devel" = "*"
-llvm = "*"
-clang = "*"
+"org.llvm.llvm-devel" = "*"
+"org.llvm.llvm" = "*"
+"org.llvm.clang" = "*"
 # rst2man for the bpftool/rtla/rv man pages (PEI-535 brought docutils to the pool).
-python3-docutils = "*"
+"io.sourceforge.docutils.docutils" = "*"
 # asciidoc + xmlto render the perf, libperf and kvm_stat man pages; the
 # DocBook stylesheets and DTD are what they resolve against.
 "io.github.asciidoc-py.asciidoc" = "*"
-xmlto = "*"
-"docbook-xsl" = "*"
-"docbook-xml" = "*"
+"io.pagure.xmlto" = "*"
+"org.docbook.docbook-xsl" = "*"
+"org.oasis-open.docbook-xml" = "*"
 # setuptools builds perf's importable python module (util/setup.py).
-"python3-setuptools" = "*"
+"io.pypa.setuptools" = "*"
 
 [build.tools.dependencies.apt]
 build-essential = "*"
@@ -417,14 +437,14 @@ command = """
 # --env peipkg the stage gets as far as "qemu not found"; the docker env and
 # --env none supply the host's QEMU.
 [test.modsig.dependencies.peipkg]
-dash               = "*"
-"org.gnu.bash"     = "*"
-coreutils-gnu      = "*"
-findutils          = "*"
-grep               = "*"
-gawk               = "*"
-cpio               = "*"
-build-essentials-c = "*"
+"org.git.kernel.dash"          = "*"
+"org.gnu.bash"                 = "*"
+"org.gnu.coreutils"            = "*"
+"org.gnu.findutils"            = "*"
+"org.gnu.grep"                 = "*"
+"org.gnu.gawk"                 = "*"
+"org.gnu.cpio"                 = "*"
+"dev.peios.build-essentials-c" = "*"
 
 [test.modsig.dependencies.apt]
 bash            = "*"
@@ -451,15 +471,15 @@ command = """
 # Same shape as test.modsig, plus openssl (ML-DSA-65 signing) and zstd (a
 # compressed blob, to show the signature covers the on-disk bytes).
 [test.fwsig.dependencies.peipkg]
-dash               = "*"
-"org.gnu.bash"     = "*"
-coreutils-gnu      = "*"
-findutils          = "*"
-grep               = "*"
-cpio               = "*"
-openssl            = "*"
-zstd               = "*"
-build-essentials-c = "*"
+"org.git.kernel.dash"          = "*"
+"org.gnu.bash"                 = "*"
+"org.gnu.coreutils"            = "*"
+"org.gnu.findutils"            = "*"
+"org.gnu.grep"                 = "*"
+"org.gnu.cpio"                 = "*"
+"org.openssl.openssl"          = "*"
+"com.facebook.zstd"            = "*"
+"dev.peios.build-essentials-c" = "*"
 
 [test.fwsig.dependencies.apt]
 bash            = "*"
@@ -480,13 +500,13 @@ command = """
 
 # Same shape as test.modsig, for the same reason.
 [test.stratafs.dependencies.peipkg]
-dash               = "*"
-"org.gnu.bash"     = "*"
-coreutils-gnu      = "*"
-findutils          = "*"
-grep               = "*"
-cpio               = "*"
-build-essentials-c = "*"
+"org.git.kernel.dash"          = "*"
+"org.gnu.bash"                 = "*"
+"org.gnu.coreutils"            = "*"
+"org.gnu.findutils"            = "*"
+"org.gnu.grep"                 = "*"
+"org.gnu.cpio"                 = "*"
+"dev.peios.build-essentials-c" = "*"
 
 [test.stratafs.dependencies.apt]
 bash            = "*"

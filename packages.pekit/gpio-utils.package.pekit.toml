@@ -2,12 +2,24 @@
 # gpio-hammer, gpio-watch) + the sloppy-logic-analyzer helper script. Built from
 # tools/gpio (build.tools).
 #
-# Runtime shared-lib deps (TODO — see D4): libc
+# ELF dependencies are derived from the staged binaries; the logic-analyzer
+# helper uses the system sh implementation.
 
 [package]
+name = "dev.peios.gpio-utils"
 description = "gpio-utils - userspace GPIO chardev tools (from Linux 7.0.9 tools/gpio)"
 
+[dependencies]
+"org.git.kernel.dash" = "*"
+
+[provides]
+"gpio-utils" = "{{version}}-1"
+
+[replaces]
+"gpio-utils" = "<= 0.20.1-rc12-26"
+
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.gpio-utils/COPYING"
 "tools:usr/bin/lsgpio"                    = "usr/bin/lsgpio"
 "tools:usr/bin/gpio-event-mon"            = "usr/bin/gpio-event-mon"
 "tools:usr/bin/gpio-hammer"               = "usr/bin/gpio-hammer"

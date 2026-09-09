@@ -3,12 +3,20 @@
 # not shipped.
 
 [package]
+name = "dev.peios.usbip-devel"
 description = "usbip - development files (libusbip headers, static lib)"
 
 [dependencies]
-usbip = "{{version}}"
+"dev.peios.usbip" = "= {{version}}-1"
+
+[provides]
+"usbip-devel" = "{{version}}-1"
+
+[replaces]
+"usbip-devel" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.usbip-devel/COPYING"
 "tools:usr/include/usbip/**" = "usr/include/usbip/"
 "tools:usr/lib/x86_64-linux-peios/libusbip.so" = "usr/lib/x86_64-linux-peios/libusbip.so"
 "tools:usr/lib/x86_64-linux-peios/libusbip.a"  = "usr/lib/x86_64-linux-peios/libusbip.a"

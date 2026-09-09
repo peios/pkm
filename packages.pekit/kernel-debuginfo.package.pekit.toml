@@ -3,10 +3,18 @@
 # symbols automatically. Produced by build.debuginfo.
 
 [package]
+name = "dev.peios.kernel-debuginfo"
 description = "Peios Kernel - debugging symbols"
 
 [dependencies]
-kernel = "{{version}}"
+"dev.peios.kernel" = "= {{version}}-1"
+
+[provides]
+"kernel-debuginfo" = "{{version}}-1"
+
+[replaces]
+"kernel-debuginfo" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.kernel-debuginfo/COPYING"
 "debuginfo:usr/lib/debug/**" = "usr/lib/debug/"

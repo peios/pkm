@@ -34,13 +34,22 @@ excludes = [
 ]
 
 [package]
+name = "dev.peios.kernel-devel"
 description = "Peios Kernel - development headers and build kit"
 
 [dependencies]
-kernel = "{{version}}"
+"dev.peios.kernel" = "= {{version}}-1"
+"dev.peios.build-essentials-c" = "*"
 
+
+[provides]
+"kernel-devel" = "{{version}}-1"
+
+[replaces]
+"kernel-devel" = "<= 0.20.1-rc12-26"
 
 [files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.kernel-devel/COPYING"
 "kernel:Makefile"            = "usr/lib/modules/7.0.9-peios-{{version}}/build/Makefile"
 "kernel:Module.symvers"      = "usr/lib/modules/7.0.9-peios-{{version}}/build/Module.symvers"
 "kernel:.config"             = "usr/lib/modules/7.0.9-peios-{{version}}/build/.config"
@@ -60,5 +69,6 @@ kernel = "{{version}}"
 # libopcodes just when -lopcodes links, and build.kernel declares no
 # binutils-devel.
 "kernel:tools/objtool/objtool" = "usr/lib/modules/7.0.9-peios-{{version}}/build/tools/objtool/objtool"
-# Build artifacts and C sources aren't needed to compile external modules; the
-# built host tools in scripts/ (no extension, e.g. modpost) are kept.
+# The scripts/ mapping deliberately retains its C sources: Kbuild compiles
+# scripts/module-common.c into external modules. Only transient objects and
+# command stamps are excluded above; prebuilt host tools such as modpost stay.
