@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note
+
 // Package uapi is the generated Go mirror of the PKM kernel ABI.
 //
 // Every declaration here is generated from the C headers in pkm/uapi/pkm/
@@ -8,5 +10,6 @@
 // only capitalised for export (KACS_TOKEN_QUERY, struct kacs_query_args ->
 // Kacs_query_args), and struct padding members appear as the blank
 // identifier _. Ergonomic, idiomatic Go wrappers belong in libp-go, which
-// consumes this package.
+// consumes this package. The generated declarations carry the source UAPI
+// headers' GPL-2.0-only WITH Linux-syscall-note licence; see LICENSE.
 package uapi
