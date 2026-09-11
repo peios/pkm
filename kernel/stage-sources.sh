@@ -37,24 +37,39 @@ linux_include_dir="$tree/include/linux"
 rm -rf "$pkm_dir" "$stratafs_dir" "$pnp_dir" "$uapi_dir"
 mkdir -p "$pkm_dir/kacs" "$pkm_dir/lcs" "$pkm_dir/kmes" "$uapi_dir"
 
+# Peiosutils deliberately does not emulate GNU install's POSIX mode/ownership
+# interface. These are source files in a disposable build tree, so copy their
+# bytes with the shell and let package creation normalise the final payload.
+stage_file() {
+	local source=$1 destination=$2
+	cat "$source" > "$destination"
+}
+
+stage_flat_dir() {
+	local source_dir=$1 destination_dir=$2 source
+	for source in "$source_dir"/*; do
+		stage_file "$source" "$destination_dir/${source##*/}"
+	done
+}
+
 # --- flat C / H / Rust sources (these dirs contain exactly the staged set) ---
-install -m 0644 "$pkm"/kacs/* "$pkm_dir/kacs/"
-install -m 0644 "$pkm"/lcs/*  "$pkm_dir/lcs/"
-install -m 0644 "$pkm"/kmes/* "$pkm_dir/kmes/"
+stage_flat_dir "$pkm/kacs" "$pkm_dir/kacs"
+stage_flat_dir "$pkm/lcs" "$pkm_dir/lcs"
+stage_flat_dir "$pkm/kmes" "$pkm_dir/kmes"
 
 # --- UAPI headers: explicit list. The umbrella pkm.h includes every other
 #     header (incl. psb.h), so the whole set must be staged together; staging
 #     pkm.h without psb.h leaves <pkm/pkm.h> unbuildable (an old-installer bug
 #     this list fixes). ---
 for h in pkm psb syscall sid sd token socket ipc net access file process kmes lcs trace pnp; do
-	install -m 0644 "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
+	stage_file "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
 done
 
 # --- Narrow in-kernel interfaces. These are not UAPI and are intentionally
 #     not exported to modules. ---
-install -m 0644 "$here/include/linux/kacs_stratafs.h" \
+stage_file "$here/include/linux/kacs_stratafs.h" \
 	"$linux_include_dir/kacs_stratafs.h"
-install -m 0644 "$here/include/linux/peios_pnp.h" \
+stage_file "$here/include/linux/peios_pnp.h" \
 	"$linux_include_dir/peios_pnp.h"
 
 # --- Static tracepoint event headers, staged into the canonical
@@ -65,22 +80,22 @@ install -m 0644 "$here/include/linux/peios_pnp.h" \
 trace_events_dir="$tree/include/trace/events"
 mkdir -p "$trace_events_dir"
 for t in kacs kmes lcs stratafs; do
-	install -m 0644 "$here/trace/$t.h" "$trace_events_dir/$t.h"
+	stage_file "$here/trace/$t.h" "$trace_events_dir/$t.h"
 done
 
 # --- Kconfig + Makefile fragments for security/pkm ---
-install -m 0644 "$here/Kconfig"  "$pkm_dir/Kconfig"
-install -m 0644 "$here/Makefile" "$pkm_dir/Makefile"
+stage_file "$here/Kconfig"  "$pkm_dir/Kconfig"
+stage_file "$here/Makefile" "$pkm_dir/Makefile"
 
 # --- StrataFS: built-in VFS glue, separate from the KACS LSM subtree. ---
 mkdir -p "$stratafs_dir"
-install -m 0644 "$pkm"/stratafs/* "$stratafs_dir/"
+stage_flat_dir "$pkm/stratafs" "$stratafs_dir"
 
 # --- PNP: the network-policy packet engine, staged into net/. Its Rust
 #     semantics live in the security/pkm Rust island (pnp_core below); the
 #     C here reaches them over the pnp_rust_* C ABI. ---
 mkdir -p "$pnp_dir"
-install -m 0644 "$pkm"/pnp/* "$pnp_dir/"
+stage_flat_dir "$pkm/pnp" "$pnp_dir"
 
 
 # --- generated TCB built-in signing-key header (overwrites the copied stub) ---
@@ -93,7 +108,7 @@ python3 "$here/scripts/generate-kacs-builtin-signing-keys.py" "${genargs[@]}"
 #     source of truth for ABI values; stage-rust-core.sh rewrites those paths
 #     to `crate::peios_uapi::` and kacs_rust.rs mounts this file as the module.
 #     Only zconst.rs (constants) is needed — the cores use no generated types. ---
-install -m 0644 "$pkm/uapi/generated/rust/src/zconst.rs" "$pkm_dir/kacs/peios_uapi.rs"
+stage_file "$pkm/uapi/generated/rust/src/zconst.rs" "$pkm_dir/kacs/peios_uapi.rs"
 
 # --- Rust cores, path-rewritten for nested in-kernel module paths ---
 "$here/stage-rust-core.sh" "$pkm/crates/kacs-core/src" "$pkm_dir/kacs/kacs_core"

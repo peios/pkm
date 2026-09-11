@@ -48,7 +48,7 @@ needs = ["upstream"]
 command = """
 set -eu
 PATCHES="$(pwd)/kernel/patches"
-cp -aT "$PEKIT_UPSTREAM_OUT" "$PEKIT_OUT"
+tar -C "$PEKIT_UPSTREAM_OUT" -cf - . | tar -C "$PEKIT_OUT" -xf -
 ./kernel/apply-patches.sh "$PEKIT_OUT" "$PATCHES"
 ./kernel/stage-sources.sh "$(pwd)" "$PEKIT_OUT"
 # Keep the staged source a plain tree so scripts/setlocalversion cannot inherit
@@ -61,12 +61,22 @@ rm -rf "$PEKIT_OUT/.git"
 [build.source.dependencies.peipkg]
 "org.git.kernel.dash"  = "*"
 "dev.peios.peiosutils" = "*"
+"org.gnu.bash"         = "*"
+"org.gnu.findutils"    = "*"
+"org.gnu.gawk"         = "*"
+"org.gnu.grep"         = "*"
 "org.gnu.patch"        = "*"
+"org.gnu.tar"          = "*"
 "org.python.python3"   = "*"
 
 [build.source.dependencies.apt]
+bash = "*"
+findutils = "*"
+gawk = "*"
+grep = "*"
 patch = "*"
 python3 = "*"
+tar = "*"
 
 # build.source is config-agnostic (the kernel-source package). The kernel
 # stages take it, configure for a profile, and compile a monolithic bzImage.
@@ -81,7 +91,7 @@ test "$actual_rust" = "$RUST_VERSION" || {
 	exit 1
 }
 
-cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
+tar -C "$PEKIT_SOURCE_OUT" -cf - . | tar -C "$PEKIT_OUT" -xf -
 # Stage the module-signing key into the tree. certs/Makefile extracts the
 # cert from CONFIG_MODULE_SIG_KEY and links it into .builtin_trusted_keys, so
 # the file must hold the private key and its certificate in one PEM. The name
@@ -165,7 +175,7 @@ sh ./kernel/verify-linux-provide.sh \
 	packages.pekit/kernel.package.pekit.toml \
 	linux-kernel "$KERNEL_VERSION" "$PEKIT_SOURCE_OUT"
 
-cp -aT "$PEKIT_SOURCE_OUT" "$PEKIT_OUT"
+tar -C "$PEKIT_SOURCE_OUT" -cf - . | tar -C "$PEKIT_OUT" -xf -
 # Inject the production TCB signing key over the allow-empty placeholder that
 # build.source stages. Provide it via the keyring: --keyring.tcb.pub=<hex>.
 python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
