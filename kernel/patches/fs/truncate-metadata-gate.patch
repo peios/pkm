@@ -1,7 +1,8 @@
 diff --git a/fs/namei.c b/fs/namei.c
+index 9e5500d..929bdaf 100644
 --- a/fs/namei.c
 +++ b/fs/namei.c
-@@ -43,6 +43,10 @@
+@@ -46,6 +46,10 @@
  #include "internal.h"
  #include "mount.h"
  
@@ -23,9 +24,10 @@ diff --git a/fs/namei.c b/fs/namei.c
  	return error;
  }
 diff --git a/fs/open.c b/fs/open.c
+index 227fffd2c..771c41eb8 100644
 --- a/fs/open.c
 +++ b/fs/open.c
-@@ -35,6 +35,10 @@
+@@ -36,6 +36,10 @@
  
  #include "internal.h"
  
@@ -36,7 +38,8 @@ diff --git a/fs/open.c b/fs/open.c
  int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
  		loff_t length, unsigned int time_attrs, struct file *filp)
  {
-@@ -191,9 +195,17 @@ static long do_ftruncate(struct file *file, loff_t length, int small)
+@@ -189,12 +193,20 @@ int do_ftruncate(struct file *file, loff_t length, int small)
+ 		return error;
  
  	error = fsnotify_truncate_perm(&file->f_path, length);
 -	if (error)
@@ -57,7 +60,9 @@ diff --git a/fs/open.c b/fs/open.c
 +#endif
 +	return error;
  }
-@@ -684,7 +696,6 @@ out_mnt_unlock:
+ 
+ int do_sys_ftruncate(unsigned int fd, loff_t length, int small)
+@@ -671,7 +683,6 @@ int chmod_common(const struct path *path, umode_t mode)
  #ifdef CONFIG_SECURITY_PKM
  extern int pkm_kacs_file_chmod(struct file *file);
  extern int pkm_kacs_file_chown(struct file *file);

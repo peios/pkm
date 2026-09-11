@@ -7,7 +7,8 @@ out_dir = "out"
 name = "dev.peios.kernel-source"
 
 # Single source of truth for the upstream Linux version, exported into every
-# build stage's environment (build.upstream clones this tag). Bump it here, in
+# build stage's environment (build.upstream imports the authenticated source
+# package). Bump it here, in
 # lockstep with the patch series — kernel/patches are generated against this
 # exact tag, so a version change generally means re-deriving or 3-way-rebasing
 # them. Note: package install paths still embed the kernel RELEASE literally;
@@ -17,46 +18,48 @@ KERNEL_VERSION = "v7.0.9"
 
 [build.upstream]
 command = """
-# Clone the pinned upstream kernel ($KERNEL_VERSION, from [env] above).
-git clone --depth 1 --branch "$KERNEL_VERSION" \
-	https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
-	"$PEKIT_OUT"
+set -eu
+# Import the independently authenticated, lock-pinned upstream source package.
+# Keeping remote acquisition in its own recipe means this build stays offline
+# and Peipkg can account for the exact upstream input in the dependency graph.
+version=${KERNEL_VERSION#v}
+cp -aT "/usr/src/linux-$version" "$PEKIT_OUT"
 
 # Source-level prep hook: nothing needed today (patches apply to a pristine
 # tree). Config/toolchain prep belongs to the later build stages, not here.
 """
 
-# Just clones the pinned upstream tag over HTTPS.
+# Exact by design: Peios' patch series is derived against this Linux release.
 [build.upstream.dependencies.peipkg]
-git = "*"
-ca-certificates = "*"
+"org.git.kernel.dash"       = "*"
+"dev.peios.peiosutils"      = "*"
+"org.kernel.linux-source"   = "= 7.0.9-1"
 
 [build.upstream.dependencies.apt]
-git = "*"
-ca-certificates = "*"
+coreutils = "*"
 
 [build.source]
 needs = ["upstream"]
 command = """
+set -eu
 PATCHES="$(pwd)/kernel/patches"
 cp -aT "$PEKIT_UPSTREAM_OUT" "$PEKIT_OUT"
-./kernel/apply-patches.sh $PEKIT_OUT $PATCHES
+./kernel/apply-patches.sh "$PEKIT_OUT" "$PATCHES"
 ./kernel/stage-sources.sh "$(pwd)" "$PEKIT_OUT"
-# .git is only needed for `git apply` above. Strip it so the staged source is a
-# plain tree: scripts/setlocalversion then finds no repo and the kernel release
-# is a clean "7.0.9" instead of "7.0.9-dirty" (HEAD sits on the v7.0.9 tag and
-# the applied patches leave the worktree dirty).
+# Keep the staged source a plain tree so scripts/setlocalversion cannot inherit
+# repository state and change the kernel release. The packaged upstream source
+# is already VCS-free; keep this defensive for developer-local inputs.
 rm -rf "$PEKIT_OUT/.git"
 """
 
-# apply-patches.sh uses git apply + patch; stage-sources.sh uses patch + python3.
+# apply-patches.sh uses GNU patch; stage-sources.sh uses patch + python3.
 [build.source.dependencies.peipkg]
-git = "*"
-patch = "*"
-python3 = "*"
+"org.git.kernel.dash"  = "*"
+"dev.peios.peiosutils" = "*"
+"org.gnu.patch"        = "*"
+"org.python.python3"   = "*"
 
 [build.source.dependencies.apt]
-git = "*"
 patch = "*"
 python3 = "*"
 
@@ -559,21 +562,19 @@ verify_on_build = []
 verify_on_test = []
 
 # Codegen for the three binding flavours: clang + libclang for the Rust bindgen
-# pass, lua for the Lua mirror, golang (go + gofmt) for the Go mirror; python3 for
-# the codegen-safe lint. bindgen + rustfmt themselves come from the rustup
-# toolchain in the build env/wrap, not a distro package. verify_command uses the
-# same toolchain, so no verify_dependencies override is needed.
+# pass, golang (go + gofmt) for the Go mirror, and python3 for the codegen-safe
+# lint. The Lua binding generator emits Lua from C metadata; an installed Lua
+# interpreter is merely an optional extra self-check, not an input. bindgen +
+# rustfmt themselves come from the rustup toolchain in the build env/wrap.
 [gen.uapi.dependencies.peipkg]
-clang = "*"
-clang-devel = "*"
-lua = "*"
-golang = "*"
-python3 = "*"
+"org.llvm.clang"        = "*"
+"org.llvm.clang-devel"  = "*"
+"org.golang.go"         = "*"
+"org.python.python3"    = "*"
 
 [gen.uapi.dependencies.apt]
 clang-18 = "*"
 libclang-18-dev = "*"
-"lua5.4" = "*"
 golang-go = "*"
 python3 = "*"
 

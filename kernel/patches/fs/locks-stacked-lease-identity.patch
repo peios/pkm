@@ -1,7 +1,9 @@
 diff --git a/fs/locks.c b/fs/locks.c
+index d13ec930b..7524e51a5 100644
 --- a/fs/locks.c
 +++ b/fs/locks.c
-@@ -1763,6 +1763,7 @@ void lease_get_mtime(struct inode *inode, struct timespec64 *time)
+@@ -1763,7 +1763,8 @@ EXPORT_SYMBOL(lease_get_mtime);
+  *	XXX: sfr & willy disagree over whether F_INPROGRESS
   *	should be returned to userspace.
   */
 -static int __fcntl_getlease(struct file *filp, unsigned int flavor)
@@ -10,7 +12,7 @@ diff --git a/fs/locks.c b/fs/locks.c
  {
  	struct file_lease *fl;
  	struct inode *inode = file_inode(filp);
-@@ -1778,7 +1779,7 @@ static int __fcntl_getlease(struct file *filp, unsigned int flavor)
+@@ -1777,7 +1778,7 @@ static int __fcntl_getlease(struct file *filp, unsigned int flavor)
  		spin_lock(&ctx->flc_lock);
  		time_out_leases(inode, &dispose);
  		list_for_each_entry(fl, &ctx->flc_lease, c.flc_list) {
@@ -53,7 +55,7 @@ diff --git a/fs/locks.c b/fs/locks.c
  	return 0;
  }
  
-@@ -1809,8 +1819,10 @@ generic_add_lease(struct file *filp, int arg, struct file_lease **flp, void **pr
+@@ -1811,15 +1827,22 @@ generic_add_lease(struct file *filp, int arg, struct file_lease **flp, void **pr
  	struct inode *inode = file_inode(filp);
  	struct file_lock_context *ctx;
  	bool is_deleg = (*flp)->c.flc_flags & FL_DELEG;
@@ -64,7 +66,7 @@ diff --git a/fs/locks.c b/fs/locks.c
  	lease = *flp;
 +	lease_file = lease->c.flc_file ?: filp;
  	trace_generic_add_lease(inode, lease);
-@@ -1820,6 +1832,11 @@ generic_add_lease(struct file *filp, int arg, struct file_lease **flp, void **pr
+ 
  	error = file_f_owner_allocate(filp);
  	if (error)
  		return error;
@@ -76,7 +78,8 @@ diff --git a/fs/locks.c b/fs/locks.c
  
  	/* Note that arg is never F_UNLCK here */
  	ctx = locks_get_lock_context(inode, arg);
-@@ -1853,6 +1864,6 @@ generic_add_lease(struct file *filp, int arg, struct file_lease **flp, void **pr
+@@ -1854,7 +1877,7 @@ generic_add_lease(struct file *filp, int arg, struct file_lease **flp, void **pr
+ 	 */
  	error = -EAGAIN;
  	list_for_each_entry(fl, &ctx->flc_lease, c.flc_list) {
 -		if (fl->c.flc_file == filp &&
@@ -84,7 +87,7 @@ diff --git a/fs/locks.c b/fs/locks.c
  		    fl->c.flc_owner == lease->c.flc_owner) {
  			my_fl = fl;
  			continue;
-@@ -1935,7 +1946,8 @@ static int generic_delete_lease(struct file *filp, void *owner)
+@@ -1934,7 +1957,8 @@ static int generic_delete_lease(struct file *filp, void *owner)
  	percpu_down_read(&file_rwsem);
  	spin_lock(&ctx->flc_lock);
  	list_for_each_entry(fl, &ctx->flc_lease, c.flc_list) {
@@ -94,7 +97,9 @@ diff --git a/fs/locks.c b/fs/locks.c
  		    fl->c.flc_owner == owner) {
  			victim = fl;
  			break;
-@@ -2026,6 +2038,11 @@ kernel_setlease(struct file *filp, int arg, struct file_lease **lease, void **pr
+@@ -2025,8 +2049,13 @@ EXPORT_SYMBOL_GPL(lease_unregister_notifier);
+ int
+ kernel_setlease(struct file *filp, int arg, struct file_lease **lease, void **priv)
  {
 -	if (lease)
 +	if (lease) {
@@ -108,9 +113,11 @@ diff --git a/fs/locks.c b/fs/locks.c
  		return filp->f_op->setlease(filp, arg, lease, priv);
  	return -EINVAL;
 diff --git a/include/linux/filelock.h b/include/linux/filelock.h
+index d2c9740e2..670d43ab5 100644
 --- a/include/linux/filelock.h
 +++ b/include/linux/filelock.h
-@@ -225,5 +225,7 @@ int __break_lease(struct inode *inode, unsigned int flags);
+@@ -225,6 +225,8 @@ struct file_lease *locks_alloc_lease(void);
+ int __break_lease(struct inode *inode, unsigned int flags);
  void lease_get_mtime(struct inode *, struct timespec64 *time);
  int generic_setlease(struct file *, int, struct file_lease **, void **priv);
 +int kernel_getlease(struct file *file, struct file *lease_file,
@@ -118,7 +125,7 @@ diff --git a/include/linux/filelock.h b/include/linux/filelock.h
  int kernel_setlease(struct file *, int, struct file_lease **, void **);
  int vfs_setlease(struct file *, int, struct file_lease **, void **);
  int lease_modify(struct file_lease *, int, struct list_head *);
-@@ -406,6 +408,12 @@ static inline int generic_setlease(struct file *filp, int arg,
+@@ -411,6 +413,12 @@ static inline int generic_setlease(struct file *filp, int arg,
  	return -EINVAL;
  }
  
@@ -132,12 +139,15 @@ diff --git a/include/linux/filelock.h b/include/linux/filelock.h
  			       struct file_lease **lease, void **priv)
  {
 diff --git a/include/linux/fs.h b/include/linux/fs.h
+index ef17f9e21..965c4a646 100644
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
-@@ -1951,4 +1951,6 @@ struct file_operations {
+@@ -1951,6 +1951,8 @@ struct file_operations {
+ 	ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
  	void (*splice_eof)(struct file *file);
  	int (*setlease)(struct file *, int, struct file_lease **, void **);
 +	int (*getlease)(struct file *file, struct file *lease_file,
 +			unsigned int flavor);
  	long (*fallocate)(struct file *file, int mode, loff_t offset,
  			  loff_t len);
+ 	void (*show_fdinfo)(struct seq_file *m, struct file *f);

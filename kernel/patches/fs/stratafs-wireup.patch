@@ -52,8 +52,7 @@ diff --git a/fs/namespace.c b/fs/namespace.c
  	LOCK_MOUNT_MAYBE_BENEATH(mp, new_path, beneath);
  	if (IS_ERR(mp.parent))
  		return PTR_ERR(mp.parent);
-@@ -3765,7 +3779,12 @@ static int do_new_mount_fc(struct fs_context *fc, const struct path *mountpoint,
- 	if (IS_ERR(mnt))
+@@ -3767,6 +3781,11 @@ static int do_new_mount_fc(struct fs_context *fc, const struct path *mountpoint,
  		return PTR_ERR(mnt);
  
  	sb = fc->root->d_sb;
@@ -68,11 +67,12 @@ diff --git a/fs/namespace.c b/fs/namespace.c
 diff --git a/include/linux/fs/super_types.h b/include/linux/fs/super_types.h
 --- a/include/linux/fs/super_types.h
 +++ b/include/linux/fs/super_types.h
-@@ -126,5 +126,7 @@ struct super_operations {
- 	void (*shutdown)(struct super_block *sb);
+@@ -127,6 +127,8 @@ struct super_operations {
  
  	/* Report a filesystem error */
  	void (*report_error)(const struct fserror_event *event);
 +	int (*validate_mountpoint)(struct super_block *sb,
 +				   const struct path *mountpoint);
  };
+ 
+ struct super_block {
