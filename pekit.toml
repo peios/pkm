@@ -336,7 +336,7 @@ command = """
 "org.gnu.gettext" = "*"
 "org.perl.perl" = "*"
 "org.gnu.binutils" = "*"
-"org.python.python3" = "*"
+"org.python.python3-devel" = "*"
 "net.sourceforge.perfmon2.libpfm-devel" = "*"
 "io.github.eudev-project.eudev-devel" = "*"
 "org.gnu.ncurses-devel" = "*"
@@ -413,6 +413,7 @@ perl = "*"
 
 # Boot the KUnit kernel in QEMU and assert the suite passes (build vs run split).
 [test.kunit]
+gate = true
 needs = ["kunit"]
 command = """
 ./build/test-kunit.sh "$PEKIT_KUNIT_OUT"
@@ -425,6 +426,7 @@ command = """
 # MODULE_SIG_FORCE a successful load is itself the proof that the signature
 # verified against a builtin key.
 [test.modsig]
+gate = true
 needs = ["kernel"]
 command = """
 ./build/test-modsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root"
@@ -463,6 +465,7 @@ qemu-system-x86 = "*"
 # kacs_fwsig=enforce the unsigned and tampered blobs are refused, under
 # kacs_fwsig=log they load with a warning. Signed blobs load either way.
 [test.fwsig]
+gate = true
 needs = ["kernel"]
 command = """
 ./build/test-fwsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root"
@@ -493,6 +496,7 @@ build-essential = "*"
 qemu-system-x86 = "*"
 
 [test.stratafs]
+gate = true
 needs = ["kunit"]
 command = """
 ./build/test-stratafs.sh "$PEKIT_KUNIT_OUT"
@@ -578,6 +582,7 @@ python3 = "*"
 # gen.uapi's verify_command) — so it stays a plain test. No needs; operates on
 # the committed uapi/.
 [test.uapi]
+gate = true
 command = """
 bash uapi/check-userspace-clean.sh
 """

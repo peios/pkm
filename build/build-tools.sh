@@ -148,15 +148,18 @@ make -C tools/bpf/bpftool -j"$jobs" \
 # libcpupower.so* lands under the triplet; skip the optional cpufreq-bench.
 # Build first, install serially: cpupower's install-gmo does not depend on
 # the .gmo generation, so a combined parallel `install` races msgfmt.
+# Its Makefile hard-codes /usr/bin/install; override that variable explicitly
+# because Peiosutils deliberately defers GNU install's mode-setting interface,
+# while build roots expose the compatibility implementation only privately.
 log "cpupower"
 make -C tools/power/cpupower -j"$jobs" \
 	prefix=/usr bindir=/usr/bin sbindir=/usr/sbin \
 	libdir=/usr/lib/$triplet mandir=/usr/share/man \
-	CPUFREQ_BENCH=false
+	CPUFREQ_BENCH=false INSTALL=/usr/libexec/coreutils-build/install
 make -C tools/power/cpupower \
 	DESTDIR="$dest" prefix=/usr bindir=/usr/bin sbindir=/usr/sbin \
 	libdir=/usr/lib/$triplet mandir=/usr/share/man \
-	CPUFREQ_BENCH=false \
+	CPUFREQ_BENCH=false INSTALL=/usr/libexec/coreutils-build/install \
 	install
 
 # --- turbostat: CPU power / frequency telemetry ---
