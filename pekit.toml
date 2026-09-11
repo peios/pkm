@@ -23,7 +23,8 @@ set -eu
 # Keeping remote acquisition in its own recipe means this build stays offline
 # and Peipkg can account for the exact upstream input in the dependency graph.
 version=${KERNEL_VERSION#v}
-cp -aT "/usr/src/linux-$version" "$PEKIT_OUT"
+tar -xJf "/usr/src/dist/linux-$version.tar.xz" \
+	--strip-components=1 --directory "$PEKIT_OUT"
 
 # Source-level prep hook: nothing needed today (patches apply to a pristine
 # tree). Config/toolchain prep belongs to the later build stages, not here.
@@ -34,9 +35,13 @@ cp -aT "/usr/src/linux-$version" "$PEKIT_OUT"
 "org.git.kernel.dash"       = "*"
 "dev.peios.peiosutils"      = "*"
 "org.kernel.linux-source"   = "= 7.0.9-1"
+"org.gnu.tar"               = "*"
+"org.tukaani.xz"            = "*"
 
 [build.upstream.dependencies.apt]
 coreutils = "*"
+tar = "*"
+xz-utils = "*"
 
 [build.source]
 needs = ["upstream"]
