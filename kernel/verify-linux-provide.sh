@@ -1,14 +1,14 @@
 #!/bin/sh
-# Assert that a package's `linux-*` virtual provide names the Linux version the
-# recipe is actually building.
+# Assert that a package's qualified Linux virtual provide names the Linux
+# version the recipe is actually building.
 #
-# kernel-headers publishes `linux-kernel-headers = <ver>` and kernel publishes
-# `linux-kernel = <ver>`, so that consumers can say "I need Linux UAPI >= X"
-# without depending on pkm's own SemVer, which tracks the PKM UAPI / KACS ABI
-# and says nothing about Linux. Those provides are static TOML — pekit has no
-# build-derived templating for `provides` — so nothing stops [env]
-# KERNEL_VERSION being bumped while the provide is left behind, which would
-# publish a package claiming to carry a UAPI it does not.
+# kernel-headers publishes `dev.peios.linux-kernel-headers = <ver>` and kernel
+# publishes `dev.peios.linux-kernel = <ver>`, so that consumers can say "I need
+# Linux UAPI >= X" without depending on pkm's own SemVer, which tracks the PKM
+# UAPI / KACS ABI and says nothing about Linux. Those provides are static TOML
+# — pekit has no build-derived templating for `provides` — so nothing stops
+# [env] KERNEL_VERSION being bumped while the provide is left behind, which
+# would publish a package claiming to carry a UAPI it does not.
 #
 # So the build asserts it, in both directions:
 #   1. the declared provide matches KERNEL_VERSION, and
@@ -26,7 +26,9 @@ tree=${4:-}
 # KERNEL_VERSION is a git tag ("v7.0.9"); the provide is a bare version.
 expected=${kver#v}
 
-declared=$(sed -n "s/^[[:space:]]*${provide}[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$pkgfile" | head -1)
+# Qualified TOML keys must be quoted. Match the quoted spelling literally;
+# provide names are controlled recipe inputs rather than arbitrary regexes.
+declared=$(sed -n "s/^[[:space:]]*\"${provide}\"[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$pkgfile" | head -1)
 
 if [ -z "$declared" ]; then
 	echo "verify-linux-provide: $pkgfile declares no \`$provide\` — it must publish the Linux version as a virtual provide" >&2

@@ -8,17 +8,17 @@
 name = "dev.peios.kernel"
 description = "Peios Kernel - bootable image (based on Linux 7.0.9)"
 
-# The Linux version this kernel is built from, as a versioned virtual name —
+# The Linux version this kernel is built from, as a qualified versioned virtual
+# name —
 # the same treatment kernel-headers gives its UAPI, and for the same reason:
 # the package version is pkm's SemVer against the PKM UAPI / KACS ABI, so it
 # cannot answer "which Linux is this?". Anything gated on a Linux feature or
-# syscall asks for linux-kernel instead.
+# syscall asks for dev.peios.linux-kernel instead.
 #
 # MUST equal [env] KERNEL_VERSION in the recipe, without the leading "v";
 # build.kernel asserts it.
 [provides]
-kernel = "{{version}}-1"
-linux-kernel = "7.0.9"
+"dev.peios.linux-kernel" = "7.0.9"
 
 # The kernel image ships beside its own modules, under the release-named
 # directory: with UKIs nothing boots from a firmware-visible path, so the

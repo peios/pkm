@@ -12,9 +12,9 @@ description = "Peios Kernel - userspace API headers"
 # program that includes <linux/*.h> relies on it.
 license = "GPL-2.0-only WITH Linux-syscall-note"
 
-# The Linux version these headers describe, published as a versioned virtual
-# name so consumers can express "I need Linux UAPI >= X" without depending on
-# this package's own version.
+# The Linux version these headers describe, published as a qualified versioned
+# virtual name so consumers can express "I need Linux UAPI >= X" without
+# depending on this package's own version.
 #
 # The two scales are deliberately independent: the package version is pkm's
 # SemVer, tracking the PKM UAPI / KACS ABI (see the shared base), while the
@@ -27,8 +27,7 @@ license = "GPL-2.0-only WITH Linux-syscall-note"
 # and fails the build rather than shipping a provide that lies about which
 # kernel's UAPI is in the payload.
 [provides]
-kernel-headers = "{{version}}-1"
-linux-kernel-headers = "7.0.9"
+"dev.peios.linux-kernel-headers" = "7.0.9"
 
 [replaces]
 kernel-headers = "<= 0.20.1-rc12-26"

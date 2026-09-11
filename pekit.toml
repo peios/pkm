@@ -170,10 +170,11 @@ test "$actual_rust" = "$RUST_VERSION" || {
 	exit 1
 }
 
-# Same assertion as build.headers, for `linux-kernel` — see that stage.
+# Same assertion as build.headers, for `dev.peios.linux-kernel` — see that
+# stage.
 sh ./kernel/verify-linux-provide.sh \
 	packages.pekit/kernel.package.pekit.toml \
-	linux-kernel "$KERNEL_VERSION" "$PEKIT_SOURCE_OUT"
+	dev.peios.linux-kernel "$KERNEL_VERSION" "$PEKIT_SOURCE_OUT"
 
 tar -C "$PEKIT_SOURCE_OUT" -cf - . | tar -C "$PEKIT_OUT" -xf -
 # Inject the production TCB signing key over the allow-empty placeholder that
@@ -256,14 +257,15 @@ xz-utils = "*"
 [build.headers]
 needs = ["source"]
 command = """
-# kernel-headers publishes the Linux version as `linux-kernel-headers`, a
-# versioned virtual provide, so consumers can require a UAPI level without
-# depending on pkm's SemVer (which tracks the PKM/KACS ABI, not Linux). That
-# provide is static TOML, so assert it against KERNEL_VERSION and against the
-# staged tree rather than trusting the two were bumped together.
+# kernel-headers publishes the Linux version as
+# `dev.peios.linux-kernel-headers`, a qualified versioned virtual provide, so
+# consumers can require a UAPI level without depending on pkm's SemVer (which
+# tracks the PKM/KACS ABI, not Linux). That provide is static TOML, so assert it
+# against KERNEL_VERSION and against the staged tree rather than trusting the
+# two were bumped together.
 sh ./kernel/verify-linux-provide.sh \
 	packages.pekit/kernel-headers.package.pekit.toml \
-	linux-kernel-headers "$KERNEL_VERSION" "$PEKIT_SOURCE_OUT"
+	dev.peios.linux-kernel-headers "$KERNEL_VERSION" "$PEKIT_SOURCE_OUT"
 
 make -C "$PEKIT_SOURCE_OUT" O="$PEKIT_OUT" LLVM="${PKM_LLVM:--18}" ${PKM_HOSTCC:+HOSTCC="$PKM_HOSTCC"} headers_install INSTALL_HDR_PATH="$PEKIT_OUT/usr"
 """
