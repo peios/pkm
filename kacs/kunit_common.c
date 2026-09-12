@@ -2209,8 +2209,9 @@ bool pkm_kunit_guid_is_zero(const u8 guid[KACS_UUID_BYTES])
 
 bool pkm_kunit_guid_is_uuid_v4(const u8 guid[KACS_UUID_BYTES])
 {
+	/* PCDS layout: the version nibble is the high nibble of byte 7. */
 	return !pkm_kunit_guid_is_zero(guid) &&
-	       (guid[6] & 0xf0) == 0x40 &&
+	       (guid[7] & 0xf0) == 0x40 &&
 	       (guid[8] & 0xc0) == 0x80;
 }
 

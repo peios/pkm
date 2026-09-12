@@ -25,8 +25,14 @@ void pkm_kacs_fill_uuid_v4(u8 out[KACS_UUID_BYTES])
 	if (!out)
 		return;
 
+	/*
+	 * PCDS GUID layout (MS-DTYP mixed-endian): Data3 is little-endian
+	 * in bytes 6-7, so the version-4 nibble is the high nibble of byte 7,
+	 * not byte 6 as in RFC 4122 network order (PEI-238).  Data4 is raw,
+	 * so the variant bits sit in byte 8 in both layouts.
+	 */
 	get_random_bytes(out, KACS_UUID_BYTES);
-	out[6] = (out[6] & 0x0f) | 0x40;
+	out[7] = (out[7] & 0x0f) | 0x40;
 	out[8] = (out[8] & 0x3f) | 0x80;
 }
 
