@@ -476,10 +476,19 @@ long pkm_kacs_unlink_delete_on_close_file(struct file *file)
 	 * the last reference goes), and a name re-created since names another
 	 * inode.  Either way the deletion this handle promised has happened
 	 * or been overtaken, so the final close is a no-op rather than a
-	 * second unlink of the same entry (PEI-694).
+	 * second unlink of the same entry -- which on tmpfs drops the pin
+	 * shmem_link took a second time and frees the dentry under us
+	 * (PEI-694).
+	 *
+	 * StrataFS is the exception to the unhashed test: it drops a merged
+	 * entry on copy-up by design (section 4.4), so its dentries are
+	 * routinely unhashed while very much alive, and its own unlink
+	 * looks the provider entry up afresh and tolerates ENOENT for a
+	 * deferred deletion.
 	 */
-	if (d_unhashed(dentry) || !d_is_positive(dentry) ||
-	    d_inode(dentry) != inode) {
+	if (!d_is_positive(dentry) || d_inode(dentry) != inode ||
+	    (d_unhashed(dentry) &&
+	     inode->i_sb->s_magic != STRATAFS_SUPER_MAGIC)) {
 		ret = 0;
 		goto out_unlock;
 	}
