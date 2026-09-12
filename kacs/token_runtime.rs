@@ -1267,7 +1267,8 @@ fn claim_entry_query_len(claim: &ClaimAttribute) -> Result<usize, i32> {
 }
 
 fn claim_array_query_len(claims: &[ClaimAttribute]) -> Result<usize, i32> {
-    let mut len = 0usize;
+    // `[count:u32le]` leads, as for a SID array (§3.D; PEI-699).
+    let mut len = 4usize;
 
     for claim in claims {
         let entry_len = claim_entry_query_len(claim)?;
@@ -1294,6 +1295,15 @@ fn write_claim_array_query(
     claims: &[ClaimAttribute],
     writer: &mut QueryWriter,
 ) -> Result<(), i32> {
+    // A claims array is `[count:u32le]` followed by `count` entries of
+    // `[entry_len:u32le][entry_bytes]`, the same shape family as a SID
+    // array; an empty array is a zero count, not an empty payload (§3.D,
+    // PEI-699).
+    let count = u32::try_from(claims.len()).map_err(|_| -EINVAL)?;
+    if !writer.write_u32(count) {
+        return Err(-ERANGE);
+    }
+
     for claim in claims {
         let entry_len = claim_entry_query_len(claim)?;
 

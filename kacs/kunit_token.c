@@ -7147,17 +7147,29 @@ static void pkm_kunit_token_query_optional_empty_shapes(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, args.buf_len, 4U);
 	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 0U);
 
+	/*
+	 * A claims array is count-prefixed like a SID array (section 3.D),
+	 * so an empty one is a zero count, not an empty payload (PEI-699).
+	 */
+	memset(buf, 0xff, sizeof(buf));
 	args.token_class = KACS_TOKEN_CLASS_USER_CLAIMS;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
 			(long)0);
-	KUNIT_EXPECT_EQ(test, args.buf_len, 0U);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 4U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 0U);
 
+	memset(buf, 0xff, sizeof(buf));
 	args.token_class = KACS_TOKEN_CLASS_DEVICE_CLAIMS;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
 	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
+			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
 			(long)0);
-	KUNIT_EXPECT_EQ(test, args.buf_len, 0U);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 4U);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 0U);
 
 	memset(buf, 0xff, sizeof(buf));
 	args.token_class = KACS_TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS;
@@ -7366,34 +7378,42 @@ static void pkm_kunit_token_query_public_tail_payload(struct kunit *test)
 						     token_spec_len);
 	KUNIT_ASSERT_GE(test, fd, 0L);
 
+	/*
+	 * The query payload is `[count:u32le]` followed by the entries the
+	 * spec carried, verbatim (section 3.D; PEI-699).
+	 */
 	args.token_class = KACS_TOKEN_CLASS_USER_CLAIMS;
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
 			(long)0);
-	KUNIT_ASSERT_EQ(test, args.buf_len, (u32)user_claims_len);
+	KUNIT_ASSERT_EQ(test, args.buf_len, 4U + (u32)user_claims_len);
 	args.buf_ptr = (u64)(unsigned long)buf;
 	args.buf_len = 384U;
 	memset(buf, 0, 384U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
 			(long)0);
-	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len, user_claims,
-				  user_claims_len);
+	KUNIT_ASSERT_EQ(test, args.buf_len, 4U + (u32)user_claims_len);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 3U);
+	pkm_kunit_expect_bytes_eq(test, buf + 4, args.buf_len - 4U,
+				  user_claims, user_claims_len);
 
 	args.token_class = KACS_TOKEN_CLASS_DEVICE_CLAIMS;
 	args.buf_len = 0U;
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
 			(long)0);
-	KUNIT_ASSERT_EQ(test, args.buf_len, (u32)device_claims_len);
+	KUNIT_ASSERT_EQ(test, args.buf_len, 4U + (u32)device_claims_len);
 	args.buf_ptr = (u64)(unsigned long)buf;
 	args.buf_len = 384U;
 	memset(buf, 0, 384U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
 			(long)0);
-	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len, device_claims,
-				  device_claims_len);
+	KUNIT_ASSERT_EQ(test, args.buf_len, 4U + (u32)device_claims_len);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 4U);
+	pkm_kunit_expect_bytes_eq(test, buf + 4, args.buf_len - 4U,
+				  device_claims, device_claims_len);
 
 	args.token_class = KACS_TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS;
 	args.buf_len = 384U;
@@ -7480,13 +7500,14 @@ static void pkm_kunit_token_query_public_tail_short_buffers(struct kunit *test)
 						     token_spec_len);
 	KUNIT_ASSERT_GE(test, fd, 0L);
 
+	/* The payload is the count word plus the entries (PEI-699). */
 	args.token_class = KACS_TOKEN_CLASS_USER_CLAIMS;
 	args.buf_len = 1U;
 	args.buf_ptr = (u64)(unsigned long)buf;
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
 			(long)-ERANGE);
-	KUNIT_EXPECT_EQ(test, args.buf_len, (u32)claim_array_len);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 4U + (u32)claim_array_len);
 	KUNIT_EXPECT_EQ(test, buf[0], 0xaa);
 
 	memset(buf, 0xaa, sizeof(buf));
@@ -7494,7 +7515,7 @@ static void pkm_kunit_token_query_public_tail_short_buffers(struct kunit *test)
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
 			(long)-ERANGE);
-	KUNIT_EXPECT_EQ(test, args.buf_len, (u32)claim_array_len);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 4U + (u32)claim_array_len);
 	KUNIT_EXPECT_EQ(test, buf[0], 0xaa);
 
 	args.token_class = KACS_TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS;
@@ -7678,17 +7699,20 @@ static void pkm_kunit_token_query_boolean_preserves_raw_u64(struct kunit *test)
 						     token_spec_len);
 	KUNIT_ASSERT_GE(test, fd, 0L);
 
+	/* The payload is the count word plus the entries (PEI-699). */
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
 			(long)0);
-	KUNIT_ASSERT_EQ(test, args.buf_len, (u32)claim_array_len);
+	KUNIT_ASSERT_EQ(test, args.buf_len, 4U + (u32)claim_array_len);
 	args.buf_len = sizeof(buf);
 	args.buf_ptr = (u64)(unsigned long)buf;
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, buf),
 			(long)0);
-	pkm_kunit_expect_bytes_eq(test, buf, args.buf_len, claim_array,
-				  claim_array_len);
+	KUNIT_ASSERT_EQ(test, args.buf_len, 4U + (u32)claim_array_len);
+	KUNIT_EXPECT_EQ(test, pkm_kunit_read_u32(buf, 0), 1U);
+	pkm_kunit_expect_bytes_eq(test, buf + 4, args.buf_len - 4U,
+				  claim_array, claim_array_len);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	flush_delayed_fput();
 }
