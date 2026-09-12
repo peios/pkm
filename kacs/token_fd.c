@@ -1254,7 +1254,13 @@ int pkm_kacs_token_fd_clone_token(int fd, const void **token_out,
 	if (access_mask_out)
 		*access_mask_out = 0;
 
-	f = fdget(fd);
+	/*
+	 * fdget_raw, not fdget: an O_PATH descriptor is a legitimate anchor
+	 * for the file-target resolvers that try this one first, and fdget
+	 * would answer EBADF for it before they ever saw it (PEI-695).  It is
+	 * simply not a token descriptor, which is the EINVAL below.
+	 */
+	f = fdget_raw(fd);
 	if (!fd_file(f))
 		return -EBADF;
 	if (fd_file(f)->f_op != &pkm_kacs_token_fops) {

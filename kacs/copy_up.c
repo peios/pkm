@@ -41,11 +41,13 @@
 #include <kunit/test.h>
 #include <linux/capability.h>
 #include <linux/completion.h>
+#include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/kthread.h>
 #include <linux/namei.h>
 #include <linux/posix_acl_xattr.h>
 #include "kunit_common.h"
+#include "token_fd.h"
 #endif
 
 enum pkm_kacs_copy_up_phase {
@@ -4858,8 +4860,43 @@ static void pkm_kunit_delete_on_close_final_close_after_unlink_is_a_no_op(
 	pkm_kunit_copy_up_tree_exit(&tree);
 }
 
+/*
+ * An O_PATH descriptor is not a token descriptor (EINVAL, so the
+ * set-security resolvers fall through to the file target), not a bad
+ * descriptor (EBADF, which ended the syscall before the file-target
+ * resolver -- the one that accepts O_PATH -- was reached) (PEI-695).
+ */
+static void pkm_kunit_token_fd_clone_treats_o_path_as_not_a_token(
+	struct kunit *test)
+{
+	struct pkm_kunit_copy_up_tree tree;
+	const void *token = NULL;
+	struct file *anchor;
+	int fd;
+
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	pkm_kunit_copy_up_be_system(&tree);
+	anchor = dentry_open(&tree.provider, O_PATH, current_cred());
+	KUNIT_ASSERT_FALSE(test, IS_ERR(anchor));
+	KUNIT_ASSERT_TRUE(test, (anchor->f_mode & FMODE_PATH) != 0);
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	KUNIT_ASSERT_GE(test, fd, 0);
+	fd_install(fd, anchor);
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_token_fd_clone_token(fd, &token, NULL),
+			-EINVAL);
+	KUNIT_EXPECT_NULL(test, token);
+	/* A descriptor that is not open at all is still EBADF. */
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_token_fd_clone_token(fd, &token, NULL),
+			-EBADF);
+	flush_delayed_fput();
+	pkm_kunit_copy_up_tree_exit(&tree);
+}
+
 static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_delete_on_close_final_close_after_unlink_is_a_no_op),
+	KUNIT_CASE(pkm_kunit_token_fd_clone_treats_o_path_as_not_a_token),
 	KUNIT_CASE(pkm_kunit_copy_up_scope_is_exact),
 	KUNIT_CASE(pkm_kunit_copy_up_exact_sd_is_installed_and_cached),
 	KUNIT_CASE(pkm_kunit_copy_up_stacked_tmpfile_binds_outer_inode),
