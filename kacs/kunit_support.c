@@ -3257,6 +3257,82 @@ out_free:
 	return ret;
 }
 
+long pkm_kacs_kunit_persistent_synthesis_pending_entry_persists_on_access(
+	const void *subject_token, u32 *queued_after_synthesis_out,
+	u32 *queued_after_reaccess_out, u32 *source_after_persist_out,
+	u32 *queued_after_persisted_reaccess_out)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_security *sec;
+	struct pkm_kacs_inode_sd_cache *cache;
+	const u8 *subset = NULL;
+	size_t subset_len = 0;
+	long ret;
+
+	if (!subject_token || !queued_after_synthesis_out ||
+	    !queued_after_reaccess_out || !source_after_persist_out ||
+	    !queued_after_persisted_reaccess_out)
+		return -EINVAL;
+
+	*queued_after_synthesis_out = 0;
+	*queued_after_reaccess_out = 0;
+	*source_after_persist_out = 0;
+	*queued_after_persisted_reaccess_out = 0;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, TMPFS_MAGIC, NULL,
+		KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT, NULL, 0,
+		S_IFREG, true);
+	if (ret)
+		goto out_free;
+	sec = pkm_kacs_inode(&state->inode);
+
+	/* Synthesis: a SYNTHETIC_PENDING entry, offered for write-back once. */
+	state->file.f_mode = FMODE_PATH;
+	ret = pkm_kacs_query_file_sd_core(subject_token, &state->file,
+					  KACS_SECINFO_DACL, &subset,
+					  &subset_len);
+	pkm_kacs_free((void *)subset);
+	if (ret)
+		goto out_cleanup;
+	*queued_after_synthesis_out = sec->kunit_persist_queue_calls;
+
+	/*
+	 * The entry is current, and (a kthread cannot carry task_work, and a
+	 * pending ancestor is never offered at all) still pending.  A later
+	 * access to the object in its own right offers it again.
+	 */
+	ret = pkm_kacs_inode_ensure_effective_cache(&state->file, sec);
+	if (ret)
+		goto out_cleanup;
+	*queued_after_reaccess_out = sec->kunit_persist_queue_calls;
+
+	/* The write-back runs: the entry becomes a stored-descriptor one. */
+	pkm_kacs_inode_run_sd_persist(&state->dentry, &state->inode, sec);
+	cache = pkm_kacs_inode_sd_cache_get_current(&state->inode, sec);
+	if (cache) {
+		*source_after_persist_out = cache->source;
+		pkm_kacs_inode_sd_cache_free(cache);
+	}
+
+	/* And once stored, a further access owes nothing. */
+	ret = pkm_kacs_inode_ensure_effective_cache(&state->file, sec);
+	if (ret)
+		goto out_cleanup;
+	*queued_after_persisted_reaccess_out = sec->kunit_persist_queue_calls;
+	ret = 0;
+
+out_cleanup:
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
 long pkm_kacs_kunit_persistent_synthesis_deferred_persist(
 	const void *subject_token, u32 *inline_written_out,
 	u32 *persisted_written_out)

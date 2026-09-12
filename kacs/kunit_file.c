@@ -1372,13 +1372,25 @@ static void pkm_kunit_file_metadata_xattr_protected_names(struct kunit *test)
 				1, PKM_KUNIT_FILE_WRITE_EA,
 				PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET,
 				XATTR_NAME_POSIX_ACL_ACCESS),
-			-EACCES);
+			-EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_file_metadata_snapshot(
 				1, PKM_KUNIT_FILE_WRITE_EA,
 				PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE,
 				XATTR_NAME_POSIX_ACL_DEFAULT),
-			-EACCES);
+			-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_SET,
+				XATTR_NAME_POSIX_ACL_DEFAULT),
+			-EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_check_file_metadata_snapshot(
+				1, PKM_KUNIT_FILE_WRITE_EA,
+				PKM_KACS_KUNIT_FILE_METADATA_XATTR_REMOVE,
+				XATTR_NAME_POSIX_ACL_ACCESS),
+			-EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_file_metadata_null(
 				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
@@ -9688,6 +9700,39 @@ static void pkm_kunit_file_missing_sd_persistent_deferred_persist_writes_xattr(
 }
 
 
+/*
+ * Section 3.9.5: an object synthesised only to supply inheritance inputs for
+ * a descendant is itself pending, and persists under the same rules when it
+ * is next accessed in its own right.  The write-back is offered again for a
+ * current entry that is still pending; once it has landed the entry is a
+ * stored-descriptor one and nothing more is owed (PEI-698).
+ */
+static void pkm_kunit_file_missing_sd_persistent_pending_entry_persists_on_access(
+	struct kunit *test)
+{
+	const void *subject_token;
+	u32 queued_after_synthesis = 0;
+	u32 queued_after_reaccess = 0;
+	u32 source_after_persist = 0;
+	u32 queued_after_persisted_reaccess = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_persistent_synthesis_pending_entry_persists_on_access(
+				subject_token, &queued_after_synthesis,
+				&queued_after_reaccess, &source_after_persist,
+				&queued_after_persisted_reaccess),
+			0L);
+	KUNIT_EXPECT_EQ(test, queued_after_synthesis, 1U);
+	KUNIT_EXPECT_EQ(test, queued_after_reaccess, 2U);
+	KUNIT_EXPECT_EQ(test, source_after_persist,
+			(u32)PKM_KACS_INODE_SD_SOURCE_XATTR);
+	KUNIT_EXPECT_EQ(test, queued_after_persisted_reaccess, 2U);
+}
+
+
 static void pkm_kunit_file_missing_sd_persistent_synthesizes_once(
 	struct kunit *test)
 {
@@ -10958,6 +11003,7 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_missing_sd_synthesize_persistent_root_defers_xattr),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_deferred_persist_writes_xattr),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_synthesizes_once),
+	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_pending_entry_persists_on_access),
 	KUNIT_CASE(pkm_kunit_file_open_identification_token_is_eacces),
 	KUNIT_CASE(pkm_kunit_file_sd_generation_currentness_by_source),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_synthesize_root_template_success),

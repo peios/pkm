@@ -1130,6 +1130,10 @@ long pkm_kacs_kunit_persistent_synthesis_second_query_uses_cache(
 long pkm_kacs_kunit_persistent_synthesis_deferred_persist(
 	const void *subject_token, u32 *inline_written_out,
 	u32 *persisted_written_out);
+long pkm_kacs_kunit_persistent_synthesis_pending_entry_persists_on_access(
+	const void *subject_token, u32 *queued_after_synthesis_out,
+	u32 *queued_after_reaccess_out, u32 *source_after_persist_out,
+	u32 *queued_after_persisted_reaccess_out);
 int pkm_kacs_kunit_cache_generation_currentness(
 	const u8 *valid_sd_ptr, size_t valid_sd_len, u32 *missing_current_out,
 	u32 *synthetic_current_out, u32 *xattr_current_out,

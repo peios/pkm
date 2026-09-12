@@ -657,7 +657,30 @@ long pkm_kacs_inode_ensure_effective_cache(
 
 	cache = pkm_kacs_inode_sd_cache_get_current(inode, sec);
 	if (cache) {
+		bool pending = cache->state == PKM_KACS_INODE_SD_VALID &&
+			       cache->source ==
+				       PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING;
+
 		pkm_kacs_inode_sd_cache_free(cache);
+		if (!pending)
+			return 0;
+		/*
+		 * A current entry that is still pending belongs to an object
+		 * synthesised as an ancestor -- only to supply inheritance
+		 * inputs for a descendant, which queues no write-back for it --
+		 * or to one whose earlier write-back never ran.  This access is
+		 * on the object itself (ancestor resolution for a child goes
+		 * through pkm_kacs_inode_resolve_effective_cache_locked, not
+		 * here), so it persists under the same rules now (PEI-698).
+		 */
+		mutex_lock(&sec->lock);
+		if (!sec->persist_work_queued) {
+			sec->persist_work_queued = true;
+			needs_persist = true;
+		}
+		mutex_unlock(&sec->lock);
+		if (needs_persist)
+			pkm_kacs_inode_queue_sd_persist(file, sec);
 		return 0;
 	}
 
@@ -703,11 +726,19 @@ long pkm_kacs_inode_ensure_effective_cache_by_inode(
 	 * Worth checking here rather than leaving it to
 	 * pkm_kacs_inode_ensure_effective_cache() below, because the alias
 	 * lookup is the one step that can fail for reasons unrelated to the SD.
+	 * A current entry that still owes its write-back (a pending ancestor
+	 * accessed in its own right, PEI-698) does need the dentry, so it
+	 * falls through to the anchor below and queues the persist there.
 	 */
 	cache = pkm_kacs_inode_sd_cache_get_current(inode, sec);
 	if (cache) {
+		bool pending = cache->state == PKM_KACS_INODE_SD_VALID &&
+			       cache->source ==
+				       PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING;
+
 		pkm_kacs_inode_sd_cache_free(cache);
-		return 0;
+		if (!pending)
+			return 0;
 	}
 
 	/*
@@ -811,6 +842,7 @@ void pkm_kacs_inode_run_sd_persist(struct dentry *dentry,
 					  struct pkm_kacs_inode_security *sec)
 {
 	struct pkm_kacs_inode_sd_cache *cur;
+	struct pkm_kacs_inode_sd_cache *promoted;
 	u8 *snapshot = NULL;
 	size_t snapshot_len = 0;
 
@@ -841,14 +873,45 @@ void pkm_kacs_inode_run_sd_persist(struct dentry *dentry,
 		return;
 
 	/*
-	 * Best-effort. On success the on-disk xattr now exists; the cached
-	 * entry stays SYNTHETIC_PENDING and serves reads unchanged until the
-	 * next cache miss re-reads the (now present) xattr as a real
-	 * SOURCE_XATTR entry. On failure the entry simply re-synthesizes later.
+	 * Best-effort. On failure the entry stays SYNTHETIC_PENDING and simply
+	 * re-synthesizes (and is offered for write-back again) later.
 	 */
-	(void)pkm_kacs_inode_write_sd_xattr_dentry_locked(
-		&nop_mnt_idmap, dentry, inode, snapshot, snapshot_len);
-	kfree(snapshot);
+	if (pkm_kacs_inode_write_sd_xattr_dentry_locked(&nop_mnt_idmap, dentry,
+						       inode, snapshot,
+						       snapshot_len)) {
+		kfree(snapshot);
+		return;
+	}
+
+	/*
+	 * The on-disk xattr now exists and holds exactly these bytes, so the
+	 * cached entry is promoted to a SOURCE_XATTR entry of the same bytes.
+	 * Leaving it pending would offer it for write-back on every later
+	 * access to the object (pkm_kacs_inode_ensure_effective_cache queues
+	 * the persist of a current pending entry, PEI-698).  The promotion
+	 * only replaces the entry it was snapshotted from: a concurrent
+	 * set-security or generation bump has already superseded it.
+	 */
+	promoted = pkm_kacs_inode_sd_cache_alloc_ex(
+		PKM_KACS_INODE_SD_VALID, snapshot, snapshot_len,
+		PKM_KACS_INODE_SD_SOURCE_XATTR, 0);
+	if (!promoted) {
+		kfree(snapshot);
+		return;
+	}
+	mutex_lock(&sec->lock);
+	cur = rcu_dereference_protected(sec->sd_cache,
+					lockdep_is_held(&sec->lock));
+	if (cur && cur->state == PKM_KACS_INODE_SD_VALID &&
+	    cur->source == PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING &&
+	    cur->len == snapshot_len && cur->bytes &&
+	    memcmp(cur->bytes, snapshot, snapshot_len) == 0) {
+		pkm_kacs_inode_replace_sd_cache_locked(sec, promoted);
+		promoted = NULL;
+	}
+	mutex_unlock(&sec->lock);
+	/* Not installed: the entry owns the snapshot, so freeing it frees both. */
+	pkm_kacs_inode_sd_cache_free(promoted);
 }
 
 static void pkm_kacs_inode_sd_persist_work_fn(struct callback_head *cb)
@@ -872,6 +935,9 @@ static void pkm_kacs_inode_queue_sd_persist(
 	struct pkm_kacs_sd_persist_work *work;
 	struct dentry *dentry;
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	sec->kunit_persist_queue_calls++;
+#endif
 	/*
 	 * task_work fires on return to userspace, so it is only meaningful for a
 	 * user task. Kernel threads and exiting tasks fall back to lazy
