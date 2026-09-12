@@ -4786,7 +4786,80 @@ static void pkm_kunit_overlay_release_frees_the_pending_descriptor(
 	KUNIT_EXPECT_EQ(test, sec->pending_create_sd_len, (size_t)0);
 }
 
+/*
+ * ---- Borrowers of the private tmpfs -------------------------------------
+ *
+ * The three cases below are not about copy-up.  They need what the tree
+ * above provides -- real dentries, inodes and a mount to pin -- for paths
+ * the fake mount fixtures cannot reach: the VFS unlink behind a
+ * delete-on-close final close, a mount's read-only flag, and a real file
+ * descriptor table entry.
+ */
+
+/*
+ * A delete-on-close final close whose pathname is already gone is a no-op
+ * (section 3.9.2): the entry an out-of-band unlink left unhashed is not
+ * unlinked a second time, and a name re-created since is left alone
+ * (PEI-694).
+ */
+static void pkm_kunit_delete_on_close_final_close_after_unlink_is_a_no_op(
+	struct kunit *test)
+{
+	struct pkm_kacs_task_security *task_sec = pkm_kacs_task(current);
+	struct pkm_kunit_copy_up_tree tree;
+	struct mnt_idmap *idmap;
+	struct inode *up_inode;
+	struct inode *doomed_inode;
+	struct path doomed = {};
+	struct dentry *recreated;
+	struct file *outer;
+
+	KUNIT_ASSERT_NULL(test, task_sec->delete_on_close_file);
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	idmap = mnt_idmap(tree.mnt);
+	up_inode = d_inode(tree.up.dentry);
+	pkm_kunit_copy_up_be_system(&tree);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_make(&tree, &tree.up, "doomed", S_IFREG | 0600,
+				       &doomed), 0);
+	doomed_inode = d_inode(doomed.dentry);
+	/* The handle whose final close carries the deletion. */
+	outer = dentry_open(&doomed, O_RDONLY, current_cred());
+	KUNIT_ASSERT_FALSE(test, IS_ERR(outer));
+
+	/* Someone else removes the pathname while the lineage lives. */
+	inode_lock_nested(up_inode, I_MUTEX_PARENT);
+	KUNIT_ASSERT_EQ(test, vfs_unlink(idmap, up_inode, doomed.dentry, NULL),
+			0);
+	inode_unlock(up_inode);
+	KUNIT_EXPECT_TRUE(test, d_unhashed(doomed.dentry));
+	KUNIT_EXPECT_EQ(test, doomed_inode->i_nlink, 0U);
+
+	/* The final close: a no-op, not a second unlink and not an error. */
+	KUNIT_EXPECT_EQ(test, pkm_kacs_unlink_delete_on_close_file(outer), 0L);
+	KUNIT_EXPECT_NULL(test, task_sec->delete_on_close_file);
+	KUNIT_EXPECT_EQ(test, doomed_inode->i_nlink, 0U);
+
+	/* A name re-created since names another inode, and is left alone. */
+	recreated = start_creating(idmap, tree.up.dentry, &QSTR("doomed"));
+	KUNIT_ASSERT_FALSE(test, IS_ERR(recreated));
+	KUNIT_ASSERT_EQ(test, vfs_create(idmap, recreated, S_IFREG | 0600, NULL),
+			0);
+	recreated = end_creating_keep(recreated);
+	KUNIT_EXPECT_PTR_NE(test, d_inode(recreated), doomed_inode);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_unlink_delete_on_close_file(outer), 0L);
+	KUNIT_EXPECT_TRUE(test, d_is_positive(recreated));
+	KUNIT_EXPECT_FALSE(test, d_unhashed(recreated));
+	KUNIT_EXPECT_EQ(test, d_inode(recreated)->i_nlink, 1U);
+	dput(recreated);
+
+	__fput_sync(outer);
+	path_put(&doomed);
+	pkm_kunit_copy_up_tree_exit(&tree);
+}
+
 static struct kunit_case pkm_kunit_copy_up_cases[] = {
+	KUNIT_CASE(pkm_kunit_delete_on_close_final_close_after_unlink_is_a_no_op),
 	KUNIT_CASE(pkm_kunit_copy_up_scope_is_exact),
 	KUNIT_CASE(pkm_kunit_copy_up_exact_sd_is_installed_and_cached),
 	KUNIT_CASE(pkm_kunit_copy_up_stacked_tmpfile_binds_outer_inode),

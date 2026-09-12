@@ -470,12 +470,26 @@ long pkm_kacs_unlink_delete_on_close_file(struct file *file)
 	}
 
 	inode_lock(parent_inode);
+	/*
+	 * The pathname may already be gone.  An unlink by someone else while
+	 * the lineage lived leaves this dentry unhashed (and negative once
+	 * the last reference goes), and a name re-created since names another
+	 * inode.  Either way the deletion this handle promised has happened
+	 * or been overtaken, so the final close is a no-op rather than a
+	 * second unlink of the same entry (PEI-694).
+	 */
+	if (d_unhashed(dentry) || !d_is_positive(dentry) ||
+	    d_inode(dentry) != inode) {
+		ret = 0;
+		goto out_unlock;
+	}
 	task_sec->delete_on_close_file = file;
 	ret = vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode, dentry, NULL);
 	task_sec->delete_on_close_inode = NULL;
 	task_sec->delete_on_close_dentry = NULL;
 	task_sec->delete_on_close_parent_inode = NULL;
 	task_sec->delete_on_close_file = NULL;
+out_unlock:
 	inode_unlock(parent_inode);
 	mnt_drop_write(parent_path.mnt);
 	path_put(&parent_path);
