@@ -8360,6 +8360,9 @@ fn process_sd_access_outcome_with_intent(
             }
             Err(KacsError::AllocationFailure) => Err(-ENOMEM),
             Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
+            // An outright denial (an Identification-level token, §3.5.1) is
+            // a refusal, not a malformed argument (PEI-691).
+            Err(KacsError::AccessDenied) => Err(-EACCES),
             Err(_) => Err(-EINVAL),
         }
     })
@@ -8487,6 +8490,9 @@ fn file_sd_access_outcome_for_descriptor(
             }
             Err(KacsError::AllocationFailure) => Err(-ENOMEM),
             Err(KacsError::ReservedAccessMaskBits(_)) => Err(-EINVAL),
+            // An outright denial (an Identification-level token, §3.5.1) is
+            // a refusal, not a malformed argument (PEI-691).
+            Err(KacsError::AccessDenied) => Err(-EACCES),
             Err(_) => Err(-EINVAL),
         }
     })

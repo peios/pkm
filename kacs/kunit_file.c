@@ -3750,6 +3750,47 @@ static void pkm_kunit_file_open_read_stamps_granted_subset(
 }
 
 
+/*
+ * Section 3.5.1: an Identification-level token is barred from AccessCheck
+ * against resources, and the file path reports the bar as the refusal it
+ * is -- EACCES, as the syscall path does -- not as an invalid argument
+ * (PEI-691).
+ */
+static void pkm_kunit_file_open_identification_token_is_eacces(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_open_args args = {
+		.file_mode = FMODE_READ,
+	};
+	const void *subject_token;
+	const u8 *file_sd;
+	size_t file_sd_len = 0;
+	u32 granted = 0xffffffffU;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_IMPERSONATION,
+		KACS_IMLEVEL_IDENTIFICATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	/* A descriptor that grants the subject the right it asks for. */
+	file_sd = pkm_kunit_create_precise_file_sd(subject_token,
+						   PKM_KUNIT_FILE_READ_DATA,
+						   &file_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, file_sd);
+	args.subject_token = subject_token;
+	args.target_file_sd_ptr = file_sd;
+	args.target_file_sd_len = file_sd_len;
+	args.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_open_file_for_subject(&args, &granted),
+			(long)-EACCES);
+
+	pkm_kacs_free((void *)file_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+
 static void pkm_kunit_file_open_read_accepts_null_group_sd(
 	struct kunit *test)
 {
@@ -10917,6 +10958,7 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_missing_sd_synthesize_persistent_root_defers_xattr),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_deferred_persist_writes_xattr),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_synthesizes_once),
+	KUNIT_CASE(pkm_kunit_file_open_identification_token_is_eacces),
 	KUNIT_CASE(pkm_kunit_file_sd_generation_currentness_by_source),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_synthesize_root_template_success),
 	KUNIT_CASE(pkm_kunit_get_file_sd_unmanaged_mount_fails_closed),
