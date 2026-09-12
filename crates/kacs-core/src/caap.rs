@@ -542,7 +542,12 @@ fn apply_rule<'a>(
             dacl_bytes: staged_dacl,
         }) {
             Some(state) => state,
-            None => deny_except_privileges(0, base.privilege_granted, object_tree)?,
+            // One rule for both evaluations: a rule that errors denies
+            // everything except the privilege-granted bits, scalar and
+            // per-node alike (PEI-697).
+            None => {
+                deny_except_privileges(base.privilege_granted, base.privilege_granted, object_tree)?
+            }
         }
     } else {
         match &effective_rule {

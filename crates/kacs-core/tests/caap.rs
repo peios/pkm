@@ -1203,7 +1203,10 @@ fn staged_object_tree_error_preserves_per_node_privilege_granted_bits() {
     )
     .expect("caap evaluation should succeed");
 
-    assert_eq!(result.staged_granted, 0);
+    // One rule for both evaluations (PEI-697): a staged rule that errors
+    // preserves the privilege-granted bits in the scalar total exactly as
+    // it does on every node, so the two views of the same call agree.
+    assert_eq!(result.staged_granted, ACCESS_SYSTEM_SECURITY);
     assert_eq!(
         result.staged_object_granted_list,
         Some(vec![ACCESS_SYSTEM_SECURITY, ACCESS_SYSTEM_SECURITY].into())
