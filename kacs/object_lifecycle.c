@@ -31,6 +31,7 @@ int pkm_kacs_inode_alloc_security(struct inode *inode)
 	sec->kunit_fake_xattr_enabled = false;
 	sec->kunit_fake_xattr_bytes = NULL;
 	sec->kunit_fake_xattr_len = 0;
+	sec->kunit_fake_xattr_get_errno = 0;
 	sec->kunit_persist_queue_calls = 0;
 	sec->kunit_unlink_calls = 0;
 #endif

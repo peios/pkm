@@ -213,6 +213,8 @@ static ssize_t pkm_kacs_kunit_fake_getxattr_locked(
 {
 	if (!sec->kunit_fake_xattr_enabled)
 		return -EOPNOTSUPP;
+	if (sec->kunit_fake_xattr_get_errno)
+		return sec->kunit_fake_xattr_get_errno;
 	if (!sec->kunit_fake_xattr_bytes || sec->kunit_fake_xattr_len == 0)
 		return -ENODATA;
 	if (!buffer)
@@ -319,7 +321,12 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 		if (current && current->security)
 			pkm_kacs_task(current)->internal_sd_read_depth--;
 	}
-	if (len == -ENODATA || len == -EOPNOTSUPP)
+	/*
+	 * ENOENT is ntfs3's answer for an inode with no $Secure entry (its
+	 * descriptor is an inline attribute the driver never reads): no
+	 * descriptor, so the mount's missing-SD policy applies (PEI-715).
+	 */
+	if (len == -ENODATA || len == -EOPNOTSUPP || len == -ENOENT)
 		return pkm_kacs_missing_file_sd_policy_result(inode->i_sb,
 							      cache_out);
 	if (len < 0)

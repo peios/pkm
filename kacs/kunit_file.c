@@ -9733,6 +9733,34 @@ static void pkm_kunit_file_missing_sd_persistent_pending_entry_persists_on_acces
 }
 
 
+/*
+ * ntfs3 answers ENOENT for `system.ntfs_security` on an inode with no
+ * $Secure entry.  That is "no descriptor", so the mount's missing-SD policy
+ * decides -- deny-missing refuses with EACCES -- rather than the driver's
+ * errno becoming the verdict and the volume vanishing (PEI-715).
+ */
+static void pkm_kunit_file_missing_sd_getxattr_enoent_is_missing(
+	struct kunit *test)
+{
+	const void *subject_token;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_query_file_sd_with_getxattr_errno(
+				subject_token, -ENOENT,
+				KACS_MOUNT_POLICY_DENY_MISSING),
+			(long)-EACCES);
+	/* Any other failure of the read is still the read's own error. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_query_file_sd_with_getxattr_errno(
+				subject_token, -EIO,
+				KACS_MOUNT_POLICY_DENY_MISSING),
+			(long)-EIO);
+}
+
+
 static void pkm_kunit_file_missing_sd_persistent_synthesizes_once(
 	struct kunit *test)
 {
@@ -11004,6 +11032,7 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_deferred_persist_writes_xattr),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_synthesizes_once),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_persistent_pending_entry_persists_on_access),
+	KUNIT_CASE(pkm_kunit_file_missing_sd_getxattr_enoent_is_missing),
 	KUNIT_CASE(pkm_kunit_file_open_identification_token_is_eacces),
 	KUNIT_CASE(pkm_kunit_file_sd_generation_currentness_by_source),
 	KUNIT_CASE(pkm_kunit_file_missing_sd_synthesize_root_template_success),

@@ -3333,6 +3333,42 @@ out_free:
 	return ret;
 }
 
+long pkm_kacs_kunit_query_file_sd_with_getxattr_errno(
+	const void *subject_token, int getxattr_errno, u32 mount_policy)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_security *sec;
+	const u8 *subset = NULL;
+	size_t subset_len = 0;
+	long ret;
+
+	if (!subject_token || getxattr_errno >= 0)
+		return -EINVAL;
+
+	state = kzalloc(sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, TMPFS_MAGIC, NULL, mount_policy, NULL, 0, S_IFREG,
+		true);
+	if (ret)
+		goto out_free;
+	sec = pkm_kacs_inode(&state->inode);
+	sec->kunit_fake_xattr_get_errno = getxattr_errno;
+
+	state->file.f_mode = FMODE_PATH;
+	ret = pkm_kacs_query_file_sd_core(subject_token, &state->file,
+					  KACS_SECINFO_DACL, &subset,
+					  &subset_len);
+	pkm_kacs_free((void *)subset);
+
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
 long pkm_kacs_kunit_persistent_synthesis_deferred_persist(
 	const void *subject_token, u32 *inline_written_out,
 	u32 *persisted_written_out)

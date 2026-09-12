@@ -195,6 +195,8 @@ struct pkm_kacs_inode_security {
 	bool kunit_fake_xattr_fail_set;
 	const u8 *kunit_fake_xattr_bytes;
 	size_t kunit_fake_xattr_len;
+	/* A negative errno the fake getxattr answers instead of ENODATA. */
+	int kunit_fake_xattr_get_errno;
 	/* How often a deferred SD persist was offered for this inode. */
 	u32 kunit_persist_queue_calls;
 	u32 kunit_unlink_calls;
