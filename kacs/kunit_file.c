@@ -1362,6 +1362,11 @@ static void pkm_kunit_file_metadata_xattr_protected_names(struct kunit *test)
 				PKM_KACS_KUNIT_FILE_METADATA_XATTR_GET,
 				XATTR_NAME_POSIX_ACL_ACCESS),
 			0);
+	/*
+	 * A POSIX ACL write through a descriptor is EOPNOTSUPP, as by
+	 * pathname, so probe-then-tolerate callers behave sensibly
+	 * (section 3.9.4, PEI-696).
+	 */
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_check_file_metadata_snapshot(
 				1, PKM_KUNIT_FILE_WRITE_EA,

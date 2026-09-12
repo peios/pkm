@@ -1006,8 +1006,9 @@ static int pkm_kacs_check_file_xattr_snapshot(struct file *file,
 	inode = file_inode(file);
 	if (inode && pkm_kacs_is_canonical_sd_xattr(inode, name))
 		return -EACCES;
+	/* As the pathname hooks answer: EOPNOTSUPP, not EACCES (PEI-696). */
 	if (write_operation && is_posix_acl_xattr(name))
-		return -EACCES;
+		return -EOPNOTSUPP;
 	if (reject_capability && pkm_kacs_is_file_capability_xattr(name))
 		return -EPERM;
 	copy_up = pkm_kacs_copy_up_file_metadata(file, write_operation);
