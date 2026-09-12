@@ -864,6 +864,22 @@ long pkm_kacs_query_path_file_sd_core(const void *subject_token,
 					   out_sd_ptr, out_sd_len);
 }
 
+/*
+ * Whether the descriptor write below must hold a write reference on the
+ * file's mount.  Only a KUnit fixture whose xattr store is faked (and whose
+ * vfsmount is a stack stand-in) is exempt; every real path and descriptor
+ * form carries a real mount.
+ */
+static bool pkm_kacs_set_file_sd_needs_mount_write(
+	const struct file *file, const struct pkm_kacs_inode_security *sec)
+{
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (sec->kunit_fake_xattr_enabled)
+		return false;
+#endif
+	return file->f_path.mnt != NULL;
+}
+
 long pkm_kacs_set_file_sd_core(const void *subject_token,
 			       struct file *file, u32 security_info,
 			       const u8 *input_sd_ptr,
@@ -879,6 +895,7 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	size_t new_sd_len = 0;
 	bool used_restore_bypass = false;
 	bool use_live_access_check;
+	bool want_write;
 	u32 desired_access = 0;
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
@@ -959,8 +976,24 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	 */
 	mutex_unlock(&sec->lock);
 
+	/*
+	 * A read-only mount withholds the write along this path whatever the
+	 * descriptor grants, as it does for every other modifying operation
+	 * (PEI-795).  Taken after the access check above so that an
+	 * unauthorised caller still sees the denial rather than EROFS.
+	 */
+	want_write = pkm_kacs_set_file_sd_needs_mount_write(file, sec);
+	if (want_write) {
+		ret = mnt_want_write(file->f_path.mnt);
+		if (ret) {
+			pkm_kacs_inode_sd_cache_free(new_cache);
+			return ret;
+		}
+	}
 	ret = pkm_kacs_inode_write_sd_xattr_locked(file, new_sd_bytes,
 						   new_sd_len);
+	if (want_write)
+		mnt_drop_write(file->f_path.mnt);
 	if (ret) {
 		/* new_cache owns new_sd_bytes; freeing the cache frees both. */
 		pkm_kacs_inode_sd_cache_free(new_cache);

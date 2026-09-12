@@ -47,6 +47,7 @@
 #include <linux/namei.h>
 #include <linux/posix_acl_xattr.h>
 #include "kunit_common.h"
+#include "sd_access.h"
 #include "token_fd.h"
 #endif
 
@@ -4861,6 +4862,59 @@ static void pkm_kunit_delete_on_close_final_close_after_unlink_is_a_no_op(
 }
 
 /*
+ * kacs_set_sd honours the mount's read-only flag: with the descriptor
+ * granting every right, a write through a read-only mount is EROFS and
+ * the stored bytes do not move; the same write succeeds once the mount is
+ * writable again (PEI-795).
+ */
+static void pkm_kunit_set_sd_through_a_read_only_mount_is_erofs(
+	struct kunit *test)
+{
+	struct pkm_kunit_copy_up_tree tree;
+	const void *token;
+	struct path target = {};
+	const u8 *before;
+	const u8 *input;
+	size_t before_len = 0;
+	size_t input_len = 0;
+
+	KUNIT_ASSERT_EQ(test, pkm_kunit_copy_up_tree_init(&tree), 0);
+	pkm_kunit_copy_up_be_system(&tree);
+	token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_make(&tree, &tree.up, "target", S_IFREG | 0600,
+				       &target), 0);
+	before = pkm_kunit_create_precise_file_sd(token, PKM_KUNIT_COPY_UP_FILE_ALL,
+						  &before_len);
+	KUNIT_ASSERT_NOT_NULL(test, before);
+	KUNIT_ASSERT_EQ(test,
+		pkm_kunit_copy_up_install_sd(&target, before, before_len), 0);
+	input = pkm_kunit_create_precise_file_sd(token, KACS_FILE_READ_DATA,
+						 &input_len);
+	KUNIT_ASSERT_NOT_NULL(test, input);
+
+	/* A read-only bind of the tree: the mount flag, not the superblock. */
+	tree.mnt->mnt_flags |= MNT_READONLY;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_set_path_file_sd_core(token, &target,
+					       KACS_SECINFO_DACL, input,
+					       input_len), (long)-EROFS);
+	pkm_kunit_copy_up_expect_sd_xattr_eq(test, &target, before, before_len);
+
+	tree.mnt->mnt_flags &= ~MNT_READONLY;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_set_path_file_sd_core(token, &target,
+					       KACS_SECINFO_DACL, input,
+					       input_len), 0L);
+
+	pkm_kacs_free((void *)input);
+	pkm_kacs_free((void *)before);
+	path_put(&target);
+	pkm_kunit_copy_up_tree_exit(&tree);
+}
+
+/*
  * An O_PATH descriptor is not a token descriptor (EINVAL, so the
  * set-security resolvers fall through to the file target), not a bad
  * descriptor (EBADF, which ended the syscall before the file-target
@@ -4896,6 +4950,7 @@ static void pkm_kunit_token_fd_clone_treats_o_path_as_not_a_token(
 
 static struct kunit_case pkm_kunit_copy_up_cases[] = {
 	KUNIT_CASE(pkm_kunit_delete_on_close_final_close_after_unlink_is_a_no_op),
+	KUNIT_CASE(pkm_kunit_set_sd_through_a_read_only_mount_is_erofs),
 	KUNIT_CASE(pkm_kunit_token_fd_clone_treats_o_path_as_not_a_token),
 	KUNIT_CASE(pkm_kunit_copy_up_scope_is_exact),
 	KUNIT_CASE(pkm_kunit_copy_up_exact_sd_is_installed_and_cached),
