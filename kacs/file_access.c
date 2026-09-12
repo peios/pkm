@@ -439,7 +439,8 @@ int pkm_kacs_stratafs_authorize_path(const struct path *path,
 	len = __vfs_getxattr(path->dentry, inode, name, NULL, 0);
 	if (current && current->security)
 		pkm_kacs_task(current)->internal_sd_read_depth--;
-	if (len == -ENODATA || len == -EOPNOTSUPP)
+	/* ENOENT: an ntfs3 inode with no $Secure entry, i.e. no descriptor. */
+	if (len == -ENODATA || len == -EOPNOTSUPP || len == -ENOENT)
 		return -EACCES;
 	if (len <= 0 || len > PKM_KACS_MAX_SD_BYTES)
 		return len < 0 ? (int)len : -EACCES;
