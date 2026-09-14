@@ -6004,8 +6004,8 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 
@@ -6066,8 +6066,8 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
 
@@ -6123,8 +6123,8 @@ static void pkm_lcs_kunit_key_fd_set_value_nontransactional_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 
@@ -6421,8 +6421,8 @@ static void pkm_lcs_kunit_key_fd_set_value_cas_failure_no_effects(
 	KUNIT_EXPECT_EQ(test, ret, (long)-EAGAIN);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 2U);
-	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
 	KUNIT_EXPECT_EQ(test, script.observed_last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 
@@ -8163,8 +8163,8 @@ static void pkm_lcs_kunit_key_fd_set_value_policy_layer_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 3U);
 	KUNIT_ASSERT_EQ(test,
@@ -10080,8 +10080,8 @@ static void pkm_lcs_kunit_key_fd_delete_key_nontransactional_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 	KUNIT_EXPECT_GT(test, script.observed_parent_last_write_time, 0ULL);
 
@@ -10201,8 +10201,8 @@ static void pkm_lcs_kunit_delete_layer_metadata_key_orchestrates(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 5U);
-	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	KUNIT_EXPECT_EQ(test, script.reads, 6U);
+	KUNIT_EXPECT_EQ(test, script.writes, 6U);
 	KUNIT_EXPECT_GT(test, script.observed_parent_last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 
@@ -10296,8 +10296,8 @@ static void pkm_lcs_kunit_key_fd_delete_key_orphans_missing_guid(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_key_fd_snapshot((int)mutation_fd, &snapshot),
 			0L);
@@ -10398,8 +10398,8 @@ static void pkm_lcs_kunit_key_fd_delete_key_dispatches_visibility_watches(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 
 	KUNIT_ASSERT_EQ(test,
@@ -10518,8 +10518,8 @@ static void pkm_lcs_kunit_key_fd_delete_key_replacement_dispatches_create(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_EQ(test, ctx.reads, 0U);
 
 	KUNIT_ASSERT_EQ(test,

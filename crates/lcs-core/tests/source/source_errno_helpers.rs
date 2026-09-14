@@ -7,6 +7,7 @@ fn source_registration_errors_project_directly_to_linux_errno() {
     let cases = [
         (LcsError::MissingTcbPrivilege, LinuxErrno::Eperm),
         (LcsError::HiveIdentityCollision, LinuxErrno::Eexist),
+        (LcsError::HiveRootGuidCollision, LinuxErrno::Eexist),
         (
             LcsError::TooManyRegisteredSources { count: 33, max: 32 },
             LinuxErrno::Enospc,

@@ -254,6 +254,8 @@ struct pkm_lcs_value_watch_event_bytes {
 struct pkm_lcs_delete_key_post_lookup {
 	bool target_still_named;
 	bool replacement_visible;
+	bool effective_found;
+	u8 effective_guid[PKM_LCS_GUID_BYTES];
 };
 
 struct pkm_lcs_hide_key_post_lookup {
@@ -265,6 +267,10 @@ static void pkm_lcs_value_watch_event_bytes_destroy(
 	struct pkm_lcs_value_watch_event_bytes *events);
 static void pkm_lcs_key_fd_runtime_limits_snapshot_or_default(
 	struct pkm_lcs_runtime_limits *limits);
+static long pkm_lcs_key_fd_layer_metadata_path_with_limits(
+	const struct pkm_lcs_key_fd *key_fd, const char **layer_name_out,
+	u32 *layer_name_len_out, const struct pkm_lcs_runtime_limits *limits,
+	bool *matches_out);
 
 static const struct file_operations pkm_lcs_key_fd_fops;
 static DEFINE_MUTEX(pkm_lcs_watch_registry_lock);
@@ -1738,15 +1744,6 @@ static void pkm_lcs_key_fd_publish_key_deleted_context(
 	(void)pkm_lcs_key_fd_dispatch_watch_event_context(&context);
 }
 
-static void pkm_lcs_key_fd_publish_set_value_effects(
-	struct pkm_lcs_key_fd *key_fd, const char *value_name,
-	u32 value_name_len, const struct pkm_lcs_runtime_limits *limits)
-{
-	pkm_lcs_key_fd_publish_value_effects(
-		key_fd, REG_WATCH_VALUE_SET, value_name, value_name_len,
-		limits);
-}
-
 static void pkm_lcs_effective_value_snapshot_destroy(
 	struct pkm_lcs_effective_value_snapshot *snapshot)
 {
@@ -2164,6 +2161,26 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 		&limits, &read_key);
 	if (ret)
 		goto out_frames;
+	/*
+	 * Every key has exactly one canonical parent (§5.2.3, §5.2.5). The
+	 * record's parent must be the parent this fd reached the key through;
+	 * a source naming one GUID under two parents is malformed key
+	 * metadata, not a second name for the key (PEI-766). A nil parent
+	 * makes no claim and is left to the record validation.
+	 */
+	if (key_fd->path_component_count >= 2 &&
+	    !pkm_lcs_guid_is_nil(read_key.parent_guid) &&
+	    !pkm_lcs_guid_equal(
+		    read_key.parent_guid,
+		    key_fd->ancestor_guids[key_fd->path_component_count - 2U])) {
+		(void)pkm_lcs_emit_source_validation_failure_audit(
+			key_fd->source_id, NULL, 0, false,
+			read_response.request_id, true, RSI_READ_KEY, true,
+			key_fd->key_guid, true,
+			PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_METADATA);
+		ret = -EIO;
+		goto out_frames;
+	}
 
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, 0, key_fd->key_guid, &limits,
@@ -3209,11 +3226,35 @@ static long pkm_lcs_key_fd_delete_key_post_lookup(
 	if (effective.found &&
 	    !pkm_lcs_guid_equal(effective.key_guid, key_fd->key_guid))
 		out->replacement_visible = true;
+	out->effective_found = effective.found != 0;
+	if (effective.found)
+		memcpy(out->effective_guid, effective.key_guid,
+		       sizeof(out->effective_guid));
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_source_layer_snapshot_release(&layer_snapshot);
 	return ret;
+}
+
+/*
+ * SUBKEY_CREATED and SUBKEY_DELETED cover both halves of the naming model
+ * (§5.6.1, §5.6.3): which entry *wins* the name before and after the
+ * deletion decides the events, not whether the name still resolves.
+ * Removing a hiding entry that concealed a lower-precedence key is a
+ * SUBKEY_CREATED; removing a masked lower entry is nothing (PEI-757).
+ */
+static void pkm_lcs_key_fd_delete_key_visibility_events(
+	const struct pkm_lcs_delete_key_post_lookup *before,
+	const struct pkm_lcs_delete_key_post_lookup *after,
+	bool *publish_deleted_out, bool *publish_created_out)
+{
+	bool same_winner = before->effective_found && after->effective_found &&
+			   pkm_lcs_guid_equal(before->effective_guid,
+					      after->effective_guid);
+
+	*publish_deleted_out = before->effective_found && !same_winner;
+	*publish_created_out = after->effective_found && !same_winner;
 }
 
 static long pkm_lcs_key_fd_hide_key_post_lookup(
@@ -3362,6 +3403,13 @@ static bool pkm_lcs_set_value_data_is_positive_dword(
  * The cost is that a symlink cannot forward-reference a hive registered after
  * it. That is the same ordering constraint the rest of the registry already
  * has, and the alternative is leaving the capture open.
+ *
+ * The value data is length-delimited (§5.2.6: a NUL counted in the length is
+ * invalid), so it is routed the way resolution routes a stored target --
+ * through the symlink-target router, which validates length-delimited bytes.
+ * It used to go through the syscall-path router, whose validator demands a
+ * trailing NUL that a value can never carry, so no REG_LINK value could be
+ * written at all (PEI-764).
  */
 static long pkm_lcs_key_fd_set_value_symlink_target_gate(
 	const void *token, const struct pkm_lcs_set_value_input *input,
@@ -3383,10 +3431,9 @@ static long pkm_lcs_key_fd_set_value_symlink_target_gate(
 	/*
 	 * The caller's scope GUIDs, not none.
 	 *
-	 * pkm_lcs_route_absolute_path_for_token uses the token only to rewrite
-	 * a CurrentUser component; it passes scope GUIDs straight through. So
-	 * routing with none would refuse every target in a private hive, which
-	 * is a legitimate thing for a symlink to name.
+	 * The router passes scope GUIDs straight through, so routing with none
+	 * would refuse every target in a private hive, which is a legitimate
+	 * thing for a symlink to name.
 	 */
 	scope_count = token ? kacs_rust_token_lcs_scope_guid_count(token) : 0;
 	if (scope_count) {
@@ -3403,9 +3450,10 @@ static long pkm_lcs_key_fd_set_value_symlink_target_gate(
 		}
 	}
 
-	ret = pkm_lcs_route_absolute_path_for_token(
-		token, (const char *)input->data, args->data_len, false,
-		(const u8 (*)[16])scope_guids, scope_count, &route);
+	ret = pkm_lcs_route_symlink_target_with_limits(
+		(const char *)input->data, args->data_len,
+		(const u8 (*)[16])scope_guids, scope_count, &input->limits,
+		&route);
 	kfree(scope_guids);
 	if (ret)
 		return -EINVAL;
@@ -3418,6 +3466,8 @@ static long pkm_lcs_key_fd_set_value_precedence_tcb_gate(
 	const struct reg_set_value_args *args)
 {
 	static const char precedence_name[] = "Precedence";
+	const char *layer_name = NULL;
+	u32 layer_name_len = 0;
 	bool is_layer_metadata_key = false;
 	bool is_precedence = false;
 	long ret;
@@ -3427,10 +3477,27 @@ static long pkm_lcs_key_fd_set_value_precedence_tcb_gate(
 	if (!pkm_lcs_set_value_data_is_positive_dword(input, args))
 		return 0;
 
-	ret = pkm_lcs_layer_table_metadata_key_guid_present(
-		key_fd->key_guid, &is_layer_metadata_key);
+	/*
+	 * The gate keys on the path -- a direct child of
+	 * Machine\System\Registry\Layers -- not on whether the layer table
+	 * already knows the key. A layer created the way §5.3.3 prescribes
+	 * writes Precedence inside the transaction that creates the metadata
+	 * key, before publication, and keying on publication let a principal
+	 * with no privilege establish a layer above precedence 0 (PEI-760).
+	 * Publication is still consulted as a second route in, for a metadata
+	 * key reached by some spelling the path check does not cover.
+	 */
+	ret = pkm_lcs_key_fd_layer_metadata_path_with_limits(
+		key_fd, &layer_name, &layer_name_len, &input->limits,
+		&is_layer_metadata_key);
 	if (ret)
 		return ret;
+	if (!is_layer_metadata_key) {
+		ret = pkm_lcs_layer_table_metadata_key_guid_present(
+			key_fd->key_guid, &is_layer_metadata_key);
+		if (ret)
+			return ret;
+	}
 	if (!is_layer_metadata_key)
 		return 0;
 
@@ -4648,11 +4715,14 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	struct pkm_lcs_transaction_set_value_log_input log_input = { };
 	struct pkm_lcs_source_key_mutation_late_effect_input late_effect = { };
 	const struct pkm_lcs_source_key_mutation_late_effect_input *late_effect_ptr = NULL;
+	struct pkm_lcs_effective_value_snapshot before = { };
+	struct pkm_lcs_effective_value_snapshot after = { };
 	u64 generation = 0;
 	u64 last_write_time;
 	u64 sequence = 0;
 	u64 cap_txn_id = 0;
 	u64 txn_id = 0;
+	u32 event_type = 0;
 	bool layer_effective_changed = false;
 	long ret;
 
@@ -4740,6 +4810,20 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	}
 
 	if (args->txn_fd < 0) {
+		/*
+		 * The watch event is computed by diffing effective state before
+		 * and after the write (§5.6.1), the way DELETE_VALUE does: a
+		 * write a higher-precedence layer masks dispatches nothing, and
+		 * a tombstone that masks every entry is VALUE_DELETED. The late
+		 * (timed-out) response path still dispatches VALUE_SET, since
+		 * the before-state is gone by then (PEI-756).
+		 */
+		ret = pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
+			key_fd, 0, input.value_name, args->name_len,
+			&input.limits, &before);
+		if (ret)
+			goto out_input;
+
 		late_effect.key_guid = key_fd->key_guid;
 		late_effect.ancestor_guids =
 			(const u8 (*)[PKM_LCS_GUID_BYTES])
@@ -4764,7 +4848,15 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		input.limits.request_timeout_ms, late_effect_ptr, &response,
 		NULL);
 	if (ret)
-		goto out_cancel_mutation;
+		goto out_before;
+
+	if (args->txn_fd < 0) {
+		ret = pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
+			key_fd, 0, input.value_name, args->name_len,
+			&input.limits, &after);
+		if (ret)
+			goto out_before;
+	}
 
 	last_write_time = (u64)ktime_get_real_ns();
 	ret = pkm_lcs_source_write_key_round_trip_timeout_with_limits(
@@ -4778,27 +4870,25 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 				       key_fd->granted_access, ret);
 		pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 		ret = -EIO;
-		goto out_cancel_mutation;
+		goto out_after;
 	}
 
 	if (args->txn_fd >= 0) {
 		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
-		if (ret)
-			goto out_cancel_mutation;
-		goto out_input;
+		goto out_after;
 	}
 
 	ret = pkm_lcs_key_fd_refresh_layer_metadata_with_owner_context_limits(
 		key_fd, NULL, 0, false, &input.limits,
 		&layer_effective_changed);
 	if (ret)
-		goto out_input;
+		goto out_after;
 
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
 	if (ret) {
 		ret = pkm_lcs_key_fd_generation_failure(key_fd->source_id, ret);
-		goto out_input;
+		goto out_after;
 	}
 
 	if (layer_effective_changed) {
@@ -4810,15 +4900,24 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		if (ret) {
 			pkm_lcs_source_mark_down_by_id(key_fd->source_id);
 			ret = -EIO;
-			goto out_input;
+			goto out_after;
 		}
 	}
 
-	pkm_lcs_key_fd_publish_set_value_effects(key_fd, input.value_name,
-						 args->name_len, &input.limits);
+	ret = pkm_lcs_key_fd_delete_value_watch_event_type(&before, &after,
+							   &event_type);
+	if (ret)
+		goto out_after;
+	if (event_type)
+		pkm_lcs_key_fd_publish_value_effects(
+			key_fd, event_type, input.value_name, args->name_len,
+			&input.limits);
 	ret = 0;
 
-out_cancel_mutation:
+out_after:
+	pkm_lcs_effective_value_snapshot_destroy(&after);
+out_before:
+	pkm_lcs_effective_value_snapshot_destroy(&before);
 	if (ret && mutation.active)
 		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
 out_input:
@@ -5155,6 +5254,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	struct pkm_lcs_transaction_mutation_handle mutation = { };
 	struct pkm_lcs_transaction_binding_plan binding = { };
 	struct pkm_lcs_transaction_delete_key_log_input log_input = { };
+	struct pkm_lcs_delete_key_post_lookup pre_lookup = { };
 	struct pkm_lcs_delete_key_post_lookup post_lookup = { };
 	const u8 *parent_guid = NULL;
 	const char *child_name = NULL;
@@ -5167,6 +5267,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	bool layer_delete_orchestrated = false;
 	bool publish_deleted = false;
 	bool publish_created = false;
+	bool key_object_gone = false;
 	long ret;
 
 	if (!key_fd || !args)
@@ -5236,6 +5337,14 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	if (ret)
 		goto out_cancel_mutation;
 
+	if (args->txn_fd < 0) {
+		ret = pkm_lcs_key_fd_delete_key_post_lookup(
+			key_fd, parent_guid, child_name, child_name_len,
+			&input.limits, &pre_lookup);
+		if (ret)
+			goto out_cancel_mutation;
+	}
+
 	ret = pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, parent_guid, child_name,
 		child_name_len, input.target.name, input.target.name_len,
@@ -5252,9 +5361,11 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 			ret = -EIO;
 			goto out_cancel_mutation;
 		}
+		pkm_lcs_key_fd_delete_key_visibility_events(
+			&pre_lookup, &post_lookup, &publish_deleted,
+			&publish_created);
 		if (!post_lookup.target_still_named) {
-			publish_deleted = true;
-			publish_created = post_lookup.replacement_visible;
+			key_object_gone = true;
 			ret = pkm_lcs_key_fd_mark_orphaned_internal(
 				key_fd->source_id, key_fd->key_guid, NULL,
 				NULL, false, &input.limits);
@@ -5287,19 +5398,19 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		goto out_input;
 	}
 
-	if (publish_deleted) {
-		internal_watch_effects =
+	if (publish_deleted)
+		internal_watch_effects |=
 			pkm_lcs_key_fd_publish_parent_subkey_deleted(
 				key_fd, parent_guid, child_name, child_name_len,
 				&input.limits);
-		if (publish_created)
-			internal_watch_effects |=
-				pkm_lcs_key_fd_publish_parent_subkey_created(
-					key_fd, parent_guid, child_name,
-					child_name_len, &input.limits);
+	if (publish_created)
+		internal_watch_effects |=
+			pkm_lcs_key_fd_publish_parent_subkey_created(
+				key_fd, parent_guid, child_name, child_name_len,
+				&input.limits);
+	if (key_object_gone)
 		pkm_lcs_key_fd_publish_key_deleted_context(key_fd,
 							   &input.limits);
-	}
 
 	if (!(internal_watch_effects &
 	      PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
@@ -6519,11 +6630,20 @@ static long pkm_lcs_restore_validate_path_entry_topology(
 							    path->sequence);
 	}
 
+	/*
+	 * GUID-bearing path entries in the root key's section describe how the
+	 * root was named at backup time. A reader skips them whatever they
+	 * name -- the target key keeps its own name and parent (§5.9.2, PSPK
+	 * Registry Backup Format §5.2). They were rejected unless the child was
+	 * the root itself, which made another writer's stream unrestorable
+	 * (PEI-770). The record is not retained for replay either.
+	 */
+	if (summary->current_key_is_root)
+		return 0;
+
 	pkm_lcs_restore_remap_guid(summary, path->child_guid, child_guid);
 	if (!pkm_lcs_restore_guid_eq(child_guid, summary->current_key_guid))
 		return -EINVAL;
-	if (summary->current_key_is_root)
-		return 0;
 	if (!pkm_lcs_restore_parent_guid_valid(summary, parent_guid))
 		return -EINVAL;
 	summary->current_key_anchor_seen = true;
@@ -6642,12 +6762,13 @@ static long pkm_lcs_restore_validate_data_record(
 								  &path);
 		if (ret)
 			break;
+		/* A skipped root-section entry is not held to the manifest. */
+		if (summary->current_key_is_root && !path.hidden)
+			break;
 		ret = lcs_rust_validate_backup_path_entry_record_layer_manifest(
 			limits, manifests, summary->layer_manifests.count, frame,
 			record_len);
-		retain_replay_frame = !ret &&
-				      (!summary->current_key_is_root ||
-				       path.hidden);
+		retain_replay_frame = !ret;
 		break;
 	}
 	case REG_BACKUP_VALUE:

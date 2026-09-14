@@ -3,6 +3,7 @@
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 #include <linux/capability.h>
+#include <linux/cred.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/once.h>
@@ -203,11 +204,28 @@ int stratafs_validate_configuration(struct stratafs_sb_info *sbi)
 	return 0;
 }
 
+/*
+ * Admission runs in two passes so that entitlement is decided for the whole
+ * stack before any validity condition (TRM §4.2.3). A caller with no right to
+ * traverse a directory must not be able to name it as a stratum and learn from
+ * the errno whether some *other* stratum exists or is a directory: the first
+ * pass resolves and stats every stratum under the caller's credentials and
+ * lets an EACCES from any of them win over whatever an earlier one reported;
+ * only then does the second pass apply the type, duplicate and depth
+ * conditions (PEI-263).
+ *
+ * The stat runs inside the same credential override as the walk: for
+ * fsopen() + fsconfig(FSCONFIG_CMD_CREATE) issued by different tasks the two
+ * halves of entitlement are otherwise decided against different principals.
+ */
 static int stratafs_check_initial_strata(struct super_block *sb,
 					 unsigned int *stack_depth)
 {
 	struct stratafs_sb_info *sbi = STRATAFS_SB(sb);
 	struct path resolved[STRATAFS_MAX_STRATA] = {};
+	umode_t modes[STRATAFS_MAX_STRATA] = {};
+	int errors[STRATAFS_MAX_STRATA] = {};
+	const struct cred *old_cred;
 	unsigned int i, j;
 	int ret = 0;
 
@@ -220,14 +238,33 @@ static int stratafs_check_initial_strata(struct super_block *sb,
 			ret = 0;
 			continue;
 		}
-		if (ret)
+		if (!ret) {
+			old_cred = override_creds(sbi->resolution_cred);
+			ret = vfs_getattr(&resolved[i], &stat,
+					  STATX_TYPE | STATX_MODE,
+					  AT_STATX_SYNC_AS_STAT);
+			revert_creds(old_cred);
+			if (!ret)
+				modes[i] = stat.mode;
+		}
+		if (ret == -EACCES)
 			goto out;
+		/*
+		 * Any other resolution result is a validity condition, judged
+		 * in stratum order with the rest of them below.
+		 */
+		errors[i] = ret;
+		ret = 0;
+	}
 
-		ret = vfs_getattr(&resolved[i], &stat,
-				  STATX_TYPE | STATX_MODE, AT_STATX_SYNC_AS_STAT);
-		if (ret)
+	for (i = 0; i < sbi->count; i++) {
+		if (errors[i]) {
+			ret = errors[i];
 			goto out;
-		if (!S_ISDIR(stat.mode)) {
+		}
+		if (!resolved[i].dentry)
+			continue;
+		if (!S_ISDIR(modes[i])) {
 			ret = -ENOTDIR;
 			goto out;
 		}

@@ -159,7 +159,9 @@ pub fn plan_source_device_open(caller_has_tcb: bool) -> LcsResult<SourceDeviceOp
 pub fn source_registration_error_errno(err: LcsError) -> Option<SourceRegistrationErrno> {
     match err {
         LcsError::MissingTcbPrivilege => Some(SourceRegistrationErrno::Eperm),
-        LcsError::HiveIdentityCollision => Some(SourceRegistrationErrno::Eexist),
+        LcsError::HiveIdentityCollision | LcsError::HiveRootGuidCollision => {
+            Some(SourceRegistrationErrno::Eexist)
+        }
         LcsError::TooManyRegisteredSources { .. } | LcsError::TooManyHives { .. } => {
             Some(SourceRegistrationErrno::Enospc)
         }
@@ -349,6 +351,7 @@ pub fn validate_source_registration(
 
     reject_active_collisions(limits, existing_slots, request.hives)?;
     reject_inexact_down_slot_resume(limits, existing_slots, request.hives)?;
+    reject_root_guid_collisions(limits, existing_slots, request.hives)?;
 
     if existing_slots.len() >= limits.max_registered_sources {
         return Err(LcsError::TooManyRegisteredSources {
@@ -626,6 +629,36 @@ fn reject_active_collisions(
                 if same_requested_and_existing_namespace(limits, requested, existing)? {
                     return Err(LcsError::HiveIdentityCollision);
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a request whose hive root GUID is already some other hive's root.
+///
+/// `validate_existing_source_slots` treats a root GUID shared across slots as
+/// a corrupt table, and runs on every registration and path walk, so a request
+/// admitted with one would take the registry down until reboot (PEI-769). A
+/// hive in the same namespace was already decided above: an Active one is a
+/// collision, a Down one a resume or a stale identity. Only a *different*
+/// namespace with the same root is left to refuse here, whatever its slot's
+/// status.
+fn reject_root_guid_collisions(
+    limits: &LcsLimits,
+    existing_slots: &[SourceSlotView<'_>],
+    request_hives: &[SourceRegistrationHive<'_>],
+) -> LcsResult<()> {
+    for slot in existing_slots {
+        for existing in slot.hives {
+            for requested in request_hives {
+                if requested.root_guid != existing.root_guid {
+                    continue;
+                }
+                if same_requested_and_existing_namespace(limits, requested, existing)? {
+                    continue;
+                }
+                return Err(LcsError::HiveRootGuidCollision);
             }
         }
     }

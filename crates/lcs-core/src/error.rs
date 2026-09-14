@@ -203,6 +203,10 @@ pub enum LcsError {
     DuplicateHiveRootGuid,
     /// A registration collided with an existing reserved hive identity.
     HiveIdentityCollision,
+    /// A registration's hive root GUID is already the root of a hive in
+    /// another slot: admitted, it would fail the whole-table consistency
+    /// check every later registration and path walk runs.
+    HiveRootGuidCollision,
     /// A Down source slot was resumed with stale hive identity data.
     StaleSourceHiveIdentity,
     /// A Down source slot was only partially or incorrectly resumed.

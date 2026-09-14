@@ -413,6 +413,12 @@ struct pkm_lcs_kunit_set_value_ioctl_source_script {
 	u32 reads;
 	u32 writes;
 	bool expect_begin;
+	/*
+	 * A non-transactional SET_VALUE queries the value's effective state
+	 * before and after the write (PEI-756). The before answer is empty;
+	 * the after answer reports the written entry unless this is set.
+	 */
+	bool after_not_found;
 	bool expect_layer_refresh;
 	const char *refresh_layer_name;
 	const u8 *refresh_sd;

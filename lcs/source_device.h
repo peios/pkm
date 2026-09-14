@@ -744,6 +744,7 @@ long pkm_lcs_runtime_limits_publish(
 void pkm_lcs_runtime_limits_reset_defaults(void);
 void pkm_lcs_runtime_limits_snapshot_or_default(
 	struct pkm_lcs_runtime_limits *limits);
+u32 pkm_lcs_layer_table_count(void);
 long pkm_lcs_layer_name_casefold_is_base_with_limits(
 	const char *layer_name, u32 layer_name_len,
 	const struct pkm_lcs_runtime_limits *limits, bool *is_base);
@@ -859,6 +860,10 @@ long pkm_lcs_materialize_relative_path_components_with_limits(
 long pkm_lcs_route_symlink_target(
 	const char *target, u32 target_len, const u8 (*scope_guids)[16],
 	u32 scope_count, struct pkm_lcs_hive_route_result *result);
+long pkm_lcs_route_symlink_target_with_limits(
+	const char *target, u32 target_len, const u8 (*scope_guids)[16],
+	u32 scope_count, const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_hive_route_result *result);
 long pkm_lcs_materialize_symlink_target_components(
 	const char *target, u32 target_len,
 	struct pkm_lcs_materialized_path *result);

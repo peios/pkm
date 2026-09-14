@@ -246,6 +246,65 @@ pkm_lcs_create_missing_resolution_limits_or_snapshot(
 	return fallback;
 }
 
+extern int lcs_rust_value_name_casefold_eq(
+	const u8 *left, u32 left_len, const u8 *right, u32 right_len,
+	const struct pkm_lcs_runtime_limits *limits, u8 *equal_out);
+
+/*
+ * Refuse a layer metadata key the layer table has no room for.
+ *
+ * A key created directly under Machine\System\Registry\Layers is a layer's
+ * metadata key, and publishing it adds an entry to the layer table.
+ * MaxTotalLayers bounds that table with the base layer included (§5.3.1),
+ * so a creation that would exceed it is refused here with ENOSPC, before
+ * anything reaches the source. Admitting it and then having every snapshot
+ * buffer -- sized to the bound -- fail is what took the registry down for
+ * every hive until reboot (PEI-759).
+ */
+static long pkm_lcs_create_missing_layer_table_admit(
+	const struct pkm_lcs_create_missing_parent_resolution *resolution)
+{
+	static const char * const prefix[] = {
+		"Machine", "System", "Registry", "Layers",
+	};
+	struct pkm_lcs_runtime_limits fallback_limits;
+	const struct pkm_lcs_runtime_limits *limits;
+	u32 i;
+
+	if (!resolution || !resolution->parent.resolved_path ||
+	    resolution->parent.component_count != ARRAY_SIZE(prefix))
+		return 0;
+	limits = pkm_lcs_create_missing_resolution_limits_or_snapshot(
+		resolution, &fallback_limits);
+	if (!limits)
+		return -EINVAL;
+
+	for (i = 0; i < ARRAY_SIZE(prefix); i++) {
+		const char *component = resolution->parent.resolved_path[i];
+		size_t component_len;
+		u8 equal = 0;
+		int ret;
+
+		if (!component)
+			return -EIO;
+		component_len = strlen(component);
+		if (component_len > U32_MAX)
+			return -EOVERFLOW;
+		ret = lcs_rust_value_name_casefold_eq(
+			(const u8 *)component, (u32)component_len,
+			(const u8 *)prefix[i], (u32)strlen(prefix[i]), limits,
+			&equal);
+		if (ret)
+			return ret;
+		if (!equal)
+			return 0;
+	}
+
+	if (pkm_lcs_layer_table_count() >= limits->max_total_layers)
+		return -ENOSPC;
+	return 0;
+}
+
 static long pkm_lcs_resolved_parent_from_snapshot_prepare(
 	const struct pkm_lcs_key_fd_parent_snapshot *parent,
 	struct pkm_lcs_resolved_key_path *result)
@@ -1633,6 +1692,9 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 		token, &resolution, &parent_plan);
 	if (ret)
 		goto out_resolution;
+	ret = pkm_lcs_create_missing_layer_table_admit(&resolution);
+	if (ret)
+		goto out_resolution;
 	ret = pkm_lcs_create_missing_volatile_parent_check(&resolution,
 							   &preflight);
 	if (ret)
@@ -1772,6 +1834,42 @@ long pkm_lcs_create_missing_copied_path_finish_for_token(
 		inputs, -1, udisposition);
 }
 
+/*
+ * Whether a create that names a layer creates that layer's own entry.
+ *
+ * A key's presence at a path is per layer (§5.2.5): a create naming a layer
+ * other than base creates *that layer's* entry, with its own GUID, when the
+ * layer has none there -- that is how hide-and-replace is authored. Another
+ * layer already naming the path is not "the key exists" for the named layer,
+ * so the existing-path finisher, which resolves across every enabled layer
+ * and never consults the layer argument, is skipped for it. When the named
+ * layer does hold the entry the source answers ALREADY_EXISTS, which retries
+ * as an open of the effective key with REG_OPENED_EXISTING (PEI-765).
+ */
+static long pkm_lcs_reg_create_key_layer_owns_entry(
+	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
+	bool *owns_entry_out)
+{
+	struct pkm_lcs_create_layer_target target = { };
+	bool is_base = false;
+	long ret;
+
+	*owns_entry_out = false;
+	if (!ulayer)
+		return 0;
+
+	ret = pkm_lcs_create_layer_target_copy_from_user(ops, ulayer, &target);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_layer_name_casefold_is_base(target.name, target.name_len,
+						  &is_base);
+	pkm_lcs_create_layer_target_destroy(&target);
+	if (ret)
+		return ret;
+	*owns_entry_out = !is_base;
+	return 0;
+}
+
 static long pkm_lcs_reg_create_key_for_token_with_txn(
 	const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	int parent_fd, const char __user *upath, u32 desired_access,
@@ -1787,9 +1885,15 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 	struct pkm_lcs_runtime_limits limits;
 	const struct pkm_lcs_create_missing_runtime_inputs *active_inputs =
 		inputs;
+	bool layer_owns_entry = false;
 	long ret;
 
 	ret = pkm_lcs_create_preflight(desired_access, flags, &preflight);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_reg_create_key_layer_owns_entry(ops, ulayer,
+						      &layer_owns_entry);
 	if (ret)
 		return ret;
 
@@ -1823,11 +1927,15 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 		active_inputs = &live_inputs;
 	}
 
-	ret = pkm_lcs_create_existing_copied_path_finish_for_token_with_txn(
-		token, ops, parent_fd, &copy, desired_access, flags,
-		active_inputs->layers, active_inputs->layer_count,
-		active_inputs->private_layers, active_inputs->private_layer_count,
-		txn_fd, udisposition);
+	if (layer_owns_entry)
+		ret = -ENOENT;
+	else
+		ret = pkm_lcs_create_existing_copied_path_finish_for_token_with_txn(
+			token, ops, parent_fd, &copy, desired_access, flags,
+			active_inputs->layers, active_inputs->layer_count,
+			active_inputs->private_layers,
+			active_inputs->private_layer_count, txn_fd,
+			udisposition);
 	if (ret == -ENOENT) {
 		ret = pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 			token, ops, parent_fd, &copy, desired_access, ulayer,

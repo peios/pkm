@@ -526,8 +526,8 @@ void pkm_lcs_kunit_expect_set_value_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 }
 
@@ -581,8 +581,8 @@ void pkm_lcs_kunit_expect_set_value_layer_refresh_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 7U);
-	KUNIT_EXPECT_EQ(test, script.writes, 7U);
+	KUNIT_EXPECT_EQ(test, script.reads, 9U);
+	KUNIT_EXPECT_EQ(test, script.writes, 9U);
 	KUNIT_EXPECT_NE(test, script.observed_last_write_time, 0ULL);
 }
 
@@ -6260,13 +6260,13 @@ int pkm_lcs_kunit_set_value_ioctl_source_write_empty_values(
 }
 
 
-int pkm_lcs_kunit_set_value_ioctl_source_handle_query(
+static int pkm_lcs_kunit_set_value_ioctl_source_read_query(
 	struct pkm_lcs_kunit_set_value_ioctl_source_script *script,
-	u8 *request, size_t request_len)
+	u8 *request, size_t request_len, u64 expected_txn_id,
+	u64 *request_id_out)
 {
 	size_t offset = RSI_REQUEST_HEADER_SIZE + RSI_GUID_SIZE;
 	ssize_t count;
-	u64 request_id;
 	u16 request_op;
 	u32 value_len;
 
@@ -6277,11 +6277,11 @@ int pkm_lcs_kunit_set_value_ioctl_source_handle_query(
 	if ((size_t)count < offset + sizeof(u32) + sizeof(u8))
 		return -EINVAL;
 
-	request_id = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
+	*request_id_out = get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET);
 	request_op = get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET);
 	if (request_op != RSI_QUERY_VALUES ||
 	    get_unaligned_le64(request + RSI_REQUEST_TXN_ID_OFFSET) !=
-		    script->expected_query_txn_id ||
+		    expected_txn_id ||
 	    memcmp(request + RSI_REQUEST_HEADER_SIZE, script->expected_guid,
 		   RSI_GUID_SIZE))
 		return -EINVAL;
@@ -6298,9 +6298,69 @@ int pkm_lcs_kunit_set_value_ioctl_source_handle_query(
 	offset++;
 	if (offset != (size_t)count)
 		return -EINVAL;
+	return 0;
+}
 
+int pkm_lcs_kunit_set_value_ioctl_source_handle_query(
+	struct pkm_lcs_kunit_set_value_ioctl_source_script *script,
+	u8 *request, size_t request_len)
+{
+	u64 request_id = 0;
+	int ret;
+
+	ret = pkm_lcs_kunit_set_value_ioctl_source_read_query(
+		script, request, request_len, script->expected_query_txn_id,
+		&request_id);
+	if (ret)
+		return ret;
 	return pkm_lcs_kunit_set_value_ioctl_source_write_empty_values(
 		script, request_id);
+}
+
+/*
+ * The effective-state queries a non-transactional SET_VALUE makes before
+ * and after the write (PEI-756). Both carry transaction id 0. The before
+ * answer is empty; the after answer reports the entry just written, so the
+ * diff is "not found -> found" and the watch event is VALUE_SET.
+ */
+static int pkm_lcs_kunit_set_value_ioctl_source_handle_effective_query(
+	struct pkm_lcs_kunit_set_value_ioctl_source_script *script,
+	u8 *request, size_t request_len, bool after)
+{
+	struct pkm_lcs_kunit_query_values_source_script query = {
+		.expected_guid = script->expected_guid,
+		.expected_value_name = script->expected_value_name,
+		.layer_name = script->expected_layer_name,
+		.data = script->expected_data,
+		.data_len = script->expected_data_len,
+		.value_type = script->expected_value_type,
+		.sequence = script->expected_sequence,
+		.empty = !after || script->after_not_found,
+	};
+	u8 response[1024];
+	size_t built_len = 0;
+	u64 request_id = 0;
+	ssize_t count;
+	int ret;
+
+	ret = pkm_lcs_kunit_set_value_ioctl_source_read_query(
+		script, request, request_len, 0, &request_id);
+	if (ret)
+		return ret;
+	if (query.empty)
+		return pkm_lcs_kunit_set_value_ioctl_source_write_empty_values(
+			script, request_id);
+
+	ret = pkm_lcs_kunit_query_values_source_build_response(
+		&query, request_id, response, sizeof(response), &built_len);
+	if (ret)
+		return ret;
+	count = pkm_lcs_kunit_source_device_write_file(
+		script->file, response, built_len, false, NULL);
+	if (count != (ssize_t)built_len)
+		return count < 0 ? (int)count : -EIO;
+	script->writes++;
+	return 0;
 }
 
 
@@ -6504,10 +6564,22 @@ int pkm_lcs_kunit_set_value_ioctl_source_thread(void *raw_script)
 		if (ret)
 			goto out;
 	}
+	if (!script->expected_txn_id) {
+		ret = pkm_lcs_kunit_set_value_ioctl_source_handle_effective_query(
+			script, request, sizeof(request), false);
+		if (ret)
+			goto out;
+	}
 	ret = pkm_lcs_kunit_set_value_ioctl_source_handle_set_value(
 		script, request, sizeof(request), &continue_after_set);
 	if (ret || !continue_after_set)
 		goto out;
+	if (!script->expected_txn_id) {
+		ret = pkm_lcs_kunit_set_value_ioctl_source_handle_effective_query(
+			script, request, sizeof(request), true);
+		if (ret)
+			goto out;
+	}
 	ret = pkm_lcs_kunit_set_value_ioctl_source_handle_write_key(
 		script, request, sizeof(request));
 	if (ret || !script->expect_layer_refresh)
@@ -7732,9 +7804,14 @@ int pkm_lcs_kunit_delete_key_ioctl_source_handle_delete(
 }
 
 
-int pkm_lcs_kunit_delete_key_ioctl_source_handle_lookup(
+/*
+ * The name lookup a non-transactional DELETE_KEY makes before and after the
+ * entry is removed (PEI-757): `before` answers with the fd's own key as the
+ * winner, `after` with whatever the script says remains.
+ */
+static int pkm_lcs_kunit_delete_key_ioctl_source_handle_lookup_at(
 	struct pkm_lcs_kunit_delete_key_ioctl_source_script *script,
-	u8 *request, size_t request_len)
+	u8 *request, size_t request_len, bool before)
 {
 	struct pkm_lcs_kunit_walk_source_step step = { };
 	u8 response[256];
@@ -7775,9 +7852,10 @@ int pkm_lcs_kunit_delete_key_ioctl_source_handle_lookup(
 		return -EINVAL;
 
 	step.expected_child = script->expected_child_name;
-	step.guid = script->remaining_guid ? script->remaining_guid :
-					      script->expected_key_guid;
-	step.empty = !script->remaining_path_found;
+	step.guid = (!before && script->remaining_guid) ?
+			    script->remaining_guid :
+			    script->expected_key_guid;
+	step.empty = !before && !script->remaining_path_found;
 	ret = pkm_lcs_kunit_walk_source_build_response(
 		&step, request_id, request_op, 0, response, sizeof(response),
 		&response_len);
@@ -7789,6 +7867,14 @@ int pkm_lcs_kunit_delete_key_ioctl_source_handle_lookup(
 		return count < 0 ? (int)count : -EIO;
 	script->writes++;
 	return 0;
+}
+
+int pkm_lcs_kunit_delete_key_ioctl_source_handle_lookup(
+	struct pkm_lcs_kunit_delete_key_ioctl_source_script *script,
+	u8 *request, size_t request_len)
+{
+	return pkm_lcs_kunit_delete_key_ioctl_source_handle_lookup_at(
+		script, request, request_len, false);
 }
 
 
@@ -7868,6 +7954,12 @@ int pkm_lcs_kunit_delete_key_ioctl_source_thread(void *raw_script)
 		script, request, sizeof(request), &has_visible_children);
 	if (ret || has_visible_children)
 		goto out;
+	if (!script->expected_txn_id && !script->skip_orphan_lookup) {
+		ret = pkm_lcs_kunit_delete_key_ioctl_source_handle_lookup_at(
+			script, request, sizeof(request), true);
+		if (ret)
+			goto out;
+	}
 	ret = pkm_lcs_kunit_delete_key_ioctl_source_handle_delete(
 		script, request, sizeof(request), &continue_after_delete);
 	if (ret || !continue_after_delete)

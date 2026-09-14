@@ -228,6 +228,50 @@ fn source_registration_rejects_active_slot_collisions() {
     );
 }
 
+/// A differently-named hive whose root GUID is already some slot's root is
+/// refused at admission, whatever that slot's status: admitted, it would fail
+/// the whole-table consistency check every later registration and path walk
+/// runs (PEI-769). Same-namespace collisions keep their own answers.
+#[test]
+fn source_registration_rejects_root_guid_collisions_across_slots() {
+    let limits = limits();
+    let active_hives = [existing_global("Machine", MACHINE_GUID)];
+    let down_hives = [existing_private("Users", USERS_GUID, SCOPE_A)];
+    let existing = [
+        SourceSlotView {
+            source_id: 7,
+            status: SourceSlotStatus::Active,
+            hives: &active_hives,
+        },
+        SourceSlotView {
+            source_id: 8,
+            status: SourceSlotStatus::Down,
+            hives: &down_hives,
+        },
+    ];
+
+    let against_active = [global_hive("Other", MACHINE_GUID)];
+    assert_eq!(
+        validate_source_registration(&limits, &existing, &request(&against_active, 0)),
+        Err(LcsError::HiveRootGuidCollision)
+    );
+    let against_down = [global_hive("Other", USERS_GUID)];
+    assert_eq!(
+        validate_source_registration(&limits, &existing, &request(&against_down, 0)),
+        Err(LcsError::HiveRootGuidCollision)
+    );
+    let same_namespace_active = [global_hive("machine", MACHINE_GUID)];
+    assert_eq!(
+        validate_source_registration(&limits, &existing, &request(&same_namespace_active, 0)),
+        Err(LcsError::HiveIdentityCollision)
+    );
+    let fresh = [global_hive("Other", OTHER_GUID)];
+    assert_eq!(
+        validate_source_registration(&limits, &existing, &request(&fresh, 0)).map(|p| p.decision),
+        Ok(SourceRegistrationDecision::NewSlot)
+    );
+}
+
 #[test]
 fn source_registration_fails_closed_on_inconsistent_existing_slots() {
     let limits = limits();

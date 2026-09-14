@@ -512,20 +512,27 @@ SYSCALL_DEFINE3(kacs_set_mount_policy, int, fd,
 	ret = pkm_kacs_copy_mount_policy_args_from_user(&args, uargs, argsize);
 	if (ret)
 		return ret;
-	ret = pkm_kacs_validate_mount_policy_args(&args);
-	if (ret)
-		return ret;
 
-	if (!pkm_kacs_may_manage_volumes_for_token(subject_token))
-		return -EPERM;
-
-	ret = pkm_kacs_copy_mount_template_from_user(&args, &template_bytes);
-	if (ret)
-		return ret;
-
+	/*
+	 * Resolve the superblock before validating the policy or checking
+	 * privilege: the core routine refuses a stratafs superblock (and an
+	 * unmanaged one) with EOPNOTSUPP ahead of both, and the wrapper used to
+	 * answer EINVAL/EPERM for every argument that failed its own checks
+	 * before the superblock was ever looked at (PEI-586, TRM §4.6.4). The
+	 * template is only copied once the arguments are known to be valid,
+	 * which the core routine re-establishes before it reads them.
+	 */
 	ret = pkm_kacs_mount_policy_fd_superblock(fd, &file, &sb);
 	if (ret)
 		goto out;
+
+	if (!pkm_kacs_validate_mount_policy_args(&args) &&
+	    pkm_kacs_may_manage_volumes_for_token(subject_token)) {
+		ret = pkm_kacs_copy_mount_template_from_user(&args,
+							     &template_bytes);
+		if (ret)
+			goto out;
+	}
 
 	ret = pkm_kacs_set_mount_policy_core(subject_token, sb, &args,
 					     template_bytes);

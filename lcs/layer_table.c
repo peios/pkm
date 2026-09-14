@@ -174,6 +174,16 @@ static u32 pkm_lcs_layer_table_count_locked(void)
 	return count;
 }
 
+u32 pkm_lcs_layer_table_count(void)
+{
+	u32 count;
+
+	mutex_lock(&pkm_lcs_layer_table_lock);
+	count = pkm_lcs_layer_table_count_locked();
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+	return count;
+}
+
 static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
 					     size_t *name_bytes_out,
 					     size_t *metadata_sd_bytes_out)
@@ -801,7 +811,16 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 			break;
 		}
 	}
-	if (!target) {
+	/*
+	 * MaxTotalLayers bounds the whole table, base included (§5.3.1): a
+	 * new entry is admitted only while the table holds fewer than that.
+	 * Creation is normally refused earlier, at the metadata key, so that
+	 * nothing reaches the source; this is the backstop that keeps the
+	 * table within the bound every snapshot buffer is sized to (PEI-759).
+	 */
+	if (!target || (!target->occupied &&
+			pkm_lcs_layer_table_count_locked() >=
+				limits->max_total_layers)) {
 		mutex_unlock(&pkm_lcs_layer_table_lock);
 		kfree(metadata_sd_copy);
 		kfree(owner_sid_copy);

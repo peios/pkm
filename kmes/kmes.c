@@ -775,25 +775,67 @@ static void pkm_kmes_drop_event(struct pkm_kmes_cpu_state *cpu)
 	cpu->dropped_events++;
 }
 
+/*
+ * The batch's own events, for the reservation walk.
+ *
+ * A batch reserves for every event before writing any, walking the tail with
+ * the running write offset. Once that walk crosses the batch's starting
+ * write_pos, the positions it is skipping belong to this batch's own events,
+ * not yet written: the ring holds the previous lap's bytes there (or zeros on
+ * a fresh ring), and their size fields describe nothing. Reading them tripped
+ * the corruption guard on a healthy ring and discarded the whole surviving
+ * window (PEI-659). Past batch_start the walk steps by the batch's own sizes
+ * instead; `own_limit` is the index of the event being reserved, which the
+ * walk can never need to skip.
+ */
+struct pkm_kmes_batch_walk {
+	u64 batch_start;
+	u32 next_own_index;
+	u32 own_limit;
+	u32 (*own_event_size)(const void *events, u32 index, u64 capacity);
+	const void *events;
+};
+
 static void pkm_kmes_reserve_space_local(struct pkm_kmes_cpu_state *cpu,
 					 u64 *tail_io, u64 write_pos,
-					 size_t event_size)
+					 size_t event_size,
+					 struct pkm_kmes_batch_walk *walk)
 {
 	u64 next_tail = *tail_io;
 	u64 used = write_pos - next_tail;
 
 	while (used + event_size > cpu->capacity) {
-		u32 overwritten_size =
-			pkm_kmes_read_u32_at(cpu->data, cpu->capacity, next_tail);
+		u32 overwritten_size;
 
-		if (overwritten_size == 0 ||
-		    overwritten_size > cpu->capacity ||
-		    overwritten_size > write_pos - next_tail) {
-			trace_kmes_drop(cpu->cpu_id, cpu->dropped_events,
-					event_size, write_pos, next_tail,
-					cpu->capacity, KMES_DROP_TAIL_RESYNC);
-			next_tail = write_pos;
-			break;
+		if (walk && next_tail >= walk->batch_start) {
+			if (walk->next_own_index >= walk->own_limit) {
+				trace_kmes_drop(cpu->cpu_id, cpu->dropped_events,
+						event_size, write_pos, next_tail,
+						cpu->capacity,
+						KMES_DROP_TAIL_RESYNC);
+				next_tail = write_pos;
+				break;
+			}
+			overwritten_size = walk->own_event_size(
+				walk->events, walk->next_own_index,
+				cpu->capacity);
+			walk->next_own_index++;
+			/* An event the write pass will skip occupies no bytes. */
+			if (!overwritten_size)
+				continue;
+		} else {
+			overwritten_size = pkm_kmes_read_u32_at(
+				cpu->data, cpu->capacity, next_tail);
+			if (overwritten_size == 0 ||
+			    overwritten_size > cpu->capacity ||
+			    overwritten_size > write_pos - next_tail) {
+				trace_kmes_drop(cpu->cpu_id, cpu->dropped_events,
+						event_size, write_pos, next_tail,
+						cpu->capacity,
+						KMES_DROP_TAIL_RESYNC);
+				next_tail = write_pos;
+				break;
+			}
 		}
 
 		next_tail += overwritten_size;
@@ -805,6 +847,15 @@ static void pkm_kmes_reserve_space_local(struct pkm_kmes_cpu_state *cpu,
 	}
 
 	*tail_io = next_tail;
+}
+
+static u32 pkm_kmes_staged_batch_event_size(const void *events, u32 index,
+					    u64 capacity)
+{
+	const struct pkm_kmes_staged_event *staged = events;
+
+	(void)capacity;
+	return staged[index].event_size;
 }
 
 static void pkm_kmes_reserve_space(struct pkm_kmes_cpu_state *cpu,
@@ -1621,6 +1672,7 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	kacs_uuid_t eff_guid;
 	kacs_uuid_t true_guid;
 	kacs_uuid_t proc_guid;
+	struct pkm_kmes_batch_walk walk = { };
 	u32 index;
 	bool wake_needed = false;
 
@@ -1687,9 +1739,14 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	 * above, so the reservation pass has nothing to reject.
 	 */
 	batch_write_pos = write_pos;
+	walk.batch_start = write_pos;
+	walk.next_own_index = 0;
+	walk.own_event_size = pkm_kmes_staged_batch_event_size;
+	walk.events = events;
 	for (index = 0; index < count; index++) {
+		walk.own_limit = index;
 		pkm_kmes_reserve_space_local(cpu, &tail_pos, batch_write_pos,
-					     events[index].event_size);
+					     events[index].event_size, &walk);
 		batch_write_pos += events[index].event_size;
 	}
 
@@ -2546,6 +2603,18 @@ static bool pkm_kmes_kernel_event_structurally_valid(
 	return true;
 }
 
+static u32 pkm_kmes_kernel_batch_event_size(const void *events, u32 index,
+					    u64 capacity)
+{
+	const struct pkm_kmes_kernel_event *batch = events;
+	u32 event_size = 0;
+
+	if (!pkm_kmes_kernel_event_structurally_valid(&batch[index], capacity,
+						      &event_size))
+		return 0;
+	return event_size;
+}
+
 void pkm_kmes_emit_kernel_batch(u8 origin_class,
 				const struct pkm_kmes_kernel_event *events,
 				u32 count)
@@ -2560,6 +2629,7 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 	kacs_uuid_t eff_guid;
 	kacs_uuid_t true_guid;
 	kacs_uuid_t proc_guid;
+	struct pkm_kmes_batch_walk walk = { };
 	u32 index;
 	bool wake_needed = false;
 	bool wrote_any = false;
@@ -2612,6 +2682,10 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 	 * this batch has already replaced.
 	 */
 	batch_write_pos = write_pos;
+	walk.batch_start = write_pos;
+	walk.next_own_index = 0;
+	walk.own_event_size = pkm_kmes_kernel_batch_event_size;
+	walk.events = events;
 	for (index = 0; index < count; index++) {
 		u32 event_size = 0;
 
@@ -2623,8 +2697,9 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 					KMES_DROP_BATCH_STRUCT_INVALID);
 			continue;
 		}
+		walk.own_limit = index;
 		pkm_kmes_reserve_space_local(cpu, &tail_pos, batch_write_pos,
-					     event_size);
+					     event_size, &walk);
 		batch_write_pos += event_size;
 		wrote_any = true;
 	}

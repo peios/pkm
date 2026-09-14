@@ -10,6 +10,7 @@
 #include <linux/string.h>
 
 #include <pkm/lcs.h>
+#include <pkm/token.h>
 
 #include <trace/events/lcs.h>
 
@@ -125,7 +126,14 @@ static long pkm_lcs_build_audit_caller_summary(
 	caller->authentication_id = token_summary.auth_id;
 	caller->token_id = token_summary.token_id;
 	caller->token_type = token_summary.token_type;
-	caller->impersonation_level = token_summary.impersonation_level;
+	/*
+	 * A primary token has no impersonation level: the summary reports the
+	 * stored field for every token type, and the caller summary normalises
+	 * it to 0 for primaries as TRM §5.4.4 documents (PEI-755).
+	 */
+	caller->impersonation_level =
+		token_summary.token_type == KACS_TOKEN_TYPE_PRIMARY ?
+			0 : token_summary.impersonation_level;
 	caller->integrity_level = token_summary.integrity_level;
 	return 0;
 }

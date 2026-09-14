@@ -7452,15 +7452,19 @@ static void pkm_lcs_kunit_create_missing_copied_path_rejects_bad_copy(
 }
 
 
-static void pkm_lcs_kunit_reg_create_key_existing_ignores_layer(
+/*
+ * A create naming the base layer at an existing path opens it. The layer
+ * argument is read first (PEI-765: naming another layer asks for that
+ * layer's own entry, so "exists" is decided per layer), which is why the
+ * copy counts include it.
+ */
+static void pkm_lcs_kunit_reg_create_key_existing_base_layer_opens(
 	struct kunit *test)
 {
 	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	const char path_src[] = "Machine";
-	const char layer_src[] = "should-not-be-read";
-	struct pkm_lcs_kunit_usercopy_ctx ctx = {
-		.fault_strlen_src = layer_src,
-	};
+	const char layer_src[] = "base";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct pkm_lcs_key_fd_snapshot snapshot = { };
 	struct pkm_lcs_kunit_read_key_source_script script = {
@@ -7499,8 +7503,8 @@ static void pkm_lcs_kunit_reg_create_key_existing_ignores_layer(
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
-	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 2U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
 			0L);
@@ -7521,10 +7525,8 @@ static void pkm_lcs_kunit_reg_create_key_existing_uses_live_layer_table(
 	static const u8 policy_guid[RSI_GUID_SIZE] = { 0x42 };
 	static const u8 policy_layer_guid[RSI_GUID_SIZE] = { 0x43 };
 	const char path_src[] = "Machine\\App";
-	const char layer_src[] = "should-not-be-read";
-	struct pkm_lcs_kunit_usercopy_ctx ctx = {
-		.fault_strlen_src = layer_src,
-	};
+	const char layer_src[] = "base";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct pkm_lcs_key_fd_snapshot snapshot = { };
 	struct pkm_lcs_kunit_walk_source_step steps[1] = {
@@ -7601,8 +7603,8 @@ static void pkm_lcs_kunit_reg_create_key_existing_uses_live_layer_table(
 	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_EQ(test, script.reads, 1U);
 	KUNIT_EXPECT_EQ(test, script.writes, 1U);
-	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
-	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 2U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
 			0L);
@@ -7954,6 +7956,12 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	static const char layer_src[] = "policy";
 	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	static const u8 policy_layer_guid[RSI_GUID_SIZE] = { 0x39 };
+	/*
+	 * Naming a layer asks for that layer's own entry (PEI-765), so the
+	 * path is not resolved across the enabled layers first: the source
+	 * sees the parent read and the create straight away, and answers
+	 * ALREADY_EXISTS itself if the layer already holds the entry.
+	 */
 	static const struct pkm_lcs_kunit_walk_source_step steps[] = {
 		{
 			.expected_child = "App",
@@ -7963,7 +7971,7 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	struct pkm_lcs_kunit_walk_then_read_create_source_script script = {
 		.walk = {
 			.steps = steps,
-			.step_count = ARRAY_SIZE(steps),
+			.step_count = 0,
 		},
 		.create = {
 			.read_key = {
@@ -8034,10 +8042,11 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_CREATED_NEW);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 4U);
-	KUNIT_EXPECT_EQ(test, script.writes, 4U);
-	KUNIT_EXPECT_EQ(test, ctx.strnlens, 2U);
-	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.writes, 3U);
+	/* The layer is read once to classify it and once to admit it. */
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 3U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 3U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
 			0L);
@@ -9229,10 +9238,8 @@ static void pkm_lcs_kunit_reg_create_key_args_existing_success(
 {
 	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	const char path_src[] = "Machine";
-	const char layer_src[] = "ignored-for-existing";
-	struct pkm_lcs_kunit_usercopy_ctx ctx = {
-		.fault_strlen_src = layer_src,
-	};
+	const char layer_src[] = "base";
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
 	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
 	struct pkm_lcs_key_fd_snapshot snapshot = { };
 	struct pkm_lcs_kunit_read_key_source_script script = {
@@ -9276,8 +9283,8 @@ static void pkm_lcs_kunit_reg_create_key_args_existing_success(
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_OPENED_EXISTING);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, ctx.strnlens, 1U);
-	KUNIT_EXPECT_EQ(test, ctx.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 2U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 2U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
 			0L);
@@ -10356,7 +10363,7 @@ static struct kunit_case pkm_lcs_kunit_open_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_branch_rejects_bad_snapshots),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_copied_path_success),
 	KUNIT_CASE(pkm_lcs_kunit_create_missing_copied_path_rejects_bad_copy),
-	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_existing_ignores_layer),
+	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_existing_base_layer_opens),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_existing_uses_live_layer_table),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_missing_fallback_success),
 	KUNIT_CASE(pkm_lcs_kunit_reg_create_key_key_duplicate_eio),
