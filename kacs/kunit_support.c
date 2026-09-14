@@ -1059,7 +1059,8 @@ long pkm_kacs_kunit_native_open_for_subject(
 		ret = pkm_kacs_build_created_file_sd_for_subject(
 			args->subject_token, &parent_file, args->input_sd_ptr,
 			args->input_sd_len, false, prepared.desired_access,
-			&created_sd, &created_sd_len, granted_access_out);
+			prepared.privilege_intent, &created_sd, &created_sd_len,
+			granted_access_out);
 		if (ret)
 			goto out_parent_cleanup;
 
@@ -1084,7 +1085,8 @@ long pkm_kacs_kunit_native_open_for_subject(
 	state->file.f_flags = prepared.open_flags;
 	state->file.f_mode = OPEN_FMODE(prepared.open_flags);
 	ret = pkm_kacs_stamp_native_file_granted_access_for_subject(
-		args->subject_token, &state->file, prepared.desired_access);
+		args->subject_token, &state->file, prepared.desired_access,
+		prepared.privilege_intent);
 	if (!ret) {
 		file_sec = pkm_kacs_file(&state->file);
 		if (granted_access_out)
@@ -1178,8 +1180,8 @@ long pkm_kacs_kunit_native_create_for_subject(
 	ret = pkm_kacs_build_created_file_sd_for_subject(
 		args->subject_token, &state->file, args->creator_sd_ptr,
 		args->creator_sd_len, prepared.directory_required,
-		prepared.desired_access, created_sd_out, created_sd_len_out,
-		granted_access_out);
+		prepared.desired_access, prepared.privilege_intent,
+		created_sd_out, created_sd_len_out, granted_access_out);
 	if (!ret && status_out)
 		*status_out = KACS_STATUS_CREATED;
 
@@ -1335,7 +1337,8 @@ long pkm_kacs_kunit_delete_on_close_for_subject(
 		ret = pkm_kacs_build_created_file_sd_for_subject(
 			args->subject_token, &parent_state->file, args->input_sd_ptr,
 			args->input_sd_len, false, prepared.desired_access,
-			&created_sd, &created_sd_len, NULL);
+			prepared.privilege_intent, &created_sd, &created_sd_len,
+			NULL);
 		if (ret)
 			goto out;
 
@@ -1427,7 +1430,8 @@ long pkm_kacs_kunit_delete_on_close_for_subject(
 	state->file.f_flags = prepared.open_flags;
 	state->file.f_mode = OPEN_FMODE(prepared.open_flags);
 	ret = pkm_kacs_stamp_native_file_granted_access_for_subject(
-		args->subject_token, &state->file, prepared.desired_access);
+		args->subject_token, &state->file, prepared.desired_access,
+		prepared.privilege_intent);
 	if (ret)
 		goto out;
 
@@ -1586,7 +1590,8 @@ long pkm_kacs_kunit_delete_on_close_dup_lineage_for_subject(
 	cache = NULL;
 
 	ret = pkm_kacs_stamp_native_file_granted_access_for_subject(
-		args->subject_token, file, prepared.desired_access);
+		args->subject_token, file, prepared.desired_access,
+		prepared.privilege_intent);
 	if (ret)
 		goto out_inode;
 
@@ -1897,8 +1902,8 @@ static long pkm_kacs_kunit_create_live_file(const void *subject_token,
 	*(struct path *)&parent_file.f_path = parent_path;
 	ret = pkm_kacs_build_created_file_sd_for_subject(
 		subject_token, &parent_file, NULL, 0, false,
-		prepared.desired_access, &created_sd, &created_sd_len,
-		&granted_access);
+		prepared.desired_access, prepared.privilege_intent, &created_sd,
+		&created_sd_len, &granted_access);
 	if (ret)
 		goto out_end_create;
 
@@ -1917,7 +1922,8 @@ static long pkm_kacs_kunit_create_live_file(const void *subject_token,
 	child_path.dentry = dget(dentry);
 	pkm_kacs_set_current_native_open_request(&child_path,
 						 prepared.desired_access,
-						 prepared.create_options);
+						 prepared.create_options,
+						 prepared.privilege_intent);
 	file = dentry_open(&child_path, prepared.open_flags, current_cred());
 	pkm_kacs_clear_current_native_open_request();
 	path_put(&child_path);

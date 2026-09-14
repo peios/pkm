@@ -35,7 +35,8 @@ long pkm_kacs_authorize_path_file_access_core(const void *subject_token,
 					      const struct path *path,
 					      u32 desired_access);
 long pkm_kacs_stamp_native_file_granted_access_for_subject(
-	const void *subject_token, struct file *file, u32 desired_access);
+	const void *subject_token, struct file *file, u32 desired_access,
+	u32 privilege_intent);
 long pkm_kacs_stamp_file_granted_access_for_subject(
 	const void *subject_token, struct file *file);
 int pkm_kacs_check_file_snapshot_grant(struct file *file,

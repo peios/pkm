@@ -1,0 +1,94 @@
+diff --git a/include/net/sock.h b/include/net/sock.h
+index 6c9a83016..b5e0070da 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -2157,6 +2157,26 @@ static inline kuid_t sock_net_uid(const struct net *net, const struct sock *sk)
+ 	return sk ? sk_uid(sk) : make_kuid(net->user_ns, 0);
+ }
+ 
++#ifdef CONFIG_SECURITY_PKM
++extern bool pkm_kacs_reuseport_owner_matches(const struct sock *sk, kuid_t uid,
++					     const struct sock *sk2);
++#endif
++
++/*
++ * Whether a socket @sk (owned by @uid) may share a port with an already
++ * bound @sk2 under SO_REUSEADDR / SO_REUSEPORT: the same owner, or, under
++ * Peios, a binder that holds SeTcbPrivilege (the KACS rebind rule).
++ */
++static inline bool sk_reuseport_owner_matches(const struct sock *sk, kuid_t uid,
++					      const struct sock *sk2)
++{
++#ifdef CONFIG_SECURITY_PKM
++	return pkm_kacs_reuseport_owner_matches(sk, uid, sk2);
++#else
++	return uid_eq(uid, sk_uid(sk2));
++#endif
++}
++
+ static inline u32 net_tx_rndhash(void)
+ {
+ 	u32 v = get_random_u32();
+diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
+index bc987a59a..51b4fd82a 100644
+--- a/net/ipv4/inet_connection_sock.c
++++ b/net/ipv4/inet_connection_sock.c
+@@ -172,12 +172,12 @@ static bool inet_bind_conflict(const struct sock *sk, struct sock *sk2,
+ 			if (!relax || (!reuseport_ok && sk->sk_reuseport &&
+ 				       sk2->sk_reuseport && reuseport_cb_ok &&
+ 				       (sk2->sk_state == TCP_TIME_WAIT ||
+-					uid_eq(uid, sk_uid(sk2)))))
++					sk_reuseport_owner_matches(sk, uid, sk2))))
+ 				return true;
+ 		} else if (!reuseport_ok || !sk->sk_reuseport ||
+ 			   !sk2->sk_reuseport || !reuseport_cb_ok ||
+ 			   (sk2->sk_state != TCP_TIME_WAIT &&
+-			    !uid_eq(uid, sk_uid(sk2)))) {
++			    !sk_reuseport_owner_matches(sk, uid, sk2))) {
+ 			return true;
+ 		}
+ 	}
+diff --git a/net/ipv4/inet_hashtables.c b/net/ipv4/inet_hashtables.c
+index 9bfccc283..721936dd9 100644
+--- a/net/ipv4/inet_hashtables.c
++++ b/net/ipv4/inet_hashtables.c
+@@ -769,7 +769,7 @@ static int inet_reuseport_add_sock(struct sock *sk,
+ 		    ipv6_only_sock(sk2) == ipv6_only_sock(sk) &&
+ 		    sk2->sk_bound_dev_if == sk->sk_bound_dev_if &&
+ 		    inet_csk(sk2)->icsk_bind_hash == tb &&
+-		    sk2->sk_reuseport && uid_eq(uid, sk_uid(sk2)) &&
++		    sk2->sk_reuseport && sk_reuseport_owner_matches(sk, uid, sk2) &&
+ 		    inet_rcv_saddr_equal(sk, sk2, false))
+ 			return reuseport_add_sock(sk, sk2,
+ 						  inet_rcv_saddr_any(sk));
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index cb99a3c27..5f0425772 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -156,7 +156,7 @@ static int udp_lib_lport_inuse(struct net *net, __u16 num,
+ 		    inet_rcv_saddr_equal(sk, sk2, true)) {
+ 			if (sk2->sk_reuseport && sk->sk_reuseport &&
+ 			    !rcu_access_pointer(sk->sk_reuseport_cb) &&
+-			    uid_eq(uid, sk_uid(sk2))) {
++			    sk_reuseport_owner_matches(sk, uid, sk2)) {
+ 				if (!bitmap)
+ 					return 0;
+ 			} else {
+@@ -193,7 +193,7 @@ static int udp_lib_lport_inuse2(struct net *net, __u16 num,
+ 		    inet_rcv_saddr_equal(sk, sk2, true)) {
+ 			if (sk2->sk_reuseport && sk->sk_reuseport &&
+ 			    !rcu_access_pointer(sk->sk_reuseport_cb) &&
+-			    uid_eq(uid, sk_uid(sk2))) {
++			    sk_reuseport_owner_matches(sk, uid, sk2)) {
+ 				res = 0;
+ 			} else {
+ 				res = 1;
+@@ -218,7 +218,7 @@ static int udp_reuseport_add_sock(struct sock *sk, struct udp_hslot *hslot)
+ 		    ipv6_only_sock(sk2) == ipv6_only_sock(sk) &&
+ 		    (udp_sk(sk2)->udp_port_hash == udp_sk(sk)->udp_port_hash) &&
+ 		    (sk2->sk_bound_dev_if == sk->sk_bound_dev_if) &&
+-		    sk2->sk_reuseport && uid_eq(uid, sk_uid(sk2)) &&
++		    sk2->sk_reuseport && sk_reuseport_owner_matches(sk, uid, sk2) &&
+ 		    inet_rcv_saddr_equal(sk, sk2, false)) {
+ 			return reuseport_add_sock(sk, sk2,
+ 						  inet_rcv_saddr_any(sk));

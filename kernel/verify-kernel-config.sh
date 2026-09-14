@@ -65,7 +65,9 @@ require_unset CONFIG_SECURITY_APPARMOR
 require_unset CONFIG_SECURITY_SMACK
 require_unset CONFIG_SECURITY_TOMOYO
 require_unset CONFIG_BPF_LSM
-require_set CONFIG_LSM '"landlock,lockdown,yama,integrity,pkm"'
+# Yama would decide ptrace attach ahead of the KACS hook (PEI-689).
+require_unset CONFIG_SECURITY_YAMA
+require_set CONFIG_LSM '"landlock,lockdown,integrity,pkm"'
 require_set CONFIG_STRICT_DEVMEM y
 require_set CONFIG_MODULE_SIG_FORCE y
 require_unset CONFIG_SECURITY_LOADPIN

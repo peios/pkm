@@ -52,10 +52,19 @@ include/ptrace-kacs-modes.patch
 mm/mempolicy-movememory-gate.patch
 mm/migrate-pages-gate.patch
 mm/process_vm_access-rw-mode-split.patch
+# PEI-689: the KACS ptrace answer is final through mm_access — no
+# perfmon_capable() fallback for READ modes — and /proc/<pid>/fd is gated
+# like the entries it lists. Neither file is touched by another patch.
+kernel/fork-mm-access-no-perfmon-fallback.patch
+fs/proc-fd-dir-ptrace-read-gate.patch
 net/sock-peercred-projection.patch
 net/socket-sol-kacs-dispatch.patch
 net/scm-kacs-token.patch
 net/af_unix-kacs-token.patch
+# PEI-1115: the privilege half of the port rebind rule. One helper in
+# include/net/sock.h and the six owner comparisons in net/ipv4 that call
+# it; no other patch touches those files.
+net/inet-reuseport-tcb-rebind.patch
 ipc/util-lsm-with-object.patch
 arch/x86-prctl-shadow-stack.patch
 arch/syscall-table-pkm.patch

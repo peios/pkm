@@ -786,7 +786,7 @@ long pkm_kacs_build_legacy_created_file_sd_for_subject(
 	pkm_kacs_init_path_anchor_file(&parent_file, &parent_path);
 
 	ret = pkm_kacs_build_created_file_sd_for_subject(
-		subject_token, &parent_file, NULL, 0, directory, 0,
+		subject_token, &parent_file, NULL, 0, directory, 0, 0,
 		out_sd_ptr, out_sd_len, NULL);
 out:
 	if (alias)

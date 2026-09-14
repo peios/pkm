@@ -1,0 +1,20 @@
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 2383c25b9..6109c0080 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1386,8 +1386,15 @@ static bool may_access_mm(struct mm_struct *mm, struct task_struct *task, unsign
+ 		return true;
+ 	if (ptrace_may_access(task, mode))
+ 		return true;
++#ifndef CONFIG_SECURITY_PKM
++	/*
++	 * Under Peios the ptrace answer is KACS's process-descriptor and PIP
++	 * decision, and it is final: a profiling privilege must not reopen
++	 * a target's memory, maps or environment past a denial.
++	 */
+ 	if ((mode & PTRACE_MODE_READ) && perfmon_capable())
+ 		return true;
++#endif
+ 	return false;
+ }
+ 

@@ -23,6 +23,12 @@ int pkm_kacs_unix_stream_connect(struct sock *sock, struct sock *other,
 				 struct sock *newsk);
 int pkm_kacs_unix_may_send(struct socket *sock, struct socket *other);
 int pkm_kacs_socket_listen(struct socket *sock, int backlog);
+/*
+ * The rebind rule's owner comparison, reached from the inet bind-conflict
+ * and reuseport-group code (net/ipv4) through <net/sock.h>.
+ */
+bool pkm_kacs_reuseport_owner_matches(const struct sock *sk, kuid_t uid,
+				      const struct sock *sk2);
 /* SOL_KACS option handlers, dispatched from net/socket.c. */
 int pkm_kacs_sock_setsockopt(struct socket *sock, int optname,
 			     sockptr_t optval, unsigned int optlen);

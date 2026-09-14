@@ -990,7 +990,8 @@ static long pkm_kacs_build_legacy_open_access_masks(const struct file *file,
 }
 
 long pkm_kacs_stamp_native_file_granted_access_for_subject(
-	const void *subject_token, struct file *file, u32 desired_access)
+	const void *subject_token, struct file *file, u32 desired_access,
+	u32 privilege_intent)
 {
 	struct pkm_kacs_file_security *file_sec;
 	struct pkm_kacs_inode_security *inode_sec;
@@ -1054,8 +1055,8 @@ long pkm_kacs_stamp_native_file_granted_access_for_subject(
 		} else {
 			ret = kacs_rust_check_cached_file_sd_with_intent_audit_caap(
 				subject_token, cache->bytes, cache->len,
-				&cache->layout, desired_access, 0, pip_type,
-				pip_trust, caap_cache, &granted_access,
+				&cache->layout, desired_access, privilege_intent,
+				pip_type, pip_trust, caap_cache, &granted_access,
 				&continuous_audit_mask);
 			if (!ret) {
 				file_sec->granted_access = granted_access;
@@ -1172,6 +1173,7 @@ int pkm_kacs_file_open(struct file *file)
 	const void *subject_token;
 	u32 desired_access = 0;
 	u32 create_options = 0;
+	u32 privilege_intent = 0;
 	long ret;
 
 	if (!file)
@@ -1204,9 +1206,10 @@ int pkm_kacs_file_open(struct file *file)
 	}
 
 	if (pkm_kacs_native_open_request_matches(file, &desired_access,
-						 &create_options)) {
+						 &create_options,
+						 &privilege_intent)) {
 		ret = pkm_kacs_stamp_native_file_granted_access_for_subject(
-			subject_token, file, desired_access);
+			subject_token, file, desired_access, privilege_intent);
 		if (ret) {
 			trace_kacs_file_open(file_inode(file), desired_access,
 					     ret, KACS_TR_NATIVE_STAMP);

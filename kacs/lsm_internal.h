@@ -27,6 +27,7 @@ struct pkm_kacs_native_open_request {
 	const struct vfsmount *expected_mnt;
 	u32 desired_access;
 	u32 create_options;
+	u32 privilege_intent;
 	bool active;
 };
 
@@ -43,6 +44,7 @@ struct pkm_kacs_native_open_prepared {
 	u32 create_disposition;
 	u32 status;
 	u32 create_options;
+	u32 privilege_intent;
 	int open_flags;
 	bool directory_required;
 };
@@ -242,6 +244,14 @@ struct pkm_kacs_socket_security {
 	 * share this token's user SID or hold SeTcbPrivilege.
 	 */
 	const void *binder_token;
+	/*
+	 * The binder held SeTcbPrivilege, enabled, when it bound a reusable
+	 * socket (SO_REUSEADDR / SO_REUSEPORT): the privilege half of the
+	 * rebind rule, decided in the bind hook — process context, before
+	 * the port is claimed — and read by the bind-conflict code under
+	 * the bind-hash spinlocks, where a token cannot be consulted.
+	 */
+	bool rebind_tcb;
 	struct mutex convey_lock;
 	const void *convey_src;
 	const void *convey_token;

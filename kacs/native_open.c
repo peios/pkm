@@ -280,6 +280,7 @@ long pkm_kacs_prepare_native_open(
 		break;
 	}
 	prepared->create_options = how->create_options;
+	prepared->privilege_intent = how->flags & PKM_KACS_OPEN_INTENT_FLAGS;
 	prepared->open_flags = open_flags;
 	prepared->directory_required =
 		(how->create_options & KACS_CREATE_OPT_DIRECTORY) != 0;
@@ -318,7 +319,8 @@ static long pkm_kacs_copy_creator_sd_from_user(
 }
 
 void pkm_kacs_set_current_native_open_request(
-	const struct path *path, u32 desired_access, u32 create_options)
+	const struct path *path, u32 desired_access, u32 create_options,
+	u32 privilege_intent)
 {
 	struct pkm_kacs_task_security *sec;
 
@@ -330,17 +332,19 @@ void pkm_kacs_set_current_native_open_request(
 	sec->native_open.expected_mnt = path ? path->mnt : NULL;
 	sec->native_open.desired_access = desired_access;
 	sec->native_open.create_options = create_options;
+	sec->native_open.privilege_intent = privilege_intent;
 	sec->native_open.active = path != NULL;
 }
 
 void pkm_kacs_clear_current_native_open_request(void)
 {
-	pkm_kacs_set_current_native_open_request(NULL, 0, 0);
+	pkm_kacs_set_current_native_open_request(NULL, 0, 0, 0);
 }
 
 bool pkm_kacs_native_open_request_matches(struct file *file,
 					  u32 *desired_access_out,
-					  u32 *create_options_out)
+					  u32 *create_options_out,
+					  u32 *privilege_intent_out)
 {
 	struct pkm_kacs_task_security *sec;
 
@@ -358,6 +362,8 @@ bool pkm_kacs_native_open_request_matches(struct file *file,
 		*desired_access_out = sec->native_open.desired_access;
 	if (create_options_out)
 		*create_options_out = sec->native_open.create_options;
+	if (privilege_intent_out)
+		*privilege_intent_out = sec->native_open.privilege_intent;
 	return true;
 }
 
@@ -673,8 +679,8 @@ static long pkm_kacs_open_path_lookup_flags(u32 flags,
 long pkm_kacs_build_created_file_sd_for_subject(
 	const void *subject_token, struct file *parent_file,
 	const u8 *creator_sd_ptr, size_t creator_sd_len, bool directory,
-	u32 desired_access, const u8 **out_sd_ptr, size_t *out_sd_len,
-	u32 *granted_access_out)
+	u32 desired_access, u32 privilege_intent, const u8 **out_sd_ptr,
+	size_t *out_sd_len, u32 *granted_access_out)
 {
 	struct inode *parent_inode;
 	struct pkm_kacs_inode_security *parent_sec;
@@ -736,8 +742,8 @@ long pkm_kacs_build_created_file_sd_for_subject(
 
 	ret = kacs_rust_check_cached_file_sd_with_intent(
 		subject_token, parent_cache->bytes, parent_cache->len,
-		&parent_cache->layout, parent_right, 0, pip_type, pip_trust,
-		&granted_access);
+		&parent_cache->layout, parent_right, privilege_intent, pip_type,
+		pip_trust, &granted_access);
 	if (ret)
 		goto out_unlock;
 
@@ -756,7 +762,7 @@ out_unlock:
 	if (desired_access != 0) {
 		ret = kacs_rust_check_file_sd_with_intent(
 			subject_token, *out_sd_ptr, *out_sd_len,
-			desired_access, 0, pip_type, pip_trust,
+			desired_access, privilege_intent, pip_type, pip_trust,
 			&granted_access);
 		if (ret) {
 			pkm_kacs_free((void *)*out_sd_ptr);
@@ -789,7 +795,8 @@ static long pkm_kacs_open_native_existing_path(
 	*file_out = NULL;
 	pkm_kacs_set_current_native_open_request(resolved_path,
 						 prepared->desired_access,
-						 prepared->create_options);
+						 prepared->create_options,
+						 prepared->privilege_intent);
 	file = dentry_open(resolved_path, prepared->open_flags, current_cred());
 	pkm_kacs_clear_current_native_open_request();
 	if (IS_ERR(file))
@@ -950,8 +957,8 @@ long pkm_kacs_do_native_supersede_open(
 
 	ret = pkm_kacs_build_created_file_sd_for_subject(
 		subject_token, &creation_parent_file, creator_sd_bytes, creator_sd_len,
-		false, prepared->desired_access, &created_sd, &created_sd_len,
-		&granted_access);
+		false, prepared->desired_access, prepared->privilege_intent,
+		&created_sd, &created_sd_len, &granted_access);
 	if (ret)
 		goto out_creator;
 	if (stratafs_supersede) {
@@ -1175,8 +1182,8 @@ static long pkm_kacs_do_native_create_open(
 	pkm_kacs_init_path_anchor_file(&parent_file, &security_parent);
 	ret = pkm_kacs_build_created_file_sd_for_subject(
 		subject_token, &parent_file, creator_sd_bytes, creator_sd_len,
-		directory, prepared->desired_access, &created_sd, &created_sd_len,
-		&granted_access);
+		directory, prepared->desired_access, prepared->privilege_intent,
+		&created_sd, &created_sd_len, &granted_access);
 	if (ret)
 		goto out_end_create;
 	if (stratafs_creation) {
@@ -1259,7 +1266,8 @@ static long pkm_kacs_do_native_create_open(
 	child_path.dentry = dget(open_dentry);
 	pkm_kacs_set_current_native_open_request(&child_path,
 						 prepared->desired_access,
-						 prepared->create_options);
+						 prepared->create_options,
+						 prepared->privilege_intent);
 	opened_file = dentry_open(&child_path, prepared->open_flags, current_cred());
 	pkm_kacs_clear_current_native_open_request();
 	path_put(&child_path);

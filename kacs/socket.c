@@ -391,6 +391,7 @@ int pkm_kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 	sec->level_set = false;
 	sec->listener_token = NULL;
 	sec->binder_token = NULL;
+	sec->rebind_tcb = false;
 	mutex_init(&sec->convey_lock);
 	sec->convey_src = NULL;
 	sec->convey_token = NULL;
@@ -415,6 +416,7 @@ void pkm_kacs_sk_free_security(struct sock *sk)
 	pkm_kacs_socket_peer_token_drop(sec);
 	pkm_kacs_listener_set(sec, NULL);
 	pkm_kacs_binder_set(sec, NULL);
+	sec->rebind_tcb = false;
 	pkm_kacs_socket_owner_set(sec, NULL, PEIOS_PNP_OWNER_UNSTAMPED, NULL, 0,
 				  NULL);
 	pkm_kacs_socket_convey_drop(sec);
@@ -691,11 +693,47 @@ static int pkm_kacs_inet_bind(struct socket *sock,
 		binder = kacs_rust_token_clone(subject_token);
 		if (binder)
 			pkm_kacs_binder_set(sec, binder);
+		/*
+		 * The privilege half of the rebind rule (<pkm/net.h>): a
+		 * reusable socket whose binder holds SeTcbPrivilege may
+		 * share the port with another principal's binding. Decided
+		 * here, where the token can be consulted; the conflict
+		 * code reads the flag through
+		 * pkm_kacs_reuseport_owner_matches() under its spinlocks.
+		 */
+		sec->rebind_tcb = false;
+		if ((sock->sk->sk_reuse || sock->sk->sk_reuseport) &&
+		    kacs_rust_token_has_enabled_privilege(
+			    subject_token, KACS_SE_TCB_PRIVILEGE) &&
+		    kacs_rust_token_mark_privileges_used(
+			    subject_token, KACS_SE_TCB_PRIVILEGE))
+			sec->rebind_tcb = true;
 	}
 	trace_kacs_socket_bind(sock->sk->sk_family, sock->type, sock->state,
 			       port, KACS_PORT_BIND, KACS_SOCK_PORT_BIND, ret);
 	return ret;
 }
+
+/*
+ * The owner comparison the inet bind-conflict and reuseport-group code
+ * makes between a binding socket @sk (whose uid is @uid) and an existing
+ * one @sk2: Linux's same-uid rule, which under Peios is the same-user-SID
+ * half of the rebind rule, or a binder that held SeTcbPrivilege. Called
+ * under the bind-hash spinlocks; reads only the flag the bind hook set.
+ */
+bool pkm_kacs_reuseport_owner_matches(const struct sock *sk, kuid_t uid,
+				      const struct sock *sk2)
+{
+	const struct pkm_kacs_socket_security *sec;
+
+	if (uid_eq(uid, sk_uid(sk2)))
+		return true;
+	if (!sk || !sk->sk_security)
+		return false;
+	sec = pkm_kacs_sock((struct sock *)sk);
+	return sec->rebind_tcb;
+}
+EXPORT_SYMBOL_GPL(pkm_kacs_reuseport_owner_matches);
 
 int pkm_kacs_socket_bind(struct socket *sock, struct sockaddr *address,
 			 int addrlen)

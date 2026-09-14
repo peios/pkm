@@ -21,7 +21,8 @@ config SECURITY_PKM
 
 	  KACS must be the sole MAC LSM. Conflicting MAC LSMs (SELinux,
 	  AppArmor, SMACK, TOMOYO) are rejected at Kconfig level.
-	  Non-MAC LSMs (landlock, lockdown, yama, integrity) are accepted.
+	  Non-MAC LSMs (landlock, lockdown, integrity) are accepted. Yama is
+	  not: its ptrace_scope would decide attach ahead of KACS (PEI-689).
 
 	  If unsure, say N.
 

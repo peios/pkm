@@ -20,8 +20,17 @@ CONFIG_RUST=y
 # CONFIG_SECURITY_TOMOYO is not set
 # CONFIG_SECURITY_SMACK is not set
 # CONFIG_BPF_LSM is not set
+# Yama is out too (PEI-689). It is not a MAC, but its ptrace_scope gate runs
+# ahead of KACS and, at the default relational scope, answers every attach
+# to a non-descendant with "does the caller hold CAP_SYS_PTRACE", which the
+# switchboard maps to SeDebugPrivilege. That made the process descriptor's
+# PROCESS_VM_WRITE and PROCESS_DUP_HANDLE inert: the descriptor never got a
+# say. KACS's own hook, plus PIP dominance, is the whole ptrace authority
+# (TRM §3.7), and the same-uid attack Yama exists to close cannot arise
+# under KACS, which never grants on uid.
+# CONFIG_SECURITY_YAMA is not set
 CONFIG_SECURITY_PKM=y
-CONFIG_LSM="landlock,lockdown,yama,integrity,pkm"
+CONFIG_LSM="landlock,lockdown,integrity,pkm"
 # LoadPin (pin module/firmware loads to one filesystem) was =y in the base
 # config but never in CONFIG_LSM, so it was compiled and never initialised —
 # and it could not work here anyway: it pins to whichever filesystem serves
