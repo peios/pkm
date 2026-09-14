@@ -45,9 +45,12 @@ root=$(cd "$root" && pwd)
 
 cd "$tree"
 
+# Pekit signs the installed .ko.zst files after worker shutdown. The kernel
+# config still requires signatures at load time; suppress only this build-time
+# invocation of scripts/sign-file, which must never receive a production key.
 # INSTALL_MOD_STRIP=1 strips debug info from the installed modules; the debug
 # info is carried separately by the debuginfo stage.
-"${make[@]}" modules_install INSTALL_MOD_PATH="$root" INSTALL_MOD_STRIP=1
+"${make[@]}" modules_install CONFIG_MODULE_SIG_ALL= INSTALL_MOD_PATH="$root" INSTALL_MOD_STRIP=1
 
 release=$("${make[@]}" -s kernelrelease)
 moddir="$root/lib/modules/$release"

@@ -63,8 +63,8 @@ int main(void)
 	 * -EKEYREJECTED/-ENOKEY/-EBADMSG mean it was not.
 	 */
 	rc = load_module("/good.ko.zst");
-	if (rc == -EKEYREJECTED || rc == -ENOKEY || rc == -EBADMSG) {
-		printf("MODSIG_SMOKE_FAIL: signature rejected (%d: %s)\n",
+	if (rc != 0 && rc != -ENODEV) {
+		printf("MODSIG_SMOKE_FAIL: signed module did not load (%d: %s)\n",
 		       rc, strerror(-rc));
 		finish(1);
 	}

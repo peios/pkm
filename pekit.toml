@@ -82,6 +82,7 @@ tar = "*"
 # stages take it, configure for a profile, and compile a monolithic bzImage.
 
 [build.kunit]
+keyring_inputs = ["modsig.pub"]
 needs = ["source"]
 command = """
 . ./build/toolchain.lock
@@ -92,12 +93,9 @@ test "$actual_rust" = "$RUST_VERSION" || {
 }
 
 tar -C "$PEKIT_SOURCE_OUT" -cf - . | tar -C "$PEKIT_OUT" -xf -
-# Stage the module-signing key into the tree. certs/Makefile extracts the
-# cert from CONFIG_MODULE_SIG_KEY and links it into .builtin_trusted_keys, so
-# the file must hold the private key and its certificate in one PEM. The name
-# is deliberately not certs/signing_key.pem, which certs/Makefile treats as a
-# request to autogenerate an ephemeral key.
-install -m 0600 "$PEKIT_KEYRING_MODSIG_PRIV" "$PEKIT_OUT/certs/peios-modsig.pem"
+# Only the public certificate enters the worker. Module signatures are
+# attached by Pekit after modules_install and worker shutdown.
+printf '%s\n' "$PEKIT_KEYRING_MODSIG_PUB" > "$PEKIT_OUT/certs/peios-modsig.pem"
 export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 ./build/configure-kernel.sh "$PEKIT_OUT" kunit
 ./build/compile-kernel.sh "$PEKIT_OUT"
@@ -161,6 +159,7 @@ tar = "*"
 xz-utils = "*"
 
 [build.kernel]
+keyring_inputs = ["modsig.pub", "tcb.pub"]
 needs = ["source"]
 command = """
 . ./build/toolchain.lock
@@ -182,12 +181,9 @@ tar -C "$PEKIT_SOURCE_OUT" -cf - . | tar -C "$PEKIT_OUT" -xf -
 python3 kernel/scripts/generate-kacs-builtin-signing-keys.py \
 	--pubkey-hex "$PEKIT_KEYRING_TCB_PUB" \
 	--out "$PEKIT_OUT/security/pkm/kacs/builtin_signing_keys.h"
-# Stage the module-signing key into the tree. certs/Makefile extracts the
-# cert from CONFIG_MODULE_SIG_KEY and links it into .builtin_trusted_keys, so
-# the file must hold the private key and its certificate in one PEM. The name
-# is deliberately not certs/signing_key.pem, which certs/Makefile treats as a
-# request to autogenerate an ephemeral key.
-install -m 0600 "$PEKIT_KEYRING_MODSIG_PRIV" "$PEKIT_OUT/certs/peios-modsig.pem"
+# Only the public certificate enters the worker. Module signatures are
+# attached by Pekit after modules_install and worker shutdown.
+printf '%s\n' "$PEKIT_KEYRING_MODSIG_PUB" > "$PEKIT_OUT/certs/peios-modsig.pem"
 export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 ./build/configure-kernel.sh "$PEKIT_OUT" production "-peios-$PEKIT_VERSION"
 ./build/compile-kernel.sh "$PEKIT_OUT"
@@ -197,6 +193,12 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 ./build/install-modules-irf.sh "$(pwd)" "$PEKIT_OUT/modules-root" \
 	"$PEKIT_OUT/modules-irf-root" "$PEKIT_OUT/System.map"
 """
+
+# Sign both installed module sets after the worker is gone. Private key
+# material is resolved by Pekit's coordinator and never exported to the build.
+[build.kernel.sign.module]
+"modules-root/**/*.ko.zst" = "modsig.priv"
+"modules-irf-root/**/*.ko.zst" = "modsig.priv"
 
 # Same toolchain as build.kunit (production profile); the keygen step adds python3
 # (already required). Rust toolchain comes from the build env/wrap, as above.
@@ -478,21 +480,43 @@ cpio            = "*"
 build-essential = "*"
 qemu-system-x86 = "*"
 
-# Prove firmware signature verification (PEI-493) on the modular kernel: boot
-# it with an initramfs carrying blobs signed on the host with the keyring's
-# TCB key, stamp them into security.peios.sig, and pull each through the
-# loader's self-test module (CONFIG_TEST_FIRMWARE). Booted twice: under
-# kacs_fwsig=enforce the unsigned and tampered blobs are refused, under
-# kacs_fwsig=log they load with a warning. Signed blobs load either way.
+# Firmware fixtures are prepared in a worker and signed by the coordinator.
+# The boot test consumes those signatures without receiving the TCB key.
+[build.fwsig]
+needs = ["kernel"]
+command = './build/prepare-fwsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root" "$PEKIT_OUT"'
+
+[build.fwsig.sign.pip]
+"root/lib/firmware/fwsig-good.bin" = "tcb.priv"
+"root/lib/firmware/fwsig-goodz.bin.zst" = "tcb.priv"
+
+[build.fwsig.dependencies.peipkg]
+"org.git.kernel.dash"          = "*"
+"org.gnu.bash"                 = "*"
+"dev.peios.peiosutils"         = "*"
+"org.gnu.findutils"            = "*"
+"org.gnu.grep"                 = "*"
+"org.gnu.cpio"                 = "*"
+"org.openssl.openssl"          = "*"
+"com.facebook.zstd"            = "*"
+"dev.peios.build-essentials-c" = "*"
+
+[build.fwsig.dependencies.apt]
+bash            = "*"
+coreutils       = "*"
+findutils       = "*"
+grep            = "*"
+cpio            = "*"
+openssl         = "*"
+zstd            = "*"
+build-essential = "*"
+qemu-system-x86 = "*"
+
 [test.fwsig]
 gate = true
-needs = ["kernel"]
-command = """
-./build/test-fwsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root"
-"""
+needs = ["kernel", "fwsig"]
+command = './build/test-fwsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root" "$PEKIT_FWSIG_OUT"'
 
-# Same shape as test.modsig, plus openssl (ML-DSA-65 signing) and zstd (a
-# compressed blob, to show the signature covers the on-disk bytes).
 [test.fwsig.dependencies.peipkg]
 "org.git.kernel.dash"          = "*"
 "org.gnu.bash"                 = "*"
