@@ -441,6 +441,24 @@ command = """
 ./build/test-kunit.sh "$PEKIT_KUNIT_OUT"
 """
 
+# The workspace isolates every target, so the stage sees only what it
+# declares: without these it has no shell to start the script with. The
+# peipkg list stops at "qemu not found" until QEMU is packaged; --env debian
+# is the one that boots.
+[test.kunit.dependencies.peipkg]
+"org.git.kernel.dash"  = "*"
+"org.gnu.bash"         = "*"
+"dev.peios.peiosutils" = "*"
+"org.gnu.grep"         = "*"
+"org.gnu.sed"          = "*"
+
+[test.kunit.dependencies.apt]
+bash            = "*"
+coreutils       = "*"
+grep            = "*"
+sed             = "*"
+qemu-system-x86 = "*"
+
 # Boot the same KACS-enabled kernel with a purpose-built initramfs and exercise
 # StrataFS through real mount/open/read/write/mmap/xattr/link/rename syscalls.
 # Prove the module-signing chain on the modular kernel: boot it with a minimal
@@ -628,3 +646,16 @@ gate = true
 command = """
 bash uapi/check-userspace-clean.sh
 """
+
+# The isolated stage needs its shell and C compiler declared, like every
+# other target.
+[test.uapi.dependencies.peipkg]
+"org.git.kernel.dash"          = "*"
+"org.gnu.bash"                 = "*"
+"dev.peios.peiosutils"         = "*"
+"dev.peios.build-essentials-c" = "*"
+
+[test.uapi.dependencies.apt]
+bash            = "*"
+coreutils       = "*"
+build-essential = "*"
