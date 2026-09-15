@@ -78,3 +78,7 @@ net/pnp-conntrack-ext.patch
 # PNP Flow slice: the refusal bit on sk_buff (PNP does not judge its own
 # refusals). One hunk in include/linux/skbuff.h; order-independent.
 net/pnp-refusal-bit.patch
+# PEI-1078: CLONE_INTO_CGROUP captured the parent's cgroup kill_seq, so every
+# child cloned into a cgroup that was ever cgroup.kill'ed was SIGKILLed at
+# birth. One hunk in kernel/cgroup/cgroup.c; no other patch touches it.
+kernel/cgroup-clone-into-cgroup-kill-seq.patch

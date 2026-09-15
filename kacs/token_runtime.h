@@ -707,6 +707,9 @@ int kacs_rust_port_table_reset(void);
 bool kacs_rust_port_table_loaded(void);
 const u8 *kacs_rust_port_fallback_sd(size_t *len_out);
 const u8 *kacs_rust_create_lcs_base_layer_default_sd(size_t *len_out);
+const u8 *kacs_rust_create_stratafs_bare_root_sd(const u8 *owner_sid_ptr,
+						 size_t owner_sid_len,
+						 size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_limited_process_sd(const void *token_ptr,
 							  size_t *len_out);
 const u8 *kacs_rust_kunit_create_query_information_process_sd(

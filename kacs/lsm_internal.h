@@ -114,6 +114,14 @@ enum pkm_kacs_inode_sd_source {
 	 * xattr to a real SOURCE_XATTR entry on the next cache miss.
 	 */
 	PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING = 5,
+	/*
+	 * A StrataFS root's descriptor, read through the outer inode. Which
+	 * stratum root provides the mount root -- or whether any does -- changes
+	 * underneath it with no event KACS can see. The entry satisfies the
+	 * check that just refreshed it, and every ensure re-reads it in place
+	 * rather than trusting what an earlier check read (PEI-575).
+	 */
+	PKM_KACS_INODE_SD_SOURCE_STRATAFS_ROOT = 6,
 };
 
 struct pkm_kacs_inode_sd_cache {
@@ -317,6 +325,14 @@ struct pkm_kacs_task_security {
 	const struct inode *delete_on_close_parent_inode;
 	const struct dentry *delete_on_close_dentry;
 	const struct inode *delete_on_close_inode;
+	/*
+	 * Whether stratafs's own unlink saw the deferred deletion in flight.
+	 * A refusal raised before ->unlink is entered -- may_delete()'s
+	 * permission check on the merged parent -- leaves it clear, and the
+	 * audit record stratafs owes for a refused deferred deletion is then
+	 * raised from KACS instead (PEI-588).
+	 */
+	bool delete_on_close_stratafs_entered;
 	const struct cred *impersonation_saved_cred;
 	struct pkm_kacs_native_open_request native_open;
 	struct pkm_kacs_native_create_request native_create;

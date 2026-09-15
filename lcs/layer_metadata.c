@@ -270,6 +270,20 @@ static long pkm_lcs_layer_metadata_refresh_all_admit_children(
 	return 0;
 }
 
+/*
+ * Which per-child refresh failures the bootstrap refresh isolates. Malformed
+ * metadata -- an unparseable descriptor, a wrong-typed or mis-sized value, an
+ * Enabled above one -- comes back from the refresh as -EIO, and a child that
+ * vanished between enumeration and refresh as -ENOENT; either is that layer's
+ * problem alone. Anything else is the source or the kernel failing, and fails
+ * the whole refresh as before.
+ */
+static bool pkm_lcs_layer_metadata_refresh_child_isolated(long ret)
+{
+	return ret == -EIO || ret == -EINVAL || ret == -ENOENT ||
+	       ret == -ENAMETOOLONG;
+}
+
 long pkm_lcs_layer_metadata_refresh_all_from_root(
 	u32 source_id, const u8 layers_root_guid[RSI_GUID_SIZE],
 	struct pkm_lcs_layer_metadata_refresh_all_result *result_out)
@@ -313,6 +327,24 @@ long pkm_lcs_layer_metadata_refresh_all_from_root(
 		ret = pkm_lcs_key_path_refresh_layer_metadata_result(
 			source_id, children.children[i].guid, resolved_path,
 			ARRAY_SIZE(resolved_path), &effective_changed);
+		if (ret && pkm_lcs_layer_metadata_refresh_child_isolated(ret)) {
+			/*
+			 * §5.3.3: a layer whose metadata will not parse is not
+			 * published, and its siblings are unaffected. The live
+			 * refresh has that isolation by construction -- one
+			 * layer per watch event -- and bootstrap has to supply
+			 * it here, or one badly authored layer suppresses every
+			 * other on the machine at boot (PEI-762). The refresh
+			 * has already audited a malformed descriptor; the count
+			 * records the skip.
+			 */
+			trace_lcs_layer_metadata_refresh(
+				source_id, 0, 0, result.refreshed_child_count, 0,
+				0, ret);
+			result.skipped_child_count++;
+			ret = 0;
+			continue;
+		}
 		if (ret)
 			goto out_children;
 		result.refreshed_child_count++;

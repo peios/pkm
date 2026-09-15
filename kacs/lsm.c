@@ -237,20 +237,19 @@ static int __init pkm_init(void)
 	bool caap_ready = false;
 	int ret;
 
-	if (IS_ENABLED(CONFIG_SECURITY_SELINUX) ||
-	    IS_ENABLED(CONFIG_SECURITY_APPARMOR) ||
-	    IS_ENABLED(CONFIG_SECURITY_SMACK) ||
-	    IS_ENABLED(CONFIG_SECURITY_TOMOYO) ||
-	    IS_ENABLED(CONFIG_BPF_LSM)) {
-		pr_err("pkm: conflicting MAC or BPF LSM detected\n");
-		return -EINVAL;
-	}
-
-	if (!IS_ENABLED(CONFIG_STRICT_DEVMEM) ||
-	    !IS_ENABLED(CONFIG_MODULE_SIG_FORCE)) {
-		pr_err("pkm: required PIP build hardening config missing\n");
-		return -EINVAL;
-	}
+	/*
+	 * Both gates test compile-time constants, so a kernel that fails them
+	 * must not build, rather than fail to initialise: upstream only WARNs
+	 * on an LSM init failure and boots with the hooks uninstalled, which
+	 * is a strictly weaker state than the one being refused (PEI-487).
+	 */
+	BUILD_BUG_ON(IS_ENABLED(CONFIG_SECURITY_SELINUX) ||
+		     IS_ENABLED(CONFIG_SECURITY_APPARMOR) ||
+		     IS_ENABLED(CONFIG_SECURITY_SMACK) ||
+		     IS_ENABLED(CONFIG_SECURITY_TOMOYO) ||
+		     IS_ENABLED(CONFIG_BPF_LSM));
+	BUILD_BUG_ON(!IS_ENABLED(CONFIG_STRICT_DEVMEM) ||
+		     !IS_ENABLED(CONFIG_MODULE_SIG_FORCE));
 
 	ret = kacs_rust_init();
 	if (ret) {

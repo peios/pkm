@@ -36,9 +36,11 @@ enum pkm_lcs_source_fd_state {
 #define PKM_LCS_MAX_SYSCALL_LAYER_BYTES_HARD \
 	(PKM_LCS_MAX_LAYER_NAME_BYTES_HARD + 1U)
 #define PKM_LCS_MAX_KEY_DEPTH_HARD 4096U
+/*
+ * The default for MaxTotalLayers only. The layer table is sized to the
+ * configured value at runtime (lcs/layer_table.c), not to this (PEI-759).
+ */
 #define PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT 1024U
-#define PKM_LCS_MAX_DYNAMIC_LAYERS_DEFAULT \
-	(PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT - 1U)
 
 struct pkm_lcs_runtime_limits {
 	u32 request_timeout_ms;
@@ -392,6 +394,8 @@ struct pkm_lcs_layer_metadata_refresh_all_result {
 	u32 enumerated_child_count;
 	u32 refreshed_child_count;
 	u32 effective_changed_count;
+	/* Children whose metadata would not parse, isolated and left unpublished. */
+	u32 skipped_child_count;
 };
 
 struct pkm_lcs_source_bootstrap_refresh_result {

@@ -418,6 +418,21 @@ int stratafs_provider_directory(struct super_block *sb, const char *relative,
 	return ret;
 }
 
+/*
+ * A deferred deletion refused before stratafs was entered -- may_delete()'s
+ * check on the merged parent, which precedes ->unlink -- still owes the
+ * record §4.6.5 promises for every refused deferred deletion. KACS raises it
+ * through here. No stratum was consulted, so the provider index is -1
+ * (PEI-588).
+ */
+void stratafs_kacs_audit_deferred_refusal(const struct dentry *outer,
+					  int result)
+{
+	if (!outer || !outer->d_sb || outer->d_sb->s_magic != STRATAFS_MAGIC)
+		return;
+	stratafs_audit_refusal(outer, "unlink", -1, result, true);
+}
+
 int stratafs_kacs_creation_parent(const struct path *outer_parent,
 				   struct path *security_parent)
 {

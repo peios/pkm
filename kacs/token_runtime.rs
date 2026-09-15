@@ -4635,6 +4635,22 @@ fn build_lcs_base_layer_default_sd_bytes() -> Result<(*mut u8, usize), i32> {
     )
 }
 
+/// The descriptor a StrataFS root serves while no stratum root exists to
+/// provide one (PEI-575): owned by the mounter, readable and traversable by
+/// everyone, and nothing more -- there is nothing beneath such a root to write.
+fn build_stratafs_bare_root_sd_bytes(owner_sid_bytes: &[u8]) -> Result<(*mut u8, usize), i32> {
+    let owner = Sid::parse(owner_sid_bytes).map_err(|_| -EINVAL)?;
+
+    build_process_sd_bytes(
+        owner,
+        owner,
+        None,
+        None,
+        None,
+        Some(crate::GENERIC_READ | crate::GENERIC_EXECUTE),
+    )
+}
+
 fn mask_option(mask: u32) -> Option<u32> {
     (mask != 0).then_some(mask)
 }
@@ -9640,6 +9656,28 @@ pub extern "C" fn kacs_rust_create_lcs_base_layer_default_sd(
     len_out: *mut usize,
 ) -> *const u8 {
     let Ok((ptr, len)) = build_lcs_base_layer_default_sd_bytes() else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Builds the descriptor a provider-less StrataFS root serves (PEI-575). The
+/// owner SID is the mounter's; the result is freed with pkm_kacs_free.
+pub extern "C" fn kacs_rust_create_stratafs_bare_root_sd(
+    owner_sid_ptr: *const u8,
+    owner_sid_len: usize,
+    len_out: *mut usize,
+) -> *const u8 {
+    if owner_sid_ptr.is_null() || owner_sid_len == 0 {
+        return null();
+    }
+    let owner_sid_bytes = unsafe { core::slice::from_raw_parts(owner_sid_ptr, owner_sid_len) };
+    let Ok((ptr, len)) = build_stratafs_bare_root_sd_bytes(owner_sid_bytes) else {
         return null();
     };
 

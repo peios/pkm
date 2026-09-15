@@ -590,7 +590,10 @@ struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script {
 	struct file *file;
 	struct pkm_lcs_kunit_enum_children_source_script enum_children;
 	struct pkm_lcs_kunit_layer_metadata_refresh_source_script refresh;
+	/* Served after `refresh` when the enumeration carried a second child. */
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script second_refresh;
 	bool expect_refresh;
+	bool expect_second_refresh;
 	u32 reads;
 	u32 writes;
 	int result;

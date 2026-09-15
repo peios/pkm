@@ -448,6 +448,102 @@ static void pkm_lcs_kunit_layer_metadata_refresh_all_empty_noops(
 }
 
 
+/*
+ * PEI-762: one malformed layer at bootstrap is skipped and its sibling still
+ * publishes. The first child's Enabled is 2, which the refresh rejects as
+ * malformed before it asks for the Owner; the second child is well-formed and
+ * lands in the table. Round trips: one enumeration, three for the broken child
+ * (read-key, Precedence, Enabled), four for the good one.
+ */
+static void pkm_lcs_kunit_layer_metadata_refresh_all_isolates_malformed_child(
+	struct kunit *test)
+{
+	static const u8 layers_root_guid[RSI_GUID_SIZE] = { 0x7b };
+	static const u8 broken_guid[RSI_GUID_SIZE] = { 0x7c };
+	static const u8 keeper_guid[RSI_GUID_SIZE] = { 0x7d };
+	struct pkm_lcs_layer_metadata_refresh_all_result result = { };
+	struct pkm_lcs_rsi_layer_view layers[3] = { };
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script script = {
+		.enum_children = {
+			.expected_parent_guid = layers_root_guid,
+			.child_name = "Broken",
+			.layer_name = "base",
+			.child_guid = broken_guid,
+			.include_second_entry = true,
+			.second_child_name = "Keeper",
+			.second_layer_name = "base",
+			.second_child_guid = keeper_guid,
+		},
+		.refresh = {
+			.expected_guid = broken_guid,
+			.name = "Broken",
+			.sd = pkm_lcs_kunit_owner_only_sd,
+			.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+			.precedence = 0,
+			.enabled = 2,
+			.precedence_present = true,
+			.enabled_present = true,
+		},
+		.second_refresh = {
+			.expected_guid = keeper_guid,
+			.name = "Keeper",
+			.sd = pkm_lcs_kunit_owner_only_sd,
+			.sd_len = sizeof(pkm_lcs_kunit_owner_only_sd),
+			.precedence = 4,
+			.enabled = 1,
+			.precedence_present = true,
+			.enabled_present = true,
+		},
+		.expect_refresh = true,
+		.expect_second_refresh = true,
+	};
+	char names[64] = { };
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	u32 count = 0;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_runtime_limits_reset_defaults();
+	pkm_lcs_kunit_reset_layer_table();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_layer_metadata_refresh_all_source_thread,
+		&script, "pkm-lcs-kunit-layers-refresh-isolate");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_layer_metadata_refresh_all_from_root(
+		1, layers_root_guid, &result);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 8U);
+	KUNIT_EXPECT_EQ(test, script.writes, 8U);
+	KUNIT_EXPECT_EQ(test, result.enumerated_child_count, 2U);
+	KUNIT_EXPECT_EQ(test, result.refreshed_child_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.skipped_child_count, 1U);
+	KUNIT_EXPECT_EQ(test, result.effective_changed_count, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_layer_snapshot_copy(
+				layers, ARRAY_SIZE(layers), names, sizeof(names),
+				&count),
+			0L);
+	KUNIT_ASSERT_EQ(test, count, 2U);
+	KUNIT_EXPECT_STREQ(test, layers[1].name, "Keeper");
+	KUNIT_EXPECT_EQ(test, layers[1].precedence, 4U);
+	KUNIT_EXPECT_EQ(test, layers[1].enabled, 1U);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	pkm_lcs_kunit_reset_layer_table();
+	kacs_rust_token_drop(token);
+}
+
+
 static void pkm_lcs_kunit_layer_metadata_refresh_all_respects_total_layer_cap(
 	struct kunit *test)
 {
@@ -1004,6 +1100,91 @@ static void pkm_lcs_kunit_layer_table_publish_uses_runtime_limits(
 				&removed),
 			0L);
 	KUNIT_EXPECT_TRUE(test, removed);
+
+	pkm_lcs_kunit_reset_layer_table();
+}
+
+
+static long pkm_lcs_kunit_publish_named_layer(
+	const char *name, u32 precedence, u16 tag,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	u8 layer_guid[RSI_GUID_SIZE] = { 0xd7 };
+
+	layer_guid[1] = (u8)(tag & 0xffU);
+	layer_guid[2] = (u8)(tag >> 8);
+	return pkm_lcs_layer_table_publish_with_result_with_limits(
+		name, strlen(name), precedence, 1, layer_guid,
+		pkm_lcs_kunit_owner_only_sd, sizeof(pkm_lcs_kunit_owner_only_sd),
+		pkm_lcs_kunit_system_sid, sizeof(pkm_lcs_kunit_system_sid),
+		limits, NULL);
+}
+
+/*
+ * PEI-759: the table is sized to MaxTotalLayers rather than fixed at build.
+ * Raising the bound above the default admits layers past the old 1023-entry
+ * array and the snapshot copies every one of them; lowering it below the
+ * occupancy refuses a new entry, still republishes an existing one in place,
+ * and discards nothing.
+ */
+static void pkm_lcs_kunit_layer_table_grows_to_max_total_layers(
+	struct kunit *test)
+{
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits = { };
+	char name[16];
+	bool removed = false;
+	u32 published = 0;
+	long ret = 0;
+
+	pkm_lcs_kunit_reset_layer_table();
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&limits), 0L);
+	limits.max_total_layers = 2048U;
+
+	while (published < 1100U) {
+		snprintf(name, sizeof(name), "grow%04u", published);
+		ret = pkm_lcs_kunit_publish_named_layer(
+			name, 0, (u16)(published + 1U), &limits);
+		if (ret)
+			break;
+		published++;
+	}
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, published, 1100U);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_layer_table_count(), 1101U);
+
+	KUNIT_ASSERT_EQ(test, pkm_lcs_source_layer_snapshot_acquire(&snapshot),
+			0L);
+	KUNIT_EXPECT_EQ(test, snapshot.layer_count, 1101U);
+	KUNIT_EXPECT_EQ(test, snapshot.metadata_count, 1100U);
+	KUNIT_EXPECT_STREQ(test, snapshot.layers[0].name, "base");
+	KUNIT_EXPECT_STREQ(test, snapshot.layers[1100].name, "grow1099");
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+
+	/* The default bound is now below the occupancy: nothing new fits... */
+	limits.max_total_layers = PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT;
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_publish_named_layer("extra", 0, 0xfff0U,
+							  &limits),
+			(long)-ENOSPC);
+	/* ...an existing entry still republishes in place... */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_publish_named_layer("GROW0007", 3, 8U,
+							  &limits),
+			0L);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_layer_table_count(), 1101U);
+	/* ...and a deletion below the bound is still not room for a new one. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_table_remove_with_limits(
+				"grow0007", strlen("grow0007"), &limits,
+				&removed),
+			0L);
+	KUNIT_EXPECT_TRUE(test, removed);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_layer_table_count(), 1100U);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_publish_named_layer("extra", 0, 0xfff0U,
+							  &limits),
+			(long)-ENOSPC);
 
 	pkm_lcs_kunit_reset_layer_table();
 }
@@ -2079,6 +2260,7 @@ static struct kunit_case pkm_lcs_kunit_layer_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_children_bad_inputs_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_all_publishes_children),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_all_empty_noops),
+	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_all_isolates_malformed_child),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_all_respects_total_layer_cap),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_all_bad_inputs_fail_closed),
 	KUNIT_CASE(pkm_lcs_kunit_layer_write_access_allows_key_set_value),
@@ -2095,6 +2277,7 @@ static struct kunit_case pkm_lcs_kunit_layer_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_layer_owner_unresolvable_blocks_publication),
 	KUNIT_CASE(pkm_lcs_kunit_layer_snapshot_incomplete_entry_is_eio),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_uses_runtime_limits),
+	KUNIT_CASE(pkm_lcs_kunit_layer_table_grows_to_max_total_layers),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_uses_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_layer_path_refresh_uses_supplied_limits),
 	KUNIT_CASE(pkm_lcs_kunit_layer_metadata_refresh_publishes_and_retains),

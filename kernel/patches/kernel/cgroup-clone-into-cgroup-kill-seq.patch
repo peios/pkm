@@ -1,0 +1,19 @@
+--- a/kernel/cgroup/cgroup.c
++++ b/kernel/cgroup/cgroup.c
+@@ -6841,6 +6841,16 @@
+ 
+ 	put_css_set(cset);
+ 	kargs->cgrp = dst_cgrp;
++	/*
++	 * Capture the kill sequence of the cgroup the child is actually going
++	 * into. The capture above ran before dst_cgrp was resolved, so it read
++	 * the parent's cgroup; cgroup_post_fork() compares against the target,
++	 * and a target that has ever been written cgroup.kill mismatches for
++	 * the rest of its life, killing every child cloned into it (PEI-1078).
++	 */
++	spin_lock_irq(&css_set_lock);
++	kargs->kill_seq = dst_cgrp->kill_seq;
++	spin_unlock_irq(&css_set_lock);
+ 	return ret;
+ 
+ err:

@@ -5,6 +5,7 @@
 #include <linux/fs.h>
 #include <linux/types.h>
 
+struct cred;
 struct dentry;
 struct path;
 
@@ -16,6 +17,13 @@ int stratafs_kacs_removal_parent(const struct path *outer_target,
 int stratafs_kacs_removal_target(const struct path *outer_target,
 				  struct path *security_target);
 int stratafs_kacs_validate_supersede(const struct path *outer_target);
+/*
+ * Audit a deferred deletion refused before stratafs's unlink was entered --
+ * by the access check on the merged parent that precedes ->unlink. §4.6.5
+ * audits a refused deferred deletion on any non-zero result (PEI-588).
+ */
+void stratafs_kacs_audit_deferred_refusal(const struct dentry *outer,
+					  int result);
 #endif
 
 /* Fixed by PSD-011; shared with KACS so its mount policy is immutable. */
@@ -42,6 +50,12 @@ int pkm_kacs_stratafs_mark_unnamed_link(const struct dentry *source);
 void pkm_kacs_stratafs_end_create_decision(void);
 bool pkm_kacs_stratafs_is_descriptor_xattr(const struct inode *inode,
 					   const char *name);
+/*
+ * The descriptor a root with no providing stratum root serves: owned by the
+ * mounter, read and traverse for everyone. getxattr semantics (PEI-575).
+ */
+ssize_t pkm_kacs_stratafs_bare_root_descriptor(const struct cred *mounter,
+					       void *buffer, size_t size);
 void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 				     u32 provider_index,
 				     const char *provider_stratum,

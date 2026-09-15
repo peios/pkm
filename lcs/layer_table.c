@@ -25,7 +25,8 @@ struct pkm_lcs_layer_table_entry {
 	u8 _pad[2];
 	u32 name_len;
 	u32 precedence;
-	char name[PKM_LCS_MAX_LAYER_NAME_BYTES_HARD + 1U];
+	/* NUL-terminated, owned; sized to the name so the table stays small. */
+	char *name;
 	u8 metadata_key_guid[RSI_GUID_SIZE];
 	u8 *metadata_sd;
 	size_t metadata_sd_len;
@@ -40,9 +41,17 @@ struct pkm_lcs_base_layer_metadata_entry {
 	size_t metadata_sd_len;
 };
 
+/*
+ * The dynamic layer table. Sized to MaxTotalLayers (base included) rather than
+ * fixed at build: allocated on the first publication and grown, under the lock,
+ * whenever a publication finds every slot occupied while the configured bound
+ * still admits one more. It never shrinks -- lowering MaxTotalLayers below the
+ * occupancy admits no new layer until enough are deleted, and discards nothing
+ * -- so a value anywhere in the configurable range binds (PEI-759).
+ */
 static DEFINE_MUTEX(pkm_lcs_layer_table_lock);
-static struct pkm_lcs_layer_table_entry
-	pkm_lcs_layer_table[PKM_LCS_MAX_DYNAMIC_LAYERS_DEFAULT];
+static struct pkm_lcs_layer_table_entry *pkm_lcs_layer_table;
+static u32 pkm_lcs_layer_table_capacity;
 static struct pkm_lcs_base_layer_metadata_entry pkm_lcs_base_layer_metadata;
 
 static const char pkm_lcs_base_layer_name[] = "base";
@@ -146,9 +155,35 @@ void pkm_lcs_create_layer_target_set_base(
 static void pkm_lcs_layer_table_entry_destroy(
 	struct pkm_lcs_layer_table_entry *entry)
 {
+	kfree(entry->name);
 	kfree(entry->metadata_sd);
 	kfree(entry->owner_sid);
 	memset(entry, 0, sizeof(*entry));
+}
+
+/*
+ * Grow the table to hold @capacity dynamic entries. Entries move by value and
+ * the strings they own move with them, so nothing beyond the slot array itself
+ * is copied or freed.
+ */
+static long pkm_lcs_layer_table_grow_locked(u32 capacity)
+{
+	struct pkm_lcs_layer_table_entry *table;
+
+	lockdep_assert_held(&pkm_lcs_layer_table_lock);
+
+	if (capacity <= pkm_lcs_layer_table_capacity)
+		return 0;
+	table = kvcalloc(capacity, sizeof(*table), GFP_KERNEL);
+	if (!table)
+		return -ENOMEM;
+	if (pkm_lcs_layer_table_capacity)
+		memcpy(table, pkm_lcs_layer_table,
+		       (size_t)pkm_lcs_layer_table_capacity * sizeof(*table));
+	kvfree(pkm_lcs_layer_table);
+	pkm_lcs_layer_table = table;
+	pkm_lcs_layer_table_capacity = capacity;
+	return 0;
 }
 
 static void pkm_lcs_base_layer_metadata_destroy_locked(void)
@@ -167,7 +202,7 @@ static u32 pkm_lcs_layer_table_count_locked(void)
 
 	lockdep_assert_held(&pkm_lcs_layer_table_lock);
 
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		if (pkm_lcs_layer_table[i].occupied)
 			count++;
 	}
@@ -206,7 +241,7 @@ static long pkm_lcs_layer_table_shape_locked(u32 *count_out,
 			return -EOVERFLOW;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		if (!pkm_lcs_layer_table[i].occupied)
 			continue;
 		if (!pkm_lcs_layer_table[i].metadata_sd ||
@@ -376,7 +411,7 @@ long pkm_lcs_source_layer_snapshot_copy(
 	}
 
 	layers[written++] = pkm_lcs_base_layer_snapshot[0];
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		struct pkm_lcs_layer_table_entry *entry =
 			&pkm_lcs_layer_table[i];
 		char *name_dst;
@@ -468,7 +503,7 @@ static long pkm_lcs_source_layer_snapshot_copy_full(
 		metadata_sd_offset +=
 			pkm_lcs_base_layer_metadata.metadata_sd_len;
 	}
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		struct pkm_lcs_layer_table_entry *entry =
 			&pkm_lcs_layer_table[i];
 		char *name_dst;
@@ -549,7 +584,7 @@ long pkm_lcs_source_layer_snapshot_acquire(
 		if (ret)
 			return ret;
 
-		if (!count || count > PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT)
+		if (!count)
 			return -EIO;
 		metadata_count = count - 1U;
 
@@ -654,7 +689,7 @@ long pkm_lcs_layer_table_owner_snapshot(
 	*present_out = false;
 
 	mutex_lock(&pkm_lcs_layer_table_lock);
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		struct pkm_lcs_layer_table_entry *entry =
 			&pkm_lcs_layer_table[i];
 		bool equal = false;
@@ -754,6 +789,7 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	struct pkm_lcs_layer_table_entry *target = NULL;
 	u8 *metadata_sd_copy;
 	u8 *owner_sid_copy;
+	char *name_copy;
 	bool existed_before;
 	bool effective_changed;
 	u8 previous_enabled;
@@ -787,9 +823,17 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 		kfree(metadata_sd_copy);
 		return -ENOMEM;
 	}
+	name_copy = kmalloc((size_t)layer_name_len + 1U, GFP_KERNEL);
+	if (!name_copy) {
+		kfree(owner_sid_copy);
+		kfree(metadata_sd_copy);
+		return -ENOMEM;
+	}
+	memcpy(name_copy, layer_name, layer_name_len);
+	name_copy[layer_name_len] = '\0';
 
 	mutex_lock(&pkm_lcs_layer_table_lock);
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		bool equal = false;
 
 		if (!pkm_lcs_layer_table[i].occupied) {
@@ -800,12 +844,8 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 		ret = pkm_lcs_layer_name_casefold_equal_with_limits(
 			layer_name, layer_name_len, pkm_lcs_layer_table[i].name,
 			pkm_lcs_layer_table[i].name_len, limits, &equal);
-		if (ret) {
-			mutex_unlock(&pkm_lcs_layer_table_lock);
-			kfree(metadata_sd_copy);
-			kfree(owner_sid_copy);
-			return ret;
-		}
+		if (ret)
+			goto out_unlock_free;
 		if (equal) {
 			target = &pkm_lcs_layer_table[i];
 			break;
@@ -817,14 +857,30 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	 * Creation is normally refused earlier, at the metadata key, so that
 	 * nothing reaches the source; this is the backstop that keeps the
 	 * table within the bound every snapshot buffer is sized to (PEI-759).
+	 *
+	 * A new entry that the bound admits but no slot can hold grows the
+	 * table to the bound: the table follows the configuration rather than
+	 * a compile-time size.
 	 */
-	if (!target || (!target->occupied &&
-			pkm_lcs_layer_table_count_locked() >=
-				limits->max_total_layers)) {
-		mutex_unlock(&pkm_lcs_layer_table_lock);
-		kfree(metadata_sd_copy);
-		kfree(owner_sid_copy);
-		return -ENOSPC;
+	if (!target || !target->occupied) {
+		if (pkm_lcs_layer_table_count_locked() >=
+		    limits->max_total_layers) {
+			ret = -ENOSPC;
+			goto out_unlock_free;
+		}
+		if (!target) {
+			u32 index = pkm_lcs_layer_table_capacity;
+
+			ret = pkm_lcs_layer_table_grow_locked(
+				limits->max_total_layers - 1U);
+			if (ret)
+				goto out_unlock_free;
+			if (index >= pkm_lcs_layer_table_capacity) {
+				ret = -ENOSPC;
+				goto out_unlock_free;
+			}
+			target = &pkm_lcs_layer_table[index];
+		}
 	}
 
 	existed_before = target->occupied;
@@ -833,6 +889,7 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	effective_changed = pkm_lcs_layer_table_effective_changed(
 		existed_before, previous_enabled, previous_precedence, enabled,
 		precedence);
+	kfree(target->name);
 	kfree(target->metadata_sd);
 	kfree(target->owner_sid);
 	memset(target, 0, sizeof(*target));
@@ -840,8 +897,7 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 	target->enabled = enabled;
 	target->name_len = layer_name_len;
 	target->precedence = precedence;
-	memcpy(target->name, layer_name, layer_name_len);
-	target->name[layer_name_len] = '\0';
+	target->name = name_copy;
 	memcpy(target->metadata_key_guid, metadata_key_guid, RSI_GUID_SIZE);
 	target->metadata_sd = metadata_sd_copy;
 	target->metadata_sd_len = metadata_sd_len;
@@ -861,6 +917,13 @@ long pkm_lcs_layer_table_publish_with_result_with_limits(
 				jhash(layer_name, layer_name_len, 0), precedence,
 				enabled, effective_changed ? 1 : 0, 0);
 	return 0;
+
+out_unlock_free:
+	mutex_unlock(&pkm_lcs_layer_table_lock);
+	kfree(name_copy);
+	kfree(owner_sid_copy);
+	kfree(metadata_sd_copy);
+	return ret;
 }
 
 long pkm_lcs_layer_table_publish_with_result(
@@ -945,7 +1008,7 @@ long pkm_lcs_layer_table_remove_with_limits(
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_layer_table_lock);
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		bool equal = false;
 
 		if (!pkm_lcs_layer_table[i].occupied)
@@ -1000,7 +1063,7 @@ long pkm_lcs_layer_table_metadata_key_guid_present(
 		mutex_unlock(&pkm_lcs_layer_table_lock);
 		return 0;
 	}
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		if (!pkm_lcs_layer_table[i].occupied)
 			continue;
 		if (!memcmp(pkm_lcs_layer_table[i].metadata_key_guid,
@@ -1027,7 +1090,7 @@ long pkm_lcs_kunit_layer_table_strip_owner(const char *layer_name,
 	if (!layer_name)
 		return -EINVAL;
 	mutex_lock(&pkm_lcs_layer_table_lock);
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++) {
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++) {
 		struct pkm_lcs_layer_table_entry *entry =
 			&pkm_lcs_layer_table[i];
 		bool equal = false;
@@ -1057,8 +1120,12 @@ void pkm_lcs_kunit_reset_layer_table(void)
 
 	mutex_lock(&pkm_lcs_layer_table_lock);
 	pkm_lcs_base_layer_metadata_destroy_locked();
-	for (i = 0; i < ARRAY_SIZE(pkm_lcs_layer_table); i++)
+	for (i = 0; i < pkm_lcs_layer_table_capacity; i++)
 		pkm_lcs_layer_table_entry_destroy(&pkm_lcs_layer_table[i]);
+	/* Back to the unallocated shape, so a case sees the first growth too. */
+	kvfree(pkm_lcs_layer_table);
+	pkm_lcs_layer_table = NULL;
+	pkm_lcs_layer_table_capacity = 0;
 	mutex_unlock(&pkm_lcs_layer_table_lock);
 }
 #endif

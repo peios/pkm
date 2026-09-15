@@ -7440,6 +7440,44 @@ int pkm_lcs_kunit_enum_children_source_thread(void *raw_script)
 }
 
 
+/*
+ * Serve one layer's metadata refresh -- read-key, Precedence, Enabled and,
+ * unless an Enabled above one stops the kernel first, Owner -- and fold the
+ * round trips into the enclosing script's counts.
+ */
+static int pkm_lcs_kunit_layer_metadata_refresh_all_serve_one(
+	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script *script,
+	struct pkm_lcs_kunit_layer_metadata_refresh_source_script *refresh,
+	u8 *request, size_t request_len)
+{
+	int ret;
+
+	refresh->file = script->file;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
+		refresh, request, request_len);
+	if (ret)
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		refresh, request, request_len, "Precedence",
+		refresh->precedence_present, refresh->precedence);
+	if (ret)
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
+		refresh, request, request_len, "Enabled",
+		refresh->enabled_present, refresh->enabled);
+	if (ret)
+		goto out;
+	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(refresh))
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
+		refresh, request, request_len);
+
+out:
+	script->reads += refresh->reads;
+	script->writes += refresh->writes;
+	return ret;
+}
+
 int pkm_lcs_kunit_layer_metadata_refresh_all_source_thread(
 	void *raw_script)
 {
@@ -7463,31 +7501,15 @@ int pkm_lcs_kunit_layer_metadata_refresh_all_source_thread(
 	if (!script->expect_refresh)
 		goto out;
 
-	script->refresh.file = script->file;
-	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_read_key(
-		&script->refresh, request, sizeof(request));
+	ret = pkm_lcs_kunit_layer_metadata_refresh_all_serve_one(
+		script, &script->refresh, request, sizeof(request));
 	if (ret)
-		goto out_refresh;
-	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
-		&script->refresh, request, sizeof(request), "Precedence",
-		script->refresh.precedence_present,
-		script->refresh.precedence);
-	if (ret)
-		goto out_refresh;
-	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_query(
-		&script->refresh, request, sizeof(request), "Enabled",
-		script->refresh.enabled_present, script->refresh.enabled);
-	if (ret)
-		goto out_refresh;
-	if (pkm_lcs_kunit_layer_metadata_refresh_stops_after_enabled(
-		    &script->refresh))
-		goto out_refresh;
-	ret = pkm_lcs_kunit_layer_metadata_refresh_handle_owner_query(
-		&script->refresh, request, sizeof(request));
+		goto out;
+	if (!script->expect_second_refresh)
+		goto out;
+	ret = pkm_lcs_kunit_layer_metadata_refresh_all_serve_one(
+		script, &script->second_refresh, request, sizeof(request));
 
-out_refresh:
-	script->reads += script->refresh.reads;
-	script->writes += script->refresh.writes;
 out:
 	script->result = ret;
 	while (!kthread_should_stop())

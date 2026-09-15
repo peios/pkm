@@ -28,7 +28,7 @@
 		.max_layers_per_value = 128U,                         \
 		.max_bound_transactions_per_source = 16U,             \
 		.max_read_only_transactions_per_source = 16U,         \
-		.max_total_layers = 1024U,                            \
+		.max_total_layers = PKM_LCS_MAX_TOTAL_LAYERS_DEFAULT,  \
 		.max_registered_sources = 32U,                        \
 		.max_hives_per_source = 64U,                          \
 		.max_concurrent_rsi_requests =                        \

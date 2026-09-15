@@ -499,7 +499,20 @@ long pkm_kacs_unlink_delete_on_close_file(struct file *file)
 		goto out_unlock;
 	}
 	task_sec->delete_on_close_file = file;
+	task_sec->delete_on_close_stratafs_entered = false;
 	ret = vfs_unlink(mnt_idmap(parent_path.mnt), parent_inode, dentry, NULL);
+#if IS_ENABLED(CONFIG_STRATAFS_FS)
+	/*
+	 * §4.6.5: a refused deferred deletion is audited on any non-zero
+	 * result. stratafs audits every refusal its own unlink raises, but
+	 * may_delete() checks the merged parent before ->unlink is entered,
+	 * and a refusal there -- the directory's descriptor tightened between
+	 * arm and close -- would otherwise leave no record at all (PEI-588).
+	 */
+	if (ret && inode->i_sb->s_magic == STRATAFS_SUPER_MAGIC &&
+	    !task_sec->delete_on_close_stratafs_entered)
+		stratafs_kacs_audit_deferred_refusal(dentry, (int)ret);
+#endif
 	task_sec->delete_on_close_inode = NULL;
 	task_sec->delete_on_close_dentry = NULL;
 	task_sec->delete_on_close_parent_inode = NULL;

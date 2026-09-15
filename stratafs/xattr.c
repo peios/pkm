@@ -185,6 +185,20 @@ static int stratafs_xattr_get(const struct xattr_handler *handler,
 		return stratafs_origin_value(dentry, buffer, size);
 	}
 	ret = stratafs_get_provider(dentry, &provider, NULL);
+	/*
+	 * A root with no stratum root beneath it has no provider to read a
+	 * descriptor from, but it needs one all the same: without it every
+	 * access check on the mount root fails as an object with no
+	 * descriptor, and the provider-less root §4.2.3 specifies can never be
+	 * observed (PEI-575). Serve the synthesised bare-root descriptor --
+	 * owned by the mounter, read and traverse for everyone. Every other
+	 * attribute of such a root is absent, as it always was.
+	 */
+	if (ret == -ENOENT && dentry == dentry->d_sb->s_root &&
+	    pkm_kacs_stratafs_is_descriptor_xattr(inode, name))
+		return pkm_kacs_stratafs_bare_root_descriptor(
+			STRATAFS_SB(dentry->d_sb)->resolution_cred, buffer,
+			size);
 	if (ret)
 		return ret;
 	ret = pkm_kacs_stratafs_rebind_metadata_decision(

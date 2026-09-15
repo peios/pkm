@@ -318,8 +318,16 @@ bool pkm_kacs_stratafs_delete_on_close_active(const struct dentry *outer)
 		return false;
 	task_sec = pkm_kacs_task(current);
 	file = task_sec->delete_on_close_file;
-	return file && file_dentry((struct file *)file) == outer &&
-	       file_inode((struct file *)file) == d_inode(outer);
+	if (!file || file_dentry((struct file *)file) != outer ||
+	    file_inode((struct file *)file) != d_inode(outer))
+		return false;
+	/*
+	 * stratafs asks this at the head of its own unlink, so a true answer
+	 * is the record that stratafs saw the deferred deletion: from here on
+	 * every refusal is audited by stratafs itself (PEI-588).
+	 */
+	task_sec->delete_on_close_stratafs_entered = true;
+	return true;
 }
 
 /*
@@ -586,6 +594,59 @@ bool pkm_kacs_stratafs_is_descriptor_xattr(const struct inode *inode,
 					   const char *name)
 {
 	return pkm_kacs_is_canonical_sd_xattr(inode, name);
+}
+
+/*
+ * The descriptor a StrataFS root serves while no stratum root exists to
+ * provide one (PEI-575). stratafs decides when it applies; KACS only knows
+ * how the bytes are shaped. Owned by the mounter, readable and traversable by
+ * everyone -- what the mount point beneath it would ordinarily grant -- and
+ * nothing more, since there is nothing under such a root to write. A mount
+ * made by a task carrying no token is owned by SYSTEM.
+ *
+ * getxattr semantics: a NULL buffer reports the length, a short one is ERANGE.
+ */
+ssize_t pkm_kacs_stratafs_bare_root_descriptor(const struct cred *mounter,
+					       void *buffer, size_t size)
+{
+	static const u8 system_sid[] = {
+		/* S-1-5-18 */
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+		0x12, 0x00, 0x00, 0x00,
+	};
+	const u8 *owner_sid = system_sid;
+	size_t owner_sid_len = sizeof(system_sid);
+	const u8 *sd_bytes;
+	size_t sd_len = 0;
+	ssize_t ret;
+
+	if (mounter && mounter->security) {
+		const void *token = pkm_kacs_cred(mounter)->token;
+		const u8 *sid = NULL;
+		size_t sid_len = 0;
+
+		if (token && !kacs_rust_token_user_sid(token, &sid, &sid_len) &&
+		    sid && sid_len) {
+			owner_sid = sid;
+			owner_sid_len = sid_len;
+		}
+	}
+
+	sd_bytes = kacs_rust_create_stratafs_bare_root_sd(owner_sid,
+							  owner_sid_len,
+							  &sd_len);
+	if (!sd_bytes || !sd_len)
+		return -EIO;
+	if (!buffer) {
+		ret = (ssize_t)sd_len;
+	} else if (size < sd_len) {
+		ret = -ERANGE;
+	} else {
+		memcpy(buffer, sd_bytes, sd_len);
+		ret = (ssize_t)sd_len;
+	}
+	pkm_kacs_free((void *)sd_bytes);
+	return ret;
 }
 
 static const u8 pkm_kacs_sysfs_write_gate_sd[] = {
