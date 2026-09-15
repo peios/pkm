@@ -11348,8 +11348,58 @@ static void pkm_lcs_internal_watch_deliver_layer_metadata_refresh(
 		pkm_lcs_internal_watch_recover_layer_change(event);
 }
 
+/*
+ * The layers a delivery has already refreshed. A transaction that creates a
+ * layer and writes its three values is one batch of four events on one key;
+ * internal delivery marks the layer dirty and refreshes it once, not once per
+ * event (§5.10.4). Running out of memory for the note only costs a repeat
+ * refresh, so the add is best effort.
+ */
+struct pkm_lcs_internal_refreshed_layer {
+	struct list_head link;
+	u8 guid[PKM_LCS_GUID_BYTES];
+};
+
+static bool pkm_lcs_internal_refreshed_layer_contains(
+	const struct list_head *refreshed, const u8 *guid)
+{
+	const struct pkm_lcs_internal_refreshed_layer *entry;
+
+	list_for_each_entry(entry, refreshed, link) {
+		if (!memcmp(entry->guid, guid, PKM_LCS_GUID_BYTES))
+			return true;
+	}
+	return false;
+}
+
+static void pkm_lcs_internal_refreshed_layer_add(struct list_head *refreshed,
+						 const u8 *guid)
+{
+	struct pkm_lcs_internal_refreshed_layer *entry;
+
+	entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+	if (!entry)
+		return;
+	INIT_LIST_HEAD(&entry->link);
+	memcpy(entry->guid, guid, PKM_LCS_GUID_BYTES);
+	list_add_tail(&entry->link, refreshed);
+}
+
+static void pkm_lcs_internal_refreshed_layers_destroy(
+	struct list_head *refreshed)
+{
+	struct pkm_lcs_internal_refreshed_layer *entry;
+	struct pkm_lcs_internal_refreshed_layer *tmp;
+
+	list_for_each_entry_safe(entry, tmp, refreshed, link) {
+		list_del(&entry->link);
+		kfree(entry);
+	}
+}
+
 static void pkm_lcs_internal_watch_deliver_layer_create(
-	const struct pkm_lcs_internal_watch_event *event)
+	const struct pkm_lcs_internal_watch_event *event,
+	struct list_head *refreshed)
 {
 	static const char * const path_prefix[] = {
 		"Machine", "System", "Registry", "Layers",
@@ -11372,6 +11422,12 @@ static void pkm_lcs_internal_watch_deliver_layer_create(
 		    event->name_len, &limits, child_guid, &present) ||
 	    !present)
 		return;
+	if (refreshed) {
+		if (pkm_lcs_internal_refreshed_layer_contains(refreshed,
+							      child_guid))
+			return;
+		pkm_lcs_internal_refreshed_layer_add(refreshed, child_guid);
+	}
 
 	if (!pkm_lcs_key_path_refresh_layer_metadata_with_owner_context_result_with_limits(
 		    event->source_id, child_guid, resolved_path,
@@ -11409,7 +11465,7 @@ static void pkm_lcs_internal_watch_deliver_layer_delete(
 
 static void pkm_lcs_internal_watch_deliver_layer_event(
 	const struct pkm_lcs_internal_watch_event *event,
-	u32 *internal_effects)
+	u32 *internal_effects, struct list_head *refreshed)
 {
 	if (!event)
 		return;
@@ -11418,10 +11474,17 @@ static void pkm_lcs_internal_watch_deliver_layer_event(
 	case REG_WATCH_VALUE_SET:
 	case REG_WATCH_VALUE_DELETED:
 	case REG_WATCH_SD_CHANGED:
+		if (refreshed) {
+			if (pkm_lcs_internal_refreshed_layer_contains(
+				    refreshed, event->guid))
+				break;
+			pkm_lcs_internal_refreshed_layer_add(refreshed,
+							     event->guid);
+		}
 		pkm_lcs_internal_watch_deliver_layer_metadata_refresh(event);
 		break;
 	case REG_WATCH_SUBKEY_CREATED:
-		pkm_lcs_internal_watch_deliver_layer_create(event);
+		pkm_lcs_internal_watch_deliver_layer_create(event, refreshed);
 		break;
 	case REG_WATCH_SUBKEY_DELETED:
 		pkm_lcs_internal_watch_deliver_layer_delete(
@@ -11461,6 +11524,7 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 {
 	struct pkm_lcs_internal_watch_event *event;
 	struct pkm_lcs_internal_watch_event *tmp;
+	LIST_HEAD(refreshed);
 
 	if (!events)
 		return;
@@ -11502,7 +11566,7 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
 			pkm_lcs_internal_watch_deliver_layer_event(
-				event, internal_effects);
+				event, internal_effects, &refreshed);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK) {
 			pkm_lcs_internal_watch_deliver_machine_root_fallback(
@@ -11513,6 +11577,7 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 		pkm_lcs_internal_watch_event_name_destroy(event);
 		kfree(event);
 	}
+	pkm_lcs_internal_refreshed_layers_destroy(&refreshed);
 }
 
 static long pkm_lcs_key_fd_transaction_burst_count_context_locked(
