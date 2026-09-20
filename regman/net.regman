@@ -57,6 +57,7 @@ Reading reservations is harmless; writing them is administration.
 canonical: Machine\System\Network\TcpIp\PortReservations @
 type: REG_BINARY
 default: (shipped seed) Everyone: PORT_BIND
+valid: a self-relative security descriptor carrying PORT_BIND and READ_CONTROL; required — the table is rejected without it
 applies: live
 
 The default reservation: the descriptor governing every port no
@@ -64,3 +65,30 @@ selector contains. The shipped seed grants `PORT_BIND` to Everyone —
 an unreserved port is anyone's to claim, as on Windows. Absent this
 value the whole table is rejected and the previous table (or the
 compiled-in SYSTEM-only default) stays in force.
+
+--- machine\system\network\tcpip\portreservations <selector>
+canonical: Machine\System\Network\TcpIp\PortReservations <selector>
+type: REG_BINARY
+default: (none — an absent selector is not a reservation)
+valid: a self-relative security descriptor carrying PORT_BIND and READ_CONTROL
+applies: live
+
+One reservation: the value name is the selector, the data is the
+descriptor deciding who may bind the ports it names.
+
+The name is `<proto>[,<proto>]:<lo>[-<hi>]` — see this key's page for the
+grammar and for how the most specific selector wins. `tcp:80`,
+`udp:53`, `tcp,udp:1-1023` and `*:8080` are all well-formed names; each
+has exactly one legal spelling, so two reservations can never disagree
+about the same set of ports by being spelled differently.
+
+The descriptor is checked for `PORT_BIND` (`0x00000001`) against the
+binding process's effective token. Granting nobody is a real and useful
+setting: a selector whose descriptor grants `PORT_BIND` to no one
+reserves those ports against the whole machine.
+
+Adding or changing one is a write to this key, governed by the key's own
+descriptor — `sd set` against the value, or a `.reg` seed. The table is
+validated and swapped whole, so a malformed name or descriptor here
+rejects every reservation, not just this one, and the previous table
+stays in force.

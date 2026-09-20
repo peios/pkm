@@ -33,10 +33,9 @@ Group Policy at a higher-precedence layer defends against a compromised
 local administrator — SeTcbPrivilege is required to create a layer at
 precedence > 0.
 
-The `Machine\System\Registry\Layers` subkey under this path is **not** a
-tunable: it holds layer metadata (precedence, enabled state, per-layer
-Security Descriptors) that LCS manages and watches directly. Do not
-hand-edit it as though it were configuration.
+The `Layers` subkey under this path is **not** a tunable: it is where the
+layers themselves live, and none of the rules above apply to it. It has
+its own page.
 
 --- machine\system\registry requesttimeoutms
 canonical: Machine\System\Registry RequestTimeoutMs
@@ -287,3 +286,98 @@ Maximum number of private-layer names a thread's credentials may carry.
 Bounds the per-resolution is_active() iteration cost. The limit is
 enforced when credentials are attached, which is a KACS concern rather
 than a registry operation.
+
+--- machine\system\registry\layers
+canonical: Machine\System\Registry\Layers
+
+Where the layers are. One subkey per layer, named by the layer name, and
+that key **is** the layer: creating it creates a layer, deleting it
+deletes one. There is no create-layer or delete-layer syscall.
+
+This is not configuration, and nothing on the `Machine\System\Registry`
+page applies here. The values under a layer's key are metadata LCS reads
+and publishes; the key's *descriptor* is the authorization for writing
+into that layer at all — `KEY_SET_VALUE` on the metadata key is checked
+on every mutation targeting the layer, in addition to the granted mask on
+the key being written. That descriptor is the answer to "who may write
+into this layer", which is why a Group Policy layer an unprivileged
+process cannot write to is enforceable at all.
+
+Creating a layer needs `KEY_CREATE_SUB_KEY` here; creating or raising one
+above precedence 0 additionally needs `SeTcbPrivilege`. Create a layer
+inside a transaction, so all three of its values are present when the
+refresh runs.
+
+This subtree is itself layered, which is circular and is safe: LCS always
+resolves metadata with the *currently published* layer table and publishes
+the updated one afterwards, so a high-precedence layer can override
+another layer's precedence and it simply lands at the next publication
+rather than recursively.
+
+Changes here are not deferred. A write under `Layers\` marks the affected
+layer names dirty, and LCS runs a bounded refresh — reading the committed
+key, its values and its descriptor, and publishing the entry atomically —
+before the syscall returns to userspace. For a transaction that happens
+once, after the source commit and before `REG_IOC_COMMIT` returns.
+
+Malformed metadata is rejected, never coerced: a value of the wrong type,
+a `REG_DWORD` that is not exactly four bytes, or an `Enabled` above 1. A
+layer whose metadata or descriptor will not parse is skipped — unpublished
+and counted, with an audit event — while its siblings publish normally.
+The previous known-good entry for that layer stays in force. Only a
+failure of the *source* fails the bootstrap refresh.
+
+--- machine\system\registry\layers\<layername> precedence
+canonical: Machine\System\Registry\Layers\<LayerName> Precedence
+type: REG_DWORD
+default: 0
+valid: any u32; above 0 requires SeTcbPrivilege to set
+applies: live — at the next layer-table publication
+
+The layer's collation weight: which layer wins when several define the
+same value.
+
+Setting or raising this above 0 requires `SeTcbPrivilege` as well as
+`KEY_SET_VALUE` on the key. That is the gate that lets Group Policy sit
+above a local administrator: an administrator can create layers, but not
+one that outranks policy.
+
+Missing means 0. Present but not exactly four bytes, or not a
+`REG_DWORD`, is malformed metadata — the layer is skipped rather than
+treated as 0.
+
+--- machine\system\registry\layers\<layername> enabled
+canonical: Machine\System\Registry\Layers\<LayerName> Enabled
+type: REG_DWORD
+default: 1 (enabled)
+valid: 0 or 1
+applies: live — at the next layer-table publication
+
+Whether the layer contributes to resolution.
+
+`0` takes the layer out of the published table without deleting anything
+it holds: its values stay in the registry and stop being visible. This is
+the reversible half of layer management — the way to find out what a
+policy layer is actually doing is to disable it and look, and the way to
+put it back is to set the value again.
+
+A value above 1 is malformed metadata, not "true": the layer is skipped
+and the previous known-good entry stays in force.
+
+--- machine\system\registry\layers\<layername> owner
+canonical: Machine\System\Registry\Layers\<LayerName> Owner
+type: REG_BINARY
+default: the creating token's SID, for a new layer
+valid: a SID
+applies: live — at the next layer-table publication
+
+Who owns the layer. Informational: it records provenance and grants
+nothing. Access to the layer is decided by the metadata key's descriptor,
+never by this value.
+
+Owner selection is a fallback chain — this value; failing that the
+creator's SID on a newly created layer; failing that the previous
+known-good owner; failing that the owner SID from the metadata key's own
+descriptor. If none of those resolves, the layer cannot be published at
+all, so this is the one metadata value whose absence can keep a layer out
+of the table.

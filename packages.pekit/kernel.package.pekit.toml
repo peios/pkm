@@ -41,3 +41,11 @@ kernel = "<= 0.20.1-rc12-26"
 # enforcement on at boot (generation 1). Inert until an image names it in
 # [registry] autoapply.
 "@source:regim/pnp-rules.reg" = "usr/share/regim/pnp-rules.reg"
+# regman documentation for the five registry roots the kernel reads
+# (lcs/source_bootstrap.c). The seeds above put values in the registry; these
+# are what `regman <path>` answers with when somebody asks what one means.
+# One fragment per subsystem, each named for its provider. See regman/README.md.
+"@source:regman/lcs.regman"   = "usr/share/regman/lcs.regman"
+"@source:regman/kmes.regman"  = "usr/share/regman/kmes.regman"
+"@source:regman/net.regman"   = "usr/share/regman/net.regman"
+"@source:regman/pnp.regman"   = "usr/share/regman/pnp.regman"

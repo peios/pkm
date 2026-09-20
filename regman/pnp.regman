@@ -1,0 +1,1072 @@
+--- machine\system\network\rules
+canonical: Machine\System\Network\Rules
+
+Peios Network Policy: the firewall, as the kernel reads it. One subkey per
+layer — `RawPacket`, `Packet`, `Flow`, and netd's `Interface` — each a
+forest of rule keys.
+
+The kernel reads this subtree whole when registryd registers, re-walks it
+on change, and publishes the result as a numbered **generation**. A
+generation is all-or-nothing: if any rule in any layer is malformed, names
+a fact its layer cannot have, or breaks one of the laws, the whole walk is
+refused and the previous generation stays in force. There is no partial
+policy and no window without one. Until the first generation lands, the
+compiled-in backstop is `DROP` in every layer.
+
+A rule is a key. Its values are its conditions (`<Fact>.<Operator>`) plus
+`Actions`, `Priority` and `Enabled`; its subkeys are exceptions, narrower
+regions under the same laws. Collation is highest priority first, ties to
+the strictest verdict, and an abstaining rule hands its parentage up.
+
+The full vocabulary — every fact, operator, action, limit and the value
+forms each accepts — is the network policy reference (learn: networking,
+"Network policy reference"). This file documents the registry surface: the
+keys, the fixed-name values, and what editing them costs.
+
+Two things live next to the rules and are **not** policy: `Interfaces\` and
+`Networks\`, which netd writes and the kernel reads as the network context
+behind the `Network.*` facts. They are netd's keys and are documented
+there.
+
+Default security: inherits the Machine hive root (SYSTEM and
+Administrators full, Authenticated Users read). That descriptor is the
+whole gate on changing this machine's firewall — there is no second
+permission model, and `reg set` against these keys is the same act as any
+other authoring surface.
+
+--- machine\system\network\rules currentreportinglevel
+canonical: Machine\System\Network\Rules CurrentReportingLevel
+type: REG_DWORD
+default: 1 (absent — everything fires)
+valid: 1–6
+applies: live — at the next generation
+
+How loud `REPORT(n)` is. A rule's `REPORT(n)` effect fires when
+`n >= CurrentReportingLevel`, so raising this value silences the quieter
+reports and leaves the louder ones.
+
+`1` is everything and is what an absent value means; `6` silences every
+report. Quietness ships as a visible value rather than a default, so a
+machine that is not reporting says so in the registry.
+
+Out of range refuses the generation — like any other malformed policy, and
+for the same reason: a firewall that silently ignored what you wrote would
+be worse than one that refused it.
+
+This value lives on the `Rules` key itself, not on a layer: reporting
+volume is machine-wide.
+
+--- machine\system\network\rules\rawpacket
+canonical: Machine\System\Network\Rules\RawPacket
+
+The wire-side layer: judged at the device seats, for all traffic, per
+packet — first inbound, last outbound.
+
+This is the layer that sees what actually arrives. Fragments may still be
+fragments (`Fragment` may be 1), conntrack has not run, so there is no
+`FlowState`, and none of the flow layer's facts (`Related`, `Start.*`,
+`Local*`, `Remote.*`) exist here. Per-packet facts — `Length`, `TcpFlags`,
+`Ttl`, `Dscp`, `EtherType`, `DstMac` — all do.
+
+It may write tags and it may not read any: a `RawPacket` rule reading a tag
+is a downward read and refuses the generation.
+
+Absent, this layer has no rules and contributes nothing. The backstop
+still applies.
+
+--- machine\system\network\rules\packet
+canonical: Machine\System\Network\Rules\Packet
+
+The per-packet layer: judged once per traversal, at the richest seat —
+between the wire and the flow.
+
+The ordinary place to write packet policy. Everything is reassembled
+(`Fragment` is always 0) and conntrack has run, so `FlowState` is
+available here and nowhere else below the flow layer. The per-packet facts
+are all present; the flow layer's are not.
+
+It may write tags, and read tags written by `RawPacket` or `Packet` rules
+— never one a `Flow` rule wrote.
+
+Absent, this layer has no rules and contributes nothing. The backstop
+still applies.
+
+--- machine\system\network\rules\flow
+canonical: Machine\System\Network\Rules\Flow
+
+The flow layer: judged once per flow, per local endpoint, at the IP seats,
+on the flow's first packet — last inbound, first outbound.
+
+Its verdict is cached on the flow as that flow's **sentence**, so this is
+where a decision about a *conversation* belongs rather than a decision
+about a packet. It is the only layer with `Related`, `Start.*`, `Local`,
+`Local.*` and `Remote.*` — the facts about who is at this end — and the
+only one that may read any tag, whichever layer wrote it. It has no
+per-packet facts at all: `Length`, `TcpFlags` and the rest are never here,
+because a flow is not a packet.
+
+Effects run per evaluation of the flow, not per packet.
+
+Absent, this layer has no rules and contributes nothing. The backstop
+still applies.
+
+--- machine\system\network\rules\<layer>\<rule...>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...>
+
+One rule. The key name is attribution — it names the decision and is what
+the viewer and the event stream quote back at you — and carries no meaning
+to the engine.
+
+Its values are its conditions, one per `<Fact>.<Operator>` name, plus the
+three fixed names below. A rule matches when *every* condition holds; a
+condition over a fact the packet lacks is false, which is the absent-fact
+law and why `Present` is the one operator that looks through it. A value
+name that is neither a fixed name nor a well-formed `<Fact>.<Operator>` is
+an error that refuses the generation — there is no ignoring an unknown
+value here.
+
+Three things hold for every condition, and are not repeated on each fact's
+page. `Present` takes `1` (the fact exists for this packet or flow) or `0`
+(it does not); on a fact its layer never has it refuses the generation
+rather than becoming an always-true condition. `Equal` against a
+`REG_MULTI_SZ` list means *any of*, and an integer list's elements may be
+`a-b` ranges. Applying an operator a family does not support —
+`GreaterThan` on an address, `Has` on a port — refuses the generation.
+
+Every fact has its own page: `regman <this key> DstPort.Equal` and the
+`Values` index below both reach them.
+
+Its subkeys are **exceptions**: a narrower region judged under the same
+laws, inheriting `Priority` unless it names its own. Nesting runs to 12
+deep, and a layer holds at most 4096 rules; exceeding either refuses the
+generation.
+
+The `<rule...>` in this page's path is that nesting — one rule name or a
+whole chain of them. An exception is a rule, with the same values meaning
+the same things, so this is its page too however deep it sits.
+
+This page covers all four layers. netd builds and judges `Rules\Interface`
+with `pnp-core`, the kernel's own engine, so a rule key means the same
+thing there — but that layer's facts, verdicts and effects are its own,
+and are on its page.
+
+--- machine\system\network\rules\<layer>\<rule...> actions
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Actions
+type: REG_MULTI_SZ
+default: (absent or empty — NULL, the rule abstains)
+valid: one action expression per element, from the layer's action vocabulary
+applies: live — at the next generation
+
+What the rule does when it matches: the action list, one expression per
+element, evaluated in order.
+
+An absent or empty `Actions` is `NULL` — the rule abstains. That is not a
+mistake and not a no-op: an abstaining rule hands its parentage up the
+tree, which is how an exception says "not this one, ask my parent again".
+
+An expression the layer does not support — a packet verdict in the
+interface layer, a `TAG` read where only writes are legal — refuses the
+generation rather than being dropped.
+
+--- machine\system\network\rules\<layer>\<rule...> priority
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Priority
+type: REG_DWORD or REG_QWORD
+default: 0 at a root; a subkey inherits its parent's
+valid: any integer the type holds
+applies: live — at the next generation
+
+Collation weight: the highest priority wins.
+
+A subkey inherits this unless it sets its own, so a tree of exceptions
+ranks together without repeating the number on every key. Ties go to the
+strictest verdict — which in the packet layers is a total order, and in
+the interface layer is `DOWN` > `IGNORE` > `JOIN`. A tie between two rules
+naming *different* profiles for one interface has no strictest answer and
+refuses the generation instead of picking.
+
+A value that is not an integer refuses the generation.
+
+--- machine\system\network\rules\<layer>\<rule...> enabled
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Enabled
+type: REG_DWORD
+default: 1 (enabled)
+valid: 0 or 1
+applies: live — at the next generation
+
+Whether the rule is in the policy at all.
+
+`0` removes the rule **and its whole subtree** from the generation — every
+exception under it goes with it. That makes this the safe way to take a
+rule out of force while keeping it, and its authoring, where somebody can
+read it.
+
+Anything other than 0 or 1 refuses the generation.
+--- machine\system\network\rules\<layer>\<rule...> direction.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Direction.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; `in`, `out`
+applies: live — at the next generation
+
+Which way the packet is going.
+
+At the `Flow` layer this is the originator's side and keeps that value
+for the flow's whole life, so an inbound flow stays `in` for the replies
+too.
+
+--- machine\system\network\rules\<layer>\<rule...> interface.equal
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Equal
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: an interface name, e.g. `eth0`
+applies: live — at the next generation
+
+The interface the packet crossed, by kernel name.
+
+Present at every layer. On an outbound `Flow` judgment it is the device
+the route chose.
+
+This is the one packet fact the `Interface` layer shares with the packet
+layers; the rest of that layer's vocabulary is `Interface.*`.
+
+--- machine\system\network\rules\<layer>\<rule...> interface.present
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Present
+type: REG_DWORD, or a decimal string
+default: (absent — the rule does not condition on this fact)
+valid: `1` the fact exists, `0` it does not
+applies: live — at the next generation
+
+The interface the packet crossed, by kernel name.
+
+Present at every layer. On an outbound `Flow` judgment it is the device
+the route chose.
+
+This is the one packet fact the `Interface` layer shares with the packet
+layers; the rest of that layer's vocabulary is `Interface.*`.
+
+--- machine\system\network\rules\<layer>\<rule...> ethertype.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> EtherType.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a number, or a name
+applies: live — at the next generation
+
+The frame's EtherType.
+
+Values: a number, or `ipv4`, `ipv6`, `arp`.
+
+Not a `Flow` fact: a flow's family is its addresses', so a `Flow` rule
+conditioning on this can never match.
+
+--- machine\system\network\rules\<layer>\<rule...> srcmac.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> SrcMac.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; `aa:bb:cc:dd:ee:ff`
+applies: live — at the next generation
+
+The source hardware address.
+
+Present when the frame has an Ethernet header. At the IP seats outbound
+that is the machine's own device address, not a peer's.
+
+--- machine\system\network\rules\<layer>\<rule...> dstmac.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> DstMac.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; `aa:bb:cc:dd:ee:ff`
+applies: live — at the next generation
+
+The destination hardware address.
+
+Present when the frame has an Ethernet header. Not a `Flow` fact.
+
+--- machine\system\network\rules\<layer>\<rule...> vlan.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Vlan.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a VLAN id
+applies: live — at the next generation
+
+The frame's VLAN id.
+
+Present when the frame is VLAN-tagged (at the device seats) or the
+interface is a VLAN device (at the IP seats).
+
+--- machine\system\network\rules\<layer>\<rule...> srcaddr.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> SrcAddr.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; an address, a CIDR prefix, or an IPv4 range
+applies: live — at the next generation
+
+The source IP address.
+
+Values: an exact address (`10.0.0.5`, `fd00::1`), a CIDR prefix
+(`10.0.0.0/8`, `fd00::/64`), or an IPv4 range (`10.0.0.1-10.0.0.99`).
+
+Address families are strict: an IPv4 pattern never matches an IPv6
+address, so `0.0.0.0/0` does not quietly swallow IPv6.
+
+--- machine\system\network\rules\<layer>\<rule...> dstaddr.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> DstAddr.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; an address, a CIDR prefix, or an IPv4 range
+applies: live — at the next generation
+
+The destination IP address.
+
+Values: an exact address (`10.0.0.5`, `fd00::1`), a CIDR prefix
+(`10.0.0.0/8`, `fd00::/64`), or an IPv4 range (`10.0.0.1-10.0.0.99`).
+
+Address families are strict: an IPv4 pattern never matches an IPv6
+address, so `0.0.0.0/0` does not quietly swallow IPv6.
+
+--- machine\system\network\rules\<layer>\<rule...> protocol.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Protocol.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a number, or a name
+applies: live — at the next generation
+
+The IP protocol.
+
+Values: a number, or `tcp`, `udp`, `icmp`, `icmpv6`, `sctp`.
+
+Present on any IP packet.
+
+--- machine\system\network\rules\<layer>\<rule...> ttl.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Ttl.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a TTL or hop limit
+applies: live — at the next generation
+
+The packet's remaining time to live.
+
+Present on any IP packet. Not a `Flow` fact -- it changes per packet, so
+a flow has no one value for it.
+
+--- machine\system\network\rules\<layer>\<rule...> dscp.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Dscp.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-63
+applies: live — at the next generation
+
+The packet's DSCP field.
+
+Present on any IP packet. Not a `Flow` fact.
+
+--- machine\system\network\rules\<layer>\<rule...> fragment.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Fragment.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; `0` or `1`
+applies: live — at the next generation
+
+Whether the packet is a fragment.
+
+Only ever 1 before defragmentation, which means only at the `RawPacket`
+seat. At the `Packet` layer everything is reassembled and this is always
+0. Not a `Flow` fact.
+
+--- machine\system\network\rules\<layer>\<rule...> srcport.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> SrcPort.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-65535
+applies: live — at the next generation
+
+The source port.
+
+Present on TCP, UDP and SCTP.
+
+--- machine\system\network\rules\<layer>\<rule...> dstport.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> DstPort.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-65535
+applies: live — at the next generation
+
+The destination port.
+
+Present on TCP, UDP and SCTP.
+
+--- machine\system\network\rules\<layer>\<rule...> tcpflags.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> TcpFlags.<op>
+type: REG_SZ, or a REG_MULTI_SZ list of flag names
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Has, Hasnt, Present; a flag name, or a list
+applies: live — at the next generation
+
+The TCP header flags.
+
+Values: `FIN`, `SYN`, `RST`, `PSH`, `ACK`, `URG`, `ECE`, `CWR`.
+
+`Has` requires every listed bit set and `Hasnt` every listed bit clear;
+that is usually what you want, rather than `Equal`, which pins the whole
+field.
+
+Present on TCP. Not a `Flow` fact.
+
+--- machine\system\network\rules\<layer>\<rule...> icmptype.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> IcmpType.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; an ICMP or ICMPv6 type
+applies: live — at the next generation
+
+The ICMP message type.
+
+Present on ICMP and ICMPv6.
+
+--- machine\system\network\rules\<layer>\<rule...> icmpcode.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> IcmpCode.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; an ICMP or ICMPv6 code
+applies: live — at the next generation
+
+The ICMP message code.
+
+Present on ICMP and ICMPv6.
+
+--- machine\system\network\rules\<layer>\<rule...> length.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Length.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a length in bytes
+applies: live — at the next generation
+
+The packet's length at this seat, as the stack sees it.
+
+Present at every layer, but not a `Flow` fact -- a flow has no single
+length.
+
+--- machine\system\network\rules\<layer>\<rule...> flowstate.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> FlowState.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; new, established, related, invalid, untracked
+applies: live — at the next generation
+
+What conntrack makes of this packet.
+
+Values: `new`, `established`, `related`, `invalid`, `untracked`.
+
+The `Packet` layer only, at its proper seat. The `RawPacket` seat stands
+before conntrack has run, and the `Flow` layer *is* the judgment of a
+flow, so neither has it.
+
+--- machine\system\network\rules\<layer>\<rule...> related.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Related.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; `0` or `1`
+applies: live — at the next generation
+
+Whether this flow was expected by another.
+
+An ICMP error for a live flow, or an FTP data connection. The `Flow`
+layer only.
+
+--- machine\system\network\rules\<layer>\<rule...> time.year.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Time.Year.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a year
+applies: live — at the next generation
+
+The year of the wall clock, UTC.
+
+Present at every layer. In a `Flow` rule, consulting a `Time.*` fact
+expires the flow's sentence at that fact's next flip, so the flow is
+re-judged rather than keeping a verdict the clock has outrun.
+
+--- machine\system\network\rules\<layer>\<rule...> time.month.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Time.Month.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 1-12
+applies: live — at the next generation
+
+The month of the wall clock, UTC.
+
+Present at every layer. In a `Flow` rule, consulting a `Time.*` fact
+expires the flow's sentence at that fact's next flip, so the flow is
+re-judged rather than keeping a verdict the clock has outrun.
+
+--- machine\system\network\rules\<layer>\<rule...> time.dayofmonth.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Time.DayOfMonth.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 1-31
+applies: live — at the next generation
+
+The day of the month of the wall clock, UTC.
+
+Present at every layer. In a `Flow` rule, consulting a `Time.*` fact
+expires the flow's sentence at that fact's next flip, so the flow is
+re-judged rather than keeping a verdict the clock has outrun.
+
+--- machine\system\network\rules\<layer>\<rule...> time.dayofweek.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Time.DayOfWeek.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 1-7, ISO
+applies: live — at the next generation
+
+The day of the week of the wall clock, UTC.
+
+Values: 1-7, ISO (1 = Monday, 7 = Sunday).
+
+Present at every layer. In a `Flow` rule, consulting a `Time.*` fact
+expires the flow's sentence at that fact's next flip, so the flow is
+re-judged rather than keeping a verdict the clock has outrun.
+
+--- machine\system\network\rules\<layer>\<rule...> time.hour.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Time.Hour.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-23
+applies: live — at the next generation
+
+The hour of the wall clock, UTC.
+
+Present at every layer. In a `Flow` rule, consulting a `Time.*` fact
+expires the flow's sentence at that fact's next flip, so the flow is
+re-judged rather than keeping a verdict the clock has outrun.
+
+--- machine\system\network\rules\<layer>\<rule...> time.minute.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Time.Minute.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-59
+applies: live — at the next generation
+
+The minute of the wall clock, UTC.
+
+Present at every layer. In a `Flow` rule, consulting a `Time.*` fact
+expires the flow's sentence at that fact's next flip, so the flow is
+re-judged rather than keeping a verdict the clock has outrun.
+
+--- machine\system\network\rules\<layer>\<rule...> time.second.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Time.Second.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-59
+applies: live — at the next generation
+
+The second of the wall clock, UTC.
+
+Present at every layer. In a `Flow` rule, consulting a `Time.*` fact
+expires the flow's sentence at that fact's next flip, so the flow is
+re-judged rather than keeping a verdict the clock has outrun.
+
+--- machine\system\network\rules\<layer>\<rule...> start.year.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Start.Year.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a year
+applies: live — at the next generation
+
+The year of the wall clock when the flow began, UTC.
+
+The `Flow` layer only. Fixed for the flow's life, so unlike `Time.*` it
+never expires a sentence.
+
+--- machine\system\network\rules\<layer>\<rule...> start.month.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Start.Month.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 1-12
+applies: live — at the next generation
+
+The month of the wall clock when the flow began, UTC.
+
+The `Flow` layer only. Fixed for the flow's life, so unlike `Time.*` it
+never expires a sentence.
+
+--- machine\system\network\rules\<layer>\<rule...> start.dayofmonth.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Start.DayOfMonth.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 1-31
+applies: live — at the next generation
+
+The day of the month of the wall clock when the flow began, UTC.
+
+The `Flow` layer only. Fixed for the flow's life, so unlike `Time.*` it
+never expires a sentence.
+
+--- machine\system\network\rules\<layer>\<rule...> start.dayofweek.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Start.DayOfWeek.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 1-7, ISO
+applies: live — at the next generation
+
+The day of the week of the wall clock when the flow began, UTC.
+
+Values: 1-7, ISO (1 = Monday, 7 = Sunday).
+
+The `Flow` layer only. Fixed for the flow's life, so unlike `Time.*` it
+never expires a sentence.
+
+--- machine\system\network\rules\<layer>\<rule...> start.hour.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Start.Hour.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-23
+applies: live — at the next generation
+
+The hour of the wall clock when the flow began, UTC.
+
+The `Flow` layer only. Fixed for the flow's life, so unlike `Time.*` it
+never expires a sentence.
+
+--- machine\system\network\rules\<layer>\<rule...> start.minute.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Start.Minute.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-59
+applies: live — at the next generation
+
+The minute of the wall clock when the flow began, UTC.
+
+The `Flow` layer only. Fixed for the flow's life, so unlike `Time.*` it
+never expires a sentence.
+
+--- machine\system\network\rules\<layer>\<rule...> start.second.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Start.Second.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; 0-59
+applies: live — at the next generation
+
+The second of the wall clock when the flow began, UTC.
+
+The `Flow` layer only. Fixed for the flow's life, so unlike `Time.*` it
+never expires a sentence.
+
+--- machine\system\network\rules\<layer>\<rule...> local.equal
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Equal
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: `program`, `kernel`, `shared`, `none`
+applies: live — at the next generation
+
+What stands at this machine's end of the flow.
+
+A `program` is a socket some process owns; `kernel` is the stack itself
+(resets, ICMP errors, neighbour discovery, tunnel outers); `shared` is
+inbound multicast or broadcast delivered to every bound socket; `none`
+means nothing listens and the stack will refuse it.
+
+Only a `program` has the `Local.*` facts, so `Local.User.Present = 0` is
+how you say "no program stands here".
+
+The `Flow` layer only, and always present there.
+
+--- machine\system\network\rules\<layer>\<rule...> local.present
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Present
+type: REG_DWORD, or a decimal string
+default: (absent — the rule does not condition on this fact)
+valid: `1` the fact exists, `0` it does not
+applies: live — at the next generation
+
+What stands at this machine's end of the flow.
+
+A `program` is a socket some process owns; `kernel` is the stack itself
+(resets, ICMP errors, neighbour discovery, tunnel outers); `shared` is
+inbound multicast or broadcast delivered to every bound socket; `none`
+means nothing listens and the stack will refuse it.
+
+Only a `program` has the `Local.*` facts, so `Local.User.Present = 0` is
+how you say "no program stands here".
+
+The `Flow` layer only, and always present there.
+
+--- machine\system\network\rules\<layer>\<rule...> local.user.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.User.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a SID, or a well-known name
+applies: live — at the next generation
+
+Who owns the socket at this end.
+
+Values: a SID (`S-1-5-19`), or a well-known name (`SYSTEM`,
+`LocalService`, `NetworkService`, `Everyone`, `Administrators`, `Users`,
+...).
+
+Present on a `Flow` judgment when `Local` is `program`.
+
+A name is turned into a SID exactly as the token was minted, so the rule
+matches the token rather than a string; a misspelt name refuses the
+generation rather than quietly matching nothing.
+
+--- machine\system\network\rules\<layer>\<rule...> local.group.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Group.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; SIDs or well-known names
+applies: live — at the next generation
+
+The groups on the token at this end -- matches if *any* is present.
+
+Deny-only groups are invisible here; the logon SID is among them.
+
+Present on a `Flow` judgment when `Local` is `program`.
+
+--- machine\system\network\rules\<layer>\<rule...> local.integrity.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Integrity.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a level, or a level name
+applies: live — at the next generation
+
+The integrity level of the token at this end.
+
+Values: a level, or `untrusted`, `low`, `medium`, `high`, `system`.
+
+Present on a `Flow` judgment when `Local` is `program`.
+
+--- machine\system\network\rules\<layer>\<rule...> local.confinement.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Confinement.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; the confinement SID
+applies: live — at the next generation
+
+The confinement the program at this end runs under.
+
+Present on a `Flow` judgment when the program is confined.
+
+--- machine\system\network\rules\<layer>\<rule...> local.capability.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Capability.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; capability SIDs
+applies: live — at the next generation
+
+The confinement's capability SIDs -- matches if *any* is present.
+
+Present on a `Flow` judgment when the program is confined.
+
+--- machine\system\network\rules\<layer>\<rule...> local.service.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Service.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a service name, or its SID
+applies: live — at the next generation
+
+Which service the program at this end is.
+
+Values: a service name (`resolvd`), or its `S-1-5-80-...` SID.
+
+The name is resolved to the service's SID the same way the service's own
+token was minted, so this matches the service and not a string.
+
+Present on a `Flow` judgment when the program is a service.
+
+--- machine\system\network\rules\<layer>\<rule...> local.process.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Process.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a process GUID
+applies: live — at the next generation
+
+Which process holds the socket at this end.
+
+Values: a process GUID, `8-4-4-4-12` hex (case-insensitive).
+
+Present on a `Flow` judgment when `Local` is `program`.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.equal
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Equal
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: `program`, `kernel`, `shared`, `none`
+applies: live — at the next generation
+
+What stands at the other end, when that is also this machine.
+
+The mirror of `Local`, and it exists only on loopback flows -- a peer on
+another machine has no identity this kernel can know.
+
+The `Remote.*` facts follow `Local.*` exactly, under the same
+conditions.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.present
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Present
+type: REG_DWORD, or a decimal string
+default: (absent — the rule does not condition on this fact)
+valid: `1` the fact exists, `0` it does not
+applies: live — at the next generation
+
+What stands at the other end, when that is also this machine.
+
+The mirror of `Local`, and it exists only on loopback flows -- a peer on
+another machine has no identity this kernel can know.
+
+The `Remote.*` facts follow `Local.*` exactly, under the same
+conditions.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.user.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.User.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a SID, or a well-known name
+applies: live — at the next generation
+
+Who owns the socket at the other end of a loopback flow.
+
+Values: a SID (`S-1-5-19`), or a well-known name (`SYSTEM`,
+`LocalService`, `NetworkService`, `Everyone`, `Administrators`, `Users`,
+...).
+
+As `Local.User`, for the far end. Loopback flows only.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.group.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Group.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; SIDs or well-known names
+applies: live — at the next generation
+
+The groups on the far token -- matches if *any* is present.
+
+As `Local.Group`, for the far end. Loopback flows only.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.integrity.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Integrity.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this fact)
+valid: Equal, GreaterThan, LessThan, Present; a level, or a level name
+applies: live — at the next generation
+
+The integrity level of the far token.
+
+Values: a level, or `untrusted`, `low`, `medium`, `high`, `system`.
+
+As `Local.Integrity`, for the far end. Loopback flows only.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.confinement.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Confinement.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; the confinement SID
+applies: live — at the next generation
+
+The confinement the far program runs under.
+
+As `Local.Confinement`, for the far end. Loopback flows only.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.capability.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Capability.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; capability SIDs
+applies: live — at the next generation
+
+The far confinement's capability SIDs -- matches if *any* is present.
+
+As `Local.Capability`, for the far end. Loopback flows only.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.service.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Service.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a service name, or its SID
+applies: live — at the next generation
+
+Which service the far program is.
+
+Values: a service name, or its `S-1-5-80-...` SID.
+
+As `Local.Service`, for the far end. Loopback flows only.
+
+--- machine\system\network\rules\<layer>\<rule...> remote.process.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Process.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a process GUID
+applies: live — at the next generation
+
+Which process holds the far socket.
+
+Values: a process GUID, `8-4-4-4-12` hex (case-insensitive).
+
+As `Local.Process`, for the far end. Loopback flows only.
+
+--- machine\system\network\rules\<layer>\<rule...> interface.kind.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Kind.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; wired, wireless, loopback, tunnel, bridge, other
+applies: live — at the next generation
+
+What kind of interface this is.
+
+Values: `wired`, `wireless`, `loopback`, `tunnel`, `bridge`, `other`.
+
+The `Interface` layer only, where it is always present.
+
+--- machine\system\network\rules\<layer>\<rule...> interface.id.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Id.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; the inventory key name
+applies: live — at the next generation
+
+The interface's stable id -- its key name under `Interfaces\`.
+
+Derived from bus path and hardware address, so it survives a rename and
+a reboot. The `Interface` layer only, where it is always present.
+
+--- machine\system\network\rules\<layer>\<rule...> interface.mac.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Mac.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; `aa:bb:cc:dd:ee:ff`
+applies: live — at the next generation
+
+The interface's hardware address.
+
+The `Interface` layer only, and only where the interface has one -- a
+tunnel does not.
+
+--- machine\system\network\rules\<layer>\<rule...> interface.path.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Path.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a bus position, e.g. `pci-0000:00:03.0`
+applies: live — at the next generation
+
+Where the interface sits on the bus.
+
+The `Interface` layer only, and only where the interface is hardware.
+
+--- machine\system\network\rules\<layer>\<rule...> interface.driver.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Driver.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; a kernel driver name
+applies: live — at the next generation
+
+Which driver owns the interface.
+
+The `Interface` layer only, and only where the interface is hardware.
+
+--- machine\system\network\rules\<layer>\<rule...> network.id.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Id.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; the record's key name under `Networks\`
+applies: live — at the next generation
+
+Which network the machine is standing on.
+
+Present at every layer once a network has been identified on the
+interface the packet crossed. netd writes the record; the kernel reads
+it as the network context.
+
+This is what lets one policy behave differently at home and in a cafe
+without being rewritten.
+
+--- machine\system\network\rules\<layer>\<rule...> network.name.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Name.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; the operator's `Name` on the record
+applies: live — at the next generation
+
+The operator's name for the network.
+
+Present at every layer, when the network record carries a `Name`.
+
+--- machine\system\network\rules\<layer>\<rule...> network.trust.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Trust.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; the operator's `Trust` on the record
+applies: live — at the next generation
+
+How far the operator said this network should be trusted.
+
+Present at every layer, when the network record carries a `Trust`.
+
+It is your word, not evidence: a rule conditioning on it is stating that
+you accept the identification netd made.
+
+--- machine\system\network\rules\<layer>\<rule...> network.kind.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Kind.<op>
+type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+default: (absent — the rule does not condition on this fact)
+valid: Equal, Present; as Interface.Kind
+applies: live — at the next generation
+
+What kind of interface the network was seen on.
+
+Values: as `Interface.Kind`: `wired`, `wireless`, `loopback`, ....
+
+Present at every layer, under the same conditions as `Network.Id`.
+
+--- machine\system\network\rules\<layer>\<rule...> tag.<name>.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Tag.<name>.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on this tag)
+valid: Equal, GreaterThan, LessThan, Present; the tag's value
+applies: live — at the next generation
+
+Reads the flow tag `<name>`, which some rule's `TAG` effect wrote.
+
+Tags are how one judgment tells a later one what it decided. The name is
+yours: whatever a rule writes with `TAG`, another reads here. A tag no
+rule anywhere writes is not an error, but a read of it can only ever be
+absent.
+
+Which tags a layer may read is the one place the layering shows.
+`RawPacket` may write tags and read none. `Packet` may read tags written
+by `RawPacket` or `Packet` rules. `Flow` may read any tag. Reading
+downwards — a `Packet` rule reading a tag a `Flow` rule wrote — refuses
+the generation.
+
+A flow carries at most 64 distinct tags; past that the write is refused
+and counted. There is no tag store at the `Interface` layer at all, so a
+`Tag.*` condition there refuses the generation.
+
+--- machine\system\network\rules\<layer>\<rule...> counter.<view>.<op>
+canonical: Machine\System\Network\Rules\<Layer>\<rule...> Counter.<view>.<op>
+type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
+default: (absent — the rule does not condition on a counter)
+valid: Equal, GreaterThan, LessThan, Present; a count
+applies: live — at the next generation
+
+Reads a counter view over the stream some rule's `COUNT` effect writes.
+
+`<view>` is a stream name, optionally with arguments in parentheses: a
+window (`10s`, `1h`, at most `1d`; omitted means the cumulative total)
+and a key (`SrcAddr`, `DstAddr`, `Interface`, or a `+`-compound; omitted
+means one global cell). So `Counter.dns` is the running total,
+`Counter.dns(10s)` the last ten seconds, and `Counter.dns(10s,SrcAddr)`
+the last ten seconds per source.
+
+This is what a rate limit is made of: count in one rule, read the count
+in another. A view over a stream no rule writes is statically dead and
+refuses the generation; a stream nobody reads is fine.
+
+Windows are approximated with eight buckets, so a value can be up to an
+eighth of a window stale. A counter table holds 4096 keys; past that
+idle keys are reaped, and if none are idle the new key is refused and
+counted. As with tags there is no store at the `Interface` layer, so a
+`Counter.*` condition there refuses the generation.
+
+**A note on spelling.** The argument list is parsed with whitespace
+trimmed, so `Counter.dns(1h,SrcAddr)` and `Counter.dns(1h, SrcAddr)` are
+the same view. This page cannot be found by the spelling with a space in
+it — a regman lookup never reads past one — so write arguments without
+spaces if you want the value name you wrote to be one you can look up.
