@@ -166,6 +166,9 @@ python3 = "*"
 perl = "*"
 tar = "*"
 xz-utils = "*"
+# CONFIG_KERNEL_ZSTD compresses the image with the zstd CLI
+# (com.facebook.zstd above).
+zstd = "*"
 
 [build.kernel]
 keyring_inputs = ["modsig.pub", "tcb.pub"]
@@ -257,6 +260,8 @@ python3 = "*"
 perl = "*"
 tar = "*"
 xz-utils = "*"
+# CONFIG_KERNEL_ZSTD and CONFIG_MODULE_COMPRESS_ZSTD (com.facebook.zstd above).
+zstd = "*"
 
 # Export the sanitized userspace UAPI headers (full Linux UAPI + our pkm/*.h,
 # which ride along since they're staged under include/uapi/pkm). Depends on
@@ -325,6 +330,9 @@ command = """
 binutils = "*"
 debugedit = "*"
 cpio = "*"
+# make-debuginfo.sh runs `make kernelrelease` (make comes from
+# dev.peios.build-essentials above).
+build-essential = "*"
 
 # In-tree userspace tooling (perf, bpftool, cpupower, turbostat, rtla, rv). These
 # are userspace ELF programs that live under tools/ in the kernel source, so they
@@ -431,6 +439,21 @@ automake = "*"
 libtool = "*"
 libcapstone-dev = "*"
 llvm-18-dev = "*"
+# perf builds with BUILD_BPF_SKEL=1, and perf and bpftool both reach for the
+# unversioned clang, llvm-strip and llvm-config (tools/scripts/Makefile.include).
+# They need one coherent LLVM: once an llvm-config is on the path they compile
+# against its headers, so installing `llvm` without `llvm-dev` breaks bpftool's
+# jit_disasm.c on a missing llvm-c/Core.h. These are Debian's default-version
+# names, as the peipkg list's org.llvm.clang, org.llvm.llvm and
+# org.llvm.llvm-devel are unpinned there. perf's bootstrap bpftool also compiles
+# sign.c against the OpenSSL headers (org.openssl.openssl-devel).
+clang = "*"
+llvm = "*"
+llvm-dev = "*"
+libssl-dev = "*"
+# getdelays is built against this kernel's own UAPI via `make headers_install`,
+# which copies the headers with rsync (org.samba.rsync).
+rsync = "*"
 libbpf-dev = "*"
 bpftool = "*"
 libcpupower-dev = "*"
