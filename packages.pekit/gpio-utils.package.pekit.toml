@@ -3,11 +3,16 @@
 # tools/gpio (build.tools).
 #
 # ELF dependencies are derived from the staged binaries; the logic-analyzer
-# helper uses the system sh implementation.
+# helper uses the system sh implementation. Upstream has no manuals for these;
+# the pages are Peios' own (build/man/), except for lsgpio and gpio-hammer,
+# which upstream calls examples (lint.pekit.toml).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.gpio-utils"
-description = "gpio-utils - userspace GPIO chardev tools (from Linux 7.0.9 tools/gpio)"
+description = "Userspace GPIO character-device tools (from Linux 7.0.9 tools/gpio)"
 
 [dependencies]
 "org.git.kernel.dash" = "*"
@@ -25,3 +30,6 @@ description = "gpio-utils - userspace GPIO chardev tools (from Linux 7.0.9 tools
 "tools:usr/bin/gpio-hammer"               = "usr/bin/gpio-hammer"
 "tools:usr/bin/gpio-watch"                = "usr/bin/gpio-watch"
 "tools:usr/bin/gpio-sloppy-logic-analyzer" = "usr/bin/gpio-sloppy-logic-analyzer"
+"tools:usr/share/man/man8/gpio-event-mon.8.gz"             = "usr/share/man/man8/gpio-event-mon.8.gz"
+"tools:usr/share/man/man8/gpio-watch.8.gz"                 = "usr/share/man/man8/gpio-watch.8.gz"
+"tools:usr/share/man/man8/gpio-sloppy-logic-analyzer.8.gz" = "usr/share/man/man8/gpio-sloppy-logic-analyzer.8.gz"

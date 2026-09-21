@@ -5,11 +5,15 @@
 # Note: only useful on physical laptops with the relevant accelerometer; dead
 # weight for a server/VM deployment — shipped for completeness.
 #
-# Runtime ELF dependencies are derived from the staged daemon.
+# Runtime ELF dependencies are derived from the staged daemon. Upstream has no
+# manual for it; the page is Peios' own (build/man/).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.freefall"
-description = "freefall - laptop free-fall disk protection daemon (from Linux 7.0.9 tools/laptop)"
+description = "Laptop free-fall disk protection daemon (from Linux 7.0.9 tools/laptop)"
 
 [provides]
 "freefall" = "{{version}}-1"
@@ -20,3 +24,4 @@ description = "freefall - laptop free-fall disk protection daemon (from Linux 7.
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.freefall/COPYING"
 "tools:usr/sbin/freefall" = "usr/bin/freefall"
+"tools:usr/share/man/man8/freefall.8.gz" = "usr/share/man/man8/freefall.8.gz"

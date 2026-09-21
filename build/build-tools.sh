@@ -19,6 +19,9 @@ set -euo pipefail
 
 src=${1:?usage: build-tools.sh <staged-source> <dest>}
 dest=${2:?usage: build-tools.sh <staged-source> <dest>}
+# This script's directory, resolved before the build moves into its work copy:
+# the manuals Peios writes for tools upstream leaves undocumented are in man/.
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 triplet=x86_64-linux-peios
 jobs=$(nproc)
 
@@ -71,6 +74,14 @@ cd "$work"
 
 log() { printf 'build-tools: %s\n' "$*"; }
 
+# Upstream links libperf, libthermal, libthermal_tools, perf's dlfilters, and the
+# thermal-engine and thermometer programs with a bare $(CC), and the two thermal
+# programs' Makefiles assign LDFLAGS themselves, so the distribution's link
+# flags (full RELRO, packed relative relocations, a build ID) never reach them.
+# Those builds take the flags through CC instead; the compiler ignores linker
+# options on the compile-only steps.
+link_cc="${CC:-cc} ${LDFLAGS:-}"
+
 # --- perf: profiling / tracing (PERF_EVENTS, kprobes, uprobes) ---
 # perfexecdir holds the perf-core helpers + scripts; relocate it under the triplet
 # (the default libexec/ is not a PSD-009 destination), and put completion under
@@ -98,7 +109,7 @@ make -C tools/perf -f Makefile.perf -j"$jobs" \
 	prefix=/usr libdir=/usr/lib/$triplet sysconfdir=/etc \
 	perfexecdir=lib/$triplet/perf-core \
 	PYTHON=python3 BUILD_BPF_SKEL=1 WERROR=0 \
-	NO_JVMTI=1 \
+	NO_JVMTI=1 CC="$link_cc" \
 	DESTDIR="$dest" install
 # NO_JVMTI: the JVMTI agent (Java/JVM symbol support) is permanently off per
 # the PEI-158 feature policy — no JDK in the Peios pool. Doc builds
@@ -131,7 +142,7 @@ fi
 # install_doc (asciidoc), and docs are off per the PEI-158 policy.
 log "libperf"
 make -C tools/lib/perf -j"$jobs" \
-	prefix=/usr libdir=/usr/lib/$triplet \
+	prefix=/usr libdir=/usr/lib/$triplet CC="$link_cc" \
 	DESTDIR="$dest" install_lib install_headers install_pkgconfig
 # The man pages come from the Documentation makefile directly, not through
 # libperf's install_doc: that target also runs install-html and
@@ -276,6 +287,13 @@ log "usbip"
 ( cd tools/usb/usbip && ./autogen.sh >/dev/null 2>&1 && \
   ./configure --prefix=/usr --libdir=/usr/lib/$triplet --sbindir=/usr/bin \
     --with-tcp-wrappers=no >/dev/null )
+# libtool gives usbip and usbipd a run path to libusbip whenever it does not
+# recognise the triplet libdir as a system search directory, which on a Debian
+# root it never does. The loader finds libusbip there without one, so stop
+# libtool emitting it.
+sed -i -e 's|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=""|' \
+	-e 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|' \
+	tools/usb/usbip/libtool
 make -C tools/usb/usbip -j"$jobs"
 make -C tools/usb/usbip DESTDIR="$dest" install
 
@@ -314,8 +332,10 @@ make -C tools/kvm/kvm_stat \
 # Note: the libs' SONAME is unversioned (libthermal.so / libthermal_tools.so), so
 # the unversioned .so must ship in the *runtime* lib packages, not just -devel.
 log "libthermal + thermal-engine + thermometer"
-make -C tools/lib/thermal -j"$jobs"
-make -C tools/lib/thermal install DESTDIR="$dest" prefix=/usr libdir=/usr/lib/$triplet
+make -C tools/lib/thermal -j"$jobs" CC="$link_cc"
+# install relinks the library (its object rule is forced), so it needs CC too.
+make -C tools/lib/thermal install DESTDIR="$dest" prefix=/usr libdir=/usr/lib/$triplet \
+	CC="$link_cc"
 # Upstream's install target ignores prefix/libdir when generating libthermal.pc
 # and emits prefix= plus libdir=/lib64. Rewrite the installed metadata to the
 # same target-triplet location as the actual library before packaging it.
@@ -324,13 +344,70 @@ sed -i \
 	-e 's#^prefix=.*#prefix=/usr#' \
 	-e 's#^libdir=.*#libdir=${prefix}/lib/'"$triplet"'#' \
 	"$thermal_pc"
-make -C tools/thermal/lib -j"$jobs"
+make -C tools/thermal/lib -j"$jobs" CC="$link_cc"
 # install_lib only: libthermal_tools is a private helper with no public header, so
 # its install_headers step (install/thermal.h) is broken — we just need the .so.
-make -C tools/thermal/lib install_lib DESTDIR="$dest" prefix=/usr libdir=/usr/lib/$triplet
-make -C tools/thermal/thermal-engine -j"$jobs"
+make -C tools/thermal/lib install_lib DESTDIR="$dest" prefix=/usr libdir=/usr/lib/$triplet \
+	CC="$link_cc"
+make -C tools/thermal/thermal-engine -j"$jobs" CC="$link_cc"
 install -D -m755 tools/thermal/thermal-engine/thermal-engine "$dest/usr/bin/thermal-engine"
-make -C tools/thermal/thermometer -j"$jobs"
+make -C tools/thermal/thermometer -j"$jobs" CC="$link_cc"
 install -D -m755 tools/thermal/thermometer/thermometer "$dest/usr/bin/thermometer"
+
+# =========================================================================
+# Finishing — the payload conventions every Peios package follows
+# =========================================================================
+
+# Three of perf's Python scripts name a bare `python`, which Peios does not
+# ship; the rest of perf's Python already asks for python3.
+log "perf script interpreters"
+while IFS= read -r -d '' f; do
+	case $(head -n 1 "$f") in
+	'#!/usr/bin/env python' | '#!/usr/bin/python') sed -i '1s/python$/python3/' "$f" ;;
+	esac
+done < <(find "$dest/usr/lib/$triplet/perf-core" -type f -print0)
+
+# Manuals. Upstream documents most of the small tools only in the kernel's
+# Documentation tree, if at all, so Peios writes their pages (build/man/, each
+# checked against the program's own option parsing). tmon and thermometer do
+# have upstream pages, which their Makefiles never install. Programs upstream
+# describes as tests or examples ship without one; pkm's lint.pekit.toml names
+# them.
+log "manuals"
+for page in "$here"/man/*.[1-8]; do
+	install -D -m644 "$page" "$dest/usr/share/man/man${page##*.}/$(basename "$page")"
+done
+install -D -m644 tools/thermal/tmon/tmon.8 "$dest/usr/share/man/man8/tmon.8"
+install -D -m644 tools/thermal/thermometer/thermometer.8 "$dest/usr/share/man/man8/thermometer.8"
+# Every page is gzip-compressed, reproducibly. The aliases are made after, so
+# they name the compressed files: `trace` is perf-trace, and osnoise, timerlat
+# and hwnoise are rtla's subcommands under their own names.
+find "$dest/usr/share/man" -type f -name '*.[1-9]' -exec gzip -9n {} +
+ln -s perf-trace.1.gz "$dest/usr/share/man/man1/trace.1.gz"
+for t in osnoise timerlat hwnoise; do
+	ln -s "rtla-$t.1.gz" "$dest/usr/share/man/man1/$t.1.gz"
+done
+
+# Debug data. Every ELF program and shared object is split by build ID into
+# usr/lib/debug/.build-id/, which kernel-tools-debuginfo ships, and then
+# stripped.
+log "debug data"
+debug_ids="$dest/usr/lib/debug/.build-id"
+while IFS= read -r -d '' f; do
+	type=$(readelf -h "$f" 2>/dev/null | sed -n 's/^ *Type: *\([A-Z]*\).*/\1/p' || true)
+	case $type in EXEC | DYN) ;; *) continue ;; esac
+	id=$(readelf -n "$f" | sed -n 's/^[[:space:]]*Build ID: //p' | head -n 1)
+	if [ -z "$id" ]; then
+		echo "build-tools: ${f#"$dest"/} has no build ID" >&2
+		exit 1
+	fi
+	debug="$debug_ids/${id:0:2}/${id:2}.debug"
+	# A hard link shares its build ID with the file already split.
+	[ -e "$debug" ] && continue
+	mkdir -p "${debug%/*}"
+	objcopy --only-keep-debug "$f" "$debug"
+	chmod 0644 "$debug"
+	strip "$f"
+done < <(find "$dest" -path "$dest/usr/lib/debug" -prune -o -type f -print0)
 
 log "installed $(cd "$dest" && find . -type f | wc -l) files under $dest"

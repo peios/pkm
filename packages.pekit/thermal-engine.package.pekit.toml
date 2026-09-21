@@ -3,11 +3,15 @@
 # no install target, so the binary is copied).
 #
 # Runtime ELF dependencies are derived from the staged binary; exact sibling
-# library packages are declared below.
+# library packages are declared below. Upstream has no manual for it; the page
+# is Peios' own (build/man/).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.thermal-engine"
-description = "thermal-engine - userspace thermal management daemon (from Linux 7.0.9 tools/thermal)"
+description = "Userspace thermal management daemon (from Linux 7.0.9 tools/thermal)"
 
 [dependencies]
 "dev.peios.libthermal"       = "= {{version}}-1"
@@ -22,3 +26,4 @@ description = "thermal-engine - userspace thermal management daemon (from Linux 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.thermal-engine/COPYING"
 "tools:usr/bin/thermal-engine" = "usr/bin/thermal-engine"
+"tools:usr/share/man/man8/thermal-engine.8.gz" = "usr/share/man/man8/thermal-engine.8.gz"

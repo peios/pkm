@@ -28,9 +28,32 @@
 # excluding it broke the thing this package exists for. The exclusion bought
 # little in any case -- scripts/ is the only mapped subtree with C sources at
 # all (78 files, 1.4M), and they pair with the prebuilt host tools beside them.
+#
+# Also excluded, because an out-of-tree module build never uses them:
+# - .gitignore files, which are source-tree residue;
+# - dtc's include-prefixes, links into other architectures' device-tree
+#   sources that an x86 kit does not carry, and scripts/kernel-doc, a
+#   compatibility link to tools/docs/kernel-doc, which the kit does not carry
+#   either (Kbuild calls the real path, and only for W= builds);
+# - the scripts that serve only the vmlinux link (mksysmap,
+#   generate_builtin_ranges.awk), kernel packaging (package/), livepatch
+#   builds (livepatch/), or kernel development checks (check-sysctl-docs,
+#   dev-needs.sh, ver_linux, verify_builtin_ranges.awk). They alone need awk,
+#   gawk, sed or make as interpreters.
 excludes = [
   "kernel:**/*.o",
   "kernel:**/*.cmd",
+  "kernel:**/.gitignore",
+  "kernel:scripts/dtc/include-prefixes/**",
+  "kernel:scripts/kernel-doc",
+  "kernel:scripts/mksysmap",
+  "kernel:scripts/generate_builtin_ranges.awk",
+  "kernel:scripts/verify_builtin_ranges.awk",
+  "kernel:scripts/package/**",
+  "kernel:scripts/livepatch/**",
+  "kernel:scripts/check-sysctl-docs",
+  "kernel:scripts/dev-needs.sh",
+  "kernel:scripts/ver_linux",
 ]
 
 [package]

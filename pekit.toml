@@ -230,6 +230,9 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 # again, so both packages describe the same build of the same modules.
 ./build/install-modules-irf.sh "$(pwd)" "$PEKIT_OUT/modules-root" \
 	"$PEKIT_OUT/modules-irf-root" "$PEKIT_OUT/System.map"
+# Last, once nothing here needs them unstripped: kernel-devel's host programs
+# ship stripped, their debug data in kernel-tools-debuginfo.
+./build/split-host-debug.sh "$PEKIT_OUT" "$PEKIT_OUT/host-debug"
 """
 
 # Sign both installed module sets after the worker is gone. Private key
@@ -424,9 +427,12 @@ command = """
 "org.oasis-open.docbook-xml" = "*"
 # setuptools builds perf's importable python module (util/setup.py).
 "io.pypa.setuptools" = "*"
+# gzip compresses every manual page; binutils (above) splits the debug data.
+"org.gnu.gzip" = "*"
 
 [build.tools.dependencies.apt]
 build-essential = "*"
+gzip = "*"
 bison = "*"
 flex = "*"
 pkg-config = "*"

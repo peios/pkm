@@ -10,11 +10,15 @@
 # otherwise — shipped for completeness.
 #
 # ELF dependencies are derived from the staged daemons. lsvmbus additionally
-# needs the packaged Python interpreter.
+# needs the packaged Python interpreter. Upstream has no manuals for any of
+# them; the pages are Peios' own (build/man/).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.hv"
-description = "hv - Linux Hyper-V guest integration daemons + tools (from Linux 7.0.9 tools/hv)"
+description = "Hyper-V guest integration daemons and tools (from Linux 7.0.9 tools/hv)"
 
 [dependencies]
 "org.python.python3" = ">= 3.14, < 3.15"
@@ -32,3 +36,7 @@ description = "hv - Linux Hyper-V guest integration daemons + tools (from Linux 
 "tools:usr/bin/hv_fcopy_uio_daemon" = "usr/bin/hv_fcopy_uio_daemon"
 "tools:usr/bin/lsvmbus"             = "usr/bin/lsvmbus"
 "tools:usr/lib/x86_64-linux-peios/hypervkvpd/**" = "usr/lib/x86_64-linux-peios/hypervkvpd/"
+"tools:usr/share/man/man8/hv_kvp_daemon.8.gz"       = "usr/share/man/man8/hv_kvp_daemon.8.gz"
+"tools:usr/share/man/man8/hv_vss_daemon.8.gz"       = "usr/share/man/man8/hv_vss_daemon.8.gz"
+"tools:usr/share/man/man8/hv_fcopy_uio_daemon.8.gz" = "usr/share/man/man8/hv_fcopy_uio_daemon.8.gz"
+"tools:usr/share/man/man1/lsvmbus.1.gz"             = "usr/share/man/man1/lsvmbus.1.gz"

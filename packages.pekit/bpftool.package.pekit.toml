@@ -12,7 +12,7 @@ side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.bpftool"
-description = "bpftool - eBPF program/map/BTF introspection (from Linux 7.0.9 tools/bpf/bpftool)"
+description = "eBPF program, map and BTF introspection (from Linux 7.0.9 tools/bpf/bpftool)"
 
 # bpftool's Makefile installs to /usr/sbin; PSD-009 §3.4.1 has no sbin (Peios is
 # bin-only), and bpftool has no compiled-in self-path, so relocate it to usr/bin.
@@ -26,4 +26,4 @@ description = "bpftool - eBPF program/map/BTF introspection (from Linux 7.0.9 to
 "@source:COPYING" = "usr/share/licenses/dev.peios.bpftool/COPYING"
 "tools:usr/sbin/bpftool" = "usr/bin/bpftool"
 "tools:usr/share/bash-completion/completions/bpftool" = "usr/share/bash-completion/completions/bpftool"
-"tools:usr/share/man/man8/bpftool*.8" = "usr/share/man/man8"
+"tools:usr/share/man/man8/bpftool*.8.gz" = "usr/share/man/man8"

@@ -6,7 +6,7 @@
 
 [package]
 name = "dev.peios.libperf"
-description = "libperf - perf events/sampling shared library"
+description = "Shared library for perf events counting and sampling"
 
 [provides]
 "libperf" = "{{version}}-1"

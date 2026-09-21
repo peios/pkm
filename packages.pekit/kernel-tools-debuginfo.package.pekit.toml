@@ -1,0 +1,21 @@
+# kernel-tools-debuginfo — debug data for every userspace program and shared
+# object in this family: the in-tree tools (build.tools) and kernel-devel's
+# Kbuild host programs (build.kernel). Each is split out by build ID when the
+# binary is stripped, so gdb and debuginfod find it under usr/lib/debug/.build-id.
+#
+# One package for the whole family, as zstd, elfutils and xz do; lint.pekit.toml
+# names it as the family's [elf] debuginfo package. vmlinux's debug data is
+# separate, in kernel-debuginfo, because it is large and wanted on its own.
+#
+# No dependencies: installing it must not pull in every tool it covers.
+
+[package]
+name = "dev.peios.kernel-tools-debuginfo"
+description = "Debugging symbols for the kernel's userspace tools and build programs"
+# The union of the licences declared by the packages whose binaries it covers.
+license = "GPL-2.0-only AND LGPL-2.1-or-later"
+
+[files]
+"@source:COPYING" = "usr/share/licenses/dev.peios.kernel-tools-debuginfo/COPYING"
+"tools:usr/lib/debug/**"              = "usr/lib/debug/"
+"kernel:host-debug/usr/lib/debug/**"  = "usr/lib/debug/"

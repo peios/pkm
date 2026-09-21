@@ -15,7 +15,7 @@ side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.rtla"
-description = "rtla - real-time latency analysis (osnoise, timerlat) (from Linux 7.0.9 tools/tracing/rtla)"
+description = "Real-time latency analysis tools (from Linux 7.0.9 tools/tracing/rtla)"
 
 [provides]
 "rtla" = "{{version}}-1"
@@ -29,4 +29,9 @@ description = "rtla - real-time latency analysis (osnoise, timerlat) (from Linux
 "tools:usr/bin/osnoise"  = "usr/bin/osnoise"
 "tools:usr/bin/hwnoise"  = "usr/bin/hwnoise"
 "tools:usr/bin/timerlat" = "usr/bin/timerlat"
-"tools:usr/share/man/man1/rtla*.1" = "usr/share/man/man1"
+"tools:usr/share/man/man1/rtla*.1.gz" = "usr/share/man/man1"
+# osnoise, hwnoise and timerlat are rtla's subcommands under their own names,
+# and their manuals are the subcommands' pages.
+"tools:usr/share/man/man1/osnoise.1.gz"  = "usr/share/man/man1/osnoise.1.gz"
+"tools:usr/share/man/man1/hwnoise.1.gz"  = "usr/share/man/man1/hwnoise.1.gz"
+"tools:usr/share/man/man1/timerlat.1.gz" = "usr/share/man/man1/timerlat.1.gz"

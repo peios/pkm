@@ -33,5 +33,5 @@ description = "libperf - development files (headers, static lib, pkg-config)"
 "tools:usr/include/internal/**"  = "usr/include/internal/"
 # The libperf API man pages: man3 for the functions, man7 for the library
 # overview. asciidoc and xmlto render them (PEI-535).
-"tools:usr/share/man/man3/libperf*.3" = "usr/share/man/man3"
-"tools:usr/share/man/man7/libperf*.7" = "usr/share/man/man7"
+"tools:usr/share/man/man3/libperf*.3.gz" = "usr/share/man/man3"
+"tools:usr/share/man/man7/libperf*.7.gz" = "usr/share/man/man7"

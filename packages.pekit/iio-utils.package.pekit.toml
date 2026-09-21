@@ -1,11 +1,16 @@
 # iio-utils — Industrial I/O userspace tools (iio_event_monitor,
 # iio_generic_buffer, lsiio). Built from tools/iio (build.tools).
 #
-# Runtime ELF dependencies are derived from the staged binaries.
+# Runtime ELF dependencies are derived from the staged binaries. lsiio's manual
+# is Peios' own (build/man/); the other two are upstream's example programs
+# (lint.pekit.toml).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.iio-utils"
-description = "iio-utils - Industrial I/O userspace tools (from Linux 7.0.9 tools/iio)"
+description = "Industrial I/O userspace tools (from Linux 7.0.9 tools/iio)"
 
 [provides]
 "iio-utils" = "{{version}}-1"
@@ -18,3 +23,4 @@ description = "iio-utils - Industrial I/O userspace tools (from Linux 7.0.9 tool
 "tools:usr/bin/iio_event_monitor"  = "usr/bin/iio_event_monitor"
 "tools:usr/bin/iio_generic_buffer" = "usr/bin/iio_generic_buffer"
 "tools:usr/bin/lsiio"              = "usr/bin/lsiio"
+"tools:usr/share/man/man1/lsiio.1.gz" = "usr/share/man/man1/lsiio.1.gz"

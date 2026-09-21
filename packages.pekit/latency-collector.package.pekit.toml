@@ -1,11 +1,15 @@
 # latency-collector — collect/aggregate scheduling + IRQ latency traces via
 # tracefs. Built from tools/tracing/latency (build.tools).
 #
-# Runtime ELF dependencies are derived from the staged binary.
+# Runtime ELF dependencies are derived from the staged binary. Upstream has no
+# manual for it; the page is Peios' own (build/man/).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.latency-collector"
-description = "latency-collector - kernel latency trace collector (from Linux 7.0.9 tools/tracing/latency)"
+description = "Kernel latency trace collector (from Linux 7.0.9 tools/tracing/latency)"
 
 [provides]
 "latency-collector" = "{{version}}-1"
@@ -16,3 +20,4 @@ description = "latency-collector - kernel latency trace collector (from Linux 7.
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.latency-collector/COPYING"
 "tools:usr/bin/latency-collector" = "usr/bin/latency-collector"
+"tools:usr/share/man/man8/latency-collector.8.gz" = "usr/share/man/man8/latency-collector.8.gz"

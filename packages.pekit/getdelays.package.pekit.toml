@@ -1,13 +1,19 @@
-# getdelays — taskstats delay-accounting demo (per-task CPU/IO/swap/reclaim delay
-# stats via netlink). Built from tools/accounting (build.tools), compiled against
+# getdelays — per-task and per-thread-group delay-accounting statistics (CPU, I/O,
+# swap and reclaim delays via the taskstats netlink interface; upstream calls it a
+# utility that also illustrates that interface). Built from tools/accounting
+# (build.tools), compiled against
 # the kernel's own exported UAPI headers (the build image's older taskstats.h
 # lacks fields this kernel adds, e.g. cpu_delay_max).
 #
-# Runtime ELF dependencies are derived from the staged binary.
+# Runtime ELF dependencies are derived from the staged binary. Upstream has no
+# manual for it; the page is Peios' own (build/man/).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.getdelays"
-description = "getdelays - taskstats delay-accounting demo (from Linux 7.0.9 tools/accounting)"
+description = "Per-task delay-accounting statistics (from Linux 7.0.9 tools/accounting)"
 
 [provides]
 "getdelays" = "{{version}}-1"
@@ -18,3 +24,4 @@ description = "getdelays - taskstats delay-accounting demo (from Linux 7.0.9 too
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.getdelays/COPYING"
 "tools:usr/bin/getdelays" = "usr/bin/getdelays"
+"tools:usr/share/man/man8/getdelays.8.gz" = "usr/share/man/man8/getdelays.8.gz"

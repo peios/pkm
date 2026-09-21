@@ -1,0 +1,38 @@
+# Lint policy for the kernel family. Findings are fixed in the build; each
+# entry here is an exception reviewed for PEI-1143, with the reason it is
+# correct rather than a defect.
+#
+# When the catalogue builds this tree, its lint files (pkgs/lint.pekit.toml and
+# the delegating recipe's) are layered over this one: the exceptions here
+# accumulate with the catalogue's, but a rule parameter set here yields to the
+# catalogue's value. The catalogue recipe therefore restates [elf] debuginfo;
+# this copy is what a standalone lint of this repository uses.
+
+[elf]
+# One debug package for every userspace program and shared object in the
+# family, the in-tree tools and kernel-devel's Kbuild host programs alike, as
+# zstd, elfutils and xz do. vmlinux's debug data has its own kernel-debuginfo.
+debuginfo = "dev.peios.kernel-tools-debuginfo"
+
+[allow]
+# The rule can only look for ELF objects, and these two carry none, but both
+# are x86_64 content: a bzImage is x86 boot and kernel code, and the asm/
+# headers describe the x86 ABI.
+"package.architecture" = "dev.peios.kernel ships an x86 bzImage and dev.peios.kernel-headers the x86 asm/ UAPI headers; both are x86_64-specific without containing an ELF object"
+
+[allow_files."split.devel.packages"]
+"usr/include/**" = "dev.peios.kernel-headers is the sanitized Linux UAPI from headers_install: its headers are the package, under the name distributions use and the dev.peios.linux-kernel-headers provide consumers resolve"
+"usr/lib/x86_64-linux-peios/libthermal.so" = "The library's SONAME is the unversioned libthermal.so (tools/lib/thermal/Makefile), so the dynamic loader resolves exactly this file at run time"
+"usr/lib/x86_64-linux-peios/libthermal_tools.so" = "The library's SONAME is the unversioned libthermal_tools.so (tools/thermal/lib/Makefile), so the dynamic loader resolves exactly this file at run time"
+
+# Programs upstream describes as tests or examples, in the program's own
+# source or the kernel documentation. They ship because they are useful for
+# exercising a driver, but they have no command-line contract to document.
+[allow_files."payload.manpages.required"]
+"usr/bin/gpio-hammer" = "tools/gpio/gpio-hammer.c: 'example swiss army knife to shake GPIO lines on a system'"
+"usr/bin/lsgpio" = "tools/gpio/lsgpio.c: 'example on how to list the GPIO lines on a system'"
+"usr/bin/iio_event_monitor" = "tools/iio/iio_event_monitor.c: 'Industrialio event test code', 'primarily intended as an example application'"
+"usr/bin/iio_generic_buffer" = "tools/iio/iio_generic_buffer.c: 'Industrialio buffer test code', 'primarily intended as an example application'"
+"usr/bin/thp_swap_allocator_test" = "tools/mm/thp_swap_allocator_test.c: a test program checking that THP swap-out gets whole swap slots"
+"usr/bin/spidev_test" = "tools/spi/spidev_test.c: 'SPI testing utility (using spidev driver)'"
+"usr/bin/spidev_fdx" = "Documentation/spi/spidev.rst calls it 'the spidev_fdx.c sample program'"

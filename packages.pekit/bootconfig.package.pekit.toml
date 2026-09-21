@@ -1,11 +1,15 @@
 # bootconfig — apply/inspect the boot-time kernel "bootconfig" appended to an
 # initrd. Built from tools/bootconfig (build.tools).
 #
-# Runtime ELF dependencies are derived from the staged binary.
+# Runtime ELF dependencies are derived from the staged binary. Upstream has no
+# manual for it; the page is Peios' own (build/man/).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.bootconfig"
-description = "bootconfig - kernel boot-config tool (from Linux 7.0.9 tools/bootconfig)"
+description = "Boot-time kernel configuration tool (from Linux 7.0.9 tools/bootconfig)"
 
 [provides]
 "bootconfig" = "{{version}}-1"
@@ -16,3 +20,4 @@ description = "bootconfig - kernel boot-config tool (from Linux 7.0.9 tools/boot
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.bootconfig/COPYING"
 "tools:usr/bin/bootconfig" = "usr/bin/bootconfig"
+"tools:usr/share/man/man8/bootconfig.8.gz" = "usr/share/man/man8/bootconfig.8.gz"

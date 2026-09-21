@@ -5,7 +5,7 @@
 
 [package]
 name = "dev.peios.spi-utils"
-description = "spi-utils - SPI userspace test tools (from Linux 7.0.9 tools/spi)"
+description = "SPI userspace test tools (from Linux 7.0.9 tools/spi)"
 
 [provides]
 "spi-utils" = "{{version}}-1"

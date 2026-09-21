@@ -13,7 +13,7 @@ side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.usbip"
-description = "usbip - USB/IP client and daemon + libusbip (from Linux 7.0.9 tools/usb/usbip)"
+description = "USB/IP client, daemon and library (from Linux 7.0.9 tools/usb/usbip)"
 
 [provides]
 "usbip" = "{{version}}-1"
@@ -27,5 +27,5 @@ description = "usbip - USB/IP client and daemon + libusbip (from Linux 7.0.9 too
 "tools:usr/bin/usbipd" = "usr/bin/usbipd"
 "tools:usr/lib/x86_64-linux-peios/libusbip.so.0"     = "usr/lib/x86_64-linux-peios/libusbip.so.0"
 "tools:usr/lib/x86_64-linux-peios/libusbip.so.0.0.1" = "usr/lib/x86_64-linux-peios/libusbip.so.0.0.1"
-"tools:usr/share/man/man8/usbip.8"  = "usr/share/man/man8/usbip.8"
-"tools:usr/share/man/man8/usbipd.8" = "usr/share/man/man8/usbipd.8"
+"tools:usr/share/man/man8/usbip.8.gz"  = "usr/share/man/man8/usbip.8.gz"
+"tools:usr/share/man/man8/usbipd.8.gz" = "usr/share/man/man8/usbipd.8.gz"

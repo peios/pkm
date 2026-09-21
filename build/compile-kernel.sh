@@ -51,6 +51,18 @@ if [[ "$llvm" == 1 ]]; then cc=clang; else cc="clang${llvm}"; fi
 command -v ccache >/dev/null 2>&1 && cc="ccache $cc"
 hostcc=()
 [[ -n "${PKM_HOSTCC:-}" ]] && hostcc=(HOSTCC="$PKM_HOSTCC")
+# The host programs Kbuild builds -- fixdep, modpost, objtool and the rest --
+# ship in kernel-devel, so they link with the distribution's flags like any
+# other shipped program: full RELRO, packed relative relocations, a build ID.
+# Kbuild takes host link flags only from HOSTLDFLAGS (C, C++ and Rust host
+# programs and objtool alike), never from LDFLAGS, so pass the build's LDFLAGS
+# through there unless the caller set HOSTLDFLAGS itself.
+hostld=()
+if [[ -n "${HOSTLDFLAGS:-}" ]]; then
+	hostld=(HOSTLDFLAGS="$HOSTLDFLAGS")
+elif [[ -n "${LDFLAGS:-}" ]]; then
+	hostld=(HOSTLDFLAGS="$LDFLAGS")
+fi
 # Normalize compiler-recorded paths before they enter DWARF.  debugedit in the
 # reference build image does not understand rustc's .debug_names section, so a
 # post-link rewrite alone can leave the absolute Pekit worktree in vmlinux.
@@ -70,7 +82,7 @@ krustflags="--remap-path-prefix=$tree=$debug_root"
 # clang processes through the vmlinux link and module generation is what took
 # this build out to the OOM killer once, with no error in the log -- the build
 # simply stopped mid-line, because the whole process group was signalled.
-make LLVM="$llvm" CC="$cc" "${hostcc[@]}" \
+make LLVM="$llvm" CC="$cc" "${hostcc[@]}" "${hostld[@]}" \
 	KCFLAGS="$kcflags" KRUSTFLAGS="$krustflags" \
 	-j"${PKM_JOBS:-$(nproc)}"
 

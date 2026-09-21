@@ -2,6 +2,12 @@
 # PKM uapi (under pkm/), what glibc and userspace C programs compile against.
 # Produced by build.headers (make headers_install); no runtime dep on the kernel.
 
+# headers_install leaves a Kbuild command stamp (.<header>.cmd) beside every
+# header it writes. They record the build, not the API.
+excludes = [
+  "headers:**/*.cmd",
+]
+
 [package]
 name = "dev.peios.kernel-headers"
 description = "Peios Kernel - userspace API headers"

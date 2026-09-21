@@ -1,11 +1,15 @@
 # cgroup-tools — the standalone cgroup diagnostic scripts which only require
 # Python's standard library. The drgn-based iocost_monitor and memcg_slabinfo
 # remain in the corresponding-source package until Peios packages drgn.
-#
+# Upstream documents neither script; the manuals are Peios' own (build/man/).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
+
 [package]
 name = "dev.peios.cgroup-tools"
 architecture = "noarch"
-description = "cgroup-tools - standalone cgroup diagnostics (from Linux 7.0.9 tools/cgroup)"
+description = "Standalone cgroup diagnostics (from Linux 7.0.9 tools/cgroup)"
 
 [dependencies]
 "org.python.python3" = ">= 3.14, < 3.15"
@@ -20,3 +24,5 @@ description = "cgroup-tools - standalone cgroup diagnostics (from Linux 7.0.9 to
 "@source:COPYING" = "usr/share/licenses/dev.peios.cgroup-tools/COPYING"
 "tools:usr/bin/iocost_coef_gen" = "usr/bin/iocost_coef_gen"
 "tools:usr/bin/memcg_shrinker"  = "usr/bin/memcg_shrinker"
+"tools:usr/share/man/man8/iocost_coef_gen.8.gz" = "usr/share/man/man8/iocost_coef_gen.8.gz"
+"tools:usr/share/man/man8/memcg_shrinker.8.gz"  = "usr/share/man/man8/memcg_shrinker.8.gz"

@@ -20,7 +20,7 @@ side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.perf"
-description = "perf - Linux performance analysis tooling (from Linux 7.0.9 tools/perf)"
+description = "Linux performance analysis tooling (from Linux 7.0.9 tools/perf)"
 
 [dependencies]
 "org.git.kernel.dash" = "*"
@@ -48,4 +48,6 @@ description = "perf - Linux performance analysis tooling (from Linux 7.0.9 tools
 # prefix, so only the destination moves.
 "tools:etc/bash_completion.d/perf" = "usr/share/bash-completion/completions/perf"
 "tools:usr/share/doc/perf-tip/tips.txt" = "usr/share/doc/perf-tip/tips.txt"
-"tools:usr/share/man/man1/perf*.1"      = "usr/share/man/man1"
+"tools:usr/share/man/man1/perf*.1.gz"   = "usr/share/man/man1"
+# `trace` is perf-trace under its own name, and so is its manual.
+"tools:usr/share/man/man1/trace.1.gz"   = "usr/share/man/man1/trace.1.gz"

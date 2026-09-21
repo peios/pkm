@@ -4,10 +4,16 @@
 #
 # thpmaps (NumPy), slabinfo-gnuplot (gnuplot), and show_page_info (drgn) remain
 # in the corresponding-source package until those optional runtimes are packaged.
+# Upstream has no manuals for these; the pages are Peios' own (build/man/),
+# except for thp_swap_allocator_test, which upstream calls a test
+# (lint.pekit.toml).
+
+# PSPU §5.24: a payload carrying man pages SHOULD declare man-db.
+side_effects = ["man-db"]
 
 [package]
 name = "dev.peios.mm-tools"
-description = "mm-tools - memory-management diagnostics (from Linux 7.0.9 tools/mm)"
+description = "Memory-management diagnostics (from Linux 7.0.9 tools/mm)"
 
 [provides]
 "mm-tools" = "{{version}}-1"
@@ -21,3 +27,6 @@ description = "mm-tools - memory-management diagnostics (from Linux 7.0.9 tools/
 "tools:usr/bin/slabinfo"                 = "usr/bin/slabinfo"
 "tools:usr/bin/page_owner_sort"          = "usr/bin/page_owner_sort"
 "tools:usr/bin/thp_swap_allocator_test"  = "usr/bin/thp_swap_allocator_test"
+"tools:usr/share/man/man8/page-types.8.gz"      = "usr/share/man/man8/page-types.8.gz"
+"tools:usr/share/man/man8/slabinfo.8.gz"        = "usr/share/man/man8/slabinfo.8.gz"
+"tools:usr/share/man/man1/page_owner_sort.1.gz" = "usr/share/man/man1/page_owner_sort.1.gz"

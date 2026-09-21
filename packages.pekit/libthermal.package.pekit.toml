@@ -10,7 +10,7 @@
 [package]
 name = "dev.peios.libthermal"
 license = "LGPL-2.1-or-later"
-description = "libthermal - kernel thermal-netlink client library"
+description = "Client library for the kernel thermal netlink interface"
 
 [provides]
 "libthermal" = "{{version}}-1"
