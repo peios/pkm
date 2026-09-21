@@ -91,6 +91,7 @@ const LOGON_TYPE_BATCH: u32 = 4;
 const LOGON_TYPE_SERVICE: u32 = 5;
 const LOGON_TYPE_NETWORK_CLEARTEXT: u32 = 8;
 const LOGON_TYPE_NEW_CREDENTIALS: u32 = 9;
+const LOGON_TYPE_REMOTE_INTERACTIVE: u32 = 10;
 const TOKEN_TYPE_PRIMARY_ABI: u32 = 1;
 const TOKEN_TYPE_IMPERSONATION_ABI: u32 = 2;
 const IMPERSONATION_LEVEL_ANONYMOUS_ABI: u32 = 0;
@@ -2188,6 +2189,7 @@ fn session_logon_type_valid(logon_type: u32) -> bool {
             | LOGON_TYPE_SERVICE
             | LOGON_TYPE_NETWORK_CLEARTEXT
             | LOGON_TYPE_NEW_CREDENTIALS
+            | LOGON_TYPE_REMOTE_INTERACTIVE
     )
 }
 
@@ -9224,8 +9226,14 @@ pub extern "C" fn kacs_rust_token_is_remote_shutdown_origin(token: *const c_void
         return -EINVAL;
     };
 
+    // RemoteInteractive drives a desktop, but the operator is not at the
+    // machine: the shutdown they ask for is one they cannot undo by hand,
+    // so it is gated like the other off-box logon types.
     match session.logon_type {
-        LOGON_TYPE_NETWORK | LOGON_TYPE_NETWORK_CLEARTEXT | LOGON_TYPE_NEW_CREDENTIALS => 1,
+        LOGON_TYPE_NETWORK
+        | LOGON_TYPE_NETWORK_CLEARTEXT
+        | LOGON_TYPE_NEW_CREDENTIALS
+        | LOGON_TYPE_REMOTE_INTERACTIVE => 1,
         LOGON_TYPE_INTERACTIVE | LOGON_TYPE_BATCH | LOGON_TYPE_SERVICE => 0,
         _ => -EINVAL,
     }

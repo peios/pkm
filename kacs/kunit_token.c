@@ -147,6 +147,7 @@ static void pkm_kunit_create_logon_session_wire_format_edge_vectors(
 		PKM_KUNIT_LOGON_TYPE_SERVICE,
 		PKM_KUNIT_LOGON_TYPE_NETWORK_CLEARTEXT,
 		PKM_KUNIT_LOGON_TYPE_NEW_CREDENTIALS,
+		PKM_KUNIT_LOGON_TYPE_REMOTE_INTERACTIVE,
 	};
 	const void *subject_token;
 	struct pkm_kacs_logon_session_snapshot snapshot = { };

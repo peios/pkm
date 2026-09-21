@@ -209,6 +209,7 @@ const (
 	KACS_LOGON_TYPE_NETWORK                             = 3
 	KACS_LOGON_TYPE_NETWORK_CLEARTEXT                   = 8
 	KACS_LOGON_TYPE_NEW_CREDENTIALS                     = 9
+	KACS_LOGON_TYPE_REMOTE_INTERACTIVE                  = 10
 	KACS_LOGON_TYPE_SERVICE                             = 5
 	KACS_META_ACL                                       = 5
 	KACS_META_BAD_ARGS                                  = 7

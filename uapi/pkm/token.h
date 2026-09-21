@@ -80,6 +80,7 @@
 #define KACS_LOGON_TYPE_SERVICE			5
 #define KACS_LOGON_TYPE_NETWORK_CLEARTEXT	8
 #define KACS_LOGON_TYPE_NEW_CREDENTIALS		9
+#define KACS_LOGON_TYPE_REMOTE_INTERACTIVE	10
 
 /* Maximum number of groups a token may carry. */
 #define KACS_TOKEN_MAX_GROUPS		1024U
