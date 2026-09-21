@@ -112,11 +112,14 @@ make -C tools/perf -f Makefile.perf -j"$jobs" \
 # tag (cpython-314-x86_64-linux-peios) and actually imports on a Peios
 # machine; the copied Debian-tagged one never could.
 #
-# Installed to the interpreter's one site-packages, asked for rather than
-# assumed -- the same rule every Python package in the pool follows.
+# Staged in the distribution layout, /usr/lib/<triplet>/pythonX.Y/site-packages,
+# using the executing interpreter's version -- the rule every Python package in
+# the pool follows (pkgs/_pybuild_/README.md). On a Peios root that is exactly
+# the interpreter's one site-packages. The Debian reference rung's own default
+# is /usr/local/lib/pythonX.Y/dist-packages, which is not a package destination.
 perf_pyso=$(find tools/perf/python -maxdepth 1 -name 'perf*.so' 2>/dev/null | head -1)
 if [ -n "$perf_pyso" ]; then
-	site=$(python3 -c 'import sysconfig; print(sysconfig.get_path("platlib"))')
+	site=/usr/lib/$triplet/$(python3 -c 'import sys; print("python%d.%d" % sys.version_info[:2])')/site-packages
 	install -D -m755 "$perf_pyso" "$dest$site/$(basename "$perf_pyso")"
 else
 	echo "build-tools: perf python module NOT built (no perf*.so under tools/perf/python)" >&2
@@ -148,18 +151,24 @@ make -C tools/bpf/bpftool -j"$jobs" \
 # libcpupower.so* lands under the triplet; skip the optional cpufreq-bench.
 # Build first, install serially: cpupower's install-gmo does not depend on
 # the .gmo generation, so a combined parallel `install` races msgfmt.
-# Its Makefile hard-codes /usr/bin/install; override that variable explicitly
-# because Peiosutils deliberately defers GNU install's mode-setting interface,
-# while build roots expose the compatibility implementation only privately.
+# Its Makefile hard-codes /usr/bin/install. On a Peios build root that is
+# Peiosutils, which deliberately defers GNU install's mode-setting interface,
+# and the root exposes the compatibility implementation only privately, so name
+# that one there. The Debian reference rung has no such path and needs none:
+# its /usr/bin/install is GNU's.
+cpupower_install=()
+if [ -x /usr/libexec/coreutils-build/install ]; then
+	cpupower_install=(INSTALL=/usr/libexec/coreutils-build/install)
+fi
 log "cpupower"
 make -C tools/power/cpupower -j"$jobs" \
 	prefix=/usr bindir=/usr/bin sbindir=/usr/sbin \
 	libdir=/usr/lib/$triplet mandir=/usr/share/man \
-	CPUFREQ_BENCH=false INSTALL=/usr/libexec/coreutils-build/install
+	CPUFREQ_BENCH=false "${cpupower_install[@]}"
 make -C tools/power/cpupower \
 	DESTDIR="$dest" prefix=/usr bindir=/usr/bin sbindir=/usr/sbin \
 	libdir=/usr/lib/$triplet mandir=/usr/share/man \
-	CPUFREQ_BENCH=false INSTALL=/usr/libexec/coreutils-build/install \
+	CPUFREQ_BENCH=false "${cpupower_install[@]}" \
 	install
 
 # --- turbostat: CPU power / frequency telemetry ---
