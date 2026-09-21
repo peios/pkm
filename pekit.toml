@@ -7,41 +7,50 @@ out_dir = "out"
 name = "dev.peios.kernel-source"
 
 # Single source of truth for the upstream Linux version, exported into every
-# build stage's environment (build.upstream imports the authenticated source
-# package). Bump it here, in
+# build stage's environment. Bump it here, in
 # lockstep with the patch series — kernel/patches are generated against this
 # exact tag, so a version change generally means re-deriving or 3-way-rebasing
-# them. Note: package install paths still embed the kernel RELEASE literally;
-# pekit's version templating carries the Peios version, not the kernel version.
+# them — and with the recipe's [input.linux] pin, which supplies the tree
+# (build.upstream). build.kernel and build.headers assert the staged tree
+# against this value, so the two cannot drift silently. Note: package install
+# paths still embed the kernel RELEASE literally; pekit's version templating
+# carries the Peios version, not the kernel version.
 [env]
 KERNEL_VERSION = "v7.0.9"
 
 [build.upstream]
 command = """
 set -eu
-# Import the independently authenticated, lock-pinned upstream source package.
-# Keeping remote acquisition in its own recipe means this build stays offline
-# and Peipkg can account for the exact upstream input in the dependency graph.
-version=${KERNEL_VERSION#v}
-tar -xJf "/usr/src/dist/linux-$version.tar.xz" \
-	--strip-components=1 --directory "$PEKIT_OUT"
+# The pristine upstream tree, declared as [input.linux] on the recipe that
+# builds this source (pkgs/dev.peios.kernel). Pekit fetched it, verified
+# kernel.org's signature coordinator-side and pinned its bytes in pekit.lock
+# before this target ran, so the build stays offline and no build root needs a
+# PGP implementation. It previously arrived as org.kernel.linux-source, a
+# package whose only payload was the tarball, which the Debian reference rung
+# could not deliver at all.
+: "${PEKIT_INPUT_LINUX:?the recipe must declare the pristine Linux tarball as [input.linux]}"
+
+# Copied through tar rather than cp, because the two rungs disagree about cp.
+# `cp -a` asks for the whole security descriptor and the native coreutils fails
+# with ENOSYS reading one on a host without KACS; naming attributes instead does
+# not help, because the vocabularies differ — GNU has `mode` and no `exec`, the
+# native one has `exec` and no `mode`, and plain -R preserves nothing there. A
+# tar stream carries modes, symlinks, hardlinks and mtimes identically on both,
+# and carries no security descriptors to fail on.
+tar -cf - -C "$PEKIT_INPUT_LINUX" . | tar -xf - -C "$PEKIT_OUT"
 
 # Source-level prep hook: nothing needed today (patches apply to a pristine
 # tree). Config/toolchain prep belongs to the later build stages, not here.
 """
 
-# Exact by design: Peios' patch series is derived against this Linux release.
 [build.upstream.dependencies.peipkg]
 "org.git.kernel.dash"       = "*"
 "dev.peios.peiosutils"      = "*"
-"org.kernel.linux-source"   = "= 7.0.9-1"
 "org.gnu.tar"               = "*"
-"org.tukaani.xz"            = "*"
 
 [build.upstream.dependencies.apt]
 coreutils = "*"
 tar = "*"
-xz-utils = "*"
 
 [build.source]
 needs = ["upstream"]

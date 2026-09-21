@@ -133,7 +133,7 @@ TCG, so the default flow is portable. Use `--env kvm` to force acceleration.
 build/build-image.sh                      # -> image `pkm-build`
 
 # 2. Fetch + graft the source (config-agnostic; this is the kernel-source tree).
-pekit build upstream                      # clone the pinned kernel
+pekit build upstream                      # unpack the pinned Linux tree (see below)
 pekit build source                        # apply kernel/patches + stage PKM sources
 
 # 3. Build + boot-test the KUnit kernel.
@@ -155,6 +155,13 @@ pekit package kernel --version 0.20.0 --no-build=…
 
 `--no-build=<stages>` reuses already-built stage outputs instead of rebuilding
 them — pass the upstream stages you want to keep.
+
+`build.upstream` takes the pristine Linux tree from `$PEKIT_INPUT_LINUX`: the
+recipe must declare the kernel.org tarball as `[input.linux]`, which Pekit
+fetches, checks against kernel.org's signature and pins in `pekit.lock` before
+the build starts. The catalogue recipe (`pkgs/dev.peios.kernel`) declares it;
+this repository's own `pekit.toml` does not, so there the stage stops and says
+so.
 
 ---
 
