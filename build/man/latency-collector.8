@@ -1,0 +1,396 @@
+.TH LATENCY-COLLECTOR 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+latency-collector \- collect traces of closely occurring kernel latencies from the ftrace latency tracers
+.SH SYNOPSIS
+.B latency-collector
+.RI [ option ...]
+.SH DESCRIPTION
+.B latency-collector
+uses one of the kernel's ftrace latency tracers
+.RB ( preemptirqsoff ,
+.BR preemptoff ,
+.BR irqsoff ,
+.BR wakeup ,
+.B \%wakeup_rt
+or
+.BR \%wakeup_dl )
+and prints the contents of the ftrace
+.I trace
+file to standard output each time the tracer records a latency.
+It detects a new latency by watching the
+.I \%tracing_max_latency
+file with
+.BR inotify (7).
+It runs until it receives
+.BR SIGINT ,
+.B SIGTERM
+or
+.BR SIGHUP .
+.PP
+Unless
+.BR \-x ,
+.B \-i
+or
+.B \-m
+is given,
+.B latency-collector
+configures ftrace itself.
+At start it saves the contents of the files
+.I \%current_tracer
+and
+.IR \%tracing_thresh ,
+and the state of the
+.B function\-trace
+and
+.B display\-graph
+options in
+.IR \%trace_options .
+If a tracer other than
+.B nop
+is active, it prints a message and exits, unless
+.B \-F
+is given, in which case it switches to the
+.B nop
+tracer.
+It then writes 0 to
+.IR \%tracing_max_latency ,
+sets the options and the threshold, and selects the tracer.
+When it receives
+.BR SIGINT ,
+.B SIGTERM
+or
+.BR SIGHUP ,
+it prints the maximum latency recorded, read from
+.IR \%tracing_max_latency ,
+restores the saved tracer, threshold and options, and exits.
+.PP
+At start,
+.B latency-collector
+prints its settings, and each of its threads prints its thread ID,
+scheduling policy and priority.
+The process runs with the
+.B \%SCHED_RR
+policy at priority 99 unless
+.B \-c
+or
+.B \-p
+is given.
+Detected latencies are numbered from 1 and handed to a pool of print
+threads.
+Each printout starts with a line of the form
+.PP
+.in +4n
+.EX
+\fIseconds\fP.\fImicroseconds\fP Latency \fIN\fP immediate print
+.EE
+.in
+.PP
+where the time is taken from
+.BR \%CLOCK_MONOTONIC ,
+followed by the contents of the trace file between lines marked
+.B BEGIN
+and
+.BR END .
+With random sleeping (see
+.BR \-r ),
+the first line reads
+.RI \(dq "randomly sleep for " T " ms before print" \(dq
+instead when the thread slept before reading the trace file, and a line
+.RI \(dq "Latency " N " printout skipped due to random delay" \(dq
+is printed when another latency was detected during the sleep.
+Detected latencies wait in a queue for a free print thread; if the queue
+is full, a warning is printed and the latency is not printed.
+With random sleeping, a latency is also not printed if it is detected
+while a trace is being printed, or if another latency has been chosen for
+printing between its detection and the time a print thread takes it; with
+.B \-v
+given twice, a message is printed for each such latency.
+.SH OPTIONS
+.TP
+.BR \-l ", " \-\-list
+List the latency tracers from the list above that the running kernel
+supports, and exit.
+.TP
+.BR \-t ", " \-\-tracer " \fItracer\fP"
+Use
+.IR tracer .
+By default the first tracer supported by the kernel is used, in this
+order: preemptirqsoff, preemptoff, irqsoff, wakeup, \%wakeup_rt, \%wakeup_dl.
+A tracer name that is not one of these produces a warning;
+a tracer that the kernel does not support is an error.
+.TP
+.BR \-F ", " \-\-force
+Start even if a tracer other than
+.B nop
+is active.
+.TP
+.BR \-s ", " \-\-threshold " \fIthreshold\fP"
+Write
+.I threshold
+(in microseconds, decimal digits only) to
+.IR \%tracing_thresh ,
+so that the tracer records every latency longer than
+.IR threshold .
+The default is 0, with which the tracer records a latency only if it is
+longer than the value in
+.IR \%tracing_max_latency ,
+the longest latency recorded so far.
+.TP
+.BR \-f ", " \-\-function
+Enable the
+.B function\-trace
+option in
+.IR \%trace_options ,
+so that ftrace also traces the functions executed during a latency.
+Without it only the beginning, the end and a backtrace are recorded.
+.TP
+.BR \-g ", " \-\-graph
+Enable the
+.B display\-graph
+option in
+.IR \%trace_options ,
+so that ftrace shows how the traced functions call each other.
+.TP
+.BR \-c ", " \-\-policy " \fIpolicy\fP"
+Run with the scheduling policy
+.IR policy ,
+one of
+.BR other ,
+.BR batch ,
+.BR idle ,
+.B rr
+or
+.BR fifo .
+The default is
+.BR rr .
+Unless
+.B \-p
+is given, the priority is 99 for
+.B rr
+and
+.B fifo
+and 0 for the other policies.
+The
+.B rr
+and
+.B fifo
+policies may cause latencies for other tasks.
+An unknown policy prints a warning and the usage message and exits.
+.TP
+.BR \-p ", " \-\-priority " \fIpriority\fP"
+Run with the scheduling priority
+.I priority
+(decimal digits only).
+A priority outside the range of the policy is raised to its minimum or
+lowered to its maximum, with a message.
+.TP
+.BR \-n ", " \-\-notrace
+Do not print the trace file when a latency is detected; print only a
+line
+.RI \(dq "Latency " N " detected" \(dq.
+This also turns random sleeping off.
+.BR \-r ,
+.B \-a
+and
+.B \-u
+given after
+.B \-n
+turn trace printing back on.
+.TP
+.BR \-e ", " \-\-threads " \fIcount\fP"
+Use
+.I count
+print threads (decimal digits only, at least 1).
+The default is 3 and the maximum 40; a larger value is reduced to 40 with
+a warning.
+.TP
+.BR \-r ", " \-\-random
+Before reading the trace file, sleep with a certain probability for the
+time set by
+.B \-u
+(default 1000 ms).
+Opening the trace file causes a blackout of hundreds of milliseconds in
+which the latency tracer notes no latencies; sleeping at random avoids
+always collecting the first of a cluster of closely occurring latencies.
+If another latency is detected while a thread sleeps, the sleeping
+thread skips its printout so that the later latency can be printed
+instead.
+The probabilities are chosen so that each latency of a cluster is equally
+likely to be the one collected; see
+.BR \-a .
+Random sleeping is intended for the irqsoff, preemptoff and
+preemptirqsoff tracers; with another tracer a warning is printed.
+.TP
+.BR \-a ", " \-\-nrlat " \fInrlat\fP"
+Assume, for the random sleep probabilities, that a cluster contains at
+most
+.I nrlat
+latencies (decimal digits only, at least 1; default 2).
+Implies
+.BR \-r .
+The first latency of a cluster is printed without sleeping with
+probability 1/\fInrlat\fP, the second with probability
+1/(\fInrlat\fP\-1), and so on, up to probability 1 for latency number
+.IR nrlat .
+When that last probability is used,
+.I nrlat
+is increased by one; with
+.B \-v
+a message is printed each time.
+.TP
+.BR \-u ", " \-\-time " \fItime\fP"
+Sleep for
+.I time
+milliseconds (decimal digits only) when random sleeping decides to
+sleep.
+The default is 1000.
+Implies
+.BR \-r .
+.TP
+.BR \-v ", " \-\-verbose
+Given once, print a message when
+.I nrlat
+is increased and when ftrace settings are changed or restored.
+Given twice or more, also print a message for each latency that random
+sleeping causes not to be printed.
+.TP
+.BR \-x ", " \-\-no\-ftrace
+Do not configure ftrace: the tracer, the threshold and the options are
+left as they are,
+.I \%tracing_max_latency
+is not reset, and nothing is restored or reported at exit.
+The tracer is then expected to have been set up through the files in the
+tracing directory.
+.TP
+.BR \-i ", " \-\-tracefile " \fIfile\fP"
+Print
+.I file
+instead of the ftrace
+.I trace
+file.
+Implies
+.BR \-x .
+.TP
+.BR \-m ", " \-\-max\-lat " \fIfile\fP"
+Watch
+.I file
+instead of the ftrace
+.I \%tracing_max_latency
+file.
+Implies
+.BR \-x .
+.TP
+.BR \-h ", " \-\-help
+Print a usage message, which includes the default file paths, and exit.
+.SH EXIT STATUS
+.B latency-collector
+exits with status 0 when it terminates on
+.BR SIGINT ,
+.B SIGTERM
+or
+.BR SIGHUP ,
+after
+.B \-h
+or
+.BR \-l ,
+and also after printing the usage message for an unknown option or an
+invalid
+.BR \-c ,
+.B \-e
+or
+.B \-a
+argument, and when it refuses to start because another tracer is
+active.
+It exits with status 1 on other errors, for example an argument that is
+not a decimal number, an unsupported tracer, a missing tracing directory,
+a failure to set the scheduling policy, or a failure to read or write a
+tracing file.
+.SH FILES
+The tracing directory is located through libtracefs; it is normally
+.IR \%/sys/kernel/tracing .
+.TP
+.I trace
+The trace that is printed for each latency.
+.TP
+.I \%tracing_max_latency
+Watched with inotify to detect latencies.
+Unless
+.B \-x
+is in effect, it is set to 0 at start and read at exit.
+.TP
+.I \%current_tracer
+.PD 0
+.TP
+.I \%tracing_thresh
+.TP
+.I \%trace_options
+.PD
+Saved at start, changed, and restored at exit, unless
+.B \-x
+is in effect.
+.TP
+.I \%available_tracers
+Read to find the tracers that the kernel supports.
+.TP
+.I \%/dev/urandom
+Read to seed the random number generator of each print thread.
+If it cannot be read, the thread's index is used as the seed and a
+warning is printed.
+.SH NOTES
+The irqsoff and preemptoff tracers need a kernel built with
+.B \%CONFIG_IRQSOFF_TRACER
+and
+.B \%CONFIG_PREEMPT_TRACER
+respectively; preemptirqsoff needs both.
+The wakeup, \%wakeup_rt and \%wakeup_dl tracers need
+.BR \%CONFIG_SCHED_TRACER .
+.PP
+.B latency-collector
+needs read and write access to the files in the tracing directory, which
+is normally restricted to privileged users.
+Setting the
+.B rr
+or
+.B fifo
+policy requires the
+.B \%CAP_SYS_NICE
+capability (on Peios,
+.BR \%SeIncreaseBasePriorityPrivilege ),
+unless the
+.B \%RLIMIT_RTPRIO
+resource limit permits the priority; if the policy cannot be set,
+.B latency-collector
+exits.
+.PP
+The
+.B function\-trace
+and
+.B display\-graph
+options are changed only if they appear in
+.IR \%trace_options ;
+otherwise
+.B \-f
+and
+.B \-g
+have no effect.
+.PP
+If
+.B latency-collector
+is terminated by a signal other than
+.BR SIGINT ,
+.B SIGTERM
+or
+.BR SIGHUP ,
+the ftrace settings it changed are not restored.
+.SH EXAMPLES
+Collect traces with the irqsoff tracer, including function traces, and
+choose at random among clustered latencies:
+.PP
+.in +4n
+.EX
+latency-collector \-t irqsoff \-f \-r
+.EE
+.in
+.SH SEE ALSO
+.BR inotify (7),
+.BR sched (7)

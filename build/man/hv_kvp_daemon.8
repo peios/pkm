@@ -1,0 +1,370 @@
+.TH HV_KVP_DAEMON 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+hv_kvp_daemon \- Hyper-V guest key-value pair (KVP) exchange daemon
+.SH SYNOPSIS
+.B hv_kvp_daemon
+.RB [ \-n ]
+.RB [ \-d ]
+.br
+.B hv_kvp_daemon
+.B \-h
+.SH DESCRIPTION
+.B hv_kvp_daemon
+is the user-space side of the Hyper-V key-value pair (KVP) exchange
+service in a Linux guest.
+The kernel's Hyper-V utilities driver passes requests from the host to
+the daemon through the character device
+.IR \%/dev/\:vmbus/\:hv_kvp ;
+the daemon services each request and writes the reply back to the
+device.
+.PP
+At startup the daemon detaches from the terminal with
+.BR daemon (3)
+unless
+.B \-n
+is given; the working directory is not changed, and standard input,
+standard output and standard error are redirected to
+.IR /dev/null .
+It opens the system log, records operating system information and the
+system's fully qualified domain name, creates
+.I \%/var/\:lib/\:hyperv
+(mode 0755) if it does not exist, and opens or creates the pool files
+in that directory.
+It then opens
+.IR \%/dev/\:vmbus/\:hv_kvp ,
+registers with the kernel, and serves requests until it is killed.
+If a read from or a write to the device fails, for example across
+hibernation, the daemon closes the device, reopens it and registers
+again.
+.SS Pools
+The host stores, retrieves, deletes and enumerates keys in five
+numbered pools.
+Each pool is kept in the file
+.IR \%/var/\:lib/\:hyperv/\:.kvp_pool_ N,
+where
+.I N
+is the pool number, 0 to 4.
+The daemon rereads a pool file before every operation on it, holding a
+write lock on the whole file
+.RB ( fcntl (2)
+.BR F_SETLKW )
+while it reads or writes the file.
+A key may be at most 512 bytes and a value at most 2048 bytes; requests
+to store larger keys or values fail.
+.PP
+Enumeration of pool 2
+.RB \%(KVP_POOL_AUTO )
+is not served from the pool file.
+Instead the daemon answers with these keys, which it generates itself:
+.TP
+.B \%FullyQualifiedDomainName
+The canonical name that
+.BR getaddrinfo (3)
+returns for the name given by
+.BR gethostname (2),
+looked up for IPv4 only.
+It is determined once, at startup; if the lookup fails, the value is
+an error message beginning
+.BR "getaddrinfo failed" .
+.TP
+.B \%IntegrationServicesVersion
+The version string that the kernel driver sends when it registers with
+the daemon.
+.TP
+.B \%NetworkAddressIPv4
+The IPv4 addresses of all interfaces other than loopback, separated by
+semicolons.
+.TP
+.B \%NetworkAddressIPv6
+The IPv6 addresses of all interfaces other than loopback, separated by
+semicolons.
+.TP
+.B \%OSBuildNumber
+The kernel release, as printed by
+.BR "uname \-r" .
+.TP
+.B \%OSVersion
+The kernel release, truncated before its first hyphen.
+.TP
+.B \%OSName
+The
+.B NAME
+field of
+.IR \%/etc/\:os\-release .
+If that file does not exist, the first line of
+.I \%/etc/\:SuSE\-release
+or, failing that,
+.IR \%/etc/\:redhat\-release .
+Otherwise the kernel name, as printed by
+.BR "uname \-s" .
+.TP
+.B \%OSMajorVersion
+The
+.B \%VERSION_ID
+field of
+.IR \%/etc/\:os\-release ,
+or the second line of the fallback file.
+Empty if neither is available.
+.TP
+.B \%OSMinorVersion
+The third line of the fallback file; otherwise empty.
+.TP
+.B \%ProcessorArchitecture
+The machine hardware name, as printed by
+.BR "uname \-m" .
+.SS Network configuration
+The host can also read and set the IP configuration of a network
+adapter.
+.PP
+To read it, the host names the adapter by its MAC address.
+The daemon looks through
+.I \%/sys/\:class/\:net/\:*/\:address
+for interfaces with that address (ignoring case), skips any that have
+no IP address, and reports for the first one it finds:
+its IPv4 and IPv6 addresses and subnet masks;
+the gateways of all default routes on the system, taken from the output
+of
+.B \%ip \-\-oneline \-4 route show
+and
+.BR "\%ip \-\-oneline \-6 route show" ;
+the DNS servers printed by the
+.B \%hv_get_dns_info
+helper; and whether DHCP is enabled, according to the
+.B \%hv_get_dhcp_info
+helper.
+.PP
+To set it, the host names the adapter by the GUID of its VMBus device,
+which the daemon matches against
+.IR \%/sys/\:class/\:net/\:*/\:device/\:device_id .
+The daemon writes the requested configuration for interface
+.I \%ifname
+to two files, then runs the
+.B \%hv_set_ifconfig
+helper with the two file names as arguments.
+If the helper exits with a non-zero status, the host is told that the
+request failed.
+The two files are:
+.TP
+.IR \%/var/\:lib/\:hyperv/\:ifcfg\- ifname
+.I KEY=value
+lines in ifcfg format:
+.BR HWADDR ,
+.BR DEVICE ,
+.B BOOTPROTO
+.RB ( dhcp " or " none ),
+.BI IPADDR n\fR,
+.BI NETMASK n\fR,
+.BR GATEWAY ,
+.BI GATEWAY n\fR,
+and
+.BI DNS n\fR;
+IPv6 entries use
+.BR IPV6ADDR ,
+.B \%IPV6NETMASK
+and
+.BR \%IPV6_DEFAULTGW ,
+with suffixes
+.BI _ n
+after the first.
+.TP
+.IR \%/var/\:lib/\:hyperv/ ifname .nmconnection
+A NetworkManager keyfile with a
+.B [connection]
+section
+.RB \%(interface\-name ),
+an
+.B [ethernet]
+section
+.RB \%(mac\-address )
+and
+.B [ipv4]
+and
+.B [ipv6]
+sections holding
+.BI address n\fR=\fIaddress\fB/\fIprefix\fR,
+.BR method ,
+and comma-separated
+.B gateway
+and
+.B dns
+lists.
+In
+.BR [ipv4] ,
+.B method
+is
+.B auto
+if DHCP is requested,
+.B manual
+if IPv4 addresses are given, and
+.B disabled
+otherwise.
+In
+.BR [ipv6] ,
+.B method
+is
+.B manual
+if IPv6 addresses are given, and
+.B auto
+otherwise.
+.SS Helper programs
+The helpers are in
+.IR \%/usr/\:lib/\:x86_64\-linux\-peios/\:hypervkvpd/ .
+The daemon runs each one through the shell and reads its standard
+output:
+.TP
+.BI \%hv_get_dns_info " ifname"
+Prints the addresses of the DNS servers, one per line.
+The installed script prints the
+.B nameserver
+entries of
+.I \%/etc/\:resolv.conf
+and ignores
+.IR \%ifname .
+.TP
+.BI \%hv_get_dhcp_info " ifname"
+Prints output beginning with
+.B Enabled
+if DHCP is enabled on
+.IR \%ifname ;
+any other output means that it is not.
+The installed script prints
+.B Enabled
+if
+.IR \%/etc/\:sysconfig/\:network\-scripts/\:ifcfg\- ifname
+contains the string
+.BR dhcp ,
+and
+.B Disabled
+otherwise.
+.TP
+.BI \%hv_set_ifconfig " ifcfg-file keyfile"
+Applies the configuration in the two files described above.
+The installed script appends
+.BR \%IPV6INIT=yes ,
+.BR \%NM_CONTROLLED=no ,
+.B \%PEERDNS=yes
+and
+.B \%ONBOOT=yes
+to
+.I \%ifcfg\-file
+and copies it to
+.IR \%/etc/\:sysconfig/\:network\-scripts/ ,
+writes
+.I keyfile
+with
+.B \%autoconnect=true
+added to its
+.B [connection]
+section into
+.IR \%/etc/\:NetworkManager/\:system\-connections/ ,
+and then runs
+.B \%/sbin/\:ifdown
+and
+.BR \%/sbin/\:ifup .
+.PP
+The installed helpers are the example scripts from the Linux source
+tree, unmodified.
+Their comments describe them as examples that each distribution is
+expected to implement for its own network configuration;
+.B \%hv_set_ifconfig
+is written for a RHEL-style system.
+Replacing the files in the helper directory changes how the daemon
+gathers and applies network configuration.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-no\-daemon
+Stay in the foreground; do not detach from the terminal.
+.TP
+.BR \-d ", " \-\-debug
+Log debug messages at priority
+.BR \%LOG_DEBUG :
+the contents of every pool at startup, and each key that is added,
+updated or deleted.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary to standard error and exit.
+.SH EXIT STATUS
+.B hv_kvp_daemon
+exits with status 0 after
+.BR \-\-help ,
+and with status 1 for an invalid option, if
+.BR daemon (3)
+fails, or on a fatal error such as failing to open
+.I \%/dev/\:vmbus/\:hv_kvp
+or to register with the kernel.
+When the daemon detaches, the invoking process exits with status 0 as
+soon as the background process has been created; later errors are
+reported only in the system log.
+.SH FILES
+.TP
+.I \%/dev/\:vmbus/\:hv_kvp
+KVP device, provided by the kernel's Hyper-V utilities driver.
+.TP
+.I \%/var/\:lib/\:hyperv/
+Directory holding the pool files and the generated network
+configuration files.
+.TP
+.IR \%/var/\:lib/\:hyperv/\:.kvp_pool_0 " to " \%.kvp_pool_4
+Pool files, created with mode 0644.
+Each is a sequence of fixed-size records: a 512-byte key followed by a
+2048-byte value.
+The pool numbers are defined in
+.I \%include/\:uapi/\:linux/\:hyperv.h
+in the Linux source: 0
+.RB \%(KVP_POOL_EXTERNAL ),
+1
+.RB \%(KVP_POOL_GUEST ),
+2
+.RB \%(KVP_POOL_AUTO ),
+3
+.RB \%(KVP_POOL_AUTO_EXTERNAL )
+and 4
+.RB \%(KVP_POOL_AUTO_INTERNAL ).
+.TP
+.IR \%/var/\:lib/\:hyperv/\:ifcfg\- ifname
+.TQ
+.IR \%/var/\:lib/\:hyperv/ ifname .nmconnection
+Network configuration written when the host sets an adapter's IP
+configuration.
+.TP
+.I \%/usr/\:lib/\:x86_64\-linux\-peios/\:hypervkvpd/
+Helper programs
+.BR \%hv_get_dhcp_info ,
+.B \%hv_get_dns_info
+and
+.BR \%hv_set_ifconfig .
+.TP
+.I \%/etc/\:os\-release
+.TQ
+.I \%/etc/\:SuSE\-release
+.TQ
+.I \%/etc/\:redhat\-release
+Sources of the operating system name and version.
+.TP
+.I \%/sys/\:class/\:net/
+Used to map MAC addresses and VMBus device GUIDs to interface names.
+.SH NOTES
+The daemon logs through
+.BR syslog (3)
+with the identifier
+.B KVP
+and the facility
+.BR \%LOG_USER .
+.PP
+The daemon works only in a Linux guest running on Hyper-V.
+.I \%/dev/\:vmbus/\:hv_kvp
+is created by the kernel's Hyper-V utilities driver, hv_utils
+.RB \%(CONFIG_HYPERV_UTILS );
+if the device cannot be opened, the daemon exits.
+.PP
+The fully qualified domain name is determined once, at startup;
+the daemon does not see later changes to the system's host name.
+.SH SEE ALSO
+.BR \%hv_fcopy_uio_daemon (8),
+.BR \%hv_vss_daemon (8),
+.BR lsvmbus (1),
+.BR daemon (3),
+.BR syslog (3)
+.PP
+.I \%Documentation/\:virt/\:hyperv/
+in the Linux source.

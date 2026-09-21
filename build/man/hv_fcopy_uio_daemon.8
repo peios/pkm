@@ -1,0 +1,153 @@
+.TH HV_FCOPY_UIO_DAEMON 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+hv_fcopy_uio_daemon \- Hyper-V guest file copy daemon
+.SH SYNOPSIS
+.B hv_fcopy_uio_daemon
+.RB [ \-n ]
+.br
+.B hv_fcopy_uio_daemon
+.B \-h
+.SH DESCRIPTION
+.B hv_fcopy_uio_daemon
+implements the guest side of the Hyper-V file copy service, through which
+the host copies files into a running Linux guest.
+Unlike
+.BR \%hv_kvp_daemon (8)
+and
+.BR \%hv_vss_daemon (8),
+it talks to the host directly over the file copy VMBus channel, which
+the kernel exposes through the Userspace I/O (UIO) framework.
+.PP
+The daemon expects the file copy device at
+.IR \%/sys/\:bus/\:vmbus/\:devices/\:eb765408\-105f\-49b6\-b4aa\-c123b64d17d4/ ,
+referred to below as
+.IR device .
+At startup it detaches from the terminal with
+.BR daemon (3)
+unless
+.B \-n
+is given; the working directory is not changed, and standard input,
+standard output and standard error are redirected to
+.IR /dev/null .
+It then:
+.IP \(bu 3
+takes half the size of the first
+.IR device /channels/*/ring
+file it finds as the size of each of the channel's two ring buffers,
+retrying once after 100 milliseconds if none is found;
+.IP \(bu 3
+takes the name of the UIO device from the first entry in
+.IR device /uio/,
+for example
+.BR uio0 ,
+and opens the corresponding device node, for example
+.IR /dev/uio0 ;
+.IP \(bu 3
+maps the ring buffers into memory.
+.PP
+It then waits for interrupts from the host and processes each message
+it receives, replying to the host through the ring buffer:
+.TP
+Version negotiation
+The daemon accepts file copy service version 1.1.
+.TP
+Start of a copy
+The host sends a destination directory and a file name.
+If a directory in the destination path, up to the path's last slash,
+does not exist, the daemon creates it with mode 0755 when the host has
+requested this, and otherwise fails the copy.
+If the file already exists, the copy fails unless the host has
+requested that existing files be overwritten.
+The file is then created, or truncated, with mode 0744 as modified by
+the process umask.
+.TP
+Data
+The data is written at the offset the host specifies.
+If the file system is full, the host is told that the disk is full.
+.TP
+End of a copy
+The file is closed.
+.PP
+Any other file copy request fails.
+The daemon handles one file at a time.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-no\-daemon
+Stay in the foreground; do not detach from the terminal.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary to standard error and exit.
+.SH EXIT STATUS
+.B hv_fcopy_uio_daemon
+exits with status 234 (the low byte of
+.BR \-EINVAL )
+after
+.B \-\-help
+or an invalid option, and also if
+.BR daemon (3)
+fails.
+Otherwise it runs until an error occurs, such as failing to determine
+the ring buffer size, to open or map the UIO device, or to read from
+it.
+When the daemon detaches, the invoking process exits with status 0 as
+soon as the background process has been created; later errors are
+reported only in the system log.
+.SH FILES
+.TP
+.I \%/sys/\:bus/\:vmbus/\:devices/\:eb765408\-105f\-49b6\-b4aa\-c123b64d17d4/
+The file copy VMBus device.
+The daemon looks for the device only under this instance GUID.
+It reads the size of the
+.I channels/*/ring
+files and the name of the UIO device in
+.I uio/
+from this directory.
+.TP
+.IR /dev/uio N
+UIO device node through which the daemon receives interrupts, signals
+the host, and maps the ring buffers.
+.SH NOTES
+The daemon logs through
+.BR syslog (3)
+with the identifier
+.B \%HV_UIO_FCOPY
+and the facility
+.BR \%LOG_USER .
+.PP
+The daemon works only in a Linux guest running on Hyper-V, and only
+when the file copy device is bound to the kernel's generic VMBus UIO
+driver, uio_hv_generic
+.RB \%( CONFIG_UIO_HV_GENERIC ).
+That driver has no built-in device IDs, so it must be told which
+devices to bind to.
+The comment at the top of
+.I \%drivers/\:uio/\:uio_hv_generic.c
+in the Linux source describes doing this by writing the device's class
+GUID to
+.IR \%/sys/\:bus/\:vmbus/\:drivers/\:uio_hv_generic/\:new_id .
+The class GUID of the file copy device is
+.BR \%34d14be3\-dee4\-41c8\-9ae7\-6b174977c192 .
+.PP
+The destination directory and file name come from the host, and the
+daemon does not restrict where it writes: any path that the daemon's
+privileges allow can be created or, if the host requests it,
+overwritten.
+.SH EXAMPLES
+Bind the file copy device to uio_hv_generic, then start the daemon:
+.PP
+.RS 4
+.EX
+# echo 34d14be3\-dee4\-41c8\-9ae7\-6b174977c192 \e
+    > /sys/bus/vmbus/drivers/uio_hv_generic/new_id
+# hv_fcopy_uio_daemon
+.EE
+.RE
+.SH SEE ALSO
+.BR \%hv_kvp_daemon (8),
+.BR \%hv_vss_daemon (8),
+.BR lsvmbus (1),
+.BR daemon (3),
+.BR syslog (3)
+.PP
+.I \%Documentation/\:virt/\:hyperv/
+in the Linux source.

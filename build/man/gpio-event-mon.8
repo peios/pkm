@@ -1,0 +1,228 @@
+.TH GPIO-EVENT-MON 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+gpio\-event\-mon \- monitor edge events on GPIO lines
+.SH SYNOPSIS
+.B \%gpio\-event\-mon
+.B \-n
+.I name
+.B \-o
+.I offset
+.RB [ \-o
+.IR offset ]...
+.RB [ \-b
+.IR period ]
+.RB [ \-c
+.IR count ]
+.RB [ \-d ]
+.RB [ \-s ]
+.RB [ \-r ]
+.RB [ \-f ]
+.RB [ \-w ]
+.RB [ \-t ]
+.br
+.B \%gpio\-event\-mon \-?
+.SH DESCRIPTION
+.B \%gpio\-event\-mon
+requests one or more lines of a GPIO chip as inputs with edge detection
+enabled, using the version 2 GPIO character device interface,
+and prints each edge event the kernel reports for them.
+.PP
+The lines are requested under the consumer label
+.BR \%gpio\-event\-mon .
+All lines share the same configuration.
+Before waiting for events, the program reads and prints the current value
+of each line:
+.PP
+.in +4n
+.EX
+Monitoring line 4 on gpiochip0
+Initial line value: 1
+.EE
+.in
+.PP
+It then prints one line per event:
+.PP
+.in +4n
+.EX
+GPIO EVENT at \fItimestamp\fP on line \fIoffset\fP (\fIline_seqno\fP|\fIseqno\fP) \fIedge\fP
+.EE
+.in
+.PP
+.I timestamp
+is the event time in nanoseconds, taken from
+.B CLOCK_MONOTONIC
+unless
+.B \-w
+or
+.B \-t
+is given.
+.I line_seqno
+is the sequence number of the event among the events on that line, and
+.I seqno
+its sequence number among all events of the request.
+.I edge
+is
+.BR "rising edge" ,
+.BR "falling edge" ,
+or
+.B unknown event
+for an event identifier the program does not recognise.
+.PP
+If neither
+.B \-r
+nor
+.B \-f
+is given, the program prints
+\(dqNo flags specified, listening on both rising and falling edges\(dq
+and monitors both edges.
+.PP
+The program runs until it has reported
+.I count
+events (see
+.BR \-c ),
+until a read from the kernel fails, or until it is killed.
+.SH OPTIONS
+.TP
+.BI \-n " name"
+Monitor lines of the GPIO character device
+.RI /dev/ name ,
+for example
+.BR gpiochip0 .
+The name is given without the
+.I /dev/
+prefix.
+This option is required.
+.TP
+.BI \-o " offset"
+Monitor the line at
+.I offset
+on the chip, given in decimal.
+May be repeated to monitor several lines in one request,
+up to a maximum of 64.
+At least one
+.B \-o
+option is required.
+.TP
+.BI \-b " period"
+Set a debounce period of
+.I period
+microseconds on all monitored lines.
+A period of 0, the default, requests no debouncing.
+.TP
+.BI \-c " count"
+Exit after
+.I count
+events have been reported.
+If this option is omitted or
+.I count
+is 0, the program runs until it is killed.
+.TP
+.B \-d
+Request the lines with the open-drain drive flag.
+See NOTES.
+.TP
+.B \-s
+Request the lines with the open-source drive flag.
+See NOTES.
+.TP
+.B \-r
+Report rising edges.
+.TP
+.B \-f
+Report falling edges.
+.TP
+.B \-w
+Timestamp events with
+.B CLOCK_REALTIME
+(wall-clock time) instead of
+.BR CLOCK_MONOTONIC .
+.TP
+.B \-t
+Timestamp events using the hardware timestamp engine (HTE).
+See NOTES.
+.TP
+.B \-?
+Print a usage message to standard error and exit.
+An unknown option or a missing option argument has the same effect.
+.PP
+The
+.BR \-c ,
+.BR \-o ,
+and
+.B \-b
+arguments are converted with
+.BR strtoul (3)
+without error checking: trailing characters are ignored and a value that does
+not begin with a digit is taken as 0.
+.SH FILES
+.TP
+.RI /dev/ name
+GPIO character device named by
+.BR \-n ,
+opened read-only;
+typically
+.IR /dev/gpiochip0 ,
+.IR /dev/gpiochip1 ,
+and so on.
+.SH NOTES
+The kernel must provide the GPIO character device
+.RB \%( CONFIG_GPIO_CDEV ).
+The caller needs read access to the device node.
+A line that is already requested by another consumer cannot be requested
+again, and the program exits with an error.
+.PP
+The kernel accepts the open-drain and open-source drive flags only for lines
+requested as outputs.
+.B \%gpio\-event\-mon
+always requests its lines as inputs, so a request made with
+.B \-d
+or
+.B \-s
+is rejected by the kernel with
+.BR EINVAL .
+.PP
+Hardware timestamps
+.RB ( \-t )
+require a kernel built with
+.B \%CONFIG_HTE
+and a timestamp provider for the line; otherwise the request fails.
+.B \-t
+cannot be combined with
+.BR \-w .
+.PP
+If the hardware does not debounce the line itself,
+the kernel emulates debouncing in software;
+an edge is then reported once the line has been stable for the debounce
+period, and the event timestamp corresponds to the end of that period.
+.PP
+If events arrive faster than they are read, the kernel event buffer
+may overflow and discard the oldest events;
+gaps in the sequence numbers show where this happened.
+.SH EXAMPLES
+Monitor both edges on line 4 of
+.I /dev/gpiochip0
+with a 10 millisecond debounce period:
+.PP
+.in +4n
+.EX
+gpio\-event\-mon \-n gpiochip0 \-o 4 \-r \-f \-b 10000
+.EE
+.in
+.PP
+Report the first five rising edges on lines 2 and 3:
+.PP
+.in +4n
+.EX
+gpio\-event\-mon \-n gpiochip0 \-o 2 \-o 3 \-r \-c 5
+.EE
+.in
+.SH SEE ALSO
+.BR \%gpio\-sloppy\-logic\-analyzer (8),
+.BR \%gpio\-watch (8)
+.PP
+The GPIO character device interface and the line request flags are
+described in the Linux kernel source in
+.PP
+.I \%Documentation/userspace\-api/gpio/chardev.rst
+.br
+.I \%Documentation/userspace\-api/gpio/gpio\-v2\-get\-line\-ioctl.rst

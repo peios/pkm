@@ -1,0 +1,159 @@
+.TH THERMAL-ENGINE 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+thermal\-engine \- report thermal zone state and thermal events from the kernel
+.SH SYNOPSIS
+.B \%thermal\-engine
+.RB [ \-d ]
+.RB [ \-s ]
+.RB [ \-l
+.IR level ]
+.br
+.B \%thermal\-engine \-h
+.SH DESCRIPTION
+.B \%thermal\-engine
+is a thermal monitoring program built on
+.B libthermal
+and the kernel's thermal generic netlink family,
+.BR thermal .
+It subscribes to the family's
+.B event
+multicast group and reports what the kernel's thermal framework does.
+.PP
+At startup it:
+.IP 1. 4
+discovers the thermal zones and reads each zone's trip points,
+thresholds and governor;
+.IP 2. 4
+for each zone, removes all existing thresholds and then adds five
+thresholds, at 43000, 49000, 55000, 57000 and 65000 millidegrees Celsius,
+each reported when crossed in either direction;
+.IP 3. 4
+for each zone, prints its name and identifier, its trip points
+(identifier, type, temperature and hysteresis),
+the thresholds read in step 1,
+its current temperature and its governor.
+.PP
+It then prints
+\(dqWaiting for thermal events ...\(dq
+and prints a message for each event the kernel sends:
+a thermal zone created, deleted, enabled or disabled;
+a trip point crossed upwards or downwards, added, deleted or changed;
+a cooling device added, deleted or changing state;
+a zone's governor changed;
+and a threshold added, deleted, flushed, or crossed upwards or downwards.
+.PP
+Temperatures are printed as the kernel reports them,
+in millidegrees Celsius.
+Trip types and threshold directions are printed as numbers.
+A threshold direction is a bit mask in which 1 means upwards and 2 means
+downwards.
+.PP
+Messages are written to standard output, or to
+.BR syslog (3)
+with
+.BR \-s .
+.B \%thermal\-engine
+runs until it is killed.
+.SH OPTIONS
+.TP
+.BR \-d ", " \-\-daemonize
+Detach from the controlling terminal and run in the background, using
+.BR daemon (3).
+The working directory is changed to
+.I /
+and standard input, standard output and standard error are redirected to
+.IR /dev/null ,
+so without
+.B \-s
+all messages are discarded.
+.TP
+.BR \-s ", " \-\-syslog
+Send messages to
+.BR syslog (3),
+with facility
+.B LOG_USER
+and the base name of the program as identity,
+instead of to standard output.
+.TP
+.BR \-l ", " \-\-loglevel " \fIlevel\fP"
+Set the lowest priority of messages passed to
+.BR syslog (3).
+.I level
+is one of
+.BR EMERG ,
+.BR ALERT ,
+.BR CRITICAL ,
+.BR ERROR ,
+.BR WARN ,
+.BR NOTICE ,
+.BR INFO ,
+or
+.BR DEBUG ,
+in upper case.
+Any other value selects
+.BR DEBUG .
+The default is
+.BR INFO .
+The level takes effect only together with
+.BR \-s ;
+messages written to standard output are not filtered.
+.TP
+.BR \-h ", " \-\-help
+Print a usage message to standard output and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+The usage message was printed.
+.TP
+.B 1
+An invalid option was given, or an option argument was missing.
+.TP
+.B 2
+.BR daemon (3)
+failed.
+.TP
+.B 3
+The logging facility could not be initialised.
+.TP
+.B 4
+The thermal library could not be initialised,
+or no thermal zone could be discovered.
+.TP
+.B 6
+The event loop could not be set up or failed.
+.SH NOTES
+The kernel must be built with
+.B \%CONFIG_THERMAL_NETLINK
+to provide the thermal netlink interface.
+.PP
+The thresholds set at startup replace any thresholds already configured
+on each zone, and remain in place after
+.B \%thermal\-engine
+exits.
+The kernel accepts the commands that remove and add thresholds only from a
+caller with
+.BR CAP_SYS_ADMIN ,
+which Peios maps to
+.BR SeTcbPrivilege .
+Without it,
+.B \%thermal\-engine
+logs
+\(dqFailed to flush all previous thresholds\(dq
+for each zone and continues without setting thresholds.
+.PP
+Errors are reported through the same channel as other messages.
+An invalid option or a failure of
+.B \-d
+occurs before logging is set up, so
+.B \%thermal\-engine
+prints no message of its own for it.
+.SH SEE ALSO
+.BR daemon (3),
+.BR syslog (3)
+.PP
+The thermal sysfs interface, including temperature units, is described in
+the Linux kernel source in
+.PP
+.I \%Documentation/ABI/testing/sysfs\-class\-thermal
+.br
+.I \%Documentation/driver\-api/thermal/sysfs\-api.rst

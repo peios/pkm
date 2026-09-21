@@ -1,0 +1,412 @@
+.TH SLABINFO 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+slabinfo \- report on and operate on the kernel's SLUB slab caches
+.SH SYNOPSIS
+.B slabinfo
+.RB [ \-aABDefilLnoPrsStTUvXz1 ]
+.RB [ \-N
+.IR count ]
+.RB [ \-d [\c
+.IR debug-flags ]]
+.RI [ pattern ]
+.br
+.B slabinfo \-h
+.SH DESCRIPTION
+.B slabinfo
+reads the attributes of the slab caches of the SLUB allocator from
+.I \%/sys/kernel/slab
+and prints reports about them, or asks the kernel to shrink or validate
+them.
+.PP
+Only caches whose names match
+.I pattern
+are processed.
+.I pattern
+is a POSIX basic regular expression, matched case-insensitively anywhere
+in the name; the default matches every cache.
+Caches that SLUB has merged appear in
+.I \%/sys/kernel/slab
+under generated names beginning with a colon, with symbolic links (the
+aliases) for the names of the original caches; such caches are always
+read, whatever the pattern.
+In the list and the other per-cache reports, a merged cache with one
+alias that matches
+.I pattern
+is shown under that alias name, a merged cache with several matching
+aliases keeps its generated name unless
+.B \-f
+is given, and a merged cache with no matching alias is not shown.
+.PP
+When none of
+.BR \-a ,
+.BR \-l ,
+.BR \-o ,
+.BR \-r ,
+.BR \-s ,
+.BR \-t ,
+.B \-v
+and
+.B \-d
+is given,
+.B slabinfo
+lists the caches, as with
+.BR \-l .
+.B \-a
+takes precedence over
+.BR \-X ,
+which takes precedence over
+.BR \-T ;
+otherwise one action is performed for each cache, the first of
+.BR \-n ,
+.BR \-t ,
+.BR \-v ,
+.BR \-s ,
+.BR \-d ,
+.BR \-o ,
+.B \-l
+and
+.B \-r
+that is given.
+.SS Cache list
+The list printed by
+.B \-l
+has one line per cache with these columns:
+.TP 16
+.B Name
+the cache name;
+.TP
+.B Objects
+the number of objects allocated;
+.TP
+.B Objsize
+the size of an object;
+.TP
+.B Space
+the memory used by the cache's slabs, or, with
+.BR \-L ,
+.B Loss
+instead: the part of that memory not used by objects;
+.TP
+.B Slabs/Part/Cpu
+the number of slabs that are not CPU slabs, the number of partial slabs,
+and the number of CPU slabs;
+.TP
+.B O/S
+the number of objects per slab;
+.TP
+.B O
+the page order of a slab;
+.TP
+.B %Fr
+partial slabs as a percentage of all slabs;
+.TP
+.B %Ef
+the memory used by objects as a percentage of the memory of the slabs;
+.TP
+.B Flg
+flags:
+.B *
+the cache has aliases,
+.B d
+it uses DMA memory,
+.B A
+objects are aligned to hardware cache lines,
+.B P
+poisoning,
+.B a
+reclaim accounting,
+.B Z
+red zoning,
+.B F
+sanity checks,
+.B U
+user tracking,
+.B T
+tracing.
+.PP
+Sizes are shown in units scaled by powers of 1000, with the suffixes
+.BR K ,
+.B M
+and
+.BR G ,
+unless
+.B \-B
+is given.
+By default caches without slabs are not listed.
+If
+.I pattern
+selects a single cache, its detailed report (see
+.BR \-r )
+is shown instead of a list line.
+.SH OPTIONS
+.SS Reports
+.TP
+.BR \-l ", " \-\-slabs
+List the caches as described in
+.IR "Cache list" .
+.TP
+.BR \-r ", " \-\-report
+Print a detailed report for each cache: its sizes, slab counts, debug
+options and memory use, its allocation and free traces (as with
+.BR \-t ),
+its per-node slab counts (as with
+.BR \-n ),
+and, when the kernel keeps them, its allocation statistics.
+.TP
+.BR \-a ", " \-\-aliases
+Show the aliases of merged caches, as lines of the form
+.IB cache " <- " "alias alias" \fR...,\fP
+or, with
+.BR \-i ,
+as one line
+.IB alias " -> " cache
+per alias.
+Aliases of caches that have only one alias are omitted unless
+.B \-1
+is given.
+.TP
+.BR \-n ", " \-\-numa
+Print the number of slabs of each cache on each NUMA node.
+On a system with a single node, a line saying that no NUMA information
+is available is printed for each cache.
+.TP
+.BR \-t ", " \-\-tracking
+Print the allocation and free traces of each cache, read from
+.IR \%/sys/kernel/debug/slab/ cache \%/alloc_traces
+and
+.IR \%free_traces ,
+or
+.B No Data
+if they are not available.
+.TP
+.BR \-o ", " \-\-ops
+Print the \%kmem_cache operations of each cache.
+This kernel does not provide the attribute that this option reads, so
+each cache is reported as having no \%kmem_cache operations.
+.TP
+.BR \-T ", " \-\-Totals
+Print only summary information: the numbers of caches and aliases, the
+total memory used and lost, and the average, minimum, maximum and total
+of per-cache and per-object figures.
+.TP
+.BR \-X ", " \-\-Xtotals
+Print the summary of
+.BR \-T ,
+followed by lists of the caches sorted by size, by loss and by number of
+partial slabs, each limited to the number of caches set by
+.B \-N
+(default 1).
+Implies
+.BR \-B .
+.SS List format and selection
+.TP
+.BR \-D ", " \-\-display\-activity
+Use a list format that shows activity: for each cache the number of
+objects, the numbers of allocations and frees, the percentages of them
+that took the fast path, the number of order fallbacks, the page order,
+and the numbers of failed \%cmpxchg_double operations.
+.TP
+.BR \-B ", " \-\-Bytes
+Show sizes in bytes.
+.TP
+.BR \-e ", " \-\-empty
+List only the caches that have no slabs.
+.TP
+.BR \-z ", " \-\-zero
+Also list the caches that have no slabs, and include them in the output
+of
+.BR \-n .
+.TP
+.BR \-U ", " \-\-Unreclaim
+List only caches that do not use reclaim accounting.
+.TP
+.BR \-f ", " \-\-first\-alias
+Show a merged cache that has several aliases under one of its alias
+names instead of its generated name.
+.TP
+.BR \-1 ", " \-\-1ref
+With
+.BR \-a ,
+also show the aliases of caches that have a single alias.
+.TP
+.BR \-N ", " \-\-lines " \fIcount\fP"
+Process only the first
+.I count
+caches in sort order (at least 1).
+Caches that are processed but not printed, such as caches without slabs,
+count towards the limit.
+.SS Sorting
+By default caches are sorted by name.
+When more than one sort option is given, the first in the order
+.BR \-S ,
+.BR \-A ,
+.BR \-L ,
+.B \-P
+applies.
+.TP
+.BR \-S ", " \-\-Size
+Sort by the memory used, largest first.
+.TP
+.BR \-A ", " \-\-activity
+Sort by activity (the total number of allocations and frees), most
+active first.
+.TP
+.BR \-L ", " \-\-Loss
+Sort by the memory not used by objects, largest first, and show it in the
+list instead of the memory used.
+.TP
+.BR \-P ", " \-\-partial
+Sort by the number of partial slabs, largest first.
+.TP
+.BR \-i ", " \-\-inverted
+Reverse the sort order.
+With
+.BR \-a ,
+print one line per alias, sorted by alias name.
+.SS Operations
+.TP
+.BR \-s ", " \-\-shrink
+Ask the kernel to shrink each cache, by writing 1 to its
+.I shrink
+attribute.
+.TP
+.BR \-v ", " \-\-validate
+Ask the kernel to validate the objects of each cache, by writing 1 to
+its
+.I validate
+attribute.
+The kernel reports problems it finds in the kernel log.
+It validates only caches that have debugging enabled and rejects the
+request for others;
+.B slabinfo
+does not report that rejection.
+.TP
+.BR \-d "[\fIdebug-flags\fP], " \-\-debug "[=\fIdebug-flags\fP]"
+Request a change of the debug options of each cache, so that the options
+in
+.I debug-flags
+are on and all others are off.
+.I debug-flags
+must be attached to the option.
+It consists of the letters
+.B f
+(sanity checks),
+.B z
+(red zoning),
+.B p
+(poisoning),
+.B u
+(user tracking) and
+.B t
+(tracing), in either case, each at most once; the value
+.B a
+on its own stands for
+.BR fzpu .
+An empty value or
+.B \-
+turns every option off.
+Sanity checks are turned on for any cache, but turning them off and
+changing red zoning, poisoning or user tracking is attempted only for a
+cache without objects, which
+.B slabinfo
+first shrinks if it still has slabs; for a cache with objects a message
+is printed instead.
+Tracing is turned on only if exactly one cache directory was read;
+merged caches, which
+.I pattern
+does not filter, count too.
+.IP
+In this kernel the attributes that hold these options are read-only, so
+any change that
+.B slabinfo
+attempts fails with the message
+.RB \(dq "Cannot write to" \(dq
+followed by the attribute, and
+.B slabinfo
+exits.
+Debug options can be set at boot with the
+.B \%slab_debug
+kernel parameter, which is described in this file in the Linux source:
+.RS
+.I \%Documentation/admin\-guide/mm/slab.rst
+.RE
+.SS Other
+.TP
+.BR \-h ", " \-\-help
+Print a usage message and exit.
+.SH EXIT STATUS
+.B slabinfo
+exits with status 0 on success and with status 1 on error, including an
+invalid option, an invalid pattern, an attribute that cannot be read for
+lack of permission, and an attribute that cannot be written.
+.SH FILES
+.TP
+.I \%/sys/kernel/slab
+The directory of slab caches; if it does not exist,
+.I \%/sys/slab
+is tried.
+Each cache is a directory of attribute files, and each alias a symbolic
+link to one.
+.TP
+.IR \%/sys/kernel/slab/ cache \%/shrink
+.PD 0
+.TP
+.IR \%/sys/kernel/slab/ cache \%/validate
+.PD
+Written by
+.B \-s
+and
+.BR \-v .
+.TP
+.IR \%/sys/kernel/debug/slab/ cache \%/alloc_traces
+.PD 0
+.TP
+.IR \%/sys/kernel/debug/slab/ cache \%/free_traces
+.PD
+Read by
+.BR \-t .
+The kernel provides them in debugfs, which must be mounted on
+.IR \%/sys/kernel/debug ,
+and only for caches with user tracking enabled.
+.SH NOTES
+.B slabinfo
+needs a kernel that uses SLUB with
+.B \%CONFIG_SYSFS
+support; otherwise it reports that SYSFS support for SLUB is not active.
+The debug options and validation need
+.BR \%CONFIG_SLUB_DEBUG ,
+and the allocation statistics shown by
+.BR \-r ,
+.B \-A
+and
+.B \-D
+need
+.BR \%CONFIG_SLUB_STATS .
+Several statistics that
+.B slabinfo
+reads, such as the slab deactivation counts in the report, are not
+provided by this kernel and are shown as zero or omitted.
+.PP
+The attributes in
+.I \%/sys/kernel/slab
+are normally readable only by privileged users.
+When an attribute cannot be read for lack of permission,
+.B slabinfo
+exits with the message
+.RB \(dq "Try using superuser" \(dq.
+.SH EXAMPLES
+List the caches that use the most memory:
+.PP
+.in +4n
+.EX
+slabinfo \-S \-N 10
+.EE
+.in
+.PP
+Show the detailed report for the dentry cache:
+.PP
+.in +4n
+.EX
+slabinfo \-r dentry
+.EE
+.in

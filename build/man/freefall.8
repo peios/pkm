@@ -1,0 +1,182 @@
+.TH FREEFALL 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+freefall \- park hard disk heads when a laptop accelerometer detects free fall
+.SH SYNOPSIS
+.B freefall
+.RI [ device ]
+.SH DESCRIPTION
+.B freefall
+is a daemon that protects a laptop hard disk from shock.
+It waits for free-fall events from
+.I /dev/freefall
+and, on each event, parks the heads of the disk through the kernel's ATA
+head-unload interface.
+.PP
+.I device
+names the disk to protect and must have the form
+.BI /dev/ name\fR,
+where
+.I name
+is a whole disk listed in
+.IR /sys/block .
+The default is
+.IR /dev/sda .
+.B freefall
+checks that
+.I /sys/block/name/device/unload_heads
+can be opened for reading; if it cannot, or if
+.I device
+does not begin with
+.IR /dev/ ,
+or if more than one argument is given, the program prints a usage
+message and exits.
+It then opens
+.I /dev/freefall
+and checks whether the LED file
+.I /sys/class/leds/hp::hddprotect/brightness
+exists; if it does not, the LED is not used.
+.PP
+The program then detaches from the terminal with
+.BR daemon (3),
+which changes the working directory to
+.I /
+and redirects standard input, standard output and standard error to
+.IR /dev/null .
+It opens the system log with the identifier
+.BR "FREE FALL" ,
+the facility
+.B LOG_LOCAL1
+and the process ID included in each message.
+It requests the
+.B SCHED_FIFO
+scheduling policy at the highest priority and locks its memory with
+.BR mlockall (2);
+failures of these two requests are ignored.
+.PP
+The daemon then performs blocking one-byte reads from
+.IR /dev/freefall .
+Each read returns once one or more free-fall interrupts have occurred
+since the previous read; the value read is not used.
+For each read, the daemon:
+.IP \(bu 3
+writes 21000 to
+.IR \%unload_heads ,
+which parks the disk heads and blocks I/O to the disk for up to
+21 seconds, and logs
+.RB \(dq Parked
+.IB device " disk head" \(dq
+at priority
+.BR LOG_INFO ;
+.IP \(bu 3
+writes 1 to the LED file, if it exists;
+.IP \(bu 3
+sets an alarm for two seconds later, replacing any pending alarm.
+.PP
+When the alarm expires, the daemon writes 0 to
+.IR \%unload_heads ,
+which unparks the heads and resumes normal operation, logs
+.RB \(dq Unparked
+.IB device " disk head" \(dq\fR,
+and writes 0 to the LED file, if it exists.
+Normal disk operation therefore resumes about two seconds after the most
+recent free-fall event.
+.PP
+The daemon exits when a read from
+.I /dev/freefall
+fails, or when a write to
+.I \%unload_heads
+or to the LED file fails.
+.SH EXIT STATUS
+.B freefall
+exits with status 1 if the arguments are invalid, the disk's
+.I \%unload_heads
+file cannot be opened,
+.I /dev/freefall
+cannot be opened, or
+.BR daemon (3)
+fails.
+Errors that occur after the program has detached are not reported to
+the invoking process, and their messages go to
+.IR /dev/null .
+.SH FILES
+.TP
+.I /dev/freefall
+Free-fall event device.
+.TP
+.I /sys/block/name/device/unload_heads
+Head-unload control of the protected disk.
+.TP
+.I /sys/class/leds/hp::hddprotect/brightness
+Disk protection LED, used if present.
+.SH NOTES
+.I /dev/freefall
+is provided by the lis3lv02d accelerometer driver, which HP laptops use
+through the hp_accel driver
+.RB ( CONFIG_HP_ACCEL ),
+and by the dell-smo8800 driver for Dell Latitude laptops
+.RB ( CONFIG_DELL_SMO8800 ).
+The lis3lv02d driver registers
+.I /dev/freefall
+only when the accelerometer has an interrupt line.
+The hp_accel driver also provides the
+.B \%hp::hddprotect
+LED; see
+.I \%Documentation/\:misc\-devices/\:lis3lv02d.rst
+in the Linux source.
+.PP
+The kernel provides
+.I \%unload_heads
+for ATA disks; see
+.I \%Documentation/\:admin\-guide/\:laptops/\:disk\-shock\-protection.rst
+and
+.I \%Documentation/\:ABI/\:testing/\:sysfs\-block\-device
+in the Linux source.
+At startup,
+.B freefall
+only checks that the file can be opened for reading.
+If the disk does not support unloading its heads, the kernel rejects
+the first park request with
+.BR EOPNOTSUPP ,
+and the daemon exits.
+According to the kernel documentation, some disks support unloading but
+the kernel does not enable it by default; it is enabled by writing \-1
+to
+.IR \%unload_heads ,
+which
+.B freefall
+does not do.
+.PP
+Each park request carries a 21-second timeout.
+According to the kernel documentation, the kernel resumes normal
+operation of the disk when that timeout expires, even if no unpark
+request arrives.
+.PP
+The kernel creates
+.I \%unload_heads
+and the LED
+.I brightness
+file with mode 0644, so
+.B freefall
+needs root privileges to park the heads and switch the LED.
+.SH EXAMPLES
+Protect
+.IR /dev/sda :
+.PP
+.RS 4
+.EX
+# freefall /dev/sda
+.EE
+.RE
+.SH SEE ALSO
+.BR mlockall (2),
+.BR sched_setscheduler (2),
+.BR daemon (3),
+.BR syslog (3)
+.PP
+In the Linux source:
+.IP \(bu 3
+.I \%Documentation/\:misc\-devices/\:lis3lv02d.rst
+.IP \(bu 3
+.I \%Documentation/\:admin\-guide/\:laptops/\:disk\-shock\-protection.rst
+.IP \(bu 3
+.I \%Documentation/\:ABI/\:testing/\:sysfs\-block\-device

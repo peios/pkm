@@ -1,0 +1,339 @@
+.TH GETDELAYS 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+getdelays \- print per-task and per-process delay accounting statistics
+.SH SYNOPSIS
+.B getdelays
+.RB [ \-dilqv ]
+.RB [ \-w
+.IR logfile ]
+.RB [ \-r
+.IR bufsize ]
+.RB [ \-m
+.IR cpumask ]
+.RB [ \-p
+.I pid
+|
+.B \-t
+.I tgid
+|
+.B \-C
+.IR cgroup-dir ]
+.br
+.B getdelays
+.RB [ \-dilqv ]
+.RB [ \-w
+.IR logfile ]
+.RB [ \-r
+.IR bufsize ]
+.RB [ \-m
+.IR cpumask ]
+.B \-c
+.I command
+.RI [ argument ...]
+.SH DESCRIPTION
+.B getdelays
+requests statistics from the kernel's taskstats interface, a generic
+netlink family, and prints them.
+It is mainly used to show delay accounting data: the time a task has
+spent waiting for a CPU, for synchronous block I/O, for swap-in, for
+memory reclaim, for thrashing, for memory compaction, for write-protect
+copies and for IRQ handling.
+The Linux source describes it as a simple utility that also illustrates
+the taskstats interface.
+.PP
+.B getdelays
+works in one or more of these modes:
+.IP \(bu 3
+With
+.B \-p
+or
+.BR \-t ,
+it requests the statistics of one task or of a whole thread group
+(process).
+.IP \(bu 3
+With
+.BR \-c ,
+it runs
+.IR command ,
+waits for it to exit, and then requests the statistics of the
+command's process by its process ID.
+.IP \(bu 3
+With
+.BR \-m ,
+it registers to receive the statistics that the kernel sends when a task
+exits on one of the CPUs in
+.IR cpumask .
+.IP \(bu 3
+With
+.BR \-C ,
+it requests the number of tasks in each scheduling state in a cgroup.
+.PP
+At least one of
+.BR \-p ,
+.BR \-t ,
+.BR \-c ,
+.B \-m
+and
+.B \-C
+must be given; otherwise a usage message is printed.
+.B \-C
+cannot be combined with
+.BR \-p ,
+.B \-t
+or
+.BR \-c .
+If more than one of
+.BR \-p ,
+.B \-t
+and
+.B \-c
+is given, the last one takes effect.
+.PP
+Unless
+.B \-l
+is given,
+.B getdelays
+exits after it has processed the first statistics record it receives.
+What it prints for a record is selected by
+.BR \-d ,
+.B \-i
+and
+.BR \-q ;
+without any of them, task statistics are received but not printed.
+Cgroup statistics requested with
+.B \-C
+are always printed, as a line of the form
+.PP
+.in +4n
+.EX
+sleeping N, blocked N, running N, stopped N, uninterruptible N
+.EE
+.in
+.PP
+.B getdelays
+also prints a line to standard output for most options it processes,
+such as
+.RB \(dq "print delayacct stats ON" \(dq.
+.SS Delay accounting output
+With
+.BR \-d ,
+each record is introduced by a line
+.BI PID " pid"
+or
+.BI TGID " tgid" \fR,\fP
+followed by a table for each delay type:
+.BR CPU ,
+.BR IO ,
+.BR SWAP ,
+.BR RECLAIM ,
+.BR THRASHING ,
+.BR COMPACT ,
+.B WPCOPY
+and
+.BR IRQ .
+For each type the table shows the number of delays recorded
+.RB ( count ),
+their cumulative total in nanoseconds
+.RB ( "delay total" ),
+and the average, maximum and minimum delay in milliseconds.
+The last column is the local time, in the form
+.IR YYYY\-MM\-DD T hh:mm:ss ,
+at which the maximum delay occurred, or
+.B N/A
+if none was recorded.
+The
+.B CPU
+table also shows the task's cumulative running time in nanoseconds, both
+as wall-clock time
+.RB ( "real total" )
+and as seen by the kernel without adjustment for time stolen by
+virtualization
+.RB ( "virtual total" ).
+.PP
+The columns and tables printed depend on the version of the taskstats
+structure reported by the kernel: the maximum and minimum columns need
+version 16, the timestamp column version 17, and the COMPACT, WPCOPY and
+IRQ tables versions 11, 13 and 14 respectively.
+The Linux 7.0.9 kernel reports version 17.
+.SH OPTIONS
+.TP
+.BI \-p " pid"
+Request the statistics of the task with thread ID
+.IR pid .
+.TP
+.BI \-t " tgid"
+Request the statistics of the thread group
+.IR tgid ,
+summed over its threads; the delay statistics also include threads that
+have exited.
+.TP
+.BI \-c " command " \fR[\fIargument\fR...]
+Run
+.I command
+with the given arguments, searching
+.B PATH
+for it, and when it exits request the statistics of its process by
+process ID (as with
+.BR \-p ).
+.I command
+must be a separate argument, not attached to
+.BR \-c .
+Option processing stops at
+.BR \-c ;
+all remaining arguments are passed to
+.IR command .
+.TP
+.BI \-m " cpumask"
+Register to receive the statistics of tasks that exit on the CPUs in
+.IR cpumask ,
+a comma-separated list of CPU numbers and ranges such as
+.BR 1\-3,5,7\-8 .
+When the last thread of a process exits, the kernel also sends the
+statistics of the thread group.
+When
+.B getdelays
+leaves its receive loop it removes the registration; if it is killed
+instead, for example while running with
+.BR \-l ,
+the kernel removes the registration later.
+.TP
+.BI \-C " cgroup-dir"
+Print the number of tasks in the cgroup directory
+.I cgroup-dir
+that are sleeping, blocked on I/O, running, stopped and in uninterruptible
+sleep.
+.TP
+.B \-d
+Print delay accounting statistics, as described under
+.BR "Delay accounting output" .
+.TP
+.B \-i
+Print I/O accounting statistics as
+.IB command ": read=" N ", write=" N ", \%cancelled_write=" N\fR,\fP
+where the values are byte counts.
+The kernel fills these fields only in per-task statistics, so they are
+zero in thread group statistics, which are requested with
+.B \-t
+and also sent with
+.BR \-m .
+.TP
+.B \-q
+Print the task's voluntary and involuntary context switch counts.
+.TP
+.B \-l
+Keep receiving and printing statistics records until interrupted,
+instead of exiting after the first one.
+This is normally used with
+.BR \-m .
+.TP
+.BI \-w " logfile"
+Write each task statistics record received, as raw binary data, to
+.IR logfile .
+The file is created if necessary and truncated.
+.TP
+.BI \-r " bufsize"
+Set the receive buffer size of the netlink socket to
+.I bufsize
+bytes.
+.TP
+.B \-v
+Print debugging messages about the netlink exchange.
+.SH EXIT STATUS
+The exit status does not reliably indicate success.
+.B getdelays
+exits with status 0 after printing statistics, but also after printing
+the usage message because no request was given and after most errors,
+including errors returned by the kernel.
+It exits with status 1 if the argument of
+.B \-p
+or
+.B \-t
+is zero or not a number, if the argument of
+.B \-r
+is negative, if the netlink socket cannot be created, if
+.I logfile
+cannot be opened or written, or if the child process for
+.B \-c
+cannot be created.
+It exits with status 255 if an unknown option is given or if the
+registration made with
+.B \-m
+cannot be removed.
+.SH NOTES
+The kernel must be built with
+.B \%CONFIG_TASKSTATS
+and, for delay statistics,
+.BR \%CONFIG_TASK_DELAY_ACCT .
+Delay accounting is disabled by default; it is enabled with the
+.B delayacct
+kernel command-line parameter or at run time with the
+.B kernel.task_delayacct
+sysctl, and in the latter case only tasks started after it was enabled
+have delay data.
+The I/O statistics printed by
+.B \-i
+need
+.B \%CONFIG_TASK_XACCT
+and
+.BR \%CONFIG_TASK_IO_ACCOUNTING .
+.PP
+The kernel accepts the taskstats request used by
+.BR \-p ,
+.BR \-t ,
+.B \-c
+and
+.B \-m
+only from a caller with the
+.B \%CAP_NET_ADMIN
+capability (on Peios,
+.BR \%SeTcbPrivilege );
+otherwise
+.B getdelays
+reports a fatal reply error.
+The cgroup request used by
+.B \-C
+needs no capability, but
+.I cgroup-dir
+must be a directory of a version 1 cgroup hierarchy (a file system of
+type
+.BR cgroup );
+the kernel rejects any other directory.
+.PP
+With
+.BR \-c ,
+the statistics are those of the command's initial thread only, because
+they are requested by process ID rather than thread group ID.
+.PP
+The taskstats structure, the taskstats interface and delay accounting
+are described in these files in the Linux source:
+.RS
+.I include/uapi/linux/taskstats.h
+.br
+.I Documentation/accounting/taskstats.rst
+.br
+.I Documentation/accounting/delay\-accounting.rst
+.RE
+.SH EXAMPLES
+Print the delay statistics of the thread group 242:
+.PP
+.in +4n
+.EX
+getdelays \-d \-t 242
+.EE
+.in
+.PP
+Run a command and print its delay and I/O statistics:
+.PP
+.in +4n
+.EX
+getdelays \-d \-i \-c make \-j4
+.EE
+.in
+.PP
+Print the delay statistics of every task that exits on CPUs 0 to 3:
+.PP
+.in +4n
+.EX
+getdelays \-d \-l \-m 0\-3
+.EE
+.in

@@ -1,0 +1,101 @@
+.TH LSVMBUS 1 2026-09-21 "Linux 7.0.9" "User Commands"
+.SH NAME
+lsvmbus \- list Hyper-V VMBus devices
+.SH SYNOPSIS
+.B lsvmbus
+.RB [ \-v ]...
+.br
+.B lsvmbus
+.B \-h
+.SH DESCRIPTION
+.B lsvmbus
+lists the devices on the Hyper-V VMBus, as the kernel presents them in
+.IR \%/sys/\:bus/\:vmbus/\:devices/ .
+Devices are sorted by VMBus ID, which is the relative ID
+.RI ( child_relid )
+of the device's primary channel.
+.PP
+Without options, each device is shown on one line:
+.PP
+.RS 4
+.EX
+VMBUS ID \fIid\fP: \fIdescription\fP
+.EE
+.RE
+.PP
+The description is looked up from the device's class ID in a table of
+Hyper-V device types built into the program, for example
+.B "Synthetic \%network adapter"
+or
+.BR [Heartbeat] .
+Devices whose class ID is not in the table are described as
+.BR Unknown .
+.PP
+Non-option arguments are ignored.
+.SH OPTIONS
+.TP
+.BR \-v ", " \-\-verbose
+Show more detail.
+Given once, the output adds the device's class ID and, on following
+lines, the mapping of each of the device's channels to a CPU, in the
+form
+.BI "Rel_ID=" relid ", target_cpu=" cpu\fR,
+sorted by channel relative ID.
+Given two or more times, the output also includes the device's instance
+ID
+.RB ( Device_ID )
+and its sysfs path.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary to standard output and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 2
+Invalid option.
+.TP
+.B 255
+.I \%/sys/\:bus/\:vmbus/\:devices
+does not exist; a message saying so is printed on standard output.
+.SH FILES
+.TP
+.IR \%/sys/\:bus/\:vmbus/\:devices/\:* /id
+VMBus ID: the relative ID of the device's primary channel.
+.TP
+.IR \%/sys/\:bus/\:vmbus/\:devices/\:* /class_id
+Class ID (interface type GUID) of the device.
+.TP
+.IR \%/sys/\:bus/\:vmbus/\:devices/\:* /device_id
+Device ID (interface instance GUID) of the device.
+.TP
+.IR \%/sys/\:bus/\:vmbus/\:devices/\:* /channel_vp_mapping
+Mapping of the device's channels to CPUs.
+.SH NOTES
+.B lsvmbus
+is a Python program and runs under
+.BR python3 .
+.PP
+The VMBus directory in sysfs exists only when the kernel's VMBus
+driver
+.RB \%( CONFIG_HYPERV_VMBUS )
+is active, that is, in a Linux guest running on Hyper-V.
+.SH EXAMPLES
+List every device with its class ID, instance ID, sysfs path and
+channel-to-CPU mapping:
+.PP
+.RS 4
+.EX
+$ lsvmbus \-vv
+.EE
+.RE
+.SH SEE ALSO
+.BR \%hv_fcopy_uio_daemon (8),
+.BR \%hv_kvp_daemon (8),
+.BR \%hv_vss_daemon (8)
+.PP
+.I \%Documentation/\:ABI/\:stable/\:sysfs\-bus\-vmbus
+and
+.I \%Documentation/\:virt/\:hyperv/\:vmbus.rst
+in the Linux source.

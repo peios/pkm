@@ -1,0 +1,445 @@
+.TH GPIO-SLOPPY-LOGIC-ANALYZER 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+gpio\-sloppy\-logic\-analyzer \- capture GPIO samples with the kernel's sloppy logic analyzer
+.SH SYNOPSIS
+.B \%gpio\-sloppy\-logic\-analyzer
+.RB [ \-c
+.IR cpu ]
+.RB [ \-d
+.IR microseconds " | " \c
+.B \-n
+.IR samples ]
+.RB [ \-s
+.IR frequency ]
+.RB [ \-t
+.IR trigger ]
+.RB [ \-i
+.IR instance ]
+.RB [ \-k
+.IR debugfs\-dir ]
+.RB [ \-o
+.IR output\-dir ]
+.br
+.B \%gpio\-sloppy\-logic\-analyzer
+.RB [ \-k
+.IR debugfs\-dir ]
+.B \-l
+.br
+.B \%gpio\-sloppy\-logic\-analyzer \-h
+.SH DESCRIPTION
+.B \%gpio\-sloppy\-logic\-analyzer
+is a shell script that drives the kernel's GPIO sloppy logic analyzer
+driver.
+The driver samples up to eight GPIO lines, called probes, by polling them
+from a CPU with local interrupts and preemption disabled for the whole
+capture.
+Latencies, non-deterministic code paths and non-maskable interrupts affect
+the result, which is why the analyzer is called sloppy.
+The script isolates a CPU for the sampling, configures one analyzer
+instance through debugfs, and saves the samples as a sigrok session file.
+.PP
+The script:
+.IP 1. 4
+checks that
+.BR taskset (1)
+and
+.BR zip (1)
+are available;
+.IP 2. 4
+looks in
+.I /proc/self/mounts
+for a mounted cgroup version 1 hierarchy with the
+.B cpuset
+controller, and if there is none, creates
+.I /sys/fs/cgroup
+if it is missing and mounts such a hierarchy there;
+.IP 3. 4
+selects the analyzer instance
+(see
+.BR \-i );
+.IP 4. 4
+isolates a CPU, if
+.B \-c
+is given or no CPU has been isolated yet (see
+.BR "CPU isolation" );
+.IP 5. 4
+writes the sampling period, the number of samples and any trigger to the
+instance's debugfs files;
+.IP 6. 4
+prints the instance, number of samples, frequency, trigger and CPU it will
+use;
+.IP 7. 4
+starts the capture in a background process and exits.
+.PP
+The background process writes to the instance's
+.I capture
+file from a process bound to the isolated CPU with
+.BR taskset (1).
+The kernel samples on that CPU, waiting first for the trigger, if one was
+given; the write returns when the capture has finished.
+The process then saves the result file and prints
+.PP
+.in +4n
+.EX
+Logic analyzer done. Saved '\fIfile\fP'
+Max sample frequency this time: \fIF\fPHz.
+.EE
+.in
+.PP
+where the frequency is derived from the time the driver measured for one
+read of all probes.
+If the capture fails, it prints
+\(dqCapture error! Check kernel log\(dq
+instead.
+No result file exists until the background process has finished.
+.SS CPU isolation
+To isolate CPU
+.IR n ,
+the script:
+.IP \(bu 2
+creates the cpuset
+.I gpio\-sloppy\-logic\-analyzer
+in the cpuset hierarchy if it does not exist;
+if that cpuset already contains a different CPU, the script fails;
+if it already contains CPU
+.IR n ,
+nothing further is done;
+.IP \(bu 2
+writes
+.I n
+to its
+.IR cpuset.cpus ,
+1 to its
+.I cpuset.cpu_exclusive
+and 0 to its
+.IR cpuset.mems ;
+.IP \(bu 2
+clears CPU
+.I n
+from the mask in
+.I /proc/irq/default_smp_affinity
+and writes the result to every file under
+.I /proc/irq
+whose name ends in
+.I smp_affinity
+and to every file named
+.I cpumask
+under
+.IR /sys/devices/virtual/workqueue ,
+ignoring errors;
+.IP \(bu 2
+for each process listed by
+.B ps \-o pid
+whose CPU affinity equals the original default mask,
+sets its affinity to the new mask with
+.BR taskset (1);
+.IP \(bu 2
+writes 1 to
+.IR /sys/module/rcupdate/parameters/rcu_cpu_stall_suppress ,
+suppressing RCU CPU stall warnings;
+.IP \(bu 2
+sets the CPU's cpufreq scaling governor to
+.B performance
+if its
+.I scaling_governor
+file is writable.
+.PP
+The script never undoes these changes.
+Later runs find the existing cpuset and reuse the CPU isolated in it.
+The CPU used for sampling is read from the cpuset's
+.I cpuset.effective_cpus
+file.
+.SS Result file
+The result is written to
+.IR output\-dir / instance \- seconds .sr,
+where
+.I seconds
+is the time the capture finished, in seconds since the Epoch.
+It is a sigrok session file, a zip archive readable by PulseView and
+sigrok\-cli from the sigrok project, containing:
+.TP
+.I version
+The session format version, 1.
+.TP
+.I metadata
+The capture description:
+the number of probes,
+the sample rate (the requested
+.IR frequency ),
+one byte per sample,
+and the probe names from the driver.
+.TP
+.I logic\-1\-1
+The raw samples, one byte per sample, bit 0 holding probe 1.
+.SH OPTIONS
+Long options may be abbreviated, and may also be given with a single
+leading dash, as
+.BR getopt (1)
+with
+.B \-a
+allows.
+.PP
+The
+.IR microseconds ,
+.IR samples ,
+and
+.I frequency
+arguments are integers that may carry the suffixes
+.BR K ,
+.BR M ,
+.BR G ,
+and
+.BR T ,
+in either case, for 10^3, 10^6, 10^9 and 10^12;
+several may be combined, so
+.B 1M500K
+is 1500000.
+.TP
+.BR \-c ", " \-\-cpu " \fIcpu\fP"
+Isolate CPU
+.I cpu
+for sampling, as described under
+.BR "CPU isolation" .
+This is needed only once.
+Without this option, CPU 1 is isolated if no CPU has been isolated yet.
+.TP
+.BR \-d ", " \-\-duration\-us " \fImicroseconds\fP"
+Set the duration of the capture in microseconds.
+The number of samples is computed as
+.IR frequency " * " microseconds " / 1000000"
+and overrides
+.BR \-n .
+.TP
+.BR \-h ", " \-\-help
+Print a help message and exit.
+.TP
+.BR \-i ", " \-\-instance " \fIinstance\fP"
+Use the analyzer instance named
+.IR instance ,
+a subdirectory of the analyzer's debugfs directory.
+The default is the first instance directory found.
+.TP
+.BR \-k ", " \-\-kernel\-debug\-dir " \fIdebugfs\-dir\fP"
+The directory where debugfs is mounted.
+The default is
+.IR /sys/kernel/debug .
+.TP
+.BR \-l ", " \-\-list\-instances
+Print the names of the available analyzer instances, one per line,
+and exit.
+The script first performs steps 1 and 2 above, so this may mount the
+cpuset hierarchy.
+.TP
+.BR \-n ", " \-\-num_samples " \fIsamples\fP"
+Set the number of samples to acquire.
+The default is 250000.
+.TP
+.BR \-o ", " \-\-output\-dir " \fIoutput\-dir\fP"
+Write the result file to
+.IR output\-dir ,
+which must exist.
+The default is the current working directory.
+.TP
+.BR \-s ", " \-\-sample_freq " \fIfrequency\fP"
+Sample at
+.I frequency
+hertz.
+The default is 1000000.
+The script writes a sampling period of 1000000000 /
+.I frequency
+nanoseconds, rounded down, to the driver.
+If that period is shorter than the time the driver measures for one read of
+all probes, or is 0, the capture fails.
+A frequency of 0 is rejected.
+.TP
+.BR \-t ", " \-\-trigger " \fItrigger\fP"
+Wait for
+.I trigger
+before sampling.
+.I trigger
+is one or more steps separated by commas, and each step is one or more
+conditions separated by
+.BR + .
+A condition is a probe number from 1 to 8 followed by a level:
+.BR L ,
+low;
+.BR H ,
+high;
+.BR R ,
+rising edge;
+or
+.BR F ,
+falling edge;
+in either case.
+All conditions of a step must be met at the same time,
+and the steps must be met in order.
+The driver detects an edge by first waiting for the level before it
+and then for the level after it, so for a step with an edge condition
+it waits for two states in turn.
+The state that completes the trigger is the first sample recorded.
+The trigger applies to the next capture only; the driver then discards it.
+.SH EXIT STATUS
+.TP
+.B 0
+The help message or the instance list was printed,
+or the capture was started.
+The outcome of the background capture is not reflected in the exit status.
+.TP
+.B 1
+The command line could not be parsed, a required command is missing,
+or a check failed; a message is printed.
+.PP
+The script runs under
+.BR "sh \-e" ,
+so it also exits, with that command's status, when any other command it
+runs fails.
+.SH FILES
+.TP
+.I /sys/kernel/debug/gpio\-sloppy\-logic\-analyzer/
+The analyzer's debugfs directory, with one subdirectory per instance.
+The prefix changes with
+.BR \-k .
+.TP
+.IR \&.../ instance /
+Instance files used by the script:
+.I delay_ns
+(sampling period in nanoseconds),
+.I buf_size
+(number of samples),
+.I trigger
+(trigger data),
+.I capture
+(starts a capture),
+.I sample_data
+(the samples),
+.I meta_data
+(probe names) and
+.I delay_ns_acquisition
+(measured time for one read of all probes).
+.TP
+.I /proc/self/mounts
+Searched for a mounted cpuset hierarchy.
+.TP
+.I /sys/fs/cgroup
+Mount point used when no cpuset hierarchy is mounted.
+.TP
+.IR cpuset\-mount /gpio\-sloppy\-logic\-analyzer/
+The cpuset holding the isolated CPU, with the files
+.IR cpuset.cpus ,
+.IR cpuset.cpu_exclusive ,
+.I cpuset.mems
+and
+.IR cpuset.effective_cpus .
+If the hierarchy is mounted with the
+.B noprefix
+option, the files have no
+.I cpuset.\&
+prefix.
+.TP
+.I /proc/irq/default_smp_affinity
+Default interrupt affinity mask.
+It is read, and then overwritten along with the
+.I smp_affinity
+files of the individual interrupts under
+.IR /proc/irq .
+.TP
+.I /sys/devices/virtual/workqueue/
+Searched for workqueue
+.I cpumask
+files.
+.TP
+.I /sys/module/rcupdate/parameters/rcu_cpu_stall_suppress
+RCU CPU stall warning suppression.
+.TP
+.IR /sys/devices/system/cpu/cpu N /cpufreq/scaling_governor
+Scaling governor of the isolated CPU.
+.SH NOTES
+The kernel must be built with
+.BR \%CONFIG_GPIO_SLOPPY_LOGIC_ANALYZER ,
+which depends on
+.BR \%CONFIG_EXPERT ,
+.B \%CONFIG_CPUSETS
+and
+.BR \%CONFIG_DEBUG_FS ,
+and the probes must be described to the kernel, for example by a
+Device Tree node compatible with
+.B \%gpio\-sloppy\-logic\-analyzer
+with
+.I probe\-gpios
+and
+.I probe\-names
+properties.
+The driver supports at most 8 probes and rejects GPIOs whose access may
+sleep.
+debugfs must be mounted, at
+.I /sys/kernel/debug
+or at the directory given with
+.BR \-k .
+.PP
+The script uses the cgroup version 1 cpuset interface,
+which requires
+.BR \%CONFIG_CPUSETS_V1 .
+When no cpuset hierarchy is mounted, the script mounts one on
+.I /sys/fs/cgroup
+without checking whether something is already mounted there.
+If the system uses cpusets for other purposes, check that the script does
+not interfere with them.
+.PP
+The script mounts a filesystem, writes kernel settings under
+.I /proc
+and
+.IR /sys ,
+uses debugfs and changes the CPU affinity of other processes;
+it must be run with the privileges these operations require.
+.PP
+Besides
+.BR taskset (1)
+and
+.BR zip (1),
+the script uses
+.BR awk (1),
+.BR sed (1),
+.BR find (1),
+.BR ps (1),
+.BR mount (8),
+.BR mktemp (1),
+and a
+.BR getopt (1)
+that supports long options.
+.SH EXAMPLES
+Take 250000 samples at 1 MHz from the first instance, isolating CPU 1 if
+no CPU has been isolated yet:
+.PP
+.in +4n
+.EX
+gpio\-sloppy\-logic\-analyzer
+.EE
+.in
+.PP
+Sample an I2C bus, with SCL on probe 1 and SDA on probe 2, at 1.5 MHz for
+15 ms, starting at a start condition (SDA falling while SCL is high):
+.PP
+.in +4n
+.EX
+gpio\-sloppy\-logic\-analyzer \-s 1500000 \-t 1H+2F \-d 15000
+.EE
+.in
+.PP
+Sample for 50 microseconds at 2 MHz, starting at a falling edge on probe 2:
+.PP
+.in +4n
+.EX
+gpio\-sloppy\-logic\-analyzer \-d 50 \-s 2M \-t 2F
+.EE
+.in
+.SH SEE ALSO
+.BR getopt (1),
+.BR taskset (1),
+.BR zip (1),
+.BR cpuset (7),
+.BR \%gpio\-event\-mon (8),
+.BR \%gpio\-watch (8)
+.PP
+Setting up the analyzer is described in the Linux kernel source in
+.PP
+.I \%Documentation/dev\-tools/gpio\-sloppy\-logic\-analyzer.rst

@@ -1,0 +1,109 @@
+.TH LSIIO 1 2026-09-21 "Linux 7.0.9" "User Commands"
+.SH NAME
+lsiio \- list industrial I/O devices and triggers
+.SH SYNOPSIS
+.B \%lsiio
+.RB [ \-v ]...
+.SH DESCRIPTION
+.B \%lsiio
+lists the devices and triggers of the kernel's industrial I/O (IIO)
+subsystem, as found in
+.IR /sys/bus/iio/devices .
+.PP
+For each directory there named
+.BI iio:device N
+it prints
+.PP
+.in +4n
+.EX
+Device \fINNN\fP: \fIname\fP
+.EE
+.in
+.PP
+and then, for each directory named
+\fBtrigger\fP\fIN\fP,
+.PP
+.in +4n
+.EX
+Trigger \fINNN\fP: \fIname\fP
+.EE
+.in
+.PP
+where
+.I NNN
+is the device or trigger number
+.IR N ,
+zero-padded to three digits, and
+.I name
+is the first word of the entry's
+.I name
+attribute.
+All devices are listed before all triggers.
+Entries are listed in the order the directory is read, not sorted.
+.SH OPTIONS
+.TP
+.B \-v
+Also list the input channels of each device:
+the names of the files in the device directory that begin with
+.B in_
+and end with
+.B _raw
+or
+.BR _input ,
+one per line and indented, followed by an empty line.
+The option may be given more than once, with no further effect.
+.PP
+Any other option, or any non-option argument, is an error.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Invalid command line; a usage message is printed to standard error.
+.PP
+Otherwise, if
+.I /sys/bus/iio/devices
+cannot be opened, or the
+.I name
+attribute of a device or trigger cannot be read,
+.B \%lsiio
+exits with a nonzero status.
+.SH FILES
+.TP
+.I /sys/bus/iio/devices/
+Directory scanned for IIO devices and triggers.
+.TP
+.IR /sys/bus/iio/devices/iio:device N /name
+Name printed for each device.
+.TP
+.IR /sys/bus/iio/devices/trigger N /name
+Name printed for each trigger.
+.SH NOTES
+.I /sys/bus/iio/devices
+exists only when the kernel's IIO subsystem
+.RB \%( CONFIG_IIO )
+is built in or its module is loaded, and sysfs is mounted on
+.IR /sys .
+If the directory cannot be opened,
+.B \%lsiio
+prints
+\(dqNo industrial I/O devices available\(dq
+to standard error.
+.PP
+An IIO device registered without a name has no
+.I name
+attribute.
+When
+.B \%lsiio
+cannot read a
+.I name
+attribute it stops at that entry, without printing a diagnostic,
+and exits with a nonzero status.
+.SH SEE ALSO
+The IIO sysfs interface and the kernel's IIO userspace tools are described
+in the Linux kernel source in
+.PP
+.I \%Documentation/ABI/testing/sysfs\-bus\-iio
+.br
+.I \%Documentation/iio/iio_tools.rst

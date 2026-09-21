@@ -1,0 +1,489 @@
+.TH PAGE-TYPES 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+page-types \- summarize, list and act on the flags of physical memory pages
+.SH SYNOPSIS
+.B page-types
+.RB [ \-rlLCMNiXx ]
+.RB [ \-a
+.IR addr-spec ]...\&
+.RB [ \-b
+.IR bits-spec ]...\&
+.RB [ \-c
+.IR cgroup ]
+.RB [ \-p
+.I pid
+|
+.B \-f
+.IR path ]
+.RB [ \-F
+.IR file ]
+.br
+.B page-types \-d
+.I flags
+.br
+.B page-types \-h
+.SH DESCRIPTION
+.B page-types
+reads the flags of physical page frames from
+.I \%/proc/kpageflags
+and prints how many pages have each combination of flags.
+It can restrict the pages it examines to ranges of page frames, to the
+pages mapped by a process or to the page-cache pages of files, select
+pages by their flags or memory cgroup, list the selected pages, and mark
+them idle or poison and unpoison them.
+.PP
+By default every page frame is examined, and the page offsets used by
+.B \-a
+are page frame numbers (PFNs).
+With
+.BR \-p ,
+the pages mapped in the address space of the process are examined, and
+the offsets used by
+.B \-a
+are virtual page numbers (virtual addresses divided by the page size);
+pages of the process that have been swapped out are included.
+With
+.BR \-f ,
+the page-cache pages of the regular file
+.IR path ,
+or of every regular file below the directory
+.IR path ,
+are examined, and the offsets used by
+.B \-a
+are page offsets within each file.
+Symbolic links are not followed and mount points are not crossed.
+Only pages that are already in the page cache are examined:
+.B page-types
+maps each file, touches the pages that are resident, and looks up their
+page frames.
+.SS Output
+Unless
+.B \-N
+is given,
+.B page-types
+prints a summary with one line for each combination of flags found: the
+flags as a hexadecimal number, the number of pages, their size in
+megabytes, the flags in short symbolic form, and the flags in long
+symbolic form.
+A final line gives the totals.
+With
+.BR \-f ,
+the summary is preceded by the name, inode number, size and modification
+and access times of
+.IR path .
+.PP
+The short symbolic form has one character for each named flag, in bit
+order, with an underscore for a flag that is not set.
+The long symbolic form is a comma-separated list of the names of the
+flags that are set.
+.PP
+With
+.B \-l
+or
+.BR \-L ,
+a list of pages, preceded by a header line, is printed before the
+summary.
+Each line contains, separated by tabs: the virtual page number (with
+.BR \-p )
+or file page offset (with
+.BR \-f ),
+the memory cgroup inode number prefixed with
+.B @
+(with
+.BR \-C ),
+the map count (with
+.BR \-M ),
+the page frame number, the number of pages (with
+.B \-l
+only), and the short symbolic flags.
+Page numbers, offsets and counts of pages are printed in hexadecimal.
+For a swapped-out page of a process, the swap offset is printed in place
+of the page frame number.
+.SS Flag processing
+Without
+.BR \-r ,
+the flags in bits 32 to 47 are cleared, and the \%compound_head and
+\%compound_tail flags are cleared unless the huge flag is set, so that they
+are reported only for hugeTLB pages.
+.PP
+With
+.BR \-r ,
+all flags reported by the kernel are kept, and some flags that the
+kernel overloads are decoded: an anonymous page with \%owner_2 set is
+reported as \%anon_exclusive, a slab page with active set as \%slub_frozen,
+a slab page with error set as \%slub_debug, and a page with reclaim set but
+writeback clear as readahead.
+With
+.B \-p
+or
+.BR \-f ,
+the softdirty, file, swap and \%mmap_exclusive flags are also taken from
+the page table entry.
+.PP
+The flag names are:
+.PP
+.RS
+.nf
+locked  error  referenced  uptodate  dirty  lru  active  slab
+writeback  reclaim  buddy  mmap  anonymous  swapcache  swapbacked
+\%compound_head  \%compound_tail  huge  unevictable  hwpoison  nopage
+ksm  thp  offline  \%zero_page  \%idle_page  pgtable
+.fi
+.RE
+.PP
+and, reported only with
+.BR \-r :
+.PP
+.RS
+.nf
+reserved  mlocked  \%owner_2  private  \%private_2  \%owner_private
+arch  softdirty  \%arch_2  \%anon_exclusive  readahead  \%slub_frozen
+\%slub_debug  file  swap  \%mmap_exclusive
+.fi
+.RE
+.PP
+Their meanings are described in
+.I \%Documentation/admin\-guide/mm/pagemap.rst
+in the Linux source.
+.SS Flag arguments
+The
+.I flags
+argument of
+.B \-d
+and the flags in a
+.I bits-spec
+are comma-separated lists of flag names and numbers.
+A name may be abbreviated to a prefix; the prefix is compared with the
+flag names in bit order and the first match is used, so that, for
+example,
+.B a
+means
+.BR active .
+Any prefix of
+.BR compound ,
+even a single
+.BR c ,
+selects both \%compound_head and \%compound_tail.
+A number, in decimal, in hexadecimal with a
+.B 0x
+prefix or in octal with a
+.B 0
+prefix, is taken as a mask of flag bits.
+Anything else is an error.
+.SH OPTIONS
+.TP
+.BR \-a ", " \-\-addr " \fIaddr-spec\fP"
+Examine only the pages in the range
+.IR addr-spec ,
+which has one of these forms, in units of pages:
+.RS
+.TP 8
+.I N
+the page at offset
+.IR N ;
+.TP
+.IB N + M
+the
+.I M
+pages starting at
+.IR N ;
+.TP
+.IB N , M
+the pages from
+.I N
+to
+.IR M \-1;
+.TP
+.IB N ,
+the pages from
+.I N
+to the end;
+.TP
+.BI , M
+the pages from 0 to
+.IR M \-1.
+.RE
+.IP
+Numbers are read as in
+.IR "Flag arguments" .
+The option may be given up to 1024 times; the ranges are examined in the
+order given.
+.TP
+.BR \-b ", " \-\-bits " \fIbits-spec\fP"
+Select only pages whose flags match
+.IR bits-spec ,
+which has one of these forms:
+.RS
+.TP 8
+.IB bit1 , bit2
+at least one of the listed flags is set;
+.TP
+.IB bit1 , bit2 = bit1
+of the flags listed before
+.BR = ,
+exactly those listed after it are set;
+.TP
+.IB bit1 ,~ bit2
+the flags without
+.B ~
+are set and the flags with
+.B ~
+are clear;
+.TP
+.BI = bit1 , bit2
+the flags are exactly the listed ones.
+.RE
+.IP
+Any number of flags may be listed.
+The option may be given up to 64 times; a page must match all of them.
+The flags compared are those after the processing described in
+.IR "Flag processing" ,
+so flags that are reported only with
+.B \-r
+match only with
+.BR \-r .
+.TP
+.BR \-c ", " \-\-cgroup " \fIcgroup\fP"
+Select only pages charged to the memory cgroup
+.IR cgroup ,
+given either as the path of the cgroup's directory or as
+.BI @ inode
+with the inode number of that directory.
+Swapped-out pages are not selected.
+.TP
+.BR \-p ", " \-\-pid " \fIpid\fP"
+Examine the pages mapped in the address space of process
+.IR pid .
+.TP
+.BR \-f ", " \-\-file " \fIpath\fP"
+Examine the page-cache pages of the regular file
+.I path
+or of the regular files below the directory
+.IR path .
+.TP
+.BR \-r ", " \-\-raw
+Raw mode, intended for kernel developers; see
+.IR "Flag processing" .
+.TP
+.BR \-l ", " \-\-list
+List the selected pages, combining runs of consecutive pages with the
+same flags (and the same cgroup and map count) into one line.
+.TP
+.BR \-L ", " \-\-list\-each
+List each selected page on its own line.
+.TP
+.BR \-C ", " \-\-list\-cgroup
+With
+.B \-l
+or
+.BR \-L ,
+include the inode number of each page's memory cgroup.
+.TP
+.BR \-M ", " \-\-list\-mapcnt
+With
+.B \-l
+or
+.BR \-L ,
+include the number of times each page is mapped.
+.TP
+.BR \-N ", " \-\-no\-summary
+Do not print the summary.
+.TP
+.BR \-i ", " \-\-mark\-idle
+Mark each selected page idle by setting its bit in
+.IR \%/sys/kernel/mm/page_idle/bitmap ,
+the interface of the kernel's idle page tracking.
+.TP
+.BR \-X ", " \-\-hwpoison
+Poison each selected page by writing its page frame number to
+.I \%hwpoison/corrupt\-pfn
+in debugfs.
+The kernel then handles the page as if a hardware memory error had been
+detected in it, which can kill the processes using it.
+Without
+.BR \-a ,
+.BR \-b ,
+.BR \-c ,
+.B \-p
+or
+.BR \-f ,
+this applies to every page frame in the system.
+.TP
+.BR \-x ", " \-\-unpoison
+Unpoison each selected page by writing its page frame number to
+.I \%hwpoison/unpoison\-pfn
+in debugfs.
+The kernel supports this only for pages poisoned by software.
+.TP
+.BI \-F " file"
+Read the page flags from
+.I file
+instead of
+.IR \%/proc/kpageflags .
+The long form
+.B \-\-kpageflags
+is defined without an argument in this version, so it cannot name a
+file: used alone it leaves the default in place, and
+.BI \-\-kpageflags= file
+is rejected as an invalid option.
+.TP
+.BR \-d ", " \-\-describe " \fIflags\fP"
+Print
+.I flags
+as a hexadecimal number, in short symbolic form and in long symbolic
+form, and exit.
+Options that follow are ignored.
+.TP
+.BR \-h ", " \-\-help
+Print a usage message, which includes the list of flag names, and exit.
+.SH EXIT STATUS
+.B page-types
+exits with status 0 on success and with status 1 on error, including an
+invalid option.
+.SH ENVIRONMENT
+.TP
+.B \%DEBUGFS_PATH
+For
+.B \-X
+and
+.BR \-x ,
+the directory where debugfs is mounted.
+If it is not set,
+.B page-types
+uses
+.I \%/sys/kernel/debug
+or
+.I \%/debug
+if a debugfs is mounted there, then the first debugfs listed in
+.IR \%/proc/mounts ,
+and otherwise tries to mount debugfs on
+.IR \%/sys/kernel/debug .
+.SH FILES
+.TP
+.I \%/proc/kpageflags
+The flags of each page frame, indexed by page frame number.
+.TP
+.I \%/proc/kpagecount
+The map count of each page frame; read with
+.B \-M
+when listing.
+.TP
+.I \%/proc/kpagecgroup
+The memory cgroup of each page frame; read with
+.B \-c
+or
+.BR \-C .
+.TP
+.IR \%/proc/ pid \%/pagemap
+.PD 0
+.TP
+.IR \%/proc/ pid \%/maps
+.PD
+The page frames and mappings of the process; read with
+.BR \-p .
+.TP
+.I \%/proc/self/pagemap
+Used with
+.B \-f
+to find the page frames of the mapped file pages.
+.TP
+.I \%/sys/kernel/mm/page_idle/bitmap
+Written with
+.BR \-i .
+.TP
+.IR debugfs \%/hwpoison/corrupt\-pfn
+.PD 0
+.TP
+.IR debugfs \%/hwpoison/unpoison\-pfn
+.PD
+Written with
+.B \-X
+and
+.BR \-x .
+.SH NOTES
+The kernel interfaces that
+.B page\-types
+uses need these kernel configuration options:
+.TP
+.B \%CONFIG_PROC_PAGE_MONITOR
+.IR \%/proc/kpageflags ,
+.I \%/proc/kpagecount
+and
+.IR \%/proc/ pid \%/pagemap ;
+.TP
+.B \%CONFIG_MEMCG
+.I \%/proc/kpagecgroup
+.RB ( \-c
+and
+.BR \-C );
+.TP
+.B \%CONFIG_IDLE_PAGE_TRACKING
+.I \%/sys/kernel/mm/page_idle/bitmap
+.RB ( \-i );
+.TP
+.B \%CONFIG_HWPOISON_INJECT
+the hwpoison files in debugfs
+.RB ( \-X
+and
+.BR \-x ).
+.PP
+Reading
+.IR \%/proc/kpageflags ,
+.I \%/proc/kpagecount
+and
+.I \%/proc/kpagecgroup
+is normally restricted to privileged users.
+The kernel reports page frame numbers in
+.I pagemap
+only to a caller with the
+.B \%CAP_SYS_ADMIN
+capability (on Peios,
+.BR \%SeTcbPrivilege );
+without it,
+.B \-p
+and
+.B \-f
+find no pages.
+Poisoning and unpoisoning pages also require
+.BR \%CAP_SYS_ADMIN .
+.PP
+With
+.B \-f
+and no
+.B \-a
+option, the range examined is the size of the first file examined, in
+whole pages rounded down, and the same range is used for every file
+below a directory.
+A partial last page of a file is therefore not examined, and neither are
+the pages of a later file beyond that range.
+.PP
+Idle page tracking is described in this file in the Linux source:
+.RS
+.I \%Documentation/admin\-guide/mm/idle_page_tracking.rst
+.RE
+.SH EXAMPLES
+Summarize the flags of all pages in the system:
+.PP
+.in +4n
+.EX
+page\-types
+.EE
+.in
+.PP
+List the anonymous pages of process 1234 that are not on an LRU list:
+.PP
+.in +4n
+.EX
+page\-types \-p 1234 \-b anonymous,~lru \-l
+.EE
+.in
+.PP
+Show which flags the value 0x1020 stands for:
+.PP
+.in +4n
+.EX
+page\-types \-d 0x1020
+.EE
+.in
+.SH SEE ALSO
+.BR proc (5)

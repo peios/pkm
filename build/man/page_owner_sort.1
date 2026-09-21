@@ -1,0 +1,284 @@
+.TH PAGE_OWNER_SORT 1 2026-09-21 "Linux 7.0.9" "User Commands"
+.SH NAME
+page_owner_sort \- combine and sort the records of a kernel page owner report
+.SH SYNOPSIS
+.B \%page_owner_sort
+.RB [ \-a | \-m | \-n | \-p | \-P | \-s | \-t ]
+.RB [ \-d ]
+.RB [ \-\-pid
+.IR pidlist ]
+.RB [ \-\-tgid
+.IR tgidlist ]
+.RB [ \-\-name
+.IR namelist ]
+.RB [ \-\-cull
+.IR rules ]
+.RB [ \-\-sort
+.IR order ]
+.I input
+.I output
+.br
+.B \%page_owner_sort \-h
+.SH DESCRIPTION
+.B \%page_owner_sort
+reads a saved copy of the kernel's page owner report, which records the
+allocation of every allocated page, combines identical records, and
+writes them to
+.I output
+sorted by one key.
+.PP
+The input consists of records separated by empty lines; a record at the
+end of the input that is not followed by an empty line is ignored.
+In the kernel's report, each record starts with a line of the form
+.PP
+.in +4n
+.EX
+Page allocated via order \fIO\fP, mask ..., pid \fIP\fP, tgid \fIT\fP (\fIname\fP), ts \fIS\fP ns
+.EE
+.in
+.PP
+followed by a line starting with
+.B PFN
+and by the stack trace of the allocation.
+From each record,
+.B \%page_owner_sort
+takes the allocation order (a record counts as 2 to the power
+.I O
+pages), the process ID, the thread group ID, the task command name, the
+timestamp, and the stack trace, which is the text after the first line.
+Lines starting with
+.B PFN
+are removed from the record text.
+Each record is also classified by allocator:
+.B CMA
+or
+.B SLAB
+if its
+.B PFN
+line contains
+.B CMA
+or
+.B slab
+respectively,
+.B VMALLOC
+if the stack trace line before
+.B \%__vmalloc_node_range
+contains
+.BR \%alloc_pages ,
+and
+.B OTHERS
+if none of these applies.
+.PP
+By default, records whose text is identical are combined into one, with
+a count of the times it was seen and the total number of pages.
+Unless
+.B \-a
+is given, the
+.RI \(dq "ts " S " ns" \(dq
+timestamp is removed from the record text first, so that records that
+differ only in their timestamp are combined.
+With
+.BR \-\-cull ,
+records are combined when they agree in the fields named in
+.I rules
+instead.
+.PP
+Without
+.BR \-\-cull ,
+each combined record is written as a line of the form
+.PP
+.in +4n
+.EX
+\fIN\fP times, \fIM\fP pages, allocated by \fIALLOCATOR\fP :
+.EE
+.in
+.PP
+followed by the record text and an empty line.
+With
+.BR \-\-cull ,
+each combined record is written as a line that starts with
+.RI \(dq N " times, " M " pages" \(dq
+and continues with these items where they apply:
+.IP \(bu 3
+.RI "\(dq, PID " pid \(dq,
+when culling by pid or selecting with
+.BR \-\-pid ;
+.IP \(bu 3
+.RI "\(dq, TGID " tgid \(dq,
+when culling by tgid or selecting with
+.BR \-\-tgid ;
+.IP \(bu 3
+.RI "\(dq, \%task_comm_name: " name \(dq,
+when culling by name or selecting with
+.BR \-\-name ;
+.IP \(bu 3
+.RI "\(dq, allocated by " ALLOCATOR \(dq,
+when culling by allocator;
+.IP \(bu 3
+a colon, followed on the next lines by the stack trace, when culling by
+stack trace.
+.PP
+Progress messages are printed to standard output.
+.SH OPTIONS
+At most one of
+.BR \-a ,
+.BR \-m ,
+.BR \-n ,
+.BR \-p ,
+.BR \-P ,
+.B \-s
+and
+.B \-t
+may be given; it selects the sort order of the output.
+.TP
+.B \-a
+Sort by allocation timestamp, oldest first.
+Timestamps are kept in the record text, so records are combined only if
+their timestamps are equal.
+.TP
+.B \-m
+Sort by total number of pages, largest first.
+.TP
+.B \-n
+Sort by task command name.
+.TP
+.B \-p
+Sort by process ID, smallest first.
+.TP
+.B \-P
+Sort by thread group ID, smallest first.
+.TP
+.B \-s
+Sort by stack trace.
+.TP
+.B \-t
+Sort by the number of times a record was seen, largest first.
+This is the default.
+.TP
+.B \-d
+Print a message to standard error for each field that cannot be found or
+parsed in a record.
+.TP
+.BI \-\-pid " pidlist"
+Select only records whose process ID is in
+.IR pidlist ,
+a comma-separated list of decimal numbers.
+.TP
+.BI \-\-tgid " tgidlist"
+Select only records whose thread group ID is in
+.IR tgidlist ,
+a comma-separated list of decimal numbers.
+.TP
+.BI \-\-name " namelist"
+Select only records whose task command name is exactly one of the names
+in the comma-separated list
+.IR namelist .
+.IP
+When more than one of
+.BR \-\-pid ,
+.B \-\-tgid
+and
+.B \-\-name
+is given, a record must match all of them.
+.TP
+.BI \-\-cull " rules"
+Combine records that agree in the fields listed in
+.IR rules ,
+a comma-separated list of these keys:
+.BR pid " or " p ,
+.BR tgid " or " tg ,
+.BR name " or " n ,
+.BR stacktrace " or " st ,
+and
+.BR allocator " or " ator .
+.TP
+.BI \-\-sort " order"
+Parse a sort order given as a comma-separated list of keys, each
+optionally preceded by
+.B +
+(ascending, the default) or
+.B \-
+(descending).
+The keys are those of
+.B \-\-cull
+and also
+.BR \%alloc_ts " or " at
+(allocation timestamp) and
+.BR txt " or " T
+(the full record text).
+An unknown key is an error.
+In this version the order given with
+.B \-\-sort
+is replaced by the single-key order selected by the options above (by
+default that of
+.BR \-t ),
+so it has no effect on the output.
+.TP
+.BR \-h ", " \-\-help
+Print a usage message and exit.
+.SH EXIT STATUS
+.B \%page_owner_sort
+exits with status 1 if an option or its argument is invalid, if more than
+one sort option is given, if
+.I input
+or
+.I output
+is missing, or if either file cannot be opened.
+Otherwise it exits with status 0, even when it stops early because the
+input holds more records than it can store or memory runs out; the output
+is then empty.
+.SH NOTES
+The kernel writes the page owner report to
+.I \%/sys/kernel/debug/page_owner
+in debugfs.
+The kernel must be built with
+.B \%CONFIG_PAGE_OWNER
+and booted with
+.BR \%page_owner=on .
+Reading the report normally requires privilege;
+.B \%page_owner_sort
+itself needs none.
+.PP
+.B \%page_owner_sort
+reserves space for one record for every 100 bytes of the size of
+.IR input ,
+so
+.I input
+must be a regular file; when it reads from a pipe it stops with the
+message
+.RB \(dq "\%max_size too small??" \(dq.
+.PP
+The page owner report and this program are described in this file in
+the Linux source:
+.RS
+.I \%Documentation/mm/page_owner.rst
+.RE
+.PP
+That document also describes the options
+.B \-f
+and
+.B \-r
+and the keys
+.BR f ,
+.BR free ,
+.B ft
+and
+.BR \%free_ts ,
+which this version does not implement.
+.SH EXAMPLES
+Save the report and sort it by total number of pages:
+.PP
+.in +4n
+.EX
+cat /sys/kernel/debug/page_owner > page_owner_full.txt
+page_owner_sort \-m page_owner_full.txt sorted_page_owner.txt
+.EE
+.in
+.PP
+Combine the records by stack trace, process ID and command name:
+.PP
+.in +4n
+.EX
+page_owner_sort \-\-cull=st,pid,name page_owner_full.txt culled.txt
+.EE
+.in

@@ -1,0 +1,105 @@
+.TH GPIO-WATCH 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+gpio\-watch \- report changes to the state of GPIO lines
+.SH SYNOPSIS
+.B \%gpio\-watch
+.I chip
+.I offset
+.RI [ offset ]...
+.SH DESCRIPTION
+.B \%gpio\-watch
+watches lines of a GPIO chip for changes to their line information,
+using the version 2 GPIO character device interface,
+and prints a line for each change the kernel reports.
+It does not request the lines itself;
+it reports what other consumers do with them.
+.PP
+.I chip
+is the path of a GPIO character device, such as
+.IR /dev/gpiochip0 .
+Each
+.I offset
+names a line on that chip and is converted with
+.BR strtoul (3)
+in base 0, so it may be given in decimal, in hexadecimal with a leading
+.BR 0x ,
+or in octal with a leading
+.BR 0 .
+.PP
+For each change the program prints:
+.PP
+.in +4n
+.EX
+line \fIoffset\fP: \fIevent\fP at \fItimestamp\fP
+.EE
+.in
+.PP
+where
+.I event
+is one of:
+.TP
+.B requested
+The line was requested by a consumer.
+.TP
+.B released
+The line was released by its consumer.
+.TP
+.B config changed
+The line was reconfigured.
+.PP
+.I timestamp
+is the time of the change in nanoseconds, as recorded by the kernel from
+.BR CLOCK_MONOTONIC .
+.PP
+The program runs until it is killed or an error occurs.
+.SH OPTIONS
+.B \%gpio\-watch
+takes no options.
+If fewer than two arguments are given, or an
+.I offset
+contains characters that are not part of a number, it prints a usage
+message to standard output and exits.
+.SH EXIT STATUS
+.B \%gpio\-watch
+exits with status 1 on a usage error or any other error, including an
+event type it does not recognise.
+It does not otherwise exit.
+.SH FILES
+.TP
+.I /dev/gpiochipN
+GPIO character device given as
+.IR chip ,
+opened for reading and writing.
+.SH NOTES
+The kernel must provide the GPIO character device
+.RB \%( CONFIG_GPIO_CDEV ).
+The caller needs read and write access to the device node.
+.PP
+Each line can be watched only once per open of the device;
+giving the same
+.I offset
+twice makes the kernel refuse the second watch with
+.BR EBUSY ,
+and the program exits.
+.PP
+The kernel buffers at most 32 change events per open of the device.
+If more occur before they are read, the most recent are discarded,
+and this cannot be detected from the output.
+.SH EXAMPLES
+Watch lines 3 and 4 of the first GPIO chip:
+.PP
+.in +4n
+.EX
+gpio\-watch /dev/gpiochip0 3 4
+.EE
+.in
+.SH SEE ALSO
+.BR \%gpio\-event\-mon (8),
+.BR \%gpio\-sloppy\-logic\-analyzer (8)
+.PP
+The GPIO character device interface and line information watches are
+described in the Linux kernel source in
+.PP
+.I \%Documentation/userspace\-api/gpio/chardev.rst
+.br
+.I \%Documentation/userspace\-api/gpio/gpio\-v2\-get\-lineinfo\-watch\-ioctl.rst

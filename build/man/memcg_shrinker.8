@@ -1,0 +1,126 @@
+.TH MEMCG_SHRINKER 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+memcg_shrinker \- list kernel memory shrinkers by object count per memory cgroup
+.SH SYNOPSIS
+.B memcg_shrinker
+.RB [ \-n
+.IR lines ]
+.SH DESCRIPTION
+.B memcg_shrinker
+reads the kernel's shrinker debugfs interface and lists each pair of
+shrinker and memory cgroup, largest object count first.
+.PP
+For every shrinker directory under
+.IR /sys/kernel/debug/shrinker ,
+the program reads the
+.I count
+file.
+Each line of that file holds a memory cgroup ID followed by one object
+count per NUMA node.
+.B memcg_shrinker
+takes the cgroup ID and the first count, which is the count for NUMA
+node 0, from each line.
+It sorts all entries by that count in descending order and prints one
+line per entry.
+Printing stops at the first entry whose count is zero, or after
+.I lines
+entries if
+.B \-n
+is given.
+.PP
+Each output line has three fields, separated by spaces:
+.IP \(bu 3
+the object count, left-aligned in a field 8 characters wide;
+.IP \(bu 3
+the name of the shrinker's debugfs directory, which is the shrinker name
+followed by a numeric ID (for example
+.BR sb\-xfs:vda1\-36 ),
+left-aligned in a field 20 characters wide;
+.IP \(bu 3
+the memory cgroup.
+.PP
+No header line is printed.
+.PP
+To name the memory cgroup, the program walks the directory tree under
+.I /sys/fs/cgroup
+and matches the cgroup ID against the inode numbers of the directories
+it finds.
+A match is printed as the full path of the directory, for example
+.IR /sys/fs/cgroup/system.slice .
+IDs 0 and 1 are printed as
+.BR / .
+An ID with no matching directory is printed as
+.BI "unknown (" id ) \fR.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print a usage message and exit.
+.TP
+.BR \-n ", " \-\-lines " \fIlines\fP"
+Print at most
+.I lines
+entries.
+Without this option, or with a value of 0, every entry with a non-zero
+count is printed.
+.SH FILES
+.TP
+.I /sys/kernel/debug/shrinker/*/count
+Read to obtain the object counts of each shrinker.
+.TP
+.I /sys/fs/cgroup
+Walked to map cgroup IDs to cgroup paths.
+.SH NOTES
+The shrinker debugfs interface exists only when the kernel is built with
+.BR CONFIG_SHRINKER_DEBUG ,
+which depends on
+.BR CONFIG_DEBUG_FS ,
+and debugfs must be mounted at
+.IR /sys/kernel/debug .
+The kernel creates the debugfs root with mode 0700 by default and the
+.I count
+files with mode 0440, so the program normally needs root privileges.
+.PP
+Errors from listing the directories of either tree are ignored.
+If
+.I /sys/kernel/debug/shrinker
+does not exist or cannot be listed, the program prints nothing and
+exits with status 0.
+If
+.I /sys/fs/cgroup
+cannot be listed, cgroups other than the root are printed as
+.BI "unknown (" id ) \fR.
+.PP
+Only the NUMA node 0 count is used.
+On systems with more than one NUMA node, objects on other nodes are not
+counted, and entries whose objects are all on other nodes are not
+printed.
+.PP
+According to
+.I \%Documentation/\:admin\-guide/\:mm/\:shrinker_debugfs.rst
+in the Linux source, reading a
+.I count
+file makes the kernel call the shrinker's
+.B count_objects()
+callback for each memory cgroup and NUMA node.
+The program never writes to the shrinkers'
+.I scan
+files, so it does not reclaim any objects.
+.PP
+.B memcg_shrinker
+is a Python 3 script.
+.SH EXAMPLES
+Show the ten largest entries:
+.PP
+.RS 4
+.EX
+# memcg_shrinker \-n 10
+.EE
+.RE
+.SH SEE ALSO
+.BR cgroups (7)
+.PP
+In the Linux source:
+.IP \(bu 3
+.I \%Documentation/\:admin\-guide/\:mm/\:shrinker_debugfs.rst
+.IP \(bu 3
+.I \%Documentation/\:admin\-guide/\:cgroup\-v2.rst

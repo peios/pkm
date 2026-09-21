@@ -1,0 +1,164 @@
+.TH BOOTCONFIG 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+bootconfig \- apply, delete or show the boot configuration attached to an initrd image
+.SH SYNOPSIS
+.B bootconfig
+.RB [ \-l ]
+.I file
+.br
+.B bootconfig \-a
+.I config
+.I initrd
+.br
+.B bootconfig \-d
+.I initrd
+.br
+.B bootconfig \-h
+.SH DESCRIPTION
+.B bootconfig
+manages the boot configuration ("bootconfig") that the Linux kernel reads
+from the end of an initial RAM disk (initrd) image at boot.
+A boot configuration is a text file of structured key-value pairs; the
+keys under
+.B kernel
+and
+.B init
+are added to the kernel command line and to the arguments of the init
+process.
+The syntax is described in
+.I \%Documentation/admin\-guide/bootconfig.rst
+in the Linux source.
+.PP
+An attached boot configuration is stored at the end of the image as the
+configuration text followed by a NUL byte, NUL padding that aligns the
+total file size to a multiple of 4 bytes, and a 20-byte footer.
+The footer holds the size of the data including the padding and a
+checksum of the text and its NUL byte, each as a 32-bit little-endian
+integer, followed by
+the 12-byte magic string
+.RB \(dq #BOOTCONFIG\en \(dq.
+.PP
+Without an option,
+.B bootconfig
+shows the boot configuration in
+.IR file .
+If
+.I file
+ends with a bootconfig footer, the attached configuration is checked
+against the size and checksum in the footer, parsed, and shown.
+Otherwise, if
+.I file
+is no larger than 32767 bytes, it is parsed as a boot configuration
+source file and shown; a syntax error is reported with its line and
+column.
+A larger file that has no footer produces no output.
+.PP
+By default the configuration is shown in a compact tree form: keys that
+share a single path are joined with dots, a key with several subkeys
+opens a brace block, values are quoted (with single quotes if the value
+contains a double quote), array elements are separated by commas, and
+each entry ends with a semicolon.
+With
+.BR \-l ,
+each key is shown on its own line in the form
+.IB key " = " value
+with the full dotted key; a key without a value is shown with the value
+.BR \(dq\(dq .
+.SH OPTIONS
+Only one of
+.BR \-a ,
+.B \-d
+and
+.B \-l
+may be given.
+.TP
+.BI \-a " config"
+Parse the boot configuration source file
+.I config
+and, if it is valid, attach it to
+.IR initrd ,
+replacing any boot configuration already attached.
+.B bootconfig
+prints the two file names, the number of parse nodes, the size of the
+data in bytes (including the terminating NUL byte, excluding padding) and
+the checksum.
+If
+.I config
+cannot be parsed, the error is reported with its line and column and
+.I initrd
+is not modified.
+If the new data cannot be written completely,
+.B bootconfig
+truncates
+.I initrd
+to the size it had before the new data was appended.
+.TP
+.B \-d
+Remove the boot configuration attached to
+.I initrd
+by truncating the file.
+If no boot configuration is attached,
+.I initrd
+is left unchanged and the command succeeds.
+.TP
+.B \-l
+Show the configuration of
+.I file
+as a list of
+.IB key " = " value
+lines instead of the compact tree form.
+.TP
+.B \-h
+Print a usage message and exit.
+.SH EXIT STATUS
+.B bootconfig
+exits with status 0 on success.
+On failure it exits with the low eight bits of a negative error number
+(for example 254 for a file that does not exist), or with 255 after
+printing the usage message, which includes
+.BR \-h .
+When a boot configuration source file shown without
+.B \-a
+or
+.B \-d
+fails to parse, the exit status is instead the low eight bits of the
+size of the file, which may be 0.
+.SH NOTES
+.B bootconfig
+is built with the kernel's own boot configuration parser, so a
+configuration that it accepts is accepted by the kernel.
+The parser limits a configuration to 32767 bytes of data (for
+.BR \-a ,
+including the terminating NUL byte that
+.B bootconfig
+adds) and to 8192 nodes.
+.PP
+The kernel must be built with
+.BR \%CONFIG_BOOT_CONFIG .
+It reads the configuration attached to the initrd only if
+.B bootconfig
+is given on the kernel command line or the kernel was built with
+.BR \%CONFIG_BOOT_CONFIG_FORCE .
+The boot loader must pass the exact size of the initrd image; otherwise
+the kernel cannot find the footer.
+The configuration in use by the running kernel can be read from
+.IR \%/proc/bootconfig .
+.SH EXAMPLES
+Attach
+.I my.bconf
+to an initrd image, replacing any existing configuration:
+.PP
+.in +4n
+.EX
+bootconfig \-a my.bconf /boot/initrd.img
+.EE
+.in
+.PP
+Show the attached configuration as a list, then remove it:
+.PP
+.in +4n
+.EX
+bootconfig \-l /boot/initrd.img
+bootconfig \-d /boot/initrd.img
+.EE
+.in

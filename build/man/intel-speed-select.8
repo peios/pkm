@@ -1,0 +1,778 @@
+.TH INTEL\-SPEED\-SELECT 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+intel\-speed\-select \- enumerate and control Intel Speed Select Technology features
+.SH SYNOPSIS
+.B intel\-speed\-select
+.RI [ options ]
+.I feature command
+.RI [ command-options ]
+.br
+.B intel\-speed\-select
+.RI [ options ]
+.I feature
+.B \-\-help
+.br
+.B intel\-speed\-select
+.RI [ options ]
+.B \-\-info
+.br
+.B intel\-speed\-select
+.RI [ options ]
+.B \-\-oob
+.br
+.B intel\-speed\-select
+.RB { \-\-help | \-\-version }
+.SH DESCRIPTION
+.B intel\-speed\-select
+enumerates and configures the Intel Speed Select Technology (Intel SST)
+features of Intel server processors.
+It works through the kernel's Intel Speed Select interface driver,
+reached through
+.IR \%/dev/\:isst_interface ,
+and through the CPU hotplug, cpufreq and cgroup interfaces in sysfs.
+.PP
+The global
+.I options
+must come before
+.IR feature :
+option parsing stops at the first argument that is not an option.
+Long global options may also be written with a single dash, and may be
+abbreviated to any unambiguous prefix.
+The
+.I command-options
+follow
+.IR command .
+.PP
+Without
+.BR \-\-cpu ,
+a command is applied once to each power domain in the system (each
+package, or each die of a package that has several dies, and on
+platforms that have them, each power domain of a die), using the first
+online CPU of the domain.
+With
+.BR \-\-cpu ,
+the command is applied once for each listed CPU that is online; settings
+that belong to a power domain then apply to the whole domain of that
+CPU.
+.PP
+Results are printed as indented text, or as JSON with
+.BR "\-\-format json" ,
+grouped by package, die, power domain (where the platform has them) and
+CPU.
+They go to standard error unless
+.B \-\-out
+is given.
+Before any result, the program prints a banner and the CPU model on
+standard output.
+.PP
+.B intel\-speed\-select
+has three levels of help:
+.B \-\-help
+alone lists the global options and features,
+.I feature
+.B \-\-help
+lists the commands of a feature, and
+.I feature command
+.B \-\-help
+describes a command and its
+.IR command-options .
+.SS Features and commands
+.TP
+.B perf\-profile
+Intel SST Performance Profile (SST-PP): several performance levels, each
+defining the set of CPUs that may be online and the base frequency those
+CPUs can sustain.
+Level 0 is the base level.
+Commands:
+.RS
+.TP
+.B info
+Print the properties of every performance level, or only of the level
+given with
+.BR \-l :
+among others, the CPUs that may be online at that level, its base,
+turbo and uncore frequencies, and whether base-freq and turbo-freq are
+supported and enabled at that level.
+.TP
+.B get\-lock\-status
+Print whether performance-level changes are locked.
+.TP
+.B get\-config\-levels
+Print the highest performance level.
+.TP
+.B get\-config\-version
+Print the performance profile (TDP) version.
+.TP
+.B get\-config\-enabled
+Print whether performance profiles are enabled.
+.TP
+.B get\-config\-current\-level
+Print the current performance level.
+.TP
+.B set\-config\-level
+Switch to the level given with
+.BR \-l ,
+which is required.
+With
+.BR \-o ,
+also bring online the CPUs of the new level and take the others
+offline.
+.RE
+.TP
+.B base\-freq
+Intel SST Base Frequency (SST-BF): a higher base frequency on a fixed
+set of high-priority cores in exchange for a lower base frequency on
+the other cores.
+Whether it is available depends on the current performance level.
+Commands:
+.RS
+.TP
+.B info
+Print the high-priority base frequency and CPUs, the low-priority base
+frequency, the junction temperature limit and the thermal design power
+of the level given with
+.BR \-l ,
+which is required.
+.TP
+.B enable
+Enable SST-BF at the current performance level.
+With
+.BR \-a ,
+first configure and enable core-power so that the high-priority CPUs
+get priority (see
+.BR \-\-auto ).
+.TP
+.B disable
+Disable SST-BF.
+With
+.BR \-a ,
+also disable core-power and restore the cpufreq minimum frequency.
+.RE
+.TP
+.B turbo\-freq
+Intel SST Turbo Frequency (SST-TF): higher turbo frequency limits for
+high-priority cores at the cost of lower limits for low-priority cores.
+Whether it is available depends on the current performance level.
+Commands:
+.RS
+.TP
+.B info
+Print, for the level given with
+.BR \-l ,
+which is required, the number of high-priority cores and their maximum
+frequencies for each bucket, and the maximum frequencies to which
+low-priority cores are clipped.
+.B \-b
+and
+.B \-r
+restrict the output to one bucket and to one TRL type.
+.TP
+.B enable
+Enable SST-TF at the current performance level.
+The command fails if turbo is disabled through
+.IR \%/sys/\:devices/\:system/\:cpu/\:intel_pstate/\:no_turbo .
+It enables core-power, enables SST-TF, and writes the turbo ratio
+limits given with
+.BR \-t ;
+without
+.BR \-t ,
+every ratio limit is set to 0xff.
+With
+.BR \-a ,
+it also makes the CPUs given with
+.B \-\-cpu
+high priority (see
+.BR \-\-auto ).
+.TP
+.B disable
+Disable SST-TF and restore the turbo ratio limits, to the value given
+with
+.B \-t
+or else to those of the current performance level.
+With
+.BR \-a ,
+also disable core-power.
+.RE
+.TP
+.B core\-power
+Intel SST Core Power (SST-CP): per-core priority through four classes of
+service (CLOS 0 to 3), each with its own frequency limits and priority
+parameters.
+Priority is assigned per core, not per logical CPU.
+Commands:
+.RS
+.TP
+.B info
+Print whether core-power is supported and enabled, whether CLOS
+prioritization is enabled, and the priority type.
+.TP
+.B enable
+Enable CLOS-based prioritization, with the priority type given with
+.BR \-p .
+The program warns that cpufreq and core-power interfere with each other
+if cpufreq is present.
+.TP
+.B disable
+Disable CLOS-based prioritization.
+On platforms that use the mailbox interface, this is refused while
+turbo-freq is enabled.
+.TP
+.B config
+Set the parameters of the CLOS given with
+.BR \-c ,
+using
+.BR \-e ,
+.BR \-w ,
+.B \-n
+and
+.BR \-m .
+.TP
+.B get\-config
+Print the parameters of the CLOS given with
+.BR \-c .
+.TP
+.B assoc
+Associate the CPUs given with
+.BR \-\-cpu ,
+which is required, with the CLOS given with
+.BR \-c .
+.TP
+.B get\-assoc
+Print the CLOS of each CPU given with
+.BR \-\-cpu ,
+which is required.
+.RE
+.TP
+.B turbo\-mode
+Turbo control through cpufreq, and access to the turbo ratio limits
+(TRL) in MSR 0x1AD.
+Commands:
+.RS
+.TP
+.B enable
+Set the cpufreq
+.I \%scaling_max_freq
+of the CPUs to their
+.IR \%cpuinfo_max_freq .
+.TP
+.B disable
+Set the cpufreq
+.I \%scaling_max_freq
+of each online CPU to its
+.IR \%base_frequency .
+.TP
+.B get\-trl
+Print the turbo ratio limits.
+.TP
+.B set\-trl
+Write the turbo ratio limits given with
+.BR \-t ,
+which is required.
+.RE
+.IP
+.B enable
+and
+.B disable
+act on all CPUs and ignore
+.BR \-\-cpu ;
+they do not change
+.IR \%intel_pstate/\:no_turbo .
+.SS Out-of-band mode
+With
+.BR \-\-oob ,
+the program runs as a daemon that follows performance-level changes
+made outside the operating system, for example by a management
+controller, and brings CPUs online or offline to match.
+.PP
+Unless
+.BR \-\-no\-daemon ,
+.B \-\-debug
+or
+.B \-\-poll\-interval
+is given, it detaches: it forks, starts a new session, closes all file
+descriptors, changes to
+.IR /tmp ,
+and writes its process ID to
+.IR \%/tmp/\:hfi\-events.pid ,
+which it keeps locked; it exits if another process holds the lock.
+.PP
+Without
+.BR \-\-poll\-interval ,
+it listens for CPU capability change events from the kernel's thermal
+generic netlink family, and checks the power domain of the CPU named in
+each event.
+This requires a processor with Hardware Feedback Interface (HFI)
+support; otherwise the daemon reports that the CPU does not support HFI
+and exits.
+With
+.BR \-\-poll\-interval ,
+it checks every power domain at that interval instead.
+.PP
+Whenever it finds a domain at a level other than the one it last
+recorded for it (the first check of each domain counts as a change),
+and the level is not locked, it brings the CPUs of the new level online
+and takes the others offline, or isolates them with
+.BR \-\-cgroupv2 .
+.B SIGINT
+and
+.B SIGTERM
+stop the daemon.
+.SH OPTIONS
+.SS Global options
+.TP
+.BR \-a ", " \-\-all\-cpus\-online
+Before running the command, bring every CPU online by writing 1 to its
+.I online
+file in sysfs, and delete the topology cache file.
+.TP
+.BR \-c ", " \-\-cpu =\fIlist
+Apply the command to the CPUs in
+.I list
+instead of to every power domain.
+.I list
+is a comma-separated list of CPU numbers and ranges; a range is written
+.IB first \- last
+or
+.IB first .. last\fR,
+as in
+.BR 0,2,4\-7 .
+At most 512 CPUs can be named.
+CPUs that are not present are ignored, and offline CPUs are skipped.
+.TP
+.BR \-d ", " \-\-debug
+Print debug messages on standard output.
+With
+.BR \-\-oob ,
+also keep the daemon in the foreground.
+.TP
+.BR \-f ", " \-\-format =\fIformat
+Print results as JSON if
+.I format
+is
+.BR json ,
+and as text, the default, for any other value.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.TP
+.BR \-i ", " \-\-info
+Print platform information and exit: the interface API and driver
+versions, whether mailbox and MMIO access are supported, which features
+are supported, and whether performance-level changes are locked.
+Options that follow
+.B \-\-info
+are not processed.
+.TP
+.BR \-o ", " \-\-out =\fIfile
+Write results to
+.I file
+instead of standard error.
+.TP
+.BI \-\-pause= msec
+Wait
+.I msec
+milliseconds before each mailbox command.
+The default is 0.
+A value that is 0 or not a number is ignored with a warning.
+This option has no working short form: the usage summary lists
+.BR \-p ,
+but
+.B \-p
+is rejected as an ambiguous abbreviation of
+.B \-\-pause
+and
+.BR \-\-poll\-interval .
+.TP
+.BR \-r ", " \-\-retry =\fIcount
+Make up to
+.I count
+attempts at each mailbox command; the default is 3.
+A value that is 0 or not a number is ignored with a warning.
+.TP
+.BR \-v ", " \-\-version
+Print the program version to the output file (standard error by
+default) and exit.
+.TP
+.BR \-b ", " \-\-oob
+Run in out-of-band mode, described above.
+No
+.I feature
+or
+.I command
+is needed.
+.TP
+.BR \-n ", " \-\-no\-daemon
+With
+.BR \-\-oob ,
+stay in the foreground.
+.TP
+.BR \-w ", " \-\-poll\-interval =\fIseconds
+With
+.BR \-\-oob ,
+check every power domain for level changes every
+.I seconds
+seconds instead of waiting for HFI events, and stay in the foreground.
+A value that is 0 or not a number is an error.
+The usage summary calls this option
+.BR \-\-delay ,
+but no such option exists.
+.TP
+.BR \-g ", " \-\-cgroupv2 =\fIarg
+Where CPUs would be taken offline for a performance level
+.RB ( "perf\-profile set\-config\-level \-o"
+and
+.BR \-\-oob ),
+isolate them with a cgroup v2 cpuset partition instead.
+The program enables the cpuset controller in
+.IR \%/sys/\:fs/\:cgroup/\:cgroup.subtree_control ,
+writes the CPUs that are not part of the level to
+.I cpuset.cpus
+of the cgroup
+.IR \%/sys/\:fs/\:cgroup/ pkg \- die \- domain,
+and sets its
+.I cpuset.cpus.partition
+to
+.B isolated
+(or
+.B root
+if
+.B isolated
+is refused).
+Switching to level 0 sets the partition back to
+.BR member .
+If the cpuset controller cannot be enabled, CPUs are taken offline as
+usual.
+.B \-g
+takes no argument; the long form requires one, which is ignored.
+.TP
+.BR \-u ", " \-\-cpu0\-workaround =\fIarg
+Never take CPU 0 offline; isolate it with cgroup v2, as for
+.BR \-\-cgroupv2 ,
+instead, and remove that isolation when CPU 0 would be brought online.
+The program does this even without
+.B \-u
+when CPU 0 has no
+.I online
+file.
+.B \-u
+takes no argument; the long form requires one, which is ignored.
+.PP
+.B \-\-pause
+and
+.B \-\-retry
+apply only to platforms that use the mailbox interface (interface API
+version 1).
+.SS Command options
+Several command options share their letter with a global option
+.RB ( \-a ,
+.BR \-b ,
+.BR \-c ,
+.BR \-d ,
+.BR \-h ,
+.BR \-n ,
+.BR \-o ,
+.B \-r
+and
+.BR \-w );
+an option means the global one before
+.I feature
+and the command one after
+.IR command .
+Numeric values must be written in decimal, except for
+.BR \-\-trl .
+A malformed value makes the program print a message and exit.
+Unknown options and surplus arguments are reported and ignored.
+.TP
+.BR \-l ", " \-\-level =\fIlevel
+Performance level.
+Required by
+.BR "perf\-profile set\-config\-level" ,
+.B base\-freq info
+and
+.BR "turbo\-freq info" ;
+optional for
+.BR "perf\-profile info" ,
+which prints every level without it.
+.TP
+.BR \-o ", " \-\-online =\fIarg
+For
+.BR "perf\-profile set\-config\-level" :
+after switching level, bring online each CPU in the new level's CPU list,
+setting its cpufreq
+.I \%scaling_max_freq
+to its base frequency if it is lower or if turbo is disabled, and take
+every other CPU of the power domain offline, or isolate it with
+.BR \-\-cgroupv2 .
+It also sets the uncore frequency limits in
+.I \%/sys/\:devices/\:system/\:cpu/\:intel_uncore_frequency/
+to those of the new level, except on processors whose CPUID extended
+family is 4.
+.B \-o
+takes no argument; the long form requires one, which is ignored.
+.TP
+.BR \-a ", " \-\-auto
+For
+.B base\-freq enable
+and
+.BR "turbo\-freq enable" ,
+also set up core-power priorities.
+For base-freq, the high-priority CPUs reported by
+.B base\-freq info
+are associated with CLOS 0 and all other CPUs with CLOS 3; the minimum
+frequency of CLOS 0 is set to the high-priority base frequency and that
+of CLOS 1 to 3 to the low-priority base frequency; core-power is enabled
+with ordered priority; and the cpufreq scaling limits of the online CPUs
+are adjusted.
+For turbo-freq, the CPUs given with
+.B \-\-cpu
+and their thread siblings are associated with CLOS 0 and every other
+online CPU with CLOS 3.
+For
+.B base\-freq disable
+and
+.BR "turbo\-freq disable" ,
+also disable core-power; base-freq also sets each online CPU's cpufreq
+.I \%scaling_min_freq
+back to its
+.IR \%cpuinfo_min_freq .
+.TP
+.BR \-b ", " \-\-bucket =\fIbucket
+For
+.BR "turbo\-freq info" :
+print only this bucket.
+.TP
+.BR \-r ", " \-\-trl\-type =\fItype
+For
+.BR "turbo\-freq info" :
+print only the high-priority frequencies of this TRL type:
+.B sse
+(TRL level 0),
+.B avx2
+(level 1) or
+.B avx512
+(level 2).
+Any other value is an error.
+.TP
+.BR \-t ", " \-\-trl =\fIvalue
+Turbo ratio limits, as a hexadecimal number with a
+.B 0x
+prefix, written to MSR 0x1AD; each byte is one ratio limit.
+Used by
+.BR "turbo\-freq enable" ,
+.B turbo\-freq disable
+and
+.BR "turbo\-mode set\-trl" .
+.TP
+.BR \-c ", " \-\-clos =\fIclos
+CLOS number, 0 to 3, for
+.BR "core\-power config" ,
+.B get\-config
+and
+.BR assoc .
+Required by these commands.
+.TP
+.BR \-e ", " \-\-epp =\fIepp
+For
+.BR "core\-power config" :
+energy performance preference of the CLOS, 0 to 15.
+If it is missing or out of range, 0 is used.
+.TP
+.BR \-w ", " \-\-weight =\fIweight
+For
+.BR "core\-power config" :
+proportional priority weight of the CLOS, 0 to 15.
+If it is missing or out of range, 0 is used.
+.TP
+.BR \-n ", " \-\-min =\fImhz
+For
+.BR "core\-power config" :
+minimum frequency of the CLOS in MHz.
+The default is 0.
+.TP
+.BR \-m ", " \-\-max =\fImhz
+For
+.BR "core\-power config" :
+maximum frequency of the CLOS in MHz.
+The default is ratio 0xff, which the program reports as the maximum
+frequency.
+.TP
+.BR \-d ", " \-\-desired =\fImhz
+Accepted, but
+.B core\-power config
+reports that a desired frequency is not supported and uses 0.
+.TP
+.BR \-p ", " \-\-priority =\fItype
+For
+.BR "core\-power enable" :
+priority type,
+.B 0
+for proportional (the default) or
+.B 1
+for ordered.
+.TP
+.BR \-h ", " \-\-help
+Describe the command and its options, and exit.
+.SH FILES
+.TP
+.I \%/dev/\:isst_interface
+Intel Speed Select interface device.
+.TP
+.I \%/var/\:run/\:isst_cpu_topology.dat
+Cache of the package, die and core IDs of every CPU, created when it
+does not exist and used for CPUs whose topology is not in sysfs, such as
+offline CPUs.
+Deleted by
+.BR \-\-all\-cpus\-online .
+.TP
+.IR \%/sys/\:devices/\:system/\:cpu/\:cpu N/
+The CPU's
+.I online
+file, its
+.I topology
+directory, and in its
+.I cpufreq
+directory
+.IR \%base_frequency ,
+.IR \%scaling_min_freq ,
+.IR \%scaling_max_freq ,
+.I \%cpuinfo_min_freq
+and
+.IR \%cpuinfo_max_freq .
+.TP
+.I \%/sys/\:devices/\:system/\:cpu/\:intel_pstate/\:no_turbo
+Read to check whether turbo is disabled.
+.TP
+.I \%/sys/\:devices/\:system/\:cpu/\:intel_uncore_frequency/
+Uncore frequency limits, set by
+.BR "perf\-profile set\-config\-level \-o" .
+.TP
+.I \%/sys/\:fs/\:cgroup/
+cgroup v2 hierarchy used by
+.B \-\-cgroupv2
+and
+.BR \-\-cpu0\-workaround .
+.TP
+.I /proc/cpuinfo
+Read to identify Cascade Lake-N processors.
+.TP
+.I \%/tmp/\:hfi\-events.pid
+Process ID and lock file of the out-of-band daemon.
+.SH NOTES
+If the effective user ID is not 0, the program tries to open
+.I \%/dev/\:isst_interface
+for reading and writing.
+If it cannot, it prints
+.RB \(dq "Must run as root" \(dq
+and exits.
+If it can, it runs in read-only mode, in which the commands that change
+settings
+.RB ( set\-config\-level ,
+.BR enable ,
+.BR disable ,
+.BR config ,
+.B assoc
+and
+.BR set\-trl )
+fail with
+.RB \(dq "Insufficient privileges" \(dq.
+.PP
+The program needs
+.IR \%/dev/\:isst_interface ,
+which the kernel's Intel Speed Select interface drivers provide
+.RB \%( CONFIG_INTEL_SPEED_SELECT_INTERFACE );
+if it cannot open the device, it reports that the drivers are not
+loaded and exits.
+This check, the privilege check and the check of the processor model
+happen before the options are processed, so even
+.B \-\-help
+and
+.B \-\-version
+need a supported system.
+.PP
+Cascade Lake processors (CPU model 0x55, stepping 6 or 7) are supported
+only in the Cascade Lake-N models Xeon 6252N, 6230N and 5218N, which are
+identified from
+.IR /proc/cpuinfo ;
+on other processors of that model and stepping, the program exits with
+the message
+.RB \(dq "Invalid CPU model" \(dq.
+On the supported models the Intel SST features are configured by the
+BIOS, and only
+.B perf\-profile info
+(level 0 only),
+.BR "base\-freq info" ,
+.B base\-freq enable
+and
+.B base\-freq disable
+are available;
+.B \-\-info
+is not.
+There,
+.B base\-freq enable
+sets the cpufreq
+.I \%scaling_min_freq
+and
+.I \%scaling_max_freq
+of each CPU to its high- or low-priority base frequency, and
+.B base\-freq disable
+sets them back to
+.I \%cpuinfo_min_freq
+and
+.IR \%cpuinfo_max_freq ;
+neither changes the hardware configuration.
+.PP
+On Skylake-based platforms (CPU model 0x55), core-power always uses
+ordered priority: the command options
+.BR \-e ,
+.B \-w
+and
+.B \-p 0
+are rejected there.
+.PP
+The exit status does not reliably indicate success: many errors,
+including an unknown feature or command, end with status 0, while
+.B \-\-help
+and a missing feature or command end with status 1.
+.PP
+The program's own version is v1.25.
+.SH EXAMPLES
+Print platform information:
+.PP
+.RS 4
+.EX
+# intel\-speed\-select \-\-info
+.EE
+.RE
+.PP
+Print the properties of performance level 0, then switch to level 4,
+taking offline the CPUs that level 4 does not include:
+.PP
+.RS 4
+.EX
+# intel\-speed\-select perf\-profile info \-l 0
+# intel\-speed\-select perf\-profile set\-config\-level \-l 4 \-o
+.EE
+.RE
+.PP
+Associate CPU 10 with CLOS 3:
+.PP
+.RS 4
+.EX
+# intel\-speed\-select \-c 10 core\-power assoc \-c 3
+.EE
+.RE
+.PP
+Enable turbo-freq with CPUs 12 and 13 as high priority, writing the
+result as JSON to a file:
+.PP
+.RS 4
+.EX
+# intel\-speed\-select \-f json \-o tf.json \-c 12,13 turbo\-freq enable \-a
+.EE
+.RE
+.SH SEE ALSO
+.BR turbostat (8),
+.BR \%x86_energy_perf_policy (8)
+.PP
+.I \%Documentation/\:admin\-guide/\:pm/\:intel\-speed\-select.rst
+in the Linux source.

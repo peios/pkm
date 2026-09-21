@@ -1,0 +1,400 @@
+.TH IOCOST_COEF_GEN 8 2026-09-21 "Linux 7.0.9" "System Manager's Manual"
+.SH NAME
+iocost_coef_gen \- generate blk-iocost linear cost model coefficients for a disk
+.SH SYNOPSIS
+.B iocost_coef_gen
+.RB \%[ \-\-testdev
+.IR dev ]
+.RB \%[ \-\-testfile\-size\-gb
+.IR gigabytes ]
+.RB \%[ \-\-duration
+.IR seconds ]
+.RB \%[ \-\-seqio\-block\-mb
+.IR megabytes ]
+.RB \%[ \-\-seq\-depth
+.IR depth ]
+.RB \%[ \-\-rand\-depth
+.IR depth ]
+.RB \%[ \-\-numjobs
+.IR jobs ]
+.RB \%[ \-\-quiet ]
+.RB \%[ \-\-verbose ]
+.SH DESCRIPTION
+.B iocost_coef_gen
+measures a disk with
+.BR fio (1)
+and prints coefficients for the linear I/O cost model of the blk-iocost
+controller, in the format accepted by the
+.I io.cost.model
+file of the root cgroup.
+.PP
+With
+.BR \-\-testdev ,
+the tests run against the raw block device named by
+.IR dev .
+Otherwise they run against the file
+.I iocost\-coef\-fio.testfile
+in the current working directory.
+In that case the program asks
+.BR findmnt (8)
+for the source device of the filesystem that contains the current
+directory and, if that device is a partition, uses the disk that
+contains it.
+If a regular file named
+.I iocost\-coef\-fio.testfile
+of exactly the requested size already exists, it is reused.
+Otherwise any existing file of that name is removed, a new empty file is
+created,
+.B chattr +C
+is run on it (a failure of this step is ignored),
+and it is filled with data read from
+.I /dev/urandom
+through
+.BR pv (1)
+and
+.BR dd (1),
+using direct I/O.
+The test file is not removed when the program finishes.
+.PP
+Before testing, the program records the disk's active I/O scheduler and
+its
+.I nomerges
+setting, then sets the scheduler to
+.B none
+and
+.I nomerges
+to
+.BR 1 .
+It restores both when the tests finish.
+.PP
+It then runs six
+.BR fio (1)
+tests in the following order.
+Each runs for the time set by
+.BR \-\-duration ,
+uses direct I/O and the
+.B libaio
+engine, and runs the number of parallel jobs set by
+.BR \-\-numjobs .
+.TP
+.B rbps
+Sequential read, block size set by
+.BR \-\-seqio\-block\-mb ,
+queue depth 1.
+.TP
+.B rseqiops
+Sequential read, block size 4096 bytes, queue depth set by
+.BR \-\-seq\-depth .
+.TP
+.B rrandiops
+Random read, block size 4096 bytes, queue depth set by
+.BR \-\-rand\-depth .
+.TP
+.B wbps
+Sequential write, block size set by
+.BR \-\-seqio\-block\-mb ,
+queue depth 1.
+.TP
+.B wseqiops
+Sequential write, block size 4096 bytes, queue depth set by
+.BR \-\-seq\-depth .
+.TP
+.B wrandiops
+Random write, block size 4096 bytes, queue depth set by
+.BR \-\-rand\-depth .
+.PP
+Each
+.B bps
+value is the measured throughput in bytes per second, summed over all
+jobs.
+Each
+.B iops
+value is the measured throughput divided by 4096 and rounded to the
+nearest integer.
+.PP
+The result is printed to standard output as a single line:
+.PP
+.RS 4
+.EX
+\fImaj\fP:\fImin\fP rbps=\fIn\fP rseqiops=\fIn\fP rrandiops=\fIn\fP wbps=\fIn\fP wseqiops=\fIn\fP wrandiops=\fIn\fP
+.EE
+.RE
+.PP
+where
+.IR maj : min
+is the device number of the tested disk.
+Unless
+.B \-\-quiet
+is given, progress messages are printed to standard output before this
+line.
+.PP
+.B Warning:
+with
+.BR \-\-testdev ,
+.BR fio (1)
+is given the device node itself as its target, with no size or offset
+limit, and the
+.BR wbps ,
+.B wseqiops
+and
+.B wrandiops
+tests each write to it for the time set by
+.BR \-\-duration .
+The program's own help text describes these as destructive tests
+performed against the whole device.
+Treat all data on the device, including any partition table and
+filesystems, as destroyed.
+The program asks for no confirmation and does not check whether the
+device is mounted or in use.
+Without
+.BR \-\-testdev ,
+the write tests overwrite only the contents of the test file.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print a usage message and exit.
+.TP
+.BI \-\-testdev " dev"
+Run the tests against the block device
+.IR /dev/name ,
+where
+.I name
+is the last path component of
+.I dev
+(so
+.B sdb
+and
+.B /dev/sdb
+are equivalent).
+The queue settings are looked up under
+.IR /sys/block/name ,
+so
+.I name
+must be a whole disk, not a partition.
+No test file is created and
+.B \-\-testfile\-size\-gb
+is ignored.
+This destroys the data on the device; see the warning in DESCRIPTION.
+.TP
+.BI \-\-testfile\-size\-gb " gigabytes"
+Size of the test file in gibibytes (units of 1073741824 bytes);
+fractional values are accepted.
+The default is 16.
+.TP
+.BI \-\-duration " seconds"
+Duration of each of the six tests, as an integer number of seconds.
+The default is 120.
+.TP
+.BI \-\-seqio\-block\-mb " megabytes"
+Block size of the
+.B rbps
+and
+.B wbps
+tests, as an integer number of mebibytes (units of 1048576 bytes).
+The default is 128.
+.TP
+.BI \-\-seq\-depth " depth"
+Queue depth of the
+.B rseqiops
+and
+.B wseqiops
+tests.
+The default is 64.
+.TP
+.BI \-\-rand\-depth " depth"
+Queue depth of the
+.B rrandiops
+and
+.B wrandiops
+tests.
+The default is 64.
+.TP
+.BI \-\-numjobs " jobs"
+Number of parallel
+.BR fio (1)
+jobs in each test.
+The default is 1.
+The program's help text notes that on high-performance devices more
+than one job is needed to saturate the device.
+.TP
+.B \-\-quiet
+Print only the result line on standard output.
+Progress messages are suppressed,
+.BR fio (1)
+is run with its ETA display disabled, and
+.BR pv (1)
+is run with
+.BR \-q .
+.TP
+.B \-\-verbose
+Print each
+.BR fio (1)
+command line before running it.
+This has no effect when
+.B \-\-quiet
+is also given.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+A required command is missing, or a step failed (for example, an
+external command exited with a non-zero status or a file could not be
+opened); the failure is reported as a Python traceback.
+.TP
+.B 2
+Invalid command-line arguments.
+.SH FILES
+.TP
+.I iocost\-coef\-fio.testfile
+Test file in the current working directory, used when
+.B \-\-testdev
+is not given.
+It is created if needed and left in place afterwards.
+.TP
+.I /dev/name
+The tested disk.
+With
+.BR \-\-testdev ,
+it is the target of the tests; in both modes its device number is
+obtained with
+.BR stat (2).
+.TP
+.I /sys/block/*/name
+Searched without
+.B \-\-testdev
+to find the disk that contains partition
+.IR name .
+.TP
+.I /sys/block/name/queue/scheduler
+Read to record the active I/O scheduler, set to
+.B none
+for the tests, and restored afterwards.
+.TP
+.I /sys/block/name/queue/nomerges
+Read to record the current value, set to
+.B 1
+for the tests, and restored afterwards.
+.TP
+.I /dev/urandom
+Source of the test file's contents.
+.TP
+A temporary file in \fB$TMPDIR\fP or \fI/tmp\fP
+Receives the JSON output of each
+.BR fio (1)
+run; it is removed after the result has been read.
+.SH NOTES
+The program runs these external commands through
+.IR /bin/sh :
+.BR findmnt (8),
+.BR rm (1),
+.BR touch (1),
+.BR chattr (1),
+.BR pv (1),
+.BR dd (1)
+and
+.BR fio (1).
+At startup it checks that
+.BR findmnt ,
+.BR pv ,
+.B dd
+and
+.B fio
+are in
+.BR PATH ,
+and exits with status 1 if any is missing, even when
+.B \-\-testdev
+is given and only
+.B fio
+is used.
+.PP
+The queue attributes
+.I scheduler
+and
+.I nomerges
+are created by the kernel with mode 0644, so the program needs root
+privileges to change them.
+With
+.BR \-\-testdev ,
+it also needs read and write access to the device node.
+.PP
+The scheduler and
+.I nomerges
+changes apply to all I/O to the disk while the tests run, including I/O
+to other partitions and filesystems on it.
+The original values are restored when the program exits normally, when
+it stops because of an error, and when it is interrupted with
+.BR SIGINT .
+They are not restored if the program is killed by a signal that Python
+does not handle, such as
+.B SIGTERM
+or
+.BR SIGKILL .
+.PP
+Without
+.BR \-\-testdev ,
+the disk is identified from the last path component of the filesystem
+source that
+.BR findmnt (8)
+reports.
+That name must be a disk or partition that exists under both
+.I /dev
+and
+.IR /sys/block ;
+otherwise the program fails before creating the test file.
+.PP
+With the default duration, the six tests take 12 minutes in total, not
+counting creation of the test file.
+.PP
+.I io.cost.model
+exists only in the root cgroup of the cgroup v2 hierarchy, and only
+when the kernel is built with
+.BR CONFIG_BLK_CGROUP_IOCOST .
+According to
+.I \%Documentation/\:admin\-guide/\:cgroup\-v2.rst
+in the Linux source, writing model parameters to it sets the device's
+.B ctrl
+key to
+.BR user ,
+which disables automatic changes to the model by the kernel.
+.PP
+.B iocost_coef_gen
+is a Python 3 script.
+.SH EXAMPLES
+Measure the disk that holds
+.I /srv/scratch
+with a 4 GiB test file and 60-second tests:
+.PP
+.RS 4
+.EX
+# cd /srv/scratch
+# iocost_coef_gen \-\-testfile\-size\-gb 4 \-\-duration 60
+.EE
+.RE
+.PP
+Measure the whole of
+.IR /dev/sdb ,
+destroying its contents, and load the result into the controller:
+.PP
+.RS 4
+.EX
+# iocost_coef_gen \-\-quiet \-\-testdev /dev/sdb > coef
+# cat coef > /sys/fs/cgroup/io.cost.model
+.EE
+.RE
+.SH SEE ALSO
+.BR chattr (1),
+.BR dd (1),
+.BR fio (1),
+.BR pv (1),
+.BR cgroups (7),
+.BR findmnt (8)
+.PP
+In the Linux source:
+.IP \(bu 3
+.I \%Documentation/\:admin\-guide/\:cgroup\-v2.rst
+(the io.cost.model and io.cost.qos entries)
+.IP \(bu 3
+.I \%block/\:blk\-iocost.c
+(the controller implementation)
