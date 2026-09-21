@@ -156,12 +156,12 @@ pekit package kernel --version 0.20.0 --no-build=…
 `--no-build=<stages>` reuses already-built stage outputs instead of rebuilding
 them — pass the upstream stages you want to keep.
 
-`build.upstream` takes the pristine Linux tree from `$PEKIT_INPUT_LINUX`: the
-recipe must declare the kernel.org tarball as `[input.linux]`, which Pekit
-fetches, checks against kernel.org's signature and pins in `pekit.lock` before
-the build starts. The catalogue recipe (`pkgs/dev.peios.kernel`) declares it;
-this repository's own `pekit.toml` does not, so there the stage stops and says
-so.
+`build.upstream` takes the pristine Linux tree from `$PEKIT_INPUT_LINUX`, the
+kernel.org tarball `pekit.toml` declares as `[input.linux]`. Pekit fetches it,
+checks it against kernel.org's signature (the key is in `keys/`) and pins it in
+`pekit.lock` before the build starts, so the stage itself is offline. The
+catalogue recipe (`pkgs/dev.peios.kernel`) that delegates here resolves the
+same input and pins it in its own lock.
 
 ---
 

@@ -10,7 +10,7 @@ name = "dev.peios.kernel-source"
 # build stage's environment. Bump it here, in
 # lockstep with the patch series — kernel/patches are generated against this
 # exact tag, so a version change generally means re-deriving or 3-way-rebasing
-# them — and with the recipe's [input.linux] pin, which supplies the tree
+# them — and with the [input.linux] pin below, which supplies the tree
 # (build.upstream). build.kernel and build.headers assert the staged tree
 # against this value, so the two cannot drift silently. Note: package install
 # paths still embed the kernel RELEASE literally; pekit's version templating
@@ -18,17 +18,43 @@ name = "dev.peios.kernel-source"
 [env]
 KERNEL_VERSION = "v7.0.9"
 
+# The pristine upstream kernel this tree is derived from. Pekit fetches it and
+# verifies kernel.org's detached signature coordinator-side, then pins its
+# bytes in the building recipe's pekit.lock: this repository's own for a
+# standalone build, the catalogue recipe's when pkgs/dev.peios.kernel
+# delegates here. No build root needs a PGP implementation, and the archive
+# stays independently verifiable. It arrives at $PEKIT_INPUT_LINUX.
+#
+# Exact by design, and pinned separately from the Peios version: the patch
+# series is derived against one upstream release, so moving it is a deliberate
+# rebase, made here together with KERNEL_VERSION and kernel/patches.
+[input.linux]
+url         = "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-{{version}}.tar.xz"
+listing_url = "https://cdn.kernel.org/pub/linux/kernel/v7.x/"
+file_regex  = 'linux-[0-9]+\.[0-9]+(?:\.[0-9]+)?\.tar\.xz'
+versions    = "= 7.0.9"
+extract     = true
+root        = "linux-{{version}}"
+
+# kernel.org signs the uncompressed tar stream. All official kernel tarball
+# releases since 4.18 use Greg Kroah-Hartman's release key.
+[input.linux.signature]
+url          = "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-{{version}}.tar.sign"
+of           = "decompressed"
+key_files    = ["keys/greg-kroah-hartman.asc"]
+fingerprints = ["647F28654894E3BD457199BE38DBBDC86092693E"]
+
 [build.upstream]
 command = """
 set -eu
-# The pristine upstream tree, declared as [input.linux] on the recipe that
-# builds this source (pkgs/dev.peios.kernel). Pekit fetched it, verified
-# kernel.org's signature coordinator-side and pinned its bytes in pekit.lock
-# before this target ran, so the build stays offline and no build root needs a
-# PGP implementation. It previously arrived as org.kernel.linux-source, a
-# package whose only payload was the tarball, which the Debian reference rung
-# could not deliver at all.
-: "${PEKIT_INPUT_LINUX:?the recipe must declare the pristine Linux tarball as [input.linux]}"
+# The pristine upstream tree, [input.linux] above. Pekit fetched it, verified
+# kernel.org's signature coordinator-side and pinned its bytes before this
+# target ran, so the build stays offline and no build root needs a PGP
+# implementation. It previously arrived as org.kernel.linux-source, a package
+# whose only payload was the tarball, which the Debian reference rung could not
+# deliver at all. The guard names the cause should a pekit that predates
+# delegated inputs build this through a recipe that does not declare it.
+: "${PEKIT_INPUT_LINUX:?no [input.linux]: this pekit does not pass a delegated source's inputs to its build}"
 
 # Copied through tar rather than cp, because the two rungs disagree about cp.
 # `cp -a` asks for the whole security descriptor and the native coreutils fails
