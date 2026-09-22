@@ -37,3 +37,26 @@ diff --git a/tools/perf/bench/mem-memset-x86-64-asm.S b/tools/perf/bench/mem-mem
  // memset_orig is being defined as SYM_L_LOCAL but we need it
  #define SYM_FUNC_START_LOCAL(name)                      \
          SYM_START(name, SYM_L_GLOBAL, SYM_A_ALIGN)
+diff --git a/tools/perf/arch/x86/tests/regs_load.S b/tools/perf/arch/x86/tests/regs_load.S
+--- a/tools/perf/arch/x86/tests/regs_load.S
++++ b/tools/perf/arch/x86/tests/regs_load.S
+@@ -1,5 +1,11 @@
+ /* SPDX-License-Identifier: GPL-2.0 */
+ #include <linux/linkage.h>
++/*
++ * Under -fcf-protection the object must carry the IBT/SHSTK property note, or
++ * the linked perf loses control-flow protection; <cet.h> emits it (and
++ * _CET_ENDBR) only when __CET__ is defined.
++ */
++#include <cet.h>
+ 
+ #define AX	 0
+ #define BX	 1 * 8
+@@ -29,6 +35,7 @@
+ .text
+ #ifdef HAVE_ARCH_X86_64_SUPPORT
+ SYM_FUNC_START(perf_regs_load)
++	_CET_ENDBR
+ 	movq %rax, AX(%rdi)
+ 	movq %rbx, BX(%rdi)
+ 	movq %rcx, CX(%rdi)

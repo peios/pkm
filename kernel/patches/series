@@ -82,9 +82,10 @@ net/pnp-refusal-bit.patch
 # child cloned into a cgroup that was ever cgroup.kill'ed was SIGKILLed at
 # birth. One hunk in kernel/cgroup/cgroup.c; no other patch touches it.
 kernel/cgroup-clone-into-cgroup-kill-seq.patch
-# PEI-1143: perf bench's x86 memcpy/memset wrappers assemble the kernel's
-# memcpy_64.S and memset_64.S, whose entry points got no endbr64 and whose
-# objects no IBT/SHSTK property under -fcf-protection, so the linked perf lost
-# control-flow protection on a Peios root. The wrappers take <cet.h> and put
-# _CET_ENDBR in SYM_START. tools/perf/bench only; no other patch touches it.
+# PEI-1143: perf's hand-written x86 assembly -- bench's memcpy/memset
+# wrappers around the kernel's memcpy_64.S and memset_64.S, and the tests'
+# regs_load.S -- got no endbr64 and no IBT/SHSTK property under
+# -fcf-protection, so the linked perf lost control-flow protection on a Peios
+# root. Each takes <cet.h> and _CET_ENDBR. tools/perf only; no other patch
+# touches it.
 tools/perf-bench-asm-cet.patch
