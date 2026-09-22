@@ -506,15 +506,15 @@ command = """
 """
 
 # The workspace isolates every target, so the stage sees only what it
-# declares: without these it has no shell to start the script with. The
-# peipkg list stops at "qemu not found" until QEMU is packaged; --env debian
-# is the one that boots.
+# declares: without these it has no shell to start the script with, and no
+# QEMU to boot the kernel in (org.qemu.qemu-system-x86, PEI-534).
 [test.kunit.dependencies.peipkg]
-"org.git.kernel.dash"  = "*"
-"org.gnu.bash"         = "*"
-"dev.peios.peiosutils" = "*"
-"org.gnu.grep"         = "*"
-"org.gnu.sed"          = "*"
+"org.git.kernel.dash"      = "*"
+"org.gnu.bash"             = "*"
+"dev.peios.peiosutils"     = "*"
+"org.gnu.grep"             = "*"
+"org.gnu.sed"              = "*"
+"org.qemu.qemu-system-x86" = "*"
 
 [test.kunit.dependencies.apt]
 bash            = "*"
@@ -539,9 +539,7 @@ command = """
 # What the script shells out to. Under --env peipkg the composed root is
 # fsbase plus exactly this list — no implicit shell, so without `dash` (for
 # pekit's /usr/bin/sh) and `bash` (the script's own interpreter) bwrap cannot
-# even start it (PEI-489). QEMU is not packaged in the farm yet, so under
-# --env peipkg the stage gets as far as "qemu not found"; the docker env and
-# --env none supply the host's QEMU.
+# even start it (PEI-489). The docker env and --env none use the host's QEMU.
 [test.modsig.dependencies.peipkg]
 "org.git.kernel.dash"          = "*"
 "org.gnu.bash"                 = "*"
@@ -554,6 +552,7 @@ command = """
 # The initramfs /init is linked with gcc -static.
 "org.gnu.glibc-static"         = "*"
 "org.gnu.gcc-libatomic-static" = "*"
+"org.qemu.qemu-system-x86"     = "*"
 
 [test.modsig.dependencies.apt]
 bash            = "*"
@@ -615,6 +614,7 @@ command = './build/test-fwsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-
 "org.openssl.openssl"          = "*"
 "com.facebook.zstd"            = "*"
 "dev.peios.build-essentials-c" = "*"
+"org.qemu.qemu-system-x86"     = "*"
 
 [test.fwsig.dependencies.apt]
 bash            = "*"
@@ -646,6 +646,7 @@ command = """
 # The initramfs /init is linked with gcc -static.
 "org.gnu.glibc-static"         = "*"
 "org.gnu.gcc-libatomic-static" = "*"
+"org.qemu.qemu-system-x86"     = "*"
 
 [test.stratafs.dependencies.apt]
 bash            = "*"
