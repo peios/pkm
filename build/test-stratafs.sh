@@ -48,6 +48,7 @@ append='console=ttyS0 quiet loglevel=4 panic=-1 kunit.enable=0 rdinit=/init'
 qemu_args=(
 	-m 2048 -smp 2 -nographic -no-reboot -serial mon:stdio
 	-machine accel=kvm:tcg
+	-cpu max
 	-kernel "$bzimage"
 	-initrd "$work/initrd.cpio"
 	-append "$append"

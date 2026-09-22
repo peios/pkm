@@ -50,6 +50,7 @@ append='console=ttyS0 loglevel=7 ignore_loglevel panic=-1 kunit.enable=1 kunit_s
 qemu_args=(
 	-m 2048 -smp 2 -nographic -no-reboot -serial mon:stdio
 	-machine accel=kvm:tcg                           # kvm if available, else tcg fallback
+	-cpu max                                         # at least Peios' x86-64-v2 baseline
 	-kernel "$bzimage"
 	-append "$append"
 )

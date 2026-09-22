@@ -63,7 +63,8 @@ echo "test-modsig: booting $bzimage via $qemu"
 set +e
 timeout "${timeout_s}s" "$qemu" \
 	-m 2048 -smp 2 -nographic -no-reboot -serial mon:stdio \
-	-machine accel=kvm:tcg -kernel "$bzimage" -initrd "$work/initrd.cpio" \
+	-machine accel=kvm:tcg -cpu max \
+	-kernel "$bzimage" -initrd "$work/initrd.cpio" \
 	-append "$append" >"$log" 2>&1
 status=$?
 set -e
