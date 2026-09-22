@@ -63,6 +63,21 @@ if [[ -n "${HOSTLDFLAGS:-}" ]]; then
 elif [[ -n "${LDFLAGS:-}" ]]; then
 	hostld=(HOSTLDFLAGS="$LDFLAGS")
 fi
+# Likewise their compile flags come only from HOSTCFLAGS, and a Peios root
+# requires control-flow protection (endbr landing pads and the IBT/SHSTK
+# property) in every shipped program. Pass the build's -fcf-protection through
+# there, and only that: Kbuild sets its own warnings and optimisation for host
+# programs, and objtool's build takes HOSTCFLAGS too.
+hostc=()
+if [[ -n "${HOSTCFLAGS:-}" ]]; then
+	hostc=(HOSTCFLAGS="$HOSTCFLAGS")
+else
+	cet=
+	for f in ${CFLAGS:-}; do
+		case $f in -fcf-protection*) cet="$cet $f" ;; esac
+	done
+	[[ -n "$cet" ]] && hostc=(HOSTCFLAGS="${cet# }")
+fi
 # Normalize compiler-recorded paths before they enter DWARF.  debugedit in the
 # reference build image does not understand rustc's .debug_names section, so a
 # post-link rewrite alone can leave the absolute Pekit worktree in vmlinux.
@@ -82,7 +97,7 @@ krustflags="--remap-path-prefix=$tree=$debug_root"
 # clang processes through the vmlinux link and module generation is what took
 # this build out to the OOM killer once, with no error in the log -- the build
 # simply stopped mid-line, because the whole process group was signalled.
-make LLVM="$llvm" CC="$cc" "${hostcc[@]}" "${hostld[@]}" \
+make LLVM="$llvm" CC="$cc" "${hostcc[@]}" "${hostc[@]}" "${hostld[@]}" \
 	KCFLAGS="$kcflags" KRUSTFLAGS="$krustflags" \
 	-j"${PKM_JOBS:-$(nproc)}"
 

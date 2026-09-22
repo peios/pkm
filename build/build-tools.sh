@@ -80,7 +80,20 @@ log() { printf 'build-tools: %s\n' "$*"; }
 # flags (full RELRO, packed relative relocations, a build ID) never reach them.
 # Those builds take the flags through CC instead; the compiler ignores linker
 # options on the compile-only steps.
-link_cc="${CC:-cc} ${LDFLAGS:-}"
+#
+# The same Makefiles, and bpftool's, rv's, tools/mm's, tools/tracing/latency's
+# and getdelays', also assign CFLAGS, so control-flow protection (the
+# workspace's -fcf-protection) never reaches them either, and a Peios root
+# requires it: every object must carry endbr landing pads and the IBT/SHSTK
+# property. CC carries that option too, taken from CFLAGS so the policy stays
+# the workspace's. Only it: the rest of CFLAGS (-Wall, FORTIFY and so on) would
+# meet these trees' own -Werror.
+cet_flags=
+for f in ${CFLAGS:-}; do
+	case $f in -fcf-protection*) cet_flags="$cet_flags $f" ;; esac
+done
+cet_cc="${CC:-cc}$cet_flags"
+link_cc="$cet_cc ${LDFLAGS:-}"
 
 # --- perf: profiling / tracing (PERF_EVENTS, kprobes, uprobes) ---
 # perfexecdir holds the perf-core helpers + scripts; relocate it under the triplet
@@ -155,7 +168,7 @@ make -C tools/lib/perf/Documentation -j"$jobs" \
 # the pool since PEI-535). mandir is passed explicitly: the Documentation
 # Makefile defaults it under /usr/local.
 log "bpftool"
-make -C tools/bpf/bpftool -j"$jobs" \
+make -C tools/bpf/bpftool -j"$jobs" CC="$cet_cc" \
 	prefix=/usr mandir=/usr/share/man DESTDIR="$dest" install doc-install
 
 # --- cpupower (+ libcpupower): CPU frequency / idle control ---
@@ -208,7 +221,7 @@ make -C tools/tracing/rtla DESTDIR="$dest" doc_install
 # --- rv: runtime verification (in-kernel monitors' userspace front-end) ---
 # Same shape as rtla: manual unstripped install, man pages via doc_install.
 log "rv"
-make -C tools/verification/rv -j"$jobs"
+make -C tools/verification/rv -j"$jobs" CC="$cet_cc"
 install -D -m755 tools/verification/rv/rv "$dest/usr/bin/rv"
 make -C tools/verification/rv DESTDIR="$dest" doc_install
 
@@ -262,11 +275,11 @@ make -C tools/thermal/tmon -j"$jobs"
 make -C tools/thermal/tmon INSTALL_ROOT="$dest" install
 
 log "latency-collector"
-make -C tools/tracing/latency -j"$jobs"
+make -C tools/tracing/latency -j"$jobs" CC="$cet_cc"
 make -C tools/tracing/latency DESTDIR="$dest" prefix=/usr bindir=/usr/bin install
 
 log "mm-tools"
-make -C tools/mm -j"$jobs"
+make -C tools/mm -j"$jobs" CC="$cet_cc"
 make -C tools/mm DESTDIR="$dest" prefix=/usr bindir=/usr/bin sbindir=/usr/bin install
 install -m755 tools/mm/slabinfo-gnuplot.sh "$dest/usr/bin/slabinfo-gnuplot"
 install -m755 tools/mm/show_page_info.py  "$dest/usr/bin/show_page_info"
@@ -304,7 +317,7 @@ make -C tools/usb/usbip DESTDIR="$dest" install
 log "getdelays"
 uapi="$work/.uapi-hdrs"
 make -C "$work" ARCH=x86 headers_install INSTALL_HDR_PATH="$uapi" >/dev/null 2>&1
-make -C tools/accounting -j"$jobs" CFLAGS="-I$uapi/include"
+make -C tools/accounting -j"$jobs" CC="$cet_cc" CFLAGS="-I$uapi/include"
 install -D -m755 tools/accounting/getdelays "$dest/usr/bin/getdelays"
 
 # hv: Linux Hyper-V guest integration daemons (kvp/vss/fcopy) + lsvmbus. The kvp
@@ -366,6 +379,15 @@ while IFS= read -r -d '' f; do
 	'#!/usr/bin/env python' | '#!/usr/bin/python') sed -i '1s/python$/python3/' "$f" ;;
 	esac
 done < <(find "$dest/usr/lib/$triplet/perf-core" -type f -print0)
+
+# A file that starts with #! is run through it, so it is installed executable.
+# On a Peios root /usr/bin/install is Peiosutils, which does not implement GNU
+# install's mode argument, so perf's scripts and shell-test helpers (installed
+# with -m 755) would otherwise ship without the execute bit.
+log "script modes"
+while IFS= read -r -d '' f; do
+	if [ "$(head -c 2 "$f")" = '#!' ] && [ ! -x "$f" ]; then chmod 0755 "$f"; fi
+done < <(find "$dest" -type f -print0)
 
 # Manuals. Upstream documents most of the small tools only in the kernel's
 # Documentation tree, if at all, so Peios writes their pages (build/man/, each
