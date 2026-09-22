@@ -551,6 +551,9 @@ command = """
 "org.gnu.gawk"                 = "*"
 "org.gnu.cpio"                 = "*"
 "dev.peios.build-essentials-c" = "*"
+# The initramfs /init is linked with gcc -static.
+"org.gnu.glibc-static"         = "*"
+"org.gnu.gcc-libatomic-static" = "*"
 
 [test.modsig.dependencies.apt]
 bash            = "*"
@@ -582,6 +585,9 @@ command = './build/prepare-fwsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modul
 "org.openssl.openssl"          = "*"
 "com.facebook.zstd"            = "*"
 "dev.peios.build-essentials-c" = "*"
+# The initramfs /init is linked with gcc -static.
+"org.gnu.glibc-static"         = "*"
+"org.gnu.gcc-libatomic-static" = "*"
 
 [build.fwsig.dependencies.apt]
 bash            = "*"
@@ -637,6 +643,9 @@ command = """
 "org.gnu.grep"                 = "*"
 "org.gnu.cpio"                 = "*"
 "dev.peios.build-essentials-c" = "*"
+# The initramfs /init is linked with gcc -static.
+"org.gnu.glibc-static"         = "*"
+"org.gnu.gcc-libatomic-static" = "*"
 
 [test.stratafs.dependencies.apt]
 bash            = "*"
