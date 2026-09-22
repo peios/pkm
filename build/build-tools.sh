@@ -275,8 +275,10 @@ make -C tools/thermal/tmon -j"$jobs"
 make -C tools/thermal/tmon INSTALL_ROOT="$dest" install
 
 log "latency-collector"
+# Its install target strips the binary, which would leave nothing for the
+# debug split below; install it unstripped, as rtla and rv are.
 make -C tools/tracing/latency -j"$jobs" CC="$cet_cc"
-make -C tools/tracing/latency DESTDIR="$dest" prefix=/usr bindir=/usr/bin install
+install -D -m755 tools/tracing/latency/latency-collector "$dest/usr/bin/latency-collector"
 
 log "mm-tools"
 make -C tools/mm -j"$jobs" CC="$cet_cc"

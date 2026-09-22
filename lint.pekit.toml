@@ -20,6 +20,13 @@ debuginfo = "dev.peios.kernel-tools-debuginfo"
 # headers describe the x86 ABI.
 "package.architecture" = "dev.peios.kernel ships an x86 bzImage and dev.peios.kernel-headers the x86 asm/ UAPI headers; both are x86_64-specific without containing an ELF object"
 
+# Every C host program and tool is built with control-flow protection. The one
+# Rust host program cannot be: it links the toolchain's prebuilt libstd, which
+# carries no endbr landing pads or IBT/SHSTK property, and stable rustc has no
+# option to add them (-Zcf-protection is unstable and would not reach libstd).
+[allow_files."elf.cet"]
+"usr/lib/modules/*/build/scripts/generate_rust_target" = "Rust host program linked against rustc's prebuilt libstd, which is built without control-flow protection; stable rustc cannot instrument it"
+
 [allow_files."split.devel.packages"]
 "usr/include/**" = "dev.peios.kernel-headers is the sanitized Linux UAPI from headers_install: its headers are the package, under the name distributions use and the dev.peios.linux-kernel-headers provide consumers resolve"
 "usr/lib/x86_64-linux-peios/libthermal.so" = "The library's SONAME is the unversioned libthermal.so (tools/lib/thermal/Makefile), so the dynamic loader resolves exactly this file at run time"
