@@ -15,12 +15,6 @@ side_effects = ["man-db"]
 name = "dev.peios.mm-tools"
 description = "Memory-management diagnostics (from Linux 7.0.9 tools/mm)"
 
-[provides]
-"mm-tools" = "{{version}}-1"
-
-[replaces]
-"mm-tools" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.mm-tools/COPYING"
 "tools:usr/bin/page-types"               = "usr/bin/page-types"

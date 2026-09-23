@@ -11,12 +11,6 @@ side_effects = ["man-db"]
 name = "dev.peios.bootconfig"
 description = "Boot-time kernel configuration tool (from Linux 7.0.9 tools/bootconfig)"
 
-[provides]
-"bootconfig" = "{{version}}-1"
-
-[replaces]
-"bootconfig" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.bootconfig/COPYING"
 "tools:usr/bin/bootconfig" = "usr/bin/bootconfig"

@@ -17,12 +17,6 @@ description = "Userspace GPIO character-device tools (from Linux 7.0.9 tools/gpi
 [dependencies]
 "org.git.kernel.dash" = "*"
 
-[provides]
-"gpio-utils" = "{{version}}-1"
-
-[replaces]
-"gpio-utils" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.gpio-utils/COPYING"
 "tools:usr/bin/lsgpio"                    = "usr/bin/lsgpio"

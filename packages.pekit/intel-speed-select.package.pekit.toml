@@ -11,12 +11,6 @@ side_effects = ["man-db"]
 name = "dev.peios.intel-speed-select"
 description = "Intel Speed Select Technology control (from Linux 7.0.9 tools/power/x86)"
 
-[provides]
-"intel-speed-select" = "{{version}}-1"
-
-[replaces]
-"intel-speed-select" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.intel-speed-select/COPYING"
 "tools:usr/bin/intel-speed-select" = "usr/bin/intel-speed-select"

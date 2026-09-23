@@ -6,13 +6,7 @@ name = "dev.peios.cpupower-libs-devel"
 description = "libcpupower - development files (headers)"
 
 [dependencies]
-"dev.peios.cpupower-libs" = "= {{version}}-1"
-
-[provides]
-"cpupower-libs-devel" = "{{version}}-1"
-
-[replaces]
-"cpupower-libs-devel" = "<= 0.20.1-rc12-26"
+"dev.peios.cpupower-libs" = "= {{release}}"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.cpupower-libs-devel/COPYING"

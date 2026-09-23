@@ -15,12 +15,6 @@ side_effects = ["man-db"]
 name = "dev.peios.usbip"
 description = "USB/IP client, daemon and library (from Linux 7.0.9 tools/usb/usbip)"
 
-[provides]
-"usbip" = "{{version}}-1"
-
-[replaces]
-"usbip" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.usbip/COPYING"
 "tools:usr/bin/usbip"  = "usr/bin/usbip"

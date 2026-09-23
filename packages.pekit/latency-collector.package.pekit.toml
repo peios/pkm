@@ -11,12 +11,6 @@ side_effects = ["man-db"]
 name = "dev.peios.latency-collector"
 description = "Kernel latency trace collector (from Linux 7.0.9 tools/tracing/latency)"
 
-[provides]
-"latency-collector" = "{{version}}-1"
-
-[replaces]
-"latency-collector" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.latency-collector/COPYING"
 "tools:usr/bin/latency-collector" = "usr/bin/latency-collector"

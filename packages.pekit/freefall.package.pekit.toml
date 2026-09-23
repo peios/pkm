@@ -15,12 +15,6 @@ side_effects = ["man-db"]
 name = "dev.peios.freefall"
 description = "Laptop free-fall disk protection daemon (from Linux 7.0.9 tools/laptop)"
 
-[provides]
-"freefall" = "{{version}}-1"
-
-[replaces]
-"freefall" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.freefall/COPYING"
 "tools:usr/sbin/freefall" = "usr/bin/freefall"

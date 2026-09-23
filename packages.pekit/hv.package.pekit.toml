@@ -23,12 +23,6 @@ description = "Hyper-V guest integration daemons and tools (from Linux 7.0.9 too
 [dependencies]
 "org.python.python3" = ">= 3.14, < 3.15"
 
-[provides]
-"hv" = "{{version}}-1"
-
-[replaces]
-"hv" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.hv/COPYING"
 "tools:usr/bin/hv_kvp_daemon"       = "usr/bin/hv_kvp_daemon"

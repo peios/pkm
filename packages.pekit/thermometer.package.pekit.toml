@@ -14,13 +14,7 @@ name = "dev.peios.thermometer"
 description = "Thermal-zone temperature logger (from Linux 7.0.9 tools/thermal)"
 
 [dependencies]
-"dev.peios.libthermal-tools" = "= {{version}}-1"
-
-[provides]
-"thermometer" = "{{version}}-1"
-
-[replaces]
-"thermometer" = "<= 0.20.1-rc12-26"
+"dev.peios.libthermal-tools" = "= {{release}}"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.thermometer/COPYING"

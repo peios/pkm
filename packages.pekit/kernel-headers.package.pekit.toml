@@ -35,9 +35,6 @@ license = "GPL-2.0-only WITH Linux-syscall-note"
 [provides]
 "dev.peios.linux-kernel-headers" = "7.0.9"
 
-[replaces]
-kernel-headers = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.kernel-headers/COPYING"
 "headers:usr/include/**" = "usr/include/"

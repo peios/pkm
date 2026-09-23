@@ -13,12 +13,6 @@ side_effects = ["man-db"]
 name = "dev.peios.x86-energy-perf-policy"
 description = "Set the x86 CPU energy/performance bias (from Linux 7.0.9 tools/power/x86)"
 
-[provides]
-"x86-energy-perf-policy" = "{{version}}-1"
-
-[replaces]
-"x86-energy-perf-policy" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.x86-energy-perf-policy/COPYING"
 "tools:usr/bin/x86_energy_perf_policy" = "usr/bin/x86_energy_perf_policy"

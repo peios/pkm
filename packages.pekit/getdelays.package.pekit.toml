@@ -15,12 +15,6 @@ side_effects = ["man-db"]
 name = "dev.peios.getdelays"
 description = "Per-task delay-accounting statistics (from Linux 7.0.9 tools/accounting)"
 
-[provides]
-"getdelays" = "{{version}}-1"
-
-[replaces]
-"getdelays" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.getdelays/COPYING"
 "tools:usr/bin/getdelays" = "usr/bin/getdelays"

@@ -8,13 +8,7 @@ architecture = "noarch"
 description = "Peios Kernel - debug sources"
 
 [dependencies]
-"dev.peios.kernel" = "= {{version}}-1"
-
-[provides]
-"kernel-debugsource" = "{{version}}-1"
-
-[replaces]
-"kernel-debugsource" = "<= 0.20.1-rc12-26"
+"dev.peios.kernel" = "= {{release}}"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.kernel-debugsource/COPYING"

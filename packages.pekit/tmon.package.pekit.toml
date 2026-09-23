@@ -11,12 +11,6 @@ side_effects = ["man-db"]
 name = "dev.peios.tmon"
 description = "Thermal subsystem monitor (from Linux 7.0.9 tools/thermal/tmon)"
 
-[provides]
-"tmon" = "{{version}}-1"
-
-[replaces]
-"tmon" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.tmon/COPYING"
 "tools:usr/bin/tmon" = "usr/bin/tmon"

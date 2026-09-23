@@ -6,13 +6,7 @@ name = "dev.peios.perf-devel"
 description = "perf - dlfilter development header"
 
 [dependencies]
-"dev.peios.perf" = "= {{version}}-1"
-
-[provides]
-"perf-devel" = "{{version}}-1"
-
-[replaces]
-"perf-devel" = "<= 0.20.1-rc12-26"
+"dev.peios.perf" = "= {{release}}"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.perf-devel/COPYING"

@@ -8,12 +8,6 @@
 name = "dev.peios.libperf"
 description = "Shared library for perf events counting and sampling"
 
-[provides]
-"libperf" = "{{version}}-1"
-
-[replaces]
-"libperf" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.libperf/COPYING"
 "tools:usr/lib/x86_64-linux-peios/libperf.so.0"     = "usr/lib/x86_64-linux-peios/libperf.so.0"

@@ -17,12 +17,6 @@ side_effects = ["man-db"]
 name = "dev.peios.rtla"
 description = "Real-time latency analysis tools (from Linux 7.0.9 tools/tracing/rtla)"
 
-[provides]
-"rtla" = "{{version}}-1"
-
-[replaces]
-"rtla" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.rtla/COPYING"
 "tools:usr/bin/rtla"     = "usr/bin/rtla"

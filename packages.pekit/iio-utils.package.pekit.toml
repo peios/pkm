@@ -12,12 +12,6 @@ side_effects = ["man-db"]
 name = "dev.peios.iio-utils"
 description = "Industrial I/O userspace tools (from Linux 7.0.9 tools/iio)"
 
-[provides]
-"iio-utils" = "{{version}}-1"
-
-[replaces]
-"iio-utils" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.iio-utils/COPYING"
 "tools:usr/bin/iio_event_monitor"  = "usr/bin/iio_event_monitor"

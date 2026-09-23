@@ -141,11 +141,13 @@ export PKM_MODSIG_KEY="certs/peios-modsig.pem"
 # package, so no clang-devel there), plus the classic kernel C build deps — bc,
 # bison, flex, libelf (CONFIG/objtool), openssl (cert/sig), dwarves/pahole (BTF),
 # cpio (initramfs), kmod, python3, perl.
-# The Rust toolchain: on the apt side it is NOT a distro package — the
-# pkm-build container's rustup provides it via the env/wrap. On the peipkg
-# side rust (rustc+cargo+rustfmt+rust-src) and bindgen ARE pool packages,
-# declared below; the kernel enter wrapper points RUST_LIB_SRC at the
-# triplet-dir rustlib the rust package ships.
+# The Rust toolchain is the kernel's pinned lane (build/toolchain.lock), which
+# the stage asserts before building. In the native Peios root it is the
+# catalogue's org.rust-lang.rust 1.83.0 (rustc + rustfmt + rust-src), declared
+# below with bindgen; the catalogue recipe's env file points RUST_LIB_SRC at the
+# triplet-dir rustlib it ships. The Debian seed root has no Rust in its apt
+# set: the coordinator installs upstream's signed Rust 1.83.0 there
+# (pkgs/_debroot_), and the catalogue supplies the pinned bindgen.
 [build.kunit.dependencies.peipkg]
 "dev.peios.build-essentials" = "*"
 "org.gnu.bash" = "*"
@@ -252,8 +254,8 @@ find "$PEKIT_OUT/scripts" -type f -exec sh -c '
 "modules-root/**/*.ko.zst" = "modsig.priv"
 "modules-irf-root/**/*.ko.zst" = "modsig.priv"
 
-# Same toolchain as build.kunit (production profile); the keygen step adds python3
-# (already required). Rust toolchain comes from the build env/wrap, as above.
+# Same toolchain as build.kunit (production profile), Rust included; the keygen
+# step adds python3 (already required).
 [build.kernel.dependencies.peipkg]
 "dev.peios.build-essentials" = "*"
 "org.gnu.bash" = "*"
@@ -330,7 +332,7 @@ make -C "$PEKIT_SOURCE_OUT" O="$PEKIT_OUT" LLVM="${PKM_LLVM:--18}" ${PKM_HOSTCC:
 """
 
 # headers_install builds the unifdef host tool with HOSTCC (defaults to
-# clang-18 via LLVM=-18 in the container; a composed peipkg root sets
+# clang-18 via LLVM=-18 in the container and the Debian root; a native root sets
 # PKM_LLVM=1 / PKM_HOSTCC=gcc — see build/compile-kernel.sh for the knob
 # rationale), so it needs make + the clang toolchain (no kernel C libs);
 # the final INSTALL step copies the tree with rsync.
@@ -678,6 +680,12 @@ qemu-system-x86 = "*"
 # committed headers. verify_command below is the matching drift gate.
 [gen.uapi]
 command = """
+# bindgen loads libclang at run time and rust/gen.sh insists on LIBCLANG_PATH.
+# A developer shell exports it; in a native Peios root libclang lives in the
+# triplet libdir (org.llvm.clang-devel carries the unversioned libclang.so).
+if [ -z "${LIBCLANG_PATH:-}" ] && [ -e /usr/lib/x86_64-linux-peios/libclang.so ]; then
+	export LIBCLANG_PATH=/usr/lib/x86_64-linux-peios
+fi
 bash uapi/generated/rust/gen.sh
 bash uapi/generated/lua/gen.sh
 bash uapi/generated/go/gen.sh
@@ -687,6 +695,10 @@ bash uapi/generated/go/gen.sh
 # regen. Regenerates into the throwaway scratch $PEKIT_OUT — never the tree —
 # and diffs. Standalone-compile is a separate concern; it stays in [test.uapi].
 verify_command = """
+# LIBCLANG_PATH as for the command above.
+if [ -z "${LIBCLANG_PATH:-}" ] && [ -e /usr/lib/x86_64-linux-peios/libclang.so ]; then
+	export LIBCLANG_PATH=/usr/lib/x86_64-linux-peios
+fi
 work="$PEKIT_OUT/uapi"
 cp -a uapi "$work"
 bash "$work/generated/rust/gen.sh"
@@ -708,22 +720,47 @@ echo "uapi: bindings in sync with uapi/pkm"
 verify_on_build = []
 verify_on_test = []
 
-# Codegen for the three binding flavours: clang + libclang for the Rust bindgen
-# pass, golang (go + gofmt) for the Go mirror, and python3 for the codegen-safe
-# lint. The Lua binding generator emits Lua from C metadata; an installed Lua
-# interpreter is merely an optional extra self-check, not an input. bindgen +
-# rustfmt themselves come from the rustup toolchain in the build env/wrap.
+# Everything the three generators and the drift gate run. The gen.sh scripts
+# are bash (with grep, sed, awk, sort, tr and mktemp); each compiles and runs
+# a C program to evaluate the headers' constants and layouts, so they need a C
+# compiler, as does `go tool cgo -godefs`. The Rust pass runs bindgen, which
+# loads libclang (clang + clang-devel), and formats with rustfmt; the Go pass
+# formats with gofmt (org.golang.go). verify_command copies the tree with
+# GNU `cp -a` and compares with diff. The rustfmt is the kernel's pinned lane,
+# the one build.kernel uses, so the committed bindings match what the pinned
+# toolchain produces. The Lua generator emits Lua from C metadata; a Lua
+# interpreter is an optional self-check it skips when absent, not an input.
 [gen.uapi.dependencies.peipkg]
-"org.llvm.clang"        = "*"
-"org.llvm.clang-devel"  = "*"
-"org.golang.go"         = "*"
-"org.python.python3"    = "*"
+"org.git.kernel.dash"            = "*"
+"org.gnu.bash"                   = "*"
+"dev.peios.peiosutils"           = "*"
+"org.gnu.coreutils-build-compat" = "*"
+"org.gnu.grep"                   = "*"
+"org.gnu.sed"                    = "*"
+"org.gnu.gawk"                   = "*"
+"org.gnu.diffutils"              = "*"
+"dev.peios.build-essentials-c"   = "*"
+"io.github.rust-lang.bindgen"    = "*"
+"org.rust-lang.rustfmt"          = "= 1.83.0"
+"org.llvm.clang"                 = "*"
+"org.llvm.clang-devel"           = "*"
+"org.golang.go"                  = "*"
 
+# bindgen comes from the catalogue, as for the kernel stages. rustfmt is not a
+# Debian package here: a Debian root has it only where the coordinator installs
+# upstream's Rust (pkgs/_debroot_), which it does for the kernel builds alone.
 [gen.uapi.dependencies.apt]
+bash = "*"
+coreutils = "*"
+grep = "*"
+sed = "*"
+gawk = "*"
+diffutils = "*"
+build-essential = "*"
 clang-18 = "*"
 libclang-18-dev = "*"
 golang-go = "*"
-python3 = "*"
+"io.github.rust-lang.bindgen" = "*"
 
 # Standalone-compile gate for the UAPI: the canonical headers must compile with
 # a stock userspace compiler. This is correctness, not drift (the drift half is
@@ -746,4 +783,38 @@ bash uapi/check-userspace-clean.sh
 [test.uapi.dependencies.apt]
 bash            = "*"
 coreutils       = "*"
+build-essential = "*"
+
+# The Rust cores' own suites: the Cargo workspace (kacs-core, lcs-core,
+# pnp-core, stratafs-core and the generated peios-uapi) tested as userspace
+# logic, as README's Conventions describe — the default feature set, never
+# --all-features, whose `kernel` feature resolves only inside a staged kernel
+# tree. The workspace has no registry dependencies, so the run is offline and
+# needs only the committed source and Cargo.lock; no build target feeds it.
+#
+# These are plain logic tests, so they take the catalogue's current Rust rather
+# than the kernel's pinned 1.83 lane (which carries no cargo); the kernel build
+# still compiles the staged cores with its own pinned rustc. Cargo's home and
+# target directory sit in this target's own output, never the source tree.
+#
+# clippy is not run: the catalogue's Rust ships no clippy component.
+[test.cores]
+gate = true
+command = """
+export CARGO_HOME="$PEKIT_OUT/cargo-home"
+export CARGO_TARGET_DIR="$PEKIT_OUT/target"
+cargo test --workspace --locked --offline
+"""
+
+# cargo drives rustc, which links the test binaries through the C toolchain's
+# cc (dev.peios.build-essentials-c).
+[test.cores.dependencies.peipkg]
+"org.git.kernel.dash"          = "*"
+"org.rust-lang.rust"           = ">= 1.98"
+"org.rust-lang.cargo"          = ">= 1.98"
+"dev.peios.build-essentials-c" = "*"
+
+[test.cores.dependencies.apt]
+cargo           = "*"
+rustc           = "*"
 build-essential = "*"

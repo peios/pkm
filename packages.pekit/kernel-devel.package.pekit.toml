@@ -61,15 +61,8 @@ name = "dev.peios.kernel-devel"
 description = "Peios Kernel - development headers and build kit"
 
 [dependencies]
-"dev.peios.kernel" = "= {{version}}-1"
+"dev.peios.kernel" = "= {{release}}"
 "dev.peios.build-essentials-c" = "*"
-
-
-[provides]
-"kernel-devel" = "{{version}}-1"
-
-[replaces]
-"kernel-devel" = "<= 0.20.1-rc12-26"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.kernel-devel/COPYING"

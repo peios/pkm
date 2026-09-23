@@ -8,13 +8,7 @@ license = "LGPL-2.1-or-later"
 description = "libthermal - development files (header, static lib, pkg-config)"
 
 [dependencies]
-"dev.peios.libthermal" = "= {{version}}-1"
-
-[provides]
-"libthermal-devel" = "{{version}}-1"
-
-[replaces]
-"libthermal-devel" = "<= 0.20.1-rc12-26"
+"dev.peios.libthermal" = "= {{release}}"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.libthermal-devel/COPYING"

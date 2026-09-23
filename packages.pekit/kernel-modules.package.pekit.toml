@@ -32,18 +32,12 @@ description = "Peios Kernel - loadable modules (based on Linux 7.0.9)"
 # was built against by vermagic and symbol CRCs; pairing it with any other
 # kernel build is a boot-time failure, not a degraded mode.
 [dependencies]
-"dev.peios.kernel" = "= {{version}}-1"
+"dev.peios.kernel" = "= {{release}}"
 
 # Everything modules_install produced, including the depmod index. The build/
 # and source/ symlinks it also creates are removed by install-modules.sh —
 # they are absolute paths into a build tree that does not exist on target, and
 # kernel-devel ships the real build/ tree at this same release directory.
-[provides]
-"kernel-modules" = "{{version}}-1"
-
-[replaces]
-"kernel-modules" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.kernel-modules/COPYING"
 "kernel:modules-root/lib/modules/7.0.9-peios-{{version}}/**" = "usr/lib/modules/7.0.9-peios-{{version}}/"

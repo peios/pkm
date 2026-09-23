@@ -14,14 +14,8 @@ name = "dev.peios.thermal-engine"
 description = "Userspace thermal management daemon (from Linux 7.0.9 tools/thermal)"
 
 [dependencies]
-"dev.peios.libthermal"       = "= {{version}}-1"
-"dev.peios.libthermal-tools" = "= {{version}}-1"
-
-[provides]
-"thermal-engine" = "{{version}}-1"
-
-[replaces]
-"thermal-engine" = "<= 0.20.1-rc12-26"
+"dev.peios.libthermal"       = "= {{release}}"
+"dev.peios.libthermal-tools" = "= {{release}}"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.thermal-engine/COPYING"

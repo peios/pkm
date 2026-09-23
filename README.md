@@ -103,7 +103,7 @@ time and is supplied by the build environment, never committed — see
 | `build/build-tools.sh` | Builds the in-tree userspace tools into a DESTDIR image. |
 | `build/test-kunit.sh` | Boots the KUnit kernel in QEMU and asserts the suite passes. |
 | `build/config/` | `config.x86_64.base`, `pkm.fragment`, `kunit.fragment`, `lsmod.txt`. |
-| `env.pekit.toml` | The container `[wrap]` — runs every stage inside `pkm-build` rootless. |
+| `env.pekit.toml` | The container `[wrap]` for standalone developer builds — runs every stage inside `pkm-build` rootless. The pkgs workspace ignores it and builds in its own sandbox. |
 | `kvm.env.pekit.toml` | `--env kvm` variant: adds `--device /dev/kvm` for accelerated QEMU. |
 | `packages.pekit/package.pekit.toml` | Base package metadata, inherited by every member. |
 | `packages.pekit/<name>.package.pekit.toml` | Per-package `[files]` maps for the kernel family + userspace tools. |
@@ -184,6 +184,7 @@ dependencies' outputs as `$PEKIT_<NEED>_OUT`, and writes to `$PEKIT_OUT`
 | `test.stratafs` | `kunit` | Boots a minimal initramfs in QEMU and exercises mounted StrataFS through real KACS-governed syscalls. |
 | `gen.uapi` | — | Regenerates `uapi/generated/**` in place from `uapi/pkm` (a `gen` target — product is committed source, not an artifact). Its `verify_command` is the drift gate (`pekit verify uapi`). |
 | `test.uapi` | — | Standalone-compile gate: the canonical headers compile with a stock userspace compiler. |
+| `test.cores` | — | The Rust cores' Cargo suites (`cargo test --workspace --locked --offline`) on the catalogue's current Rust, from the committed source alone. |
 
 `build.kernel` and `build.kunit` each take the config-agnostic `build.source`
 tree, configure it for their profile via `build/configure-kernel.sh`, and
@@ -365,6 +366,9 @@ hand-edited.
 - **`pekit verify uapi`** — the UAPI drift gate (committed bindings == fresh
   regen), and **`pekit test uapi`** — the standalone-compile gate. Both are
   described under *UAPI and language bindings* above.
+- **`pekit test cores`** — runs the Rust cores' Cargo suites offline
+  (`cargo test --workspace --locked --offline`, default features). It is a
+  package gate and needs no build stage.
 
 ---
 

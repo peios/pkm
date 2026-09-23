@@ -12,12 +12,6 @@ name = "dev.peios.libthermal"
 license = "LGPL-2.1-or-later"
 description = "Client library for the kernel thermal netlink interface"
 
-[provides]
-"libthermal" = "{{version}}-1"
-
-[replaces]
-"libthermal" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.libthermal/COPYING"
 "tools:usr/lib/x86_64-linux-peios/libthermal.so"       = "usr/lib/x86_64-linux-peios/libthermal.so"

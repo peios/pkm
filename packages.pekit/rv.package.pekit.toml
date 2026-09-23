@@ -15,12 +15,6 @@ side_effects = ["man-db"]
 name = "dev.peios.rv"
 description = "Runtime verification monitor front-end (from Linux 7.0.9 tools/verification)"
 
-[provides]
-"rv" = "{{version}}-1"
-
-[replaces]
-"rv" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.rv/COPYING"
 "tools:usr/bin/rv" = "usr/bin/rv"

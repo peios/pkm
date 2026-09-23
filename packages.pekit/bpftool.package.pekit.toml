@@ -16,12 +16,6 @@ description = "eBPF program, map and BTF introspection (from Linux 7.0.9 tools/b
 
 # bpftool's Makefile installs to /usr/sbin; PSD-009 §3.4.1 has no sbin (Peios is
 # bin-only), and bpftool has no compiled-in self-path, so relocate it to usr/bin.
-[provides]
-"bpftool" = "{{version}}-1"
-
-[replaces]
-"bpftool" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.bpftool/COPYING"
 "tools:usr/sbin/bpftool" = "usr/bin/bpftool"

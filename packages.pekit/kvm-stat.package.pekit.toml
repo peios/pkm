@@ -16,12 +16,6 @@ description = "kvm_stat - KVM event monitor (from Linux 7.0.9 tools/kvm/kvm_stat
 [dependencies]
 "org.python.python3" = ">= 3.14, < 3.15"
 
-[provides]
-"kvm-stat" = "{{version}}-1"
-
-[replaces]
-"kvm-stat" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.kvm-stat/COPYING"
 "tools:usr/bin/kvm_stat"                = "usr/bin/kvm_stat"

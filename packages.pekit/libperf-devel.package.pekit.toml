@@ -16,13 +16,7 @@ name = "dev.peios.libperf-devel"
 description = "libperf - development files (headers, static lib, pkg-config)"
 
 [dependencies]
-"dev.peios.libperf" = "= {{version}}-1"
-
-[provides]
-"libperf-devel" = "{{version}}-1"
-
-[replaces]
-"libperf-devel" = "<= 0.20.1-rc12-26"
+"dev.peios.libperf" = "= {{release}}"
 
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.libperf-devel/COPYING"

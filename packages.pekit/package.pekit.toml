@@ -19,51 +19,9 @@
 format = "peipkg"
 
 [package]
-# -16: stratafs gains its conformance-test apparatus: the stratafs: tracepoint
-# system (d_revalidate verdicts) and the test rendezvous/fail points of TRM
-# §4.A.2 (CONFIG_STRATAFS_FS_TEST_HOOKS) — compiled in, registered only when
-# booted with stratafs.test_hooks=1, which only the provium profiles pass.
-#
-# -15: KACS invalidates an inode's cached security descriptor when a canonical
-# descriptor xattr lands on it. A descriptor set through a stacking filesystem
-# reaches a second inode the set-security path never sees, and that inode could
-# keep serving the descriptor the object was created with (PEI-564).
-#
-# -14: KACS resolves an overlay create in the overlay's own terms (PEI-564).
-# A file or directory created on the live root now inherits from the directory
-# the caller named, as the caller -- not from a backing upper or work directory
-# as the mounter -- so CREATOR OWNER resolves to the principal that made the
-# object and a runtime `sd set` governs the children that follow it. An explicit
-# creator descriptor from a native create is honoured on an overlay too.
-# -17: PNP — the Peios Network Policy packet engine (PEI-598). net/pnp
-# subtree at the ratified seats, pnp-core rules engine in the Rust island,
-# registry ingestion via LCS with a depth-unbounded rules watch, nftables
-# and the xtables family configured out (the clean slate), and the
-# dev-baseline policy seed (regim/pnp-rules.reg) that arms enforcement on
-# images that autoapply it.
-# -19: the PNP verdict event stream — /dev/peios-pnp drains one record per
-# evaluation (verdict, attribution, tuple; drops confessed) and the STATUS
-# ioctl reports generation/enforcing/stats/last-ingest. ABI: <pkm/pnp.h>,
-# experimental. (-18: conntrack pinned at init.)
-# -24: KACS carries the caller's projected uid/gid across an overlay create
-# (PEI-618). Overlayfs performs the real create under the mounter's credential
-# and hands the caller's ownership down by assigning it to that cred's
-# fsuid/fsgid, which is inert here because current_fsuid() reads the projection
-# instead of the field. Every file created on the overlay root was therefore
-# stamped with the mounter's ids, so `stat` reported uid 0 for every
-# principal's files while the security descriptor named the right owner. Any
-# program checking that it owns its own directory refused to run.
-# -26 (-25 superseded): PNP reads the network context (PEI-598). The kernel's registry walk
-# widens from Rules\ to the whole Machine\System\Network key and reads netd's
-# inventory — each interface's Status Network, joined to the Networks\<id>
-# record's Name and Trust — into a per-interface table (net/pnp/context.c), so
-# Network.Id/Name/Trust are facts at every packet layer and one rule can say
-# "SSH only on the network I called home". A table that differs from the active
-# one advances the policy generation (every sentence re-judged, as after a rule
-# change); an identical one does not. The rules walk now digests what it fed the
-# builder and skips republishing an unchanged forest. The LCS watch target moves
-# from the Rules key to the Network key.
-version      = "{{version}}-4"
+# The family revision. Every package here shares it, and same-family
+# relations pin it through {{release}}, so it is written once.
+version      = "{{version}}-1"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 license_class = "free"

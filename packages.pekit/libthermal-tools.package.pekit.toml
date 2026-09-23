@@ -10,12 +10,6 @@ name = "dev.peios.libthermal-tools"
 license = "LGPL-2.1-or-later"
 description = "libthermal_tools - private helper library for the thermal tools"
 
-[provides]
-"libthermal-tools" = "{{version}}-1"
-
-[replaces]
-"libthermal-tools" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.libthermal-tools/COPYING"
 "tools:usr/lib/x86_64-linux-peios/libthermal_tools.so"       = "usr/lib/x86_64-linux-peios/libthermal_tools.so"

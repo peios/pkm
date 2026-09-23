@@ -13,12 +13,6 @@ side_effects = ["man-db"]
 name = "dev.peios.turbostat"
 description = "CPU frequency, idle and power telemetry (from Linux 7.0.9 tools/power/x86)"
 
-[provides]
-"turbostat" = "{{version}}-1"
-
-[replaces]
-"turbostat" = "<= 0.20.1-rc12-26"
-
 [files]
 "@source:COPYING" = "usr/share/licenses/dev.peios.turbostat/COPYING"
 "tools:usr/bin/turbostat" = "usr/bin/turbostat"
