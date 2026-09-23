@@ -31,6 +31,7 @@
 #include "firmware.h"
 #include "kmes_rate.h"
 #include "lsm_internal.h"
+#include "mnt_namespace.h"
 #include "mount_policy.h"
 #include "namespace.h"
 #include "native_open.h"
@@ -78,6 +79,7 @@ static struct security_hook_list pkm_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(cred_free, pkm_kacs_cred_free),
 	LSM_HOOK_INIT(sb_alloc_security, pkm_kacs_sb_alloc_security),
 	LSM_HOOK_INIT(sb_free_security, pkm_kacs_sb_free_security),
+	LSM_HOOK_INIT(sb_kern_mount, pkm_kacs_sb_kern_mount),
 	LSM_HOOK_INIT(inode_alloc_security, pkm_kacs_inode_alloc_security),
 	LSM_HOOK_INIT(inode_free_security_rcu, pkm_kacs_inode_free_security_rcu),
 	LSM_HOOK_INIT(inode_getattr, pkm_kacs_inode_getattr),

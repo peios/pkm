@@ -323,10 +323,17 @@ static void unprivileged_child(void)
 	check(unshare(CLONE_NEWNS) == 0,
 	      "unprivileged unshare(CLONE_NEWNS) must succeed");
 
-	/* Inside it, only bind, umount and pivot_root are admitted. */
-	errno = 0;
-	check_errno(mount("none", "/other", "tmpfs", 0, NULL), EPERM,
-		    "tmpfs in a private table must be EPERM");
+	/*
+	 * Inside it, bind, umount, pivot_root and an allowlisted filesystem
+	 * are admitted; everything else is not.
+	 */
+	check(mount("none", "/other", "tmpfs", 0, "mode=0755") == 0,
+	      "tmpfs in a private table must succeed");
+	write_text("/other/early", "early");
+	expect_text("/other/early", "early");
+	check(umount2("/other", 0) == 0,
+	      "unmount of an own tmpfs must succeed");
+	expect_text("/other/marker", "outside");
 	errno = 0;
 	check_errno(mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL), EPERM,
 		    "propagation change in a private table must be EPERM");
@@ -366,6 +373,38 @@ static void unprivileged_child(void)
 	expect_absent("/env");
 	expect_absent("/other");
 	expect_absent("/newroot");
+
+	/*
+	 * Inside the private root, tmpfs and proc are admitted; the tmpfs is
+	 * stamped with a creator template so its files are reachable at once,
+	 * with no privilege to seed it. Every other type stays refused before
+	 * the type is even looked up.
+	 */
+	make_dir("/tmp");
+	make_dir("/proc");
+	check(mount("none", "/tmp", "tmpfs", 0, "mode=0755") == 0,
+	      "tmpfs in a private table must succeed");
+	write_text("/tmp/scratch", "scratch");
+	expect_text("/tmp/scratch", "scratch");
+	make_dir("/tmp/dir");
+	write_text("/tmp/dir/nested", "nested");
+	expect_text("/tmp/dir/nested", "nested");
+	check(mount("none", "/proc", "proc", 0, NULL) == 0,
+	      "proc in a private table must succeed");
+	check(access("/proc/self/status", R_OK) == 0,
+	      "/proc/self/status must be readable in the private proc");
+	errno = 0;
+	check_errno(mount("none", "/tmp", "ext4", 0, NULL), EPERM,
+		    "ext4 in a private table must be EPERM");
+	errno = 0;
+	check_errno(mount("none", "/tmp", "stratafs", 0, "strata=/sub+ro"), EPERM,
+		    "stratafs in a private table must be EPERM");
+	errno = 0;
+	check_errno(mount("none", "/tmp", "sysfs", 0, NULL), EPERM,
+		    "sysfs in a private table must be EPERM");
+	check(umount2("/proc", 0) == 0, "unmount of the private proc must succeed");
+	check(umount2("/tmp", 0) == 0, "unmount of the private tmpfs must succeed");
+	expect_absent("/tmp/scratch");
 
 	printf("MNTNS_SMOKE_CHILD_CHECKS: %u\n", checks);
 	fflush(NULL);

@@ -17,20 +17,26 @@
  * descriptor, so the root table is reachable only through the privilege,
  * exactly as it was.
  *
- * Only a bind mount, an unmount and pivot_root can be admitted by the
- * descriptor. Everything else — a filesystem type, a remount, a move, a
- * propagation change, the new mount API — still needs the privilege, so a
- * private table never puts a filesystem parser in reach of an unprivileged
- * caller. The other Linux reasons for gating a private table do not apply
- * here: the token never changes at exec, and every file access is decided on
- * the real object's descriptor, so a bind mount shows a name and denies at
- * open.
+ * A bind mount, an unmount, pivot_root, and a new tmpfs or proc can be
+ * admitted by the descriptor. Everything else — any other filesystem type, a
+ * remount, a move, a propagation change, the new mount API — still needs the
+ * privilege, so a private table never puts a filesystem parser that reads an
+ * untrusted image in reach of an unprivileged caller. The allowlist is a
+ * kernel attack-surface list, never a policy knob: who may change a table is
+ * decided by the table's descriptor alone. The other Linux reasons for gating
+ * a private table do not apply here: the token never changes at exec, and
+ * every file access is decided on the real object's descriptor, so a bind
+ * mount shows a name and denies at open.
  */
 
 #include <linux/errno.h>
+#include <linux/fs.h>
 #include <linux/kacs_mntns.h>
 #include <linux/kernel.h>
+#include <linux/magic.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/types.h>
 
 #include <pkm/mntns.h>
@@ -41,6 +47,7 @@
 #include "capability.h"
 #include "lsm_internal.h"
 #include "mnt_namespace.h"
+#include "mount_policy.h"
 #include "token_runtime.h"
 
 #include <trace/events/kacs.h>
@@ -118,15 +125,29 @@ static bool pkm_kacs_mntns_op_admissible(unsigned int op)
 	case PKM_KACS_MNTNS_OP_BIND:
 	case PKM_KACS_MNTNS_OP_UMOUNT:
 	case PKM_KACS_MNTNS_OP_PIVOT_ROOT:
+	case PKM_KACS_MNTNS_OP_NEW_FS:
 		return true;
 	default:
 		return false;
 	}
 }
 
+/*
+ * The filesystem types an unprivileged caller may bring into being in a
+ * table it holds the mount right on. Both read nothing but the caller's
+ * own mount options: tmpfs has no backing image and proc is a view of the
+ * kernel's own state. A type that parses an image (ext4, squashfs, iso9660,
+ * ntfs3 ...) or that KACS itself governs specially (stratafs) is not here
+ * and stays privileged whatever a descriptor grants.
+ */
+static bool pkm_kacs_mntns_fs_type_admissible(const char *fstype)
+{
+	return fstype && (!strcmp(fstype, "tmpfs") || !strcmp(fstype, "proc"));
+}
+
 bool pkm_kacs_may_mount_op_for_token(const void *subject_token,
 				     const struct pkm_kacs_process_sd *sd,
-				     unsigned int op)
+				     unsigned int op, const char *fstype)
 {
 	u32 granted = 0;
 	u32 pip_type = 0;
@@ -163,6 +184,12 @@ bool pkm_kacs_may_mount_op_for_token(const void *subject_token,
 		return false;
 	}
 
+	if (op == PKM_KACS_MNTNS_OP_NEW_FS &&
+	    !pkm_kacs_mntns_fs_type_admissible(fstype)) {
+		trace_kacs_mntns(op, 0, KACS_MNTNS_GATE_FS_NOT_ADMITTED, -EPERM);
+		return false;
+	}
+
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
 	if (ret) {
 		trace_kacs_mntns(op, KACS_MNTNS_MOUNT, KACS_MNTNS_GATE_PIP_CONTEXT,
@@ -178,9 +205,70 @@ bool pkm_kacs_may_mount_op_for_token(const void *subject_token,
 }
 
 bool pkm_kacs_may_mount_op(const struct pkm_kacs_mntns_security *sec,
-			   unsigned int op)
+			   unsigned int op, const char *fstype)
 {
 	return pkm_kacs_may_mount_op_for_token(
 		pkm_kacs_current_effective_token_ptr(), sec ? sec->sd : NULL,
-		op);
+		op, fstype);
+}
+
+long pkm_kacs_mntns_stamp_superblock_for_token(struct super_block *sb,
+					       const void *token)
+{
+	struct pkm_kacs_superblock_security *sec;
+	const u8 *template_bytes;
+	size_t template_len = 0;
+	u32 generation;
+
+	if (!sb || !sb->s_security || !token)
+		return 0;
+	if (sb->s_magic != TMPFS_MAGIC)
+		return 0;
+	/*
+	 * A privileged mounter's tmpfs keeps the magic default (deny-missing)
+	 * and the mounter seeds it, as the system's own overlays are seeded.
+	 * Only a mount the descriptor rung admitted reaches the stamp.
+	 */
+	if (kacs_rust_token_enabled_privileges_in_mask(
+		    token, PKM_KACS_MNTNS_PRIVILEGE_MASK))
+		return 0;
+
+	template_bytes = kacs_rust_create_default_mnt_ns_sd(token, &template_len);
+	if (!template_bytes || template_len == 0) {
+		trace_kacs_mntns(PKM_KACS_MNTNS_OP_NEW_FS, 0,
+				 KACS_MNTNS_SB_STAMP_FAIL, -ENOMEM);
+		return -ENOMEM;
+	}
+
+	sec = pkm_kacs_sb(sb);
+	mutex_lock(&sec->lock);
+	/*
+	 * A generation above zero means kacs_set_mount_policy has already
+	 * spoken for this superblock; the lazily cached magic default has not,
+	 * and is what the root inode's creation during fill_super leaves
+	 * behind. Bumping the generation retires anything cached under it.
+	 */
+	if (READ_ONCE(sec->policy_generation) != 0) {
+		mutex_unlock(&sec->lock);
+		pkm_kacs_free((void *)template_bytes);
+		return 0;
+	}
+	generation = pkm_kacs_next_mount_policy_generation(0);
+	sec->template_sd_bytes = template_bytes;
+	sec->template_sd_len = template_len;
+	WRITE_ONCE(sec->mount_policy, KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
+	WRITE_ONCE(sec->policy_generation, generation);
+	mutex_unlock(&sec->lock);
+
+	trace_kacs_mntns(PKM_KACS_MNTNS_OP_NEW_FS, 0, KACS_MNTNS_SB_STAMP, 0);
+	return 0;
+}
+
+int pkm_kacs_sb_kern_mount(const struct super_block *sb)
+{
+	long ret = pkm_kacs_mntns_stamp_superblock_for_token(
+		(struct super_block *)sb,
+		pkm_kacs_current_effective_token_ptr());
+
+	return ret < 0 ? (int)ret : 0;
 }

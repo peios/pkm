@@ -5735,7 +5735,7 @@ const u8 *pkm_kacs_kunit_create_mntns_sd_for_subject(const void *token,
 
 bool pkm_kacs_kunit_may_mount_op_for_subject(const void *subject_token,
 					     const u8 *sd_bytes, size_t sd_len,
-					     unsigned int op)
+					     unsigned int op, const char *fstype)
 {
 	struct pkm_kacs_process_sd sd = {
 		.refs = REFCOUNT_INIT(1),
@@ -5744,7 +5744,48 @@ bool pkm_kacs_kunit_may_mount_op_for_subject(const void *subject_token,
 	};
 
 	return pkm_kacs_may_mount_op_for_token(subject_token,
-					       sd_bytes ? &sd : NULL, op);
+					       sd_bytes ? &sd : NULL, op,
+					       fstype);
+}
+
+long pkm_kacs_kunit_mntns_stamp_superblock_for_subject(
+	const void *token, u64 magic, u32 *policy_out, u32 *generation_out,
+	u8 **template_out, size_t *template_len_out)
+{
+	struct pkm_kacs_kunit_file_mount_state state = {};
+	struct pkm_kacs_superblock_security *sb_sec;
+	long ret;
+
+	if (!policy_out || !generation_out || !template_out ||
+	    !template_len_out)
+		return -EINVAL;
+	*policy_out = 0;
+	*generation_out = 0;
+	*template_out = NULL;
+	*template_len_out = 0;
+
+	/* Policy left unresolved, as alloc_super() leaves it. */
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(&state, magic, NULL, 0,
+						      NULL, 0, S_IFDIR, false);
+	if (ret)
+		return ret;
+
+	ret = pkm_kacs_mntns_stamp_superblock_for_token(&state.sb, token);
+
+	sb_sec = pkm_kacs_sb(&state.sb);
+	*policy_out = READ_ONCE(sb_sec->mount_policy);
+	*generation_out = READ_ONCE(sb_sec->policy_generation);
+	if (sb_sec->template_sd_bytes && sb_sec->template_sd_len) {
+		*template_out = kmemdup(sb_sec->template_sd_bytes,
+					sb_sec->template_sd_len, GFP_KERNEL);
+		if (!*template_out)
+			ret = -ENOMEM;
+		else
+			*template_len_out = sb_sec->template_sd_len;
+	}
+
+	pkm_kacs_kunit_cleanup_file_mount_state(&state);
+	return ret;
 }
 
 long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,

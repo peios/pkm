@@ -854,4 +854,7 @@
 #define KACS_MNTNS_GATE_OP_NOT_ADMITTED		4U  /* op needs the privilege whatever the SD says */
 #define KACS_MNTNS_GATE_SD_DECISION		5U  /* access check against the namespace SD */
 #define KACS_MNTNS_GATE_PIP_CONTEXT		6U  /* caller PIP context unavailable */
+#define KACS_MNTNS_GATE_FS_NOT_ADMITTED		7U  /* filesystem type not on the unprivileged allowlist */
+#define KACS_MNTNS_SB_STAMP			8U  /* unprivileged tmpfs stamped synth-ephemeral, creator template */
+#define KACS_MNTNS_SB_STAMP_FAIL		9U  /* creator template could not be built */
 #endif /* _UAPI_PKM_TRACE_H */

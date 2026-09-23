@@ -98,3 +98,10 @@ tools/perf-bench-asm-cet.patch
 # may_mount() body, so it must stay after both.
 kernel/nsproxy-mount-namespace-unprivileged.patch
 fs/namespace-mount-namespace-objects.patch
+# PEI-1173, slice 2: a new tmpfs or proc is admitted by the namespace
+# descriptor too. may_mount_op() takes the filesystem type, and the
+# superblock gate in fs/super.c asks the same question. Cut against the tree
+# with the two patches above applied; stays after them and after
+# super-mount-volume-privilege, whose call it replaces.
+fs/namespace-mount-namespace-new-fs.patch
+fs/super-mount-namespace-objects.patch

@@ -1895,7 +1895,10 @@ DEFINE_EVENT(kacs_tlp, kacs_tlp,
 	{ KACS_MNTNS_GATE_NO_SD,	"gate-no-sd" },			\
 	{ KACS_MNTNS_GATE_OP_NOT_ADMITTED, "gate-op-not-admitted" },	\
 	{ KACS_MNTNS_GATE_SD_DECISION,	"gate-sd-decision" },		\
-	{ KACS_MNTNS_GATE_PIP_CONTEXT,	"gate-pip-context" }
+	{ KACS_MNTNS_GATE_PIP_CONTEXT,	"gate-pip-context" },		\
+	{ KACS_MNTNS_GATE_FS_NOT_ADMITTED, "gate-fs-not-admitted" },	\
+	{ KACS_MNTNS_SB_STAMP,		"sb-stamp" },			\
+	{ KACS_MNTNS_SB_STAMP_FAIL,	"sb-stamp-fail" }
 
 /*
  * One mount-namespace object event: a descriptor minted at namespace

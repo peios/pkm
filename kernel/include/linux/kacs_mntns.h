@@ -21,13 +21,16 @@ struct pkm_kacs_mntns_security;
 
 /*
  * What a mount-table change is, as far as the namespace descriptor is
- * concerned. Only BIND, UMOUNT and PIVOT_ROOT can be admitted by the
- * descriptor; OTHER always needs the privilege.
+ * concerned. BIND, UMOUNT and PIVOT_ROOT can be admitted by the descriptor;
+ * NEW_FS can be, for the filesystem types KACS keeps on its allowlist
+ * (tmpfs and proc, whose parsers take no untrusted image); OTHER always
+ * needs the privilege.
  */
 #define PKM_KACS_MNTNS_OP_OTHER		0U
 #define PKM_KACS_MNTNS_OP_BIND		1U
 #define PKM_KACS_MNTNS_OP_UMOUNT	2U
 #define PKM_KACS_MNTNS_OP_PIVOT_ROOT	3U
+#define PKM_KACS_MNTNS_OP_NEW_FS	4U
 
 #ifdef CONFIG_SECURITY_PKM
 /*
@@ -48,10 +51,11 @@ bool pkm_kacs_mntns_creator_privileged(void);
 /*
  * Whether the current task may perform @op on the mount table whose
  * namespace carries @sec (NULL for the initial namespace and for anonymous
- * ones). Replaces the CAP_SYS_ADMIN test in may_mount().
+ * ones). @fstype is the filesystem type name for NEW_FS and NULL otherwise.
+ * Replaces the CAP_SYS_ADMIN test in may_mount() and mount_capable().
  */
 bool pkm_kacs_may_mount_op(const struct pkm_kacs_mntns_security *sec,
-			   unsigned int op);
+			   unsigned int op, const char *fstype);
 #else
 static inline struct pkm_kacs_mntns_security *
 pkm_kacs_mntns_security_create(void)
@@ -70,7 +74,8 @@ static inline bool pkm_kacs_mntns_creator_privileged(void)
 }
 
 static inline bool pkm_kacs_may_mount_op(
-	const struct pkm_kacs_mntns_security *sec, unsigned int op)
+	const struct pkm_kacs_mntns_security *sec, unsigned int op,
+	const char *fstype)
 {
 	return false;
 }

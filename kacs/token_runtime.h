@@ -1490,7 +1490,16 @@ const u8 *pkm_kacs_kunit_create_mntns_sd_for_subject(const void *token,
 						    size_t *len_out);
 bool pkm_kacs_kunit_may_mount_op_for_subject(const void *subject_token,
 					     const u8 *sd_bytes, size_t sd_len,
-					     unsigned int op);
+					     unsigned int op, const char *fstype);
+/*
+ * Stamp a fake tmpfs superblock (magic @magic, lazily resolved policy) as
+ * the sb_kern_mount hook would for @token; returns the stamp result and
+ * reports the policy, generation and template the superblock ends up with.
+ * @template_out is a copy the caller frees with kfree.
+ */
+long pkm_kacs_kunit_mntns_stamp_superblock_for_subject(
+	const void *token, u64 magic, u32 *policy_out, u32 *generation_out,
+	u8 **template_out, size_t *template_len_out);
 long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,
 					     u64 effective_mask,
 					     u64 inheritable_mask,

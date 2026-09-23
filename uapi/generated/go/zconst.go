@@ -234,12 +234,15 @@ const (
 	KACS_MIT_WXP                                        = 1
 	KACS_MNTNS_ALL_ACCESS                               = 917507
 	KACS_MNTNS_ENTER                                    = 2
+	KACS_MNTNS_GATE_FS_NOT_ADMITTED                     = 7
 	KACS_MNTNS_GATE_NO_SD                               = 3
 	KACS_MNTNS_GATE_OP_NOT_ADMITTED                     = 4
 	KACS_MNTNS_GATE_PIP_CONTEXT                         = 6
 	KACS_MNTNS_GATE_PRIVILEGE                           = 2
 	KACS_MNTNS_GATE_SD_DECISION                         = 5
 	KACS_MNTNS_MOUNT                                    = 1
+	KACS_MNTNS_SB_STAMP                                 = 8
+	KACS_MNTNS_SB_STAMP_FAIL                            = 9
 	KACS_MNTNS_SD_ALLOC                                 = 0
 	KACS_MNTNS_SD_ALLOC_FAIL                            = 1
 	KACS_MOUNT_POLICY_ARGS_MIN_SIZE                     = 16

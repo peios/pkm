@@ -5,6 +5,7 @@
 #include "process_state.h"
 
 #include <linux/kacs_mntns.h>
+#include <linux/magic.h>
 #include <linux/prctl.h>
 
 
@@ -616,7 +617,7 @@ static void pkm_kunit_mntns_gate_privilege_admits_everything(
 			KUNIT_EXPECT_TRUE_MSG(
 				test,
 				pkm_kacs_kunit_may_mount_op_for_subject(
-					token, NULL, 0, ops[j]),
+					token, NULL, 0, ops[j], NULL),
 				"privilege 0x%llx op %u", privileges[i], ops[j]);
 		kacs_rust_token_drop(token);
 	}
@@ -635,9 +636,9 @@ static void pkm_kunit_mntns_gate_without_sd_denies_unprivileged(
 
 	KUNIT_ASSERT_NOT_NULL(test, token);
 	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
-					 token, NULL, 0, PKM_KACS_MNTNS_OP_BIND));
+					 token, NULL, 0, PKM_KACS_MNTNS_OP_BIND, NULL));
 	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
-					 NULL, NULL, 0, PKM_KACS_MNTNS_OP_BIND));
+					 NULL, NULL, 0, PKM_KACS_MNTNS_OP_BIND, NULL));
 	kacs_rust_token_drop(token);
 }
 
@@ -668,16 +669,16 @@ static void pkm_kunit_mntns_gate_creator_sd_admits_bind_umount_pivot_only(
 
 		KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
 						token, sd, sd_len,
-						PKM_KACS_MNTNS_OP_BIND));
+						PKM_KACS_MNTNS_OP_BIND, NULL));
 		KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
 						token, sd, sd_len,
-						PKM_KACS_MNTNS_OP_UMOUNT));
+						PKM_KACS_MNTNS_OP_UMOUNT, NULL));
 		KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
 						token, sd, sd_len,
-						PKM_KACS_MNTNS_OP_PIVOT_ROOT));
+						PKM_KACS_MNTNS_OP_PIVOT_ROOT, NULL));
 		KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
 						 token, sd, sd_len,
-						 PKM_KACS_MNTNS_OP_OTHER));
+						 PKM_KACS_MNTNS_OP_OTHER, NULL));
 
 		pkm_kacs_free((void *)sd);
 		kacs_rust_token_drop(token);
@@ -708,17 +709,144 @@ static void pkm_kunit_mntns_gate_denies_a_descriptor_naming_someone_else(
 	/* Still admitted before the ACE is rewritten... */
 	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
 					token, sd, sd_len,
-					PKM_KACS_MNTNS_OP_BIND));
+					PKM_KACS_MNTNS_OP_BIND, NULL));
 
 	/* ...and refused once the only ACE names SYSTEM instead. */
 	pkm_kunit_set_dacl_ace_sid(test, sd, sd_len, 0, pkm_kunit_system_sid,
 				   sizeof(pkm_kunit_system_sid));
 	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
 					 token, sd, sd_len,
-					 PKM_KACS_MNTNS_OP_BIND));
+					 PKM_KACS_MNTNS_OP_BIND, NULL));
 
 	kfree(sd);
 	kacs_rust_token_drop(token);
+}
+
+/*
+ * A new filesystem is admitted by the descriptor only for the two types
+ * whose parsers read nothing but the caller's own options: tmpfs and proc.
+ * The allowlist is an attack-surface list, not policy -- the same descriptor
+ * that admits tmpfs refuses ext4 -- and a privileged token is not asked it.
+ */
+static void pkm_kunit_mntns_gate_new_fs_allowlist(struct kunit *test)
+{
+	static const struct {
+		const char *fstype;
+		bool admitted;
+	} cases[] = {
+		{ "tmpfs", true },
+		{ "proc", true },
+		{ "ext4", false },
+		{ "squashfs", false },
+		{ "stratafs", false },
+		{ "sysfs", false },
+		{ "iso9660", false },
+		{ "", false },
+		{ NULL, false },
+	};
+	const void *token = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE, 0ULL);
+	const void *privileged = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE,
+		PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE);
+	const u8 *sd;
+	size_t sd_len = 0;
+	size_t i;
+
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_NOT_NULL(test, privileged);
+	sd = pkm_kacs_kunit_create_mntns_sd_for_subject(token, &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		KUNIT_EXPECT_EQ_MSG(
+			test,
+			(int)pkm_kacs_kunit_may_mount_op_for_subject(
+				token, sd, sd_len, PKM_KACS_MNTNS_OP_NEW_FS,
+				cases[i].fstype),
+			(int)cases[i].admitted, "type: %s",
+			cases[i].fstype ? cases[i].fstype : "(null)");
+		KUNIT_EXPECT_TRUE_MSG(
+			test,
+			pkm_kacs_kunit_may_mount_op_for_subject(
+				privileged, NULL, 0, PKM_KACS_MNTNS_OP_NEW_FS,
+				cases[i].fstype),
+			"privileged, type: %s",
+			cases[i].fstype ? cases[i].fstype : "(null)");
+	}
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(privileged);
+}
+
+/*
+ * A tmpfs an unprivileged token brings into being is stamped
+ * synthesize-ephemeral with a creator-owned template at sb_kern_mount, so
+ * its files are reachable by the one identity that can reach the table.
+ * A privileged mounter's tmpfs, and any other type, is left untouched.
+ */
+static void pkm_kunit_mntns_unprivileged_tmpfs_is_stamped_for_its_creator(
+	struct kunit *test)
+{
+	const void *token = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE, 0ULL);
+	const void *privileged = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE,
+		PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE);
+	const u8 *user_sid = NULL;
+	size_t user_sid_len = 0;
+	u8 *template = NULL;
+	size_t template_len = 0;
+	u32 policy = 0;
+	u32 generation = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_NOT_NULL(test, privileged);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_user_sid(token, &user_sid, &user_sid_len),
+			0);
+
+	/* Unprivileged, tmpfs: stamped, generation 1, creator template. */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_mntns_stamp_superblock_for_subject(
+				token, TMPFS_MAGIC, &policy, &generation,
+				&template, &template_len),
+			0L);
+	KUNIT_EXPECT_EQ(test, policy,
+			(u32)KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL);
+	KUNIT_EXPECT_EQ(test, generation, 1U);
+	KUNIT_ASSERT_NOT_NULL(test, template);
+	pkm_kunit_expect_sd_sid_component(test, template, template_len, 4,
+					  user_sid, user_sid_len);
+	pkm_kunit_expect_allow_ace(test, template, template_len, 0,
+				   KACS_ACCESS_GENERIC_ALL, user_sid,
+				   user_sid_len);
+	kfree(template);
+	template = NULL;
+
+	/* Privileged, tmpfs: untouched -- the mounter seeds it. */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_mntns_stamp_superblock_for_subject(
+				privileged, TMPFS_MAGIC, &policy, &generation,
+				&template, &template_len),
+			0L);
+	KUNIT_EXPECT_EQ(test, policy, 0U);
+	KUNIT_EXPECT_EQ(test, generation, 0U);
+	KUNIT_EXPECT_NULL(test, template);
+
+	/* Unprivileged, proc: untouched -- unmanaged, nothing to stamp. */
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_mntns_stamp_superblock_for_subject(
+				token, PROC_SUPER_MAGIC, &policy, &generation,
+				&template, &template_len),
+			0L);
+	KUNIT_EXPECT_EQ(test, policy, 0U);
+	KUNIT_EXPECT_EQ(test, generation, 0U);
+	KUNIT_EXPECT_NULL(test, template);
+
+	kacs_rust_token_drop(token);
+	kacs_rust_token_drop(privileged);
 }
 
 static void pkm_kunit_capability_privilege_mapping_matrix(struct kunit *test)
@@ -10237,6 +10365,8 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_mntns_gate_without_sd_denies_unprivileged),
 	KUNIT_CASE(pkm_kunit_mntns_gate_creator_sd_admits_bind_umount_pivot_only),
 	KUNIT_CASE(pkm_kunit_mntns_gate_denies_a_descriptor_naming_someone_else),
+	KUNIT_CASE(pkm_kunit_mntns_gate_new_fs_allowlist),
+	KUNIT_CASE(pkm_kunit_mntns_unprivileged_tmpfs_is_stamped_for_its_creator),
 	KUNIT_CASE(pkm_kunit_capability_privilege_mapping_matrix),
 	KUNIT_CASE(pkm_kunit_capability_switchboard_full_matrix),
 	KUNIT_CASE(pkm_kunit_capability_privilege_denied_without_privilege),

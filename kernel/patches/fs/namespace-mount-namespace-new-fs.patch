@@ -1,0 +1,82 @@
+diff --git a/fs/namespace.c b/fs/namespace.c
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -2004,10 +2004,11 @@ void __detach_mounts(struct dentry *dentry)
+  * Is the caller allowed to modify his namespace?
+  *
+  * @op says what kind of modification, as one of the PKM_KACS_MNTNS_OP_*
+- * codes; callers that cannot be admitted by a namespace descriptor pass
+- * OTHER through may_mount().
++ * codes, and @fstype names the filesystem type for NEW_FS; callers that
++ * cannot be admitted by a namespace descriptor pass OTHER through
++ * may_mount().
+  */
+-static bool may_mount_op(unsigned int op)
++static bool may_mount_op(unsigned int op, const char *fstype)
+ {
+ #ifdef CONFIG_SECURITY_PKM
+ 	/*
+@@ -2023,7 +2024,8 @@ static bool may_mount_op(unsigned int op)
+ 	 * runs only after this function has already allowed the operation --
+ 	 * an LSM cannot widen a decision it is never consulted about.
+ 	 */
+-	if (pkm_kacs_may_mount_op(current->nsproxy->mnt_ns->security, op))
++	if (pkm_kacs_may_mount_op(current->nsproxy->mnt_ns->security, op,
++				  fstype))
+ 		return true;
+ #endif
+ 	return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
+@@ -2031,18 +2033,22 @@ static bool may_mount_op(unsigned int op)
+ 
+ bool may_mount(void)
+ {
+-	return may_mount_op(PKM_KACS_MNTNS_OP_OTHER);
++	return may_mount_op(PKM_KACS_MNTNS_OP_OTHER, NULL);
+ }
+ 
+ /*
+- * The one mount(2) shape a namespace descriptor can admit: a bind, with or
+- * without MS_REC. MS_REMOUNT|MS_BIND is a per-mount reconfigure, and the
+- * dispatch below sends it elsewhere.
++ * The mount(2) shapes a namespace descriptor can admit: a bind, with or
++ * without MS_REC, and a new filesystem of an allowlisted type.
++ * MS_REMOUNT|MS_BIND is a per-mount reconfigure, and the dispatch below
++ * sends it elsewhere.
+  */
+ static unsigned int mount_op_for_flags(unsigned long flags)
+ {
+ 	if ((flags & MS_BIND) && !(flags & MS_REMOUNT))
+ 		return PKM_KACS_MNTNS_OP_BIND;
++	if (!(flags & (MS_REMOUNT | MS_BIND | MS_SHARED | MS_PRIVATE |
++		       MS_SLAVE | MS_UNBINDABLE | MS_MOVE)))
++		return PKM_KACS_MNTNS_OP_NEW_FS;
+ 	return PKM_KACS_MNTNS_OP_OTHER;
+ }
+ 
+@@ -2060,7 +2066,7 @@ static int can_umount(const struct path *path, int flags)
+ 	struct mount *mnt = real_mount(path->mnt);
+ 	struct super_block *sb = path->dentry->d_sb;
+ 
+-	if (!may_mount_op(PKM_KACS_MNTNS_OP_UMOUNT))
++	if (!may_mount_op(PKM_KACS_MNTNS_OP_UMOUNT, NULL))
+ 		return -EPERM;
+ 	if (!path_mounted(path))
+ 		return -EINVAL;
+@@ -4162,7 +4168,7 @@ int path_mount(const char *dev_name, const struct path *path,
+ 	ret = security_sb_mount(dev_name, path, type_page, flags, data_page);
+ 	if (ret)
+ 		return ret;
+-	if (!may_mount_op(mount_op_for_flags(flags)))
++	if (!may_mount_op(mount_op_for_flags(flags), type_page))
+ 		return -EPERM;
+ 	if (flags & SB_MANDLOCK)
+ 		warn_mandlock();
+@@ -4711,7 +4717,7 @@ int path_pivot_root(struct path *new, struct path *old)
+ 	struct mount *new_mnt, *root_mnt, *old_mnt, *root_parent, *ex_parent;
+ 	int error;
+ 
+-	if (!may_mount_op(PKM_KACS_MNTNS_OP_PIVOT_ROOT))
++	if (!may_mount_op(PKM_KACS_MNTNS_OP_PIVOT_ROOT, NULL))
+ 		return -EPERM;
+ 
+ 	error = security_sb_pivotroot(old, new);
