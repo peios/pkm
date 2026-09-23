@@ -373,14 +373,11 @@ install -D -m755 tools/thermal/thermometer/thermometer "$dest/usr/bin/thermomete
 # Finishing — the payload conventions every Peios package follows
 # =========================================================================
 
-# Three of perf's Python scripts name a bare `python`, which Peios does not
-# ship; the rest of perf's Python already asks for python3.
-log "perf script interpreters"
-while IFS= read -r -d '' f; do
-	case $(head -n 1 "$f") in
-	'#!/usr/bin/env python' | '#!/usr/bin/python') sed -i '1s/python$/python3/' "$f" ;;
-	esac
-done < <(find "$dest/usr/lib/$triplet/perf-core" -type f -print0)
+# Installed scripts name their interpreter through the runtime views: /bin/sh,
+# /bin/bash, /bin/python3, /bin/perl. Upstream uses /usr/bin paths, env, and in
+# three of perf's scripts a bare `python`, which Peios does not ship.
+log "script interpreters"
+"$here/runtime-shebangs.sh" "$dest"
 
 # A file that starts with #! is run through it, so it is installed executable.
 # On a Peios root /usr/bin/install is Peiosutils, which does not implement GNU

@@ -246,6 +246,10 @@ find "$PEKIT_OUT/scripts" -type f -exec sh -c '
 	for f do
 		if [ "$(head -c 2 "$f")" = "#!" ] && [ ! -x "$f" ]; then chmod 0755 "$f"; fi
 	done' sh {} +
+# Those scripts name their interpreter through the runtime views (/bin/sh,
+# /bin/bash, /bin/python3, /bin/perl), not upstream's /usr/bin paths and env.
+# Last, so nothing above runs a rewritten script.
+./build/runtime-shebangs.sh "$PEKIT_OUT/scripts"
 """
 
 # Sign both installed module sets after the worker is gone. Private key
@@ -414,8 +418,8 @@ command = """
 "org.kernel.libcap-devel" = "*"
 "io.github.numactl.libnuma-devel" = "*"
 "org.jedsoft.slang-devel" = "*"
-"org.linux.traceevent-devel" = "*"
-"org.linux.tracefs-devel" = "*"
+"org.kernel.libtraceevent-devel" = "*"
+"org.kernel.libtracefs-devel" = "*"
 "cz.ucw.libpci-devel" = "*"
 "org.gnu.gettext" = "*"
 "org.perl.perl" = "*"
