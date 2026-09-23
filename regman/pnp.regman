@@ -98,7 +98,7 @@ The flow layer: judged once per flow, per local endpoint, at the IP seats,
 on the flow's first packet — last inbound, first outbound.
 
 Its verdict is cached on the flow as that flow's **sentence**, so this is
-where a decision about a *conversation* belongs rather than a decision
+where a decision about a conversation belongs rather than a decision
 about a packet. It is the only layer with `Related`, `Start.*`, `Local`,
 `Local.*` and `Remote.*` — the facts about who is at this end — and the
 only one that may read any tag, whichever layer wrote it. It has no
@@ -118,7 +118,7 @@ the viewer and the event stream quote back at you — and carries no meaning
 to the engine.
 
 Its values are its conditions, one per `<Fact>.<Operator>` name, plus the
-three fixed names below. A rule matches when *every* condition holds; a
+three fixed names below. A rule matches when every condition holds; a
 condition over a fact the packet lacks is false, which is the absent-fact
 law and why `Present` is the one operator that looks through it. A value
 name that is neither a fixed name nor a well-formed `<Fact>.<Operator>` is
@@ -129,7 +129,7 @@ Three things hold for every condition, and are not repeated on each fact's
 page. `Present` takes `1` (the fact exists for this packet or flow) or `0`
 (it does not); on a fact its layer never has it refuses the generation
 rather than becoming an always-true condition. `Equal` against a
-`REG_MULTI_SZ` list means *any of*, and an integer list's elements may be
+`REG_MULTI_SZ` list means any of, and an integer list's elements may be
 `a-b` ranges. Applying an operator a family does not support —
 `GreaterThan` on an address, `Has` on a port — refuses the generation.
 
@@ -181,7 +181,7 @@ A subkey inherits this unless it sets its own, so a tree of exceptions
 ranks together without repeating the number on every key. Ties go to the
 strictest verdict — which in the packet layers is a total order, and in
 the interface layer is `DOWN` > `IGNORE` > `JOIN`. A tie between two rules
-naming *different* profiles for one interface has no strictest answer and
+naming different profiles for one interface has no strictest answer and
 refuses the generation instead of picking.
 
 A value that is not an integer refuses the generation.
@@ -203,9 +203,9 @@ read it.
 Anything other than 0 or 1 refuses the generation.
 --- machine\system\network\rules\<layer>\<rule...> direction.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Direction.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; `in`, `out`
+valid: Equal, Present; in, out
 applies: live — at the next generation
 
 Which way the packet is going.
@@ -216,9 +216,9 @@ too.
 
 --- machine\system\network\rules\<layer>\<rule...> interface.equal
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Equal
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: an interface name, e.g. `eth0`
+valid: an interface name, e.g. eth0
 applies: live — at the next generation
 
 The interface the packet crossed, by kernel name.
@@ -233,7 +233,7 @@ layers; the rest of that layer's vocabulary is `Interface.*`.
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Present
 type: REG_DWORD, or a decimal string
 default: (absent — the rule does not condition on this fact)
-valid: `1` the fact exists, `0` it does not
+valid: 1 the fact exists, 0 it does not
 applies: live — at the next generation
 
 The interface the packet crossed, by kernel name.
@@ -260,9 +260,9 @@ conditioning on this can never match.
 
 --- machine\system\network\rules\<layer>\<rule...> srcmac.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> SrcMac.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; `aa:bb:cc:dd:ee:ff`
+valid: Equal, Present; aa:bb:cc:dd:ee:ff
 applies: live — at the next generation
 
 The source hardware address.
@@ -272,9 +272,9 @@ that is the machine's own device address, not a peer's.
 
 --- machine\system\network\rules\<layer>\<rule...> dstmac.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> DstMac.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; `aa:bb:cc:dd:ee:ff`
+valid: Equal, Present; aa:bb:cc:dd:ee:ff
 applies: live — at the next generation
 
 The destination hardware address.
@@ -295,7 +295,7 @@ interface is a VLAN device (at the IP seats).
 
 --- machine\system\network\rules\<layer>\<rule...> srcaddr.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> SrcAddr.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; an address, a CIDR prefix, or an IPv4 range
 applies: live — at the next generation
@@ -310,7 +310,7 @@ address, so `0.0.0.0/0` does not quietly swallow IPv6.
 
 --- machine\system\network\rules\<layer>\<rule...> dstaddr.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> DstAddr.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; an address, a CIDR prefix, or an IPv4 range
 applies: live — at the next generation
@@ -363,7 +363,7 @@ Present on any IP packet. Not a `Flow` fact.
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Fragment.<op>
 type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
 default: (absent — the rule does not condition on this fact)
-valid: Equal, GreaterThan, LessThan, Present; `0` or `1`
+valid: Equal, GreaterThan, LessThan, Present; 0 or 1
 applies: live — at the next generation
 
 Whether the packet is a fragment.
@@ -447,7 +447,7 @@ length.
 
 --- machine\system\network\rules\<layer>\<rule...> flowstate.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> FlowState.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; new, established, related, invalid, untracked
 applies: live — at the next generation
@@ -457,14 +457,14 @@ What conntrack makes of this packet.
 Values: `new`, `established`, `related`, `invalid`, `untracked`.
 
 The `Packet` layer only, at its proper seat. The `RawPacket` seat stands
-before conntrack has run, and the `Flow` layer *is* the judgment of a
+before conntrack has run, and the `Flow` layer is the judgment of a
 flow, so neither has it.
 
 --- machine\system\network\rules\<layer>\<rule...> related.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Related.<op>
 type: REG_DWORD, REG_QWORD, a decimal string, or a REG_MULTI_SZ list
 default: (absent — the rule does not condition on this fact)
-valid: Equal, GreaterThan, LessThan, Present; `0` or `1`
+valid: Equal, GreaterThan, LessThan, Present; 0 or 1
 applies: live — at the next generation
 
 Whether this flow was expected by another.
@@ -653,9 +653,9 @@ never expires a sentence.
 
 --- machine\system\network\rules\<layer>\<rule...> local.equal
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Equal
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: `program`, `kernel`, `shared`, `none`
+valid: program, kernel, shared, none
 applies: live — at the next generation
 
 What stands at this machine's end of the flow.
@@ -674,7 +674,7 @@ The `Flow` layer only, and always present there.
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Present
 type: REG_DWORD, or a decimal string
 default: (absent — the rule does not condition on this fact)
-valid: `1` the fact exists, `0` it does not
+valid: 1 the fact exists, 0 it does not
 applies: live — at the next generation
 
 What stands at this machine's end of the flow.
@@ -691,7 +691,7 @@ The `Flow` layer only, and always present there.
 
 --- machine\system\network\rules\<layer>\<rule...> local.user.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.User.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; a SID, or a well-known name
 applies: live — at the next generation
@@ -710,12 +710,12 @@ generation rather than quietly matching nothing.
 
 --- machine\system\network\rules\<layer>\<rule...> local.group.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Group.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; SIDs or well-known names
 applies: live — at the next generation
 
-The groups on the token at this end -- matches if *any* is present.
+The groups on the token at this end -- matches if any is present.
 
 Deny-only groups are invisible here; the logon SID is among them.
 
@@ -736,7 +736,7 @@ Present on a `Flow` judgment when `Local` is `program`.
 
 --- machine\system\network\rules\<layer>\<rule...> local.confinement.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Confinement.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; the confinement SID
 applies: live — at the next generation
@@ -747,18 +747,18 @@ Present on a `Flow` judgment when the program is confined.
 
 --- machine\system\network\rules\<layer>\<rule...> local.capability.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Capability.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; capability SIDs
 applies: live — at the next generation
 
-The confinement's capability SIDs -- matches if *any* is present.
+The confinement's capability SIDs -- matches if any is present.
 
 Present on a `Flow` judgment when the program is confined.
 
 --- machine\system\network\rules\<layer>\<rule...> local.service.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Service.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; a service name, or its SID
 applies: live — at the next generation
@@ -774,7 +774,7 @@ Present on a `Flow` judgment when the program is a service.
 
 --- machine\system\network\rules\<layer>\<rule...> local.process.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Local.Process.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; a process GUID
 applies: live — at the next generation
@@ -787,9 +787,9 @@ Present on a `Flow` judgment when `Local` is `program`.
 
 --- machine\system\network\rules\<layer>\<rule...> remote.equal
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Equal
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: `program`, `kernel`, `shared`, `none`
+valid: program, kernel, shared, none
 applies: live — at the next generation
 
 What stands at the other end, when that is also this machine.
@@ -804,7 +804,7 @@ conditions.
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Present
 type: REG_DWORD, or a decimal string
 default: (absent — the rule does not condition on this fact)
-valid: `1` the fact exists, `0` it does not
+valid: 1 the fact exists, 0 it does not
 applies: live — at the next generation
 
 What stands at the other end, when that is also this machine.
@@ -817,7 +817,7 @@ conditions.
 
 --- machine\system\network\rules\<layer>\<rule...> remote.user.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.User.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; a SID, or a well-known name
 applies: live — at the next generation
@@ -832,12 +832,12 @@ As `Local.User`, for the far end. Loopback flows only.
 
 --- machine\system\network\rules\<layer>\<rule...> remote.group.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Group.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; SIDs or well-known names
 applies: live — at the next generation
 
-The groups on the far token -- matches if *any* is present.
+The groups on the far token -- matches if any is present.
 
 As `Local.Group`, for the far end. Loopback flows only.
 
@@ -856,7 +856,7 @@ As `Local.Integrity`, for the far end. Loopback flows only.
 
 --- machine\system\network\rules\<layer>\<rule...> remote.confinement.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Confinement.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; the confinement SID
 applies: live — at the next generation
@@ -867,18 +867,18 @@ As `Local.Confinement`, for the far end. Loopback flows only.
 
 --- machine\system\network\rules\<layer>\<rule...> remote.capability.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Capability.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; capability SIDs
 applies: live — at the next generation
 
-The far confinement's capability SIDs -- matches if *any* is present.
+The far confinement's capability SIDs -- matches if any is present.
 
 As `Local.Capability`, for the far end. Loopback flows only.
 
 --- machine\system\network\rules\<layer>\<rule...> remote.service.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Service.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; a service name, or its SID
 applies: live — at the next generation
@@ -891,7 +891,7 @@ As `Local.Service`, for the far end. Loopback flows only.
 
 --- machine\system\network\rules\<layer>\<rule...> remote.process.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Remote.Process.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; a process GUID
 applies: live — at the next generation
@@ -904,7 +904,7 @@ As `Local.Process`, for the far end. Loopback flows only.
 
 --- machine\system\network\rules\<layer>\<rule...> interface.kind.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Kind.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; wired, wireless, loopback, tunnel, bridge, other
 applies: live — at the next generation
@@ -917,7 +917,7 @@ The `Interface` layer only, where it is always present.
 
 --- machine\system\network\rules\<layer>\<rule...> interface.id.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Id.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; the inventory key name
 applies: live — at the next generation
@@ -929,9 +929,9 @@ a reboot. The `Interface` layer only, where it is always present.
 
 --- machine\system\network\rules\<layer>\<rule...> interface.mac.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Mac.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; `aa:bb:cc:dd:ee:ff`
+valid: Equal, Present; aa:bb:cc:dd:ee:ff
 applies: live — at the next generation
 
 The interface's hardware address.
@@ -941,9 +941,9 @@ tunnel does not.
 
 --- machine\system\network\rules\<layer>\<rule...> interface.path.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Path.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; a bus position, e.g. `pci-0000:00:03.0`
+valid: Equal, Present; a bus position, e.g. pci-0000:00:03.0
 applies: live — at the next generation
 
 Where the interface sits on the bus.
@@ -952,7 +952,7 @@ The `Interface` layer only, and only where the interface is hardware.
 
 --- machine\system\network\rules\<layer>\<rule...> interface.driver.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Interface.Driver.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; a kernel driver name
 applies: live — at the next generation
@@ -963,9 +963,9 @@ The `Interface` layer only, and only where the interface is hardware.
 
 --- machine\system\network\rules\<layer>\<rule...> network.id.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Id.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; the record's key name under `Networks\`
+valid: Equal, Present; the record's key name under Networks\
 applies: live — at the next generation
 
 Which network the machine is standing on.
@@ -979,9 +979,9 @@ without being rewritten.
 
 --- machine\system\network\rules\<layer>\<rule...> network.name.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Name.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; the operator's `Name` on the record
+valid: Equal, Present; the operator's Name on the record
 applies: live — at the next generation
 
 The operator's name for the network.
@@ -990,9 +990,9 @@ Present at every layer, when the network record carries a `Name`.
 
 --- machine\system\network\rules\<layer>\<rule...> network.trust.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Trust.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
-valid: Equal, Present; the operator's `Trust` on the record
+valid: Equal, Present; the operator's Trust on the record
 applies: live — at the next generation
 
 How far the operator said this network should be trusted.
@@ -1004,7 +1004,7 @@ you accept the identification netd made.
 
 --- machine\system\network\rules\<layer>\<rule...> network.kind.<op>
 canonical: Machine\System\Network\Rules\<Layer>\<rule...> Network.Kind.<op>
-type: REG_SZ, or a REG_MULTI_SZ list meaning *any of*
+type: REG_SZ, or a REG_MULTI_SZ list meaning any of
 default: (absent — the rule does not condition on this fact)
 valid: Equal, Present; as Interface.Kind
 applies: live — at the next generation

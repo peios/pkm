@@ -76,8 +76,10 @@ regman lint *.regman   # verify framing, anchors, structure
 
 The body's first line is the one-sentence summary shown in the key-level
 `Values` index, so lead each value doc with a complete summary sentence.
-Inline markup is `**bold**` and `` `code` `` only (single-asterisk
-emphasis renders literally — do not use it).
+Inline markup is `**bold**`, `*emphasis*` and `` `code` ``. A delimiter
+with no closer is left as written, so a bare `*` or backtick in prose is
+safe; `*` and `**` additionally need no space just inside either end, which
+is what keeps `2 * 3 * 4` and `*.conf` from being read as markup.
 
 `lint` checks structure and anchors, not completeness: it will not tell
 you that a value doc is missing `valid:`. Every value doc here carries all
