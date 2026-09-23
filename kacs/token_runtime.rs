@@ -27,8 +27,8 @@ use crate::port_reservation::{
 };
 use crate::access_mask::{
     GenericMapping, ACCESS_SYSTEM_SECURITY, FILE_GENERIC_MAPPING, FILE_READ_DATA,
-    FILE_WRITE_DATA, GENERIC_ALL, IPC_GENERIC_MAPPING, PROCESS_GENERIC_MAPPING,
-    PROCESS_QUERY_INFORMATION,
+    FILE_WRITE_DATA, GENERIC_ALL, IPC_GENERIC_MAPPING, MNTNS_GENERIC_MAPPING,
+    PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION,
     PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use crate::audit::evaluate_sacl;
@@ -4422,6 +4422,27 @@ fn build_default_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, u
     )
 }
 
+/// The descriptor a mount namespace is minted with: the creating token's
+/// user owns it and is the only party the DACL names. SYSTEM and
+/// Administrators get nothing here on purpose — the privilege rung of the
+/// mount gate admits them before the descriptor is consulted, so an ACE
+/// would only pretend the descriptor was what let them in.
+fn build_default_mnt_ns_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8, usize), i32> {
+    let _guard = token.lock_mutation();
+    let group_sid = token
+        .sid_by_index(token.primary_group_index.load(Ordering::Relaxed))
+        .ok_or(-EINVAL)?;
+
+    build_process_sd_bytes(
+        token.user_sid.sid,
+        group_sid,
+        Some(GENERIC_ALL),
+        None,
+        None,
+        None,
+    )
+}
+
 fn build_default_logon_session_sd_bytes(
     user_sid: Sid<'_>,
     group_sid: Sid<'_>,
@@ -8777,6 +8798,15 @@ fn ipc_sd_access_check_errno(
     object_sd_access_check_errno(subject_token, sd_bytes, desired, &IPC_GENERIC_MAPPING, pip)
 }
 
+fn mnt_ns_sd_access_check_errno(
+    subject_token: *const c_void,
+    sd_bytes: &[u8],
+    desired: u32,
+    pip: PipContext,
+) -> Result<u32, i32> {
+    object_sd_access_check_errno(subject_token, sd_bytes, desired, &MNTNS_GENERIC_MAPPING, pip)
+}
+
 /// AccessCheck of `subject_token` against a standalone object descriptor
 /// (System V IPC objects, port reservations) for `desired` under `mapping`.
 /// Emits the internal audit events and marks privilege use on the token.
@@ -11396,6 +11426,57 @@ pub extern "C" fn kacs_rust_check_socket_sd(
 
     let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
     match socket_sd_access_check_errno(
+        subject_token_ptr,
+        sd_bytes,
+        desired,
+        pip_context_from_abi(pip_type, pip_trust),
+    ) {
+        Ok(granted) => {
+            if let Some(granted_out) = unsafe { granted_out.as_mut() } {
+                *granted_out = granted;
+            }
+            0
+        }
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+/// Builds the default mount-namespace descriptor for the creating token.
+pub extern "C" fn kacs_rust_create_default_mnt_ns_sd(
+    token_ptr: *const c_void,
+    len_out: *mut usize,
+) -> *const u8 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token_ptr) }) else {
+        return null();
+    };
+    let Ok((ptr, len)) = build_default_mnt_ns_sd_bytes(token) else {
+        return null();
+    };
+
+    if let Some(len_out) = unsafe { len_out.as_mut() } {
+        *len_out = len;
+    }
+    ptr.cast_const()
+}
+
+#[no_mangle]
+/// Evaluates a mount namespace's security descriptor for `subject`.
+pub extern "C" fn kacs_rust_check_mnt_ns_sd(
+    subject_token_ptr: *const c_void,
+    sd_ptr: *const u8,
+    sd_len: usize,
+    desired: u32,
+    pip_type: u32,
+    pip_trust: u32,
+    granted_out: *mut u32,
+) -> i32 {
+    if desired == 0 || sd_ptr.is_null() || sd_len == 0 {
+        return -EINVAL;
+    }
+
+    let sd_bytes = unsafe { core::slice::from_raw_parts(sd_ptr, sd_len) };
+    match mnt_ns_sd_access_check_errno(
         subject_token_ptr,
         sd_bytes,
         desired,

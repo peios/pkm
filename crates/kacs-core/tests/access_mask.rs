@@ -113,3 +113,34 @@ fn generic_all_uses_all_mapping_entry() {
         DELETE | READ_CONTROL | WRITE_DAC | WRITE_OWNER | 0x0000_000f
     );
 }
+
+#[test]
+fn mount_namespace_mapping_matches_the_header() {
+    use kacs_core::{MNTNS_ALL_ACCESS, MNTNS_ENTER, MNTNS_GENERIC_MAPPING, MNTNS_MOUNT};
+
+    assert_eq!(MNTNS_MOUNT, 0x0000_0001);
+    assert_eq!(MNTNS_ENTER, 0x0000_0002);
+    assert_eq!(
+        MNTNS_ALL_ACCESS,
+        MNTNS_MOUNT | MNTNS_ENTER | READ_CONTROL | WRITE_DAC | WRITE_OWNER
+    );
+
+    // Changing the table is the write; joining is the execute; a read is only
+    // the descriptor itself.
+    assert_eq!(
+        MNTNS_GENERIC_MAPPING.map_mask(GENERIC_WRITE).unwrap(),
+        MNTNS_MOUNT | WRITE_DAC
+    );
+    assert_eq!(
+        MNTNS_GENERIC_MAPPING.map_mask(GENERIC_EXECUTE).unwrap(),
+        MNTNS_ENTER | READ_CONTROL
+    );
+    assert_eq!(
+        MNTNS_GENERIC_MAPPING.map_mask(GENERIC_READ).unwrap(),
+        READ_CONTROL
+    );
+    assert_eq!(
+        MNTNS_GENERIC_MAPPING.map_mask(GENERIC_ALL).unwrap(),
+        MNTNS_ALL_ACCESS
+    );
+}

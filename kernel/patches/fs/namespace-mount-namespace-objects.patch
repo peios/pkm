@@ -1,0 +1,154 @@
+diff --git a/fs/mount.h b/fs/mount.h
+--- a/fs/mount.h
++++ b/fs/mount.h
+@@ -29,6 +29,15 @@ struct mnt_namespace {
+ 	unsigned int		pending_mounts;
+ 	refcount_t		passive; /* number references not pinning @mounts */
+ 	bool			is_anon;
++#ifdef CONFIG_SECURITY_PKM
++	/*
++	 * KACS: the namespace's security descriptor object, minted from the
++	 * creator's token in copy_mnt_ns(). NULL for the initial namespace and
++	 * for anonymous ones, which are then reachable only through the mount
++	 * privilege. See <linux/kacs_mntns.h>.
++	 */
++	struct pkm_kacs_mntns_security *security;
++#endif
+ } __randomize_layout;
+ 
+ struct mnt_pcp {
+diff --git a/fs/namespace.c b/fs/namespace.c
+--- a/fs/namespace.c
++++ b/fs/namespace.c
+@@ -34,6 +34,7 @@
+ #include <linux/mnt_idmapping.h>
+ #include <linux/pidfs.h>
+ #include <linux/nstree.h>
++#include <linux/kacs_mntns.h>
+ 
+ #include "pnode.h"
+ #include "internal.h"
+@@ -132,6 +133,9 @@ static void mnt_ns_release(struct mnt_namespace *ns)
+ 	if (ns && refcount_dec_and_test(&ns->passive)) {
+ 		fsnotify_mntns_delete(ns);
+ 		put_user_ns(ns->user_ns);
++#ifdef CONFIG_SECURITY_PKM
++		pkm_kacs_mntns_security_free(ns->security);
++#endif
+ 		kfree(ns);
+ 	}
+ }
+@@ -1998,28 +2002,50 @@ void __detach_mounts(struct dentry *dentry)
+ 
+ /*
+  * Is the caller allowed to modify his namespace?
++ *
++ * @op says what kind of modification, as one of the PKM_KACS_MNTNS_OP_*
++ * codes; callers that cannot be admitted by a namespace descriptor pass
++ * OTHER through may_mount().
+  */
+-bool may_mount(void)
++static bool may_mount_op(unsigned int op)
+ {
+ #ifdef CONFIG_SECURITY_PKM
+ 	/*
+-	 * PKM: mounting is an administrative act, not a TCB one.
+-	 * SeManageVolumePrivilege satisfies it; SeTcbPrivilege does too. The
+-	 * CAP_SYS_ADMIN fallback below stays for the non-PKM build and costs
+-	 * nothing here, since a TCB token is granted CAP_SYS_ADMIN anyway.
++	 * PKM: the mount table is a KACS object. Mounting is an administrative
++	 * act, not a TCB one -- SeManageVolumePrivilege satisfies it, and
++	 * SeTcbPrivilege does too -- and in a namespace the caller created for
++	 * itself, a bind mount, an unmount or a pivot_root is admitted by the
++	 * namespace's own descriptor instead. The CAP_SYS_ADMIN fallback below
++	 * stays for the non-PKM build and costs nothing here, since a TCB
++	 * token is granted CAP_SYS_ADMIN anyway.
+ 	 *
+ 	 * Asked here rather than through security_sb_mount() because that hook
+ 	 * runs only after this function has already allowed the operation --
+ 	 * an LSM cannot widen a decision it is never consulted about.
+ 	 */
+-	extern bool pkm_kacs_may_manage_volumes(void);
+-
+-	if (pkm_kacs_may_manage_volumes())
++	if (pkm_kacs_may_mount_op(current->nsproxy->mnt_ns->security, op))
+ 		return true;
+ #endif
+ 	return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
+ }
+ 
++bool may_mount(void)
++{
++	return may_mount_op(PKM_KACS_MNTNS_OP_OTHER);
++}
++
++/*
++ * The one mount(2) shape a namespace descriptor can admit: a bind, with or
++ * without MS_REC. MS_REMOUNT|MS_BIND is a per-mount reconfigure, and the
++ * dispatch below sends it elsewhere.
++ */
++static unsigned int mount_op_for_flags(unsigned long flags)
++{
++	if ((flags & MS_BIND) && !(flags & MS_REMOUNT))
++		return PKM_KACS_MNTNS_OP_BIND;
++	return PKM_KACS_MNTNS_OP_OTHER;
++}
++
+ static void warn_mandlock(void)
+ {
+ 	pr_warn_once("=======================================================\n"
+@@ -2034,7 +2060,7 @@ static int can_umount(const struct path *path, int flags)
+ 	struct mount *mnt = real_mount(path->mnt);
+ 	struct super_block *sb = path->dentry->d_sb;
+ 
+-	if (!may_mount())
++	if (!may_mount_op(PKM_KACS_MNTNS_OP_UMOUNT))
+ 		return -EPERM;
+ 	if (!path_mounted(path))
+ 		return -EINVAL;
+@@ -4136,7 +4162,7 @@ int path_mount(const char *dev_name, const struct path *path,
+ 	ret = security_sb_mount(dev_name, path, type_page, flags, data_page);
+ 	if (ret)
+ 		return ret;
+-	if (!may_mount())
++	if (!may_mount_op(mount_op_for_flags(flags)))
+ 		return -EPERM;
+ 	if (flags & SB_MANDLOCK)
+ 		warn_mandlock();
+@@ -4287,9 +4313,26 @@ struct mnt_namespace *copy_mnt_ns(u64 flags, struct mnt_namespace *ns,
+ 		return new_ns;
+ 
+ 	guard(namespace_excl)();
++#ifdef CONFIG_SECURITY_PKM
++	/* KACS: the new table is an object, and its creator owns it. */
++	new_ns->security = pkm_kacs_mntns_security_create();
++	if (IS_ERR(new_ns->security)) {
++		int err = PTR_ERR(new_ns->security);
++
++		new_ns->security = NULL;
++		emptied_ns = new_ns;
++		return ERR_PTR(err);
++	}
++#endif
+ 	/* First pass: copy the tree topology */
+ 	copy_flags = CL_COPY_UNBINDABLE | CL_EXPIRE;
+-	if (user_ns != ns->user_ns)
++	/*
++	 * A table created without the mount privilege receives its mounts as
++	 * slaves of the parent's, exactly as a user-namespace-owned copy does:
++	 * propagation runs parent to child only, so whatever the creator
++	 * mounts in its own table never appears in the one it copied.
++	 */
++	if (user_ns != ns->user_ns || !pkm_kacs_mntns_creator_privileged())
+ 		copy_flags |= CL_SLAVE;
+ 	new = copy_tree(old, old->mnt.mnt_root, copy_flags);
+ 	if (IS_ERR(new)) {
+@@ -4668,7 +4711,7 @@ int path_pivot_root(struct path *new, struct path *old)
+ 	struct mount *new_mnt, *root_mnt, *old_mnt, *root_parent, *ex_parent;
+ 	int error;
+ 
+-	if (!may_mount())
++	if (!may_mount_op(PKM_KACS_MNTNS_OP_PIVOT_ROOT))
+ 		return -EPERM;
+ 
+ 	error = security_sb_pivotroot(old, new);

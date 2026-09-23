@@ -61,7 +61,7 @@ stage_flat_dir "$pkm/kmes" "$pkm_dir/kmes"
 #     header (incl. psb.h), so the whole set must be staged together; staging
 #     pkm.h without psb.h leaves <pkm/pkm.h> unbuildable (an old-installer bug
 #     this list fixes). ---
-for h in pkm psb syscall sid sd token socket ipc net access file process kmes lcs trace pnp; do
+for h in pkm psb syscall sid sd token socket ipc net mntns access file process kmes lcs trace pnp; do
 	stage_file "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
 done
 
@@ -69,6 +69,8 @@ done
 #     not exported to modules. ---
 stage_file "$here/include/linux/kacs_stratafs.h" \
 	"$linux_include_dir/kacs_stratafs.h"
+stage_file "$here/include/linux/kacs_mntns.h" \
+	"$linux_include_dir/kacs_mntns.h"
 stage_file "$here/include/linux/peios_pnp.h" \
 	"$linux_include_dir/peios_pnp.h"
 

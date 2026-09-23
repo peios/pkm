@@ -836,4 +836,22 @@
  */
 #define KACS_TLP_CHECK_PATH			0U  /* executable transition denied: no prefix match */
 #define KACS_TLP_REPLACE			1U  /* TLP prefix table replaced */
+
+/*
+ * kacs_mntns reason — mount-namespace object lifecycle and the mount gate.
+ * SD_ALLOC / SD_ALLOC_FAIL mark a namespace minted with (or without) its
+ * creator descriptor; the gate reasons say which rung admitted or refused a
+ * mount-table change: PRIVILEGE is SeManageVolume / SeTcb, NO_SD is a
+ * namespace with no descriptor (the initial one), OP_NOT_ADMITTED is an
+ * operation the descriptor can never grant, SD_DECISION is the access check
+ * against the namespace descriptor, PIP_CONTEXT a failure to read the
+ * caller's PIP state. Emitted by kacs:kacs_mntns. Verdict is `ret`.
+ */
+#define KACS_MNTNS_SD_ALLOC			0U  /* namespace minted with a creator descriptor */
+#define KACS_MNTNS_SD_ALLOC_FAIL		1U  /* descriptor could not be built */
+#define KACS_MNTNS_GATE_PRIVILEGE		2U  /* admitted by SeManageVolume / SeTcb */
+#define KACS_MNTNS_GATE_NO_SD			3U  /* namespace has no descriptor; refused */
+#define KACS_MNTNS_GATE_OP_NOT_ADMITTED		4U  /* op needs the privilege whatever the SD says */
+#define KACS_MNTNS_GATE_SD_DECISION		5U  /* access check against the namespace SD */
+#define KACS_MNTNS_GATE_PIP_CONTEXT		6U  /* caller PIP context unavailable */
 #endif /* _UAPI_PKM_TRACE_H */

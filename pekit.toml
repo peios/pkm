@@ -677,6 +677,39 @@ cpio            = "*"
 build-essential = "*"
 qemu-system-x86 = "*"
 
+# Mount namespaces as KACS objects (PEI-1173): boots the KUnit kernel with a
+# minimal initramfs and drives unshare / bind / pivot_root / umount through
+# real syscalls, first with the boot token and then with every privilege
+# stripped, so the descriptor rung of the mount gate is what admits them.
+[test.mntns]
+gate = true
+needs = ["kunit"]
+command = """
+./build/test-mntns.sh "$PEKIT_KUNIT_OUT"
+"""
+
+# Same shape as test.stratafs, for the same reason.
+[test.mntns.dependencies.peipkg]
+"org.git.kernel.dash"          = "*"
+"org.gnu.bash"                 = "*"
+"dev.peios.peiosutils"         = "*"
+"org.gnu.findutils"            = "*"
+"org.gnu.grep"                 = "*"
+"org.gnu.cpio"                 = "*"
+"dev.peios.build-essentials-c" = "*"
+"org.gnu.glibc-static"         = "*"
+"org.gnu.gcc-libatomic-static" = "*"
+"org.qemu.qemu-system-x86"     = "*"
+
+[test.mntns.dependencies.apt]
+bash            = "*"
+coreutils       = "*"
+findutils       = "*"
+grep            = "*"
+cpio            = "*"
+build-essential = "*"
+qemu-system-x86 = "*"
+
 # Regenerate the language bindings under uapi/generated/{go,lua,rust} from the
 # canonical uapi/pkm headers, in place (each gen.sh runs the codegen-safe lint
 # first). This is a `gen` target, not a build: its product is committed source,

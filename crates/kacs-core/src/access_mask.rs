@@ -107,6 +107,24 @@ pub const IPC_GENERIC_MAPPING: GenericMapping = GenericMapping {
         | WRITE_OWNER,
 };
 
+/// Mount namespace right permitting changes to the mount table (`<pkm/mntns.h>`).
+pub const MNTNS_MOUNT: u32 = peios_uapi::KACS_MNTNS_MOUNT;
+/// Mount namespace right permitting `setns(2)` into the namespace (`<pkm/mntns.h>`).
+pub const MNTNS_ENTER: u32 = peios_uapi::KACS_MNTNS_ENTER;
+/// Every mount namespace right plus the standard rights (`<pkm/mntns.h>`).
+pub const MNTNS_ALL_ACCESS: u32 = peios_uapi::KACS_MNTNS_ALL_ACCESS;
+
+/// Generic mapping for mount namespace security descriptors.
+///
+/// Changing the table is the write; joining the namespace is the execute.
+/// There is nothing to read from a namespace beyond its own descriptor.
+pub const MNTNS_GENERIC_MAPPING: GenericMapping = GenericMapping {
+    read: READ_CONTROL,
+    write: MNTNS_MOUNT | WRITE_DAC,
+    execute: MNTNS_ENTER | READ_CONTROL,
+    all: MNTNS_ALL_ACCESS,
+};
+
 /// Generic mapping for file and directory security descriptors.
 pub const FILE_GENERIC_MAPPING: GenericMapping = GenericMapping {
     read: FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | READ_CONTROL | SYNCHRONIZE,

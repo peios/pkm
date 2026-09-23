@@ -697,6 +697,11 @@ const u8 *kacs_rust_create_default_socket_sd(const void *token_ptr,
 					     size_t *len_out);
 const u8 *kacs_rust_create_default_ipc_sd(const void *token_ptr,
 					  size_t *len_out);
+const u8 *kacs_rust_create_default_mnt_ns_sd(const void *token_ptr,
+					     size_t *len_out);
+int kacs_rust_check_mnt_ns_sd(const void *subject_token_ptr, const u8 *sd_ptr,
+			      size_t sd_len, u32 desired, u32 pip_type,
+			      u32 pip_trust, u32 *granted_out);
 int kacs_rust_check_ipc_sd(const void *subject_token_ptr, const u8 *sd_ptr,
 			   size_t sd_len, u32 desired, u32 pip_type,
 			   u32 pip_trust, u32 *granted_out);
@@ -1480,6 +1485,12 @@ long pkm_kacs_kunit_check_capget_for_subject(
 long pkm_kacs_kunit_check_capability_for_subject(const void *subject_token,
 						 int cap);
 bool pkm_kacs_kunit_may_manage_volumes_for_subject(const void *subject_token);
+/* Mount namespaces as KACS objects (mnt_namespace.c). */
+const u8 *pkm_kacs_kunit_create_mntns_sd_for_subject(const void *token,
+						    size_t *len_out);
+bool pkm_kacs_kunit_may_mount_op_for_subject(const void *subject_token,
+					     const u8 *sd_bytes, size_t sd_len,
+					     unsigned int op);
 long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,
 					     u64 effective_mask,
 					     u64 inheritable_mask,

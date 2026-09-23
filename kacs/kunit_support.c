@@ -77,6 +77,7 @@
 #include "file_sd_cache.h"
 #include "kmes_rate.h"
 #include "lsm_internal.h"
+#include "mnt_namespace.h"
 #include "mount_policy.h"
 #include "namespace.h"
 #include "native_open.h"
@@ -5724,6 +5725,26 @@ long pkm_kacs_kunit_check_capability_for_subject(const void *subject_token,
 bool pkm_kacs_kunit_may_manage_volumes_for_subject(const void *subject_token)
 {
 	return pkm_kacs_may_manage_volumes_for_token(subject_token);
+}
+
+const u8 *pkm_kacs_kunit_create_mntns_sd_for_subject(const void *token,
+						    size_t *len_out)
+{
+	return kacs_rust_create_default_mnt_ns_sd(token, len_out);
+}
+
+bool pkm_kacs_kunit_may_mount_op_for_subject(const void *subject_token,
+					     const u8 *sd_bytes, size_t sd_len,
+					     unsigned int op)
+{
+	struct pkm_kacs_process_sd sd = {
+		.refs = REFCOUNT_INIT(1),
+		.bytes = sd_bytes,
+		.len = sd_len,
+	};
+
+	return pkm_kacs_may_mount_op_for_token(subject_token,
+					       sd_bytes ? &sd : NULL, op);
 }
 
 long pkm_kacs_kunit_check_capset_for_subject(const void *subject_token,

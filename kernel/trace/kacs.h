@@ -1888,6 +1888,42 @@ DEFINE_EVENT(kacs_tlp, kacs_tlp,
 		 long ret),
 	TP_ARGS(path_len, prefix_count, allowed, reason, ret));
 
+#define kacs_mntns_reason_symbols					\
+	{ KACS_MNTNS_SD_ALLOC,		"sd-alloc" },			\
+	{ KACS_MNTNS_SD_ALLOC_FAIL,	"sd-alloc-fail" },		\
+	{ KACS_MNTNS_GATE_PRIVILEGE,	"gate-privilege" },		\
+	{ KACS_MNTNS_GATE_NO_SD,	"gate-no-sd" },			\
+	{ KACS_MNTNS_GATE_OP_NOT_ADMITTED, "gate-op-not-admitted" },	\
+	{ KACS_MNTNS_GATE_SD_DECISION,	"gate-sd-decision" },		\
+	{ KACS_MNTNS_GATE_PIP_CONTEXT,	"gate-pip-context" }
+
+/*
+ * One mount-namespace object event: a descriptor minted at namespace
+ * creation, or one rung of the mount gate. `op` is the PKM_KACS_MNTNS_OP_*
+ * code of the table change (0 where none); `desired` the right asked of the
+ * descriptor (0 where the rung never reached it). Only scalars.
+ */
+TRACE_EVENT(kacs_mntns,
+	TP_PROTO(u32 op, u32 desired, u8 reason, long ret),
+	TP_ARGS(op, desired, reason, ret),
+	TP_STRUCT__entry(
+		__field(u32, op)
+		__field(u32, desired)
+		__field(u8, reason)
+		__field(long, ret)
+	),
+	TP_fast_assign(
+		__entry->op = op;
+		__entry->desired = desired;
+		__entry->reason = reason;
+		__entry->ret = ret;
+	),
+	TP_printk("reason=%s verdict=%s op=%u desired=0x%x ret=%ld",
+		__print_symbolic(__entry->reason, kacs_mntns_reason_symbols),
+		__entry->ret ? "deny" : "allow",
+		__entry->op, __entry->desired, __entry->ret)
+);
+
 /* System V IPC object decisions (ipc.c): kind 0=sem 1=msg 2=shm (ipc_ids index) */
 TRACE_EVENT(kacs_ipc,
 	TP_PROTO(u32 kind, int id, u32 cmd, u32 desired, u8 reason, long ret),

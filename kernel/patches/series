@@ -89,3 +89,12 @@ kernel/cgroup-clone-into-cgroup-kill-seq.patch
 # root. Each takes <cet.h> and _CET_ENDBR. tools/perf only; no other patch
 # touches it.
 tools/perf-bench-asm-cet.patch
+# PEI-1173: mount namespaces are KACS objects. Creating one alone needs no
+# capability (kernel/nsproxy.c); every other namespace type keeps the gate.
+# fs/namespace.c mints a creator descriptor in copy_mnt_ns, frees it in
+# mnt_ns_release, and asks KACS per operation in may_mount(). The fs patch is
+# cut against the tree with namespace-rootfs-seed-sd and
+# namespace-mount-volume-privilege already applied and replaces the latter's
+# may_mount() body, so it must stay after both.
+kernel/nsproxy-mount-namespace-unprivileged.patch
+fs/namespace-mount-namespace-objects.patch

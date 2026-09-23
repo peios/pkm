@@ -35,6 +35,7 @@
 #include <pkm/socket.h>
 #include <pkm/ipc.h>
 #include <pkm/net.h>
+#include <pkm/mntns.h>
 #include <pkm/psb.h>
 #include <pkm/access.h>
 #include <pkm/file.h>

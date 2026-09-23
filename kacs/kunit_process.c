@@ -4,6 +4,7 @@
 #include "lsm_internal.h"
 #include "process_state.h"
 
+#include <linux/kacs_mntns.h>
 #include <linux/prctl.h>
 
 
@@ -545,6 +546,178 @@ static void pkm_kunit_may_manage_volumes_marks_the_privilege_used(
 
 	KUNIT_ASSERT_TRUE(test, kacs_rust_kunit_token_snapshot(token, &after));
 	KUNIT_EXPECT_NE(test, after.privileges_used, before.privileges_used);
+	kacs_rust_token_drop(token);
+}
+
+/*
+ * Mount namespaces as KACS objects (mnt_namespace.c, PEI-1173).
+ *
+ * The descriptor a namespace is minted with names its creator and nobody
+ * else: the creating token's user owns it, and the DACL is one allow ACE
+ * granting that user everything. SYSTEM and Administrators are absent on
+ * purpose -- the privilege rung admits them before the descriptor is read.
+ */
+static void pkm_kunit_mntns_sd_names_only_the_creator(struct kunit *test)
+{
+	const void *token;
+	const u8 *sd;
+	const u8 *user_sid = NULL;
+	size_t user_sid_len = 0;
+	size_t sd_len = 0;
+
+	token = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_token_user_sid(token, &user_sid, &user_sid_len),
+			0);
+
+	sd = pkm_kacs_kunit_create_mntns_sd_for_subject(token, &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	KUNIT_ASSERT_GT(test, sd_len, (size_t)0);
+
+	/* Owner and group come from the token. */
+	pkm_kunit_expect_sd_sid_component(test, sd, sd_len, 4, user_sid,
+					  user_sid_len);
+	/* One ACE: the creator, everything. */
+	pkm_kunit_expect_allow_ace(test, sd, sd_len, 0, KACS_ACCESS_GENERIC_ALL,
+				   user_sid, user_sid_len);
+	KUNIT_EXPECT_NULL(test, pkm_kunit_dacl_ace_const(sd, sd_len, 1));
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+/*
+ * The privilege rung is decided first and alone. A token holding
+ * SeManageVolume or SeTcb is admitted to every operation in every
+ * namespace, including one with no descriptor at all (the initial
+ * namespace) and including operations a descriptor could never grant.
+ */
+static void pkm_kunit_mntns_gate_privilege_admits_everything(
+	struct kunit *test)
+{
+	static const u64 privileges[] = {
+		PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE,
+		PKM_KUNIT_SE_TCB_PRIVILEGE,
+	};
+	static const unsigned int ops[] = {
+		PKM_KACS_MNTNS_OP_OTHER, PKM_KACS_MNTNS_OP_BIND,
+		PKM_KACS_MNTNS_OP_UMOUNT, PKM_KACS_MNTNS_OP_PIVOT_ROOT,
+	};
+	size_t i, j;
+
+	for (i = 0; i < ARRAY_SIZE(privileges); i++) {
+		const void *token = kacs_rust_kunit_create_logon_type_token(
+			PKM_KUNIT_LOGON_TYPE_INTERACTIVE, privileges[i]);
+
+		KUNIT_ASSERT_NOT_NULL(test, token);
+		for (j = 0; j < ARRAY_SIZE(ops); j++)
+			KUNIT_EXPECT_TRUE_MSG(
+				test,
+				pkm_kacs_kunit_may_mount_op_for_subject(
+					token, NULL, 0, ops[j]),
+				"privilege 0x%llx op %u", privileges[i], ops[j]);
+		kacs_rust_token_drop(token);
+	}
+}
+
+/*
+ * Without the privilege, a namespace with no descriptor -- the initial one --
+ * admits nothing. This is the whole of "the root table keeps today's rule".
+ * A missing token denies rather than faults.
+ */
+static void pkm_kunit_mntns_gate_without_sd_denies_unprivileged(
+	struct kunit *test)
+{
+	const void *token = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE, 0ULL);
+
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+					 token, NULL, 0, PKM_KACS_MNTNS_OP_BIND));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+					 NULL, NULL, 0, PKM_KACS_MNTNS_OP_BIND));
+	kacs_rust_token_drop(token);
+}
+
+/*
+ * In a namespace it created, an unprivileged token is admitted to exactly
+ * the three operations that add no kernel parser to the attack surface --
+ * bind, unmount, pivot_root -- and to nothing else, whatever its descriptor
+ * grants. An unrelated privilege does not change that: the gate is specific.
+ */
+static void pkm_kunit_mntns_gate_creator_sd_admits_bind_umount_pivot_only(
+	struct kunit *test)
+{
+	static const u64 privileges[] = {
+		0ULL,
+		PKM_KUNIT_SE_LOAD_DRIVER_PRIVILEGE,
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(privileges); i++) {
+		const void *token = kacs_rust_kunit_create_logon_type_token(
+			PKM_KUNIT_LOGON_TYPE_INTERACTIVE, privileges[i]);
+		const u8 *sd;
+		size_t sd_len = 0;
+
+		KUNIT_ASSERT_NOT_NULL(test, token);
+		sd = pkm_kacs_kunit_create_mntns_sd_for_subject(token, &sd_len);
+		KUNIT_ASSERT_NOT_NULL(test, sd);
+
+		KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+						token, sd, sd_len,
+						PKM_KACS_MNTNS_OP_BIND));
+		KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+						token, sd, sd_len,
+						PKM_KACS_MNTNS_OP_UMOUNT));
+		KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+						token, sd, sd_len,
+						PKM_KACS_MNTNS_OP_PIVOT_ROOT));
+		KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+						 token, sd, sd_len,
+						 PKM_KACS_MNTNS_OP_OTHER));
+
+		pkm_kacs_free((void *)sd);
+		kacs_rust_token_drop(token);
+	}
+}
+
+/*
+ * It is the descriptor that admits, not the namespace. The same unprivileged
+ * token against the same-shaped descriptor whose one ACE names somebody
+ * else is refused.
+ */
+static void pkm_kunit_mntns_gate_denies_a_descriptor_naming_someone_else(
+	struct kunit *test)
+{
+	const void *token = kacs_rust_kunit_create_logon_type_token(
+		PKM_KUNIT_LOGON_TYPE_INTERACTIVE, 0ULL);
+	const u8 *minted;
+	u8 *sd;
+	size_t sd_len = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	minted = pkm_kacs_kunit_create_mntns_sd_for_subject(token, &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, minted);
+	sd = kmemdup(minted, sd_len, GFP_KERNEL);
+	pkm_kacs_free((void *)minted);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+
+	/* Still admitted before the ACE is rewritten... */
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+					token, sd, sd_len,
+					PKM_KACS_MNTNS_OP_BIND));
+
+	/* ...and refused once the only ACE names SYSTEM instead. */
+	pkm_kunit_set_dacl_ace_sid(test, sd, sd_len, 0, pkm_kunit_system_sid,
+				   sizeof(pkm_kunit_system_sid));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_may_mount_op_for_subject(
+					 token, sd, sd_len,
+					 PKM_KACS_MNTNS_OP_BIND));
+
+	kfree(sd);
 	kacs_rust_token_drop(token);
 }
 
@@ -10059,6 +10232,11 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_may_manage_volumes_accepts_volume_or_tcb),
 	KUNIT_CASE(pkm_kunit_may_manage_volumes_without_a_token_denies),
 	KUNIT_CASE(pkm_kunit_may_manage_volumes_marks_the_privilege_used),
+	KUNIT_CASE(pkm_kunit_mntns_sd_names_only_the_creator),
+	KUNIT_CASE(pkm_kunit_mntns_gate_privilege_admits_everything),
+	KUNIT_CASE(pkm_kunit_mntns_gate_without_sd_denies_unprivileged),
+	KUNIT_CASE(pkm_kunit_mntns_gate_creator_sd_admits_bind_umount_pivot_only),
+	KUNIT_CASE(pkm_kunit_mntns_gate_denies_a_descriptor_naming_someone_else),
 	KUNIT_CASE(pkm_kunit_capability_privilege_mapping_matrix),
 	KUNIT_CASE(pkm_kunit_capability_switchboard_full_matrix),
 	KUNIT_CASE(pkm_kunit_capability_privilege_denied_without_privilege),

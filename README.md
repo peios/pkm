@@ -182,6 +182,7 @@ dependencies' outputs as `$PEKIT_<NEED>_OUT`, and writes to `$PEKIT_OUT`
 | `build.tools` | `source` | The in-tree userspace tools (perf, bpftool, …) as a DESTDIR image. |
 | `test.kunit` | `kunit` | Boots in QEMU; asserts the KUnit suite passes (build/run split). |
 | `test.stratafs` | `kunit` | Boots a minimal initramfs in QEMU and exercises mounted StrataFS through real KACS-governed syscalls. |
+| `test.mntns` | `kunit` | Boots a minimal initramfs in QEMU and drives unprivileged mount namespaces — unshare, bind, pivot_root, umount — through real syscalls with every privilege stripped. |
 | `gen.uapi` | — | Regenerates `uapi/generated/**` in place from `uapi/pkm` (a `gen` target — product is committed source, not an artifact). Its `verify_command` is the drift gate (`pekit verify uapi`). |
 | `test.uapi` | — | Standalone-compile gate: the canonical headers compile with a stock userspace compiler. |
 | `test.cores` | — | The Rust cores' Cargo suites (`cargo test --workspace --locked --offline`) on the catalogue's current Rust, from the committed source alone. |
