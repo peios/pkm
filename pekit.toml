@@ -195,6 +195,9 @@ xz-utils = "*"
 # CONFIG_KERNEL_ZSTD compresses the image with the zstd CLI
 # (com.facebook.zstd above).
 zstd = "*"
+# The pinned bindgen, from the signed Peios catalogue; the Debian root also
+# receives upstream's Rust 1.83.0 (pkgs/_debroot_).
+"io.github.rust-lang.bindgen" = "*"
 
 [build.kernel]
 keyring_inputs = ["modsig.pub", "tcb.pub"]
@@ -299,6 +302,9 @@ tar = "*"
 xz-utils = "*"
 # CONFIG_KERNEL_ZSTD and CONFIG_MODULE_COMPRESS_ZSTD (com.facebook.zstd above).
 zstd = "*"
+# The pinned bindgen, from the signed Peios catalogue; the Debian root also
+# receives upstream's Rust 1.83.0 (pkgs/_debroot_).
+"io.github.rust-lang.bindgen" = "*"
 
 # Export the sanitized userspace UAPI headers (full Linux UAPI + our pkm/*.h,
 # which ride along since they're staged under include/uapi/pkm). Depends on
