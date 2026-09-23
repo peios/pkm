@@ -550,7 +550,7 @@ command = """
 ./build/test-modsig.sh "$PEKIT_KERNEL_OUT" "$PEKIT_KERNEL_OUT/modules-root"
 """
 
-# What the script shells out to. Under --env peipkg the composed root is
+# What the script shells out to. In the pkgs native root the composed root is
 # fsbase plus exactly this list — no implicit shell, so without `dash` (for
 # pekit's /usr/bin/sh) and `bash` (the script's own interpreter) bwrap cannot
 # even start it (PEI-489). The docker env and --env none use the host's QEMU.
