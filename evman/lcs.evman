@@ -1,0 +1,226 @@
+--- field source.rsi.slot
+type: uint
+
+Which registry source slot supplied the data, by index. Sources are the
+userspace backends that serve registry content to the kernel, so this names
+the backend rather than anything about the caller.
+
+--- field source.rsi.hive
+type: str
+
+The hive the offending source data belonged to, where the failure could be
+attributed to one. Null when the data was malformed before a hive could be
+determined.
+
+--- field request.id
+type: uint
+
+The identifier of the source request this record concerns, for joining a
+record to the exchange that produced it. A pure correlation key.
+
+--- field request.op_code
+type: uint
+
+The source-protocol operation code of the request this record concerns.
+Identifies which kind of exchange returned unusable data.
+
+--- group caller
+include: subject.token.sid
+include: subject.token.integrity
+include: subject.token.id
+include: subject.token.auth_id
+include: subject.token.impersonation
+
+The identity LCS records on an audited operation. A deliberate subset of
+`subject` — the token's durable GUIDs ride in the event header, and the
+group SIDs and PIP state that KACS records are absent here.
+
+**That absence is a gap rather than a design.** Access to a registry key is
+granted through a group as often as to a user SID directly, so an LCS
+record cannot answer "which membership let this through" where the
+equivalent KACS record can. The two subsystems reached the bound on what to
+serialise independently and landed in different places.
+
+`token_type` is not carried. It said only whether the token was primary or
+impersonation, which `subject.token.impersonation` already answers — a
+value of 0 is a primary token.
+
+--- event lcs.audit.key-open
+origin: lcs
+tier: essential
+gating: a matching SACL audit ACE on the key
+cardinality: once per matching open
+emitters: crates/lcs-core/src/audit.rs — LcsKeyOpenAuditRecord
+
+The record that a registry key was opened and what access the open
+received. SACL evaluation follows the KACS AccessCheck algorithm, with the
+SACL evaluated alongside the DACL rather than separately.
+
+**A request of `MAXIMUM_ALLOWED` alone records nothing.** It maps to a
+desired mask of zero, and the SACL walk tests each audit ACE's mask against
+that mask, so no ACE matches. The one request shape that asks for
+everything is the one shape that produces no record — a real hole for
+anyone auditing key opens, and the same defect KACS's own SACL walk was
+changed to close.
+
+Emission failure is handled in two halves. If a valid payload cannot be
+**constructed**, the open fails with `EIO` and no key descriptor is
+published — the audit is a precondition of the access. If a valid payload
+cannot be **retained** by KMES, the decision and the descriptor stand, and
+the loss is accounted as a gap in the stream rather than as a failed open.
+
+include: caller
+field: object.key.guid          required
+field: access.requested         required
+  After registry generic mapping, with `MAXIMUM_ALLOWED` re-added when the
+  caller asked for it.
+field: access.granted           required
+  Forced to zero on a denial, and enforced rather than merely intended — a
+  denied record carrying a non-zero granted mask is rejected as malformed.
+field: outcome.success          required
+  Whether the open was allowed. Replaces the former `decision` string,
+  which carried the same two states as words.
+field: trigger.sacl_match       required
+
+--- event lcs.audit.backup.start
+origin: lcs
+tier: essential
+gating: none — audited unconditionally
+cardinality: once per backup
+emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreStartAuditRecord
+
+The record that a registry subtree backup began, emitted **before any data
+is read**. Backup is a privilege-gated bulk operation that bypasses
+per-key access checks entirely, so this trail is the only evidence it
+happened at all — which is why it is audited whatever the target key's
+SACL says.
+
+The start record exists so that an operation dying partway still leaves
+evidence that it began. A start with no matching complete is itself the
+finding.
+
+Emission failure fails the operation with `EIO`, unlike every other LCS
+event: an unrecorded bulk read of the configuration store is not permitted
+to proceed.
+
+include: caller
+field: object.key.guid          required
+field: operation.fd             required
+  The descriptor the backup stream was written to.
+
+--- event lcs.audit.backup.complete
+origin: lcs
+tier: essential
+gating: none — audited unconditionally
+cardinality: once per backup that started
+emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreCompleteAuditRecord
+
+The record that a registry subtree backup finished, successfully or
+otherwise. Pairs with `lcs.audit.backup.start` on the same key.
+
+Emission failure here does not affect the result, which has already been
+determined by the time this is written.
+
+include: caller
+field: object.key.guid          required
+field: outcome.errno            required
+
+--- event lcs.audit.restore.start
+origin: lcs
+tier: essential
+gating: none — audited unconditionally
+cardinality: once per restore
+emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreStartAuditRecord
+
+The record that a registry subtree restore began, emitted **before any
+state is modified**. As with backup, this is a privilege-gated bulk
+operation that bypasses per-key access checks, and is audited regardless of
+the target's SACL.
+
+A restore rewrites configuration wholesale, so a start with no matching
+complete means the store may be in a partially rewritten state.
+
+Emission failure fails the operation with `EIO`.
+
+include: caller
+field: object.key.guid          required
+field: operation.fd             required
+  The descriptor the restore stream was read from.
+
+--- event lcs.audit.restore.complete
+origin: lcs
+tier: essential
+gating: none — audited unconditionally
+cardinality: once per restore that started
+emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreCompleteAuditRecord
+
+The record that a registry subtree restore finished, successfully or
+otherwise. Pairs with `lcs.audit.restore.start` on the same key.
+
+include: caller
+field: object.key.guid          required
+field: outcome.errno            required
+
+--- event lcs.source-validation-failed
+origin: lcs
+tier: essential
+gating: none — every rejection is recorded
+cardinality: once per rejected response
+emitters: crates/lcs-core/src/audit.rs — LcsSourceValidationFailureAuditRecord
+
+The record that LCS rejected data a registry source sent it. Sources are
+userspace backends serving configuration into the kernel, so this is the
+boundary where the kernel refuses to believe what userspace told it.
+
+**This is the one LCS event with no caller.** It describes a source
+misbehaving rather than a principal acting, and there is frequently no
+principal involved — the data arrived on a source channel, not through a
+syscall.
+
+The failure classes are a stable vocabulary of twelve. They distinguish
+malformed structure from semantic impossibility: a security descriptor that
+will not parse is a different problem from a sequence number from the
+future or two layers claiming the same winning sequence.
+
+field: source.rsi.slot          required
+field: source.rsi.hive          optional
+field: request.id               optional
+field: request.op_code          optional
+field: object.key.guid          optional
+  Present when the rejected data could be attributed to a specific key.
+field: outcome.reason           required
+  From the source-validation class vocabulary: `malformed-security-descriptor`,
+  `malformed-layer-name`, `unknown-rsi-status-code`, `future-sequence-number`,
+  `duplicate-winning-sequence-tie`,
+  `malformed-layer-metadata-security-descriptor`, `malformed-key-name`,
+  `malformed-value-name`, `malformed-response-payload`,
+  `malformed-key-metadata`, `malformed-value-payload`,
+  `malformed-delete-layer-orphan-list`.
+
+--- event lcs.config-invalid
+origin: lcs
+tier: standard
+gating: none — every rejected configuration value is recorded
+cardinality: once per rejected value
+emitters: crates/lcs-core/src/audit.rs — LcsSelfConfigInvalidAuditRecord
+
+The record that LCS read one of its own configuration values, rejected it,
+and carried on with what it had. Identical in shape and meaning to
+`kmes.config-invalid`, differing only in which key the values live under.
+
+Validation is reject-or-keep and never clamps, so this event is the only
+place where what an administrator wrote and what LCS is running on can be
+seen to differ.
+
+Emission failure preserves the retained configuration — a failure to record
+the rejection must not change which value is in force.
+
+field: config.key               required
+field: config.name              required
+field: config.expected.type     required
+field: config.expected.min      required
+field: config.expected.max      required
+field: config.received.kind     required
+field: config.received.type     when config.received.kind == wrong-type
+field: config.received.value    when config.received.kind == out-of-range
+field: config.retained.value    required

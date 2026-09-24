@@ -1,0 +1,111 @@
+--- field source.stratum.index
+type: uint
+
+Which stratum an object was read from, by index within the mount's stack.
+
+--- field source.stratum.path
+type: str.path
+
+The filesystem path of the stratum an object was read from. Null when the
+refusal was raised before any provider was determined — creation, tmpfile,
+and the heads of link and rename — in which case `source.stratum.index` is
+`-1` and the two agree that no provider was involved.
+
+--- field destination.stratum.index
+type: uint
+
+Which stratum an object was written into, by index within the mount's stack.
+
+--- field destination.stratum.path
+type: str.path
+
+The filesystem path of the stratum an object was written into.
+
+--- event stratafs.copy-up
+origin: kacs
+tier: standard
+gating: none — every copy-up is recorded
+cardinality: once per copy-up
+emitters: kacs/file_access.c — pkm_kacs_stratafs_audit_copy_up
+
+The record that StrataFS materialised an object into a writable stratum,
+successful or not. Copy-up is how a layered mount turns a read-only object
+into a writable one, so this is the record of a file coming into existence
+in a place it did not previously exist.
+
+**There is no caller in the payload, and that is not an omission.** Copy-up
+preserves the source object's descriptor, so the resulting file records
+nothing about who caused it to exist. The actor is identified by the
+envelope instead: copy-up runs in the caller's own context, so
+`subject.token.guid` and `subject.process.guid` in the header are the
+caller's.
+
+That identification is currently weaker than it looks. The envelope carries
+GUIDs and nothing in the stream binds a GUID to a SID, an image or a
+process name, so an operator reading these records can group them by actor
+but cannot say who the actor was.
+
+**`ENOTDIR` from a failed parent materialisation surfaces here**, in
+`outcome.errno`, rather than as a refusal record. Searching
+`stratafs.mutation-refused` for it finds nothing; the record exists under
+this type with every field present.
+
+field: object.file.relative_path    required
+field: source.stratum.index         required
+field: source.stratum.path          required
+field: destination.stratum.index    required
+field: destination.stratum.path     required
+field: outcome.errno                required
+  Zero on success, the failure otherwise.
+
+--- event stratafs.mutation-refused
+origin: kacs
+tier: standard
+gating: none — every arrangement refusal is recorded
+cardinality: once per refused mutation
+emitters: kacs/file_access.c — pkm_kacs_stratafs_audit_mutation_refused
+
+The record that a mutation was refused because of how the mount is
+arranged, rather than because of an access check. Software writing where it
+cannot, or an arrangement that does not admit an operation someone expected
+— a mismatch between intent and configuration that is otherwise visible
+only as an error returned to a caller who may discard it.
+
+The refusals that count are one explicit list: `EROFS`, `EXDEV`, `ENOTDIR`,
+`EISDIR`, `ENOTEMPTY`, `EEXIST` and `EINVAL`. Call sites cover every
+mutating path.
+
+**`EACCES` is deliberately absent.** A refusal produced by an access check
+is recorded by the mechanism that performed it, so StrataFS does not
+duplicate it. Looking here for a permission denial finds nothing — look at
+`kacs.audit.access`.
+
+There is one exception, and it is deliberate. A refused **deferred**
+deletion is recorded on any non-zero result, including one refused by an
+access check, because by the time a deferred deletion fails there is nobody
+left to receive the error. Rollbacks arrive under this type with the same
+flag set: a create or link whose outer bookkeeping failed and whose lower
+object could not be removed again, and a failed publication rollback after
+a copy-up.
+
+Resolution, revalidation and enumeration record nothing at all. They happen
+on every path operation, reveal nothing the resulting access check does
+not, and recording them would produce volume out of all proportion to their
+significance.
+
+field: object.file.relative_path    required
+field: operation.name               required
+  StrataFS names its own operations, and the set is disjoint from the
+  `file.` names an already-open handle uses: `copy-file-range`,
+  `copy-up-publication-rollback`, `create`, `create-rollback`,
+  `fallocate`, `link`, `link-rollback`, `mmap`, `remap-file-range`,
+  `removexattr`, `rename`, `rmdir`, `setattr`, `setxattr`,
+  `splice-write`, `supersede`, `supersede-publication`, `tmpfile`,
+  `truncate`, `unlink`, `write`.
+field: source.stratum.index         required
+  `-1` when the refusal was raised before any provider was determined.
+field: source.stratum.path          when source.stratum.index >= 0
+field: outcome.errno                required
+field: outcome.deferred             required
+  Whether the refusal was deferred — set on rollbacks and on deferred
+  deletions, which are the records where no caller remained to be told.

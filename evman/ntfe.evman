@@ -1,0 +1,156 @@
+--- field rule.name
+type: str
+
+The policy rule that produced this record, by name. Rules are the unit an
+administrator writes and edits, so this is the field that connects a record
+back to something a person can change.
+
+--- field rule.report_level
+type: uint
+
+The reporting level the matching rule asked for. Records exist only because
+a rule contained an explicit report directive, and this is the level it
+named.
+
+--- field rule.layer
+type: str.enum
+values: raw-packet | packet | flow
+
+Which evaluation layer the rule sat in. The layers see progressively more
+context — a raw frame, a parsed packet, a tracked connection — so the layer
+bounds what the rule could possibly have matched on.
+
+--- field rule.seat
+type: str.enum
+values: ingress | egress | local-in | local-out
+
+Where in the path evaluation happened. Distinguishes traffic entering or
+leaving the machine from traffic terminating at or originating from a local
+socket, which is the difference between forwarding policy and host policy.
+
+--- field network.direction
+type: str.enum
+values: in | out
+
+Which way the traffic was moving relative to this machine.
+
+--- field network.interface.name
+type: str
+
+The network interface the traffic was seen on.
+
+--- field network.interface.index
+type: uint
+
+The kernel's index for that interface. Zero when no interface was
+determined. Indexes are reused across interface teardown, so
+`network.interface.name` is the durable one.
+
+--- field network.ether_type
+type: uint
+
+The link-layer protocol number of the frame.
+
+--- field network.family
+type: uint.enum
+
+The address family of the addresses in this record. Zero when the traffic
+was evaluated below the layer where addresses exist, in which case no
+address, port or protocol field is present.
+
+--- field network.protocol
+type: uint.enum
+
+The transport protocol number.
+
+--- field network.length
+type: uint.bytes
+
+The length of the traffic unit evaluated.
+
+--- field source.address
+type: str.ip
+
+The address the traffic came from, rendered in the textual form for its
+family.
+
+--- field source.port
+type: uint
+
+The transport port the traffic came from. Present only for protocols that
+have ports.
+
+--- field destination.address
+type: str.ip
+
+The address the traffic was going to, rendered in the textual form for its
+family.
+
+--- field destination.port
+type: uint
+
+The transport port the traffic was going to. Present only for protocols
+that have ports.
+
+--- field flow.state
+type: str.enum
+values: new | established | related | invalid | untracked
+
+How connection tracking classified this traffic. `untracked` means tracking
+was not applied rather than that tracking failed; `invalid` means it was
+applied and the traffic did not fit any known flow.
+
+--- field policy.generation
+type: uint
+
+The generation counter of the rule set in force when the decision was made.
+Increments on every policy load, so a record can be tied to the exact rule
+set that produced it rather than to whatever is loaded when the record is
+read.
+
+--- event ntfe.report
+origin: pnp
+tier: standard
+gating: an explicit report directive in the matching rule
+cardinality: once per matching evaluation
+emitters: pnp/report.c
+
+The record of a traffic policy decision that a rule explicitly asked to be
+reported. Not a record of every decision — the engine evaluates constantly
+and reports only where a rule says to.
+
+**A stock machine emits none of these.** The shipped baseline rule set
+contains no report directives, so this event exists and never fires until
+an administrator adds one. Absence of these records says nothing about
+whether traffic was evaluated.
+
+The engine's own record of every verdict goes to a private ring read by the
+userspace policy daemon, not to the event stream, and is overwritten when
+no reader is attached. So the complete decision history is neither in the
+event stream nor durable.
+
+Address, port and protocol fields are conditional on how far up the stack
+evaluation reached: traffic matched at the raw-packet layer has no
+addresses to record.
+
+field: rule.name                     required
+field: rule.report_level             required
+field: rule.layer                    required
+field: rule.seat                     required
+field: outcome.verdict               required
+field: outcome.reason                when outcome.verdict == reject
+  Whether the refusal was prohibited or refused — the two flavours of an
+  explicit rejection.
+field: network.direction             required
+field: network.interface.name        required
+field: network.interface.index       required
+field: network.ether_type            required
+field: network.family                required
+field: network.protocol              when network.family != 0
+field: source.address                when network.family != 0
+field: destination.address           when network.family != 0
+field: source.port                   when the protocol has ports
+field: destination.port              when the protocol has ports
+field: flow.state                    when flow tracking applied
+field: network.length                required
+field: policy.generation             required

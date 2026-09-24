@@ -1,0 +1,156 @@
+--- field privilege.name
+type: str.enum
+values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege
+
+The privilege that contributed access. Only these five can influence an
+access check, so only these five can appear — a privilege used for anything
+else produces no record here.
+
+--- field privilege.contributed
+type: uint.mask
+
+The access bits this privilege supplied to the check, intersected with what
+the caller actually asked for. Distinct from `access.granted`, which is the
+whole check's result rather than this privilege's part in it.
+
+--- field privilege.surviving
+type: uint.mask
+
+The subset of `privilege.contributed` that reached the final granted mask.
+Empty means the privilege fired and a later layer stripped it — a
+confinement, a CAAP rule, or PIP non-dominance — which is usually the more
+interesting record of the two, because it shows a boundary doing its job.
+
+--- event kacs.audit.access
+origin: kacs
+tier: essential
+gating: a matching SACL audit ACE, or the token's audit policy
+cardinality: once per matching audit ACE, not once per access
+emitters: kacs/token_runtime.rs — token_open_check_errno, token_sd_access_check_errno_with_intent, process_sd_access_outcome_with_intent, file_sd_access_outcome_for_descriptor, socket_sd_access_check_errno, object_sd_access_check_errno
+
+The record that an access check completed, and what it decided. The most
+common event on the system, and the one most investigations start from.
+
+It fires against every kind of object KACS protects — files, processes,
+tokens, sockets and SysV IPC objects — which is why `object.kind` is
+required. A process opening another process, or a token adjusting another
+token, puts an actor and an object of the same kind in one record, so the
+`subject.` and `object.` fields are never interchangeable.
+
+**It is silent by default.** Nothing is recorded unless an audit ACE in the
+object's SACL matches, or the calling token's audit policy forces it. An
+object with no SACL produces no record on any outcome, including denials.
+
+**One access can produce several records.** The event is per matching audit
+ACE, so an access matching three ACEs produces three records differing only
+in `trigger.ace`.
+
+include: subject
+field: object.kind              required
+field: object.file.path         when object.kind == file
+field: object.process.pid       when object.kind == process
+field: object.process.guid      when object.kind == process
+field: object.token.id          when object.kind == token
+field: object.token.guid        when object.kind == token
+field: object.context           optional
+field: access.requested         required
+field: access.granted           required
+  The mask this check granted.
+field: outcome.success          required
+  True when every requested bit is in `access.granted`. A `MAXIMUM_ALLOWED`
+  request always reports true, because such a request returns whatever is
+  available and cannot fail — so a success rate computed over these records
+  is skewed by them.
+field: trigger.kind             required
+field: trigger.ace              optional
+
+--- event kacs.audit.continuous
+origin: kacs
+tier: standard
+gating: the operation's required access overlaps the alarm mask cached on the handle
+cardinality: once per operation on the handle
+emitters: kacs/file_access.c — pkm_kacs_emit_file_continuous_audit
+
+The record of what was done with a handle after it was opened. Where
+`kacs.audit.access` records the decision to open something, this records
+each subsequent use of it.
+
+The mask is configured by `SYSTEM_ALARM*` ACEs at the access check that
+opened the handle, and the record is produced afterwards by whatever
+enforcement point handles the operation. FACS, for file handles, is the
+only such point today.
+
+**The subject is re-read on every operation.** A handle outlives the token
+that opened it, so a process that starts or stops impersonating keeps its
+handles and every later operation is recorded under the token current at
+that moment. An investigation assuming the open-time identity will
+attribute later operations to the wrong principal.
+
+Three masks appear together and are easy to confuse. Read as a sentence:
+the operation needed `access.requested`, of which `access.matched`
+triggered the audit, against a handle opened with `access.granted`, and it
+succeeded or did not.
+
+include: subject
+field: object.kind              required
+  Always `file` today, because FACS is the only enforcement point.
+field: object.file.path         required
+field: operation.name           required
+field: access.requested         required
+  What this operation needs — a read needs `FILE_READ_DATA`, an `mmap` with
+  `PROT_EXEC` needs `FILE_EXECUTE`.
+field: access.matched           required
+field: access.granted           required
+  What the handle was opened with, not what this operation was granted. An
+  operation can only succeed if `access.requested` is a subset of it.
+field: access.audit_mask        required
+field: outcome.success          required
+  Whether the operation itself was allowed.
+field: outcome.reason           required
+  From `KACS_FSR_*`, excluding `DECISION` (which names the ordinary path
+  rather than a reason) and `AUDIT_EMIT_FAIL` (which cannot appear, being
+  the failure of this record's own emission).
+
+--- event kacs.audit.privilege
+origin: kacs
+tier: essential
+gating: the token's audit policy, success and failure flavours independently
+cardinality: once per privilege that contributed access
+emitters: crates/kacs-core/src/access_check.rs — evaluate_privilege_use
+
+The record that a privilege contributed access to a check, and whether that
+contribution survived. Purely token-policy driven — no SACL is involved, so
+there is no trigger to record.
+
+**Success here means the privilege worked, not that it fired.** This is the
+field most often misread. A false outcome is not a failed attempt to use a
+privilege; it is a privilege that fired and was then overridden by a
+confinement, a CAAP rule, or PIP non-dominance — usually the more
+interesting of the two records, because it shows a boundary holding.
+
+A token can carry either audit policy flavour, both, or neither, and each
+governs its own outcome independently.
+
+**`MAXIMUM_ALLOWED` requests produce nothing here.** Privilege-use auditing
+short-circuits on them, even though SACL auditing was deliberately changed
+not to — a probing enumerator therefore trips one and slips the other.
+
+include: subject
+field: object.kind              required
+field: object.file.path         when object.kind == file
+field: object.process.pid       when object.kind == process
+field: object.process.guid      when object.kind == process
+field: object.token.id          when object.kind == token
+field: object.token.guid        when object.kind == token
+field: object.context           optional
+field: privilege.name           required
+field: privilege.contributed    required
+field: privilege.surviving      required
+field: access.requested         required
+  The whole check's requested mask, not this privilege's share of it.
+field: access.granted           required
+  The whole check's final granted mask.
+field: outcome.success          required
+  True when `privilege.surviving` is non-empty. Derived rather than
+  independently decided, and kept so that a single query for failed
+  outcomes works across every event type.

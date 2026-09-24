@@ -1,0 +1,68 @@
+--- field buffer.capacity.requested
+type: uint.bytes
+
+The per-CPU ring buffer capacity that was asked for.
+
+--- field buffer.capacity.retained
+type: uint.bytes
+
+The per-CPU ring buffer capacity still in effect after a failed swap.
+
+--- event kmes.config-invalid
+origin: kmes
+tier: standard
+gating: none — every rejected configuration value is recorded
+cardinality: once per rejected value
+emitters: kmes/kmes.c — pkm_kmes_emit_self_config_invalid
+
+The record that KMES read a configuration value, rejected it, and carried
+on with what it had. Emitted when the stored value is missing, of the wrong
+type, or out of range.
+
+Validation is **reject-or-keep, never clamp**: a valid value is applied and
+an invalid one is ignored, with the last known-good value retained. That
+makes this event the only place the divergence is visible — the registry
+records what an administrator wrote, and this records what KMES is running
+on. An operator reading only the registry will believe a change took effect
+that did not.
+
+These records are emitted before the configuration commit and are
+deliberately not part of the commit decision: a failure to construct one
+must never roll back a hot-swap that otherwise succeeded.
+
+field: config.key                 required
+field: config.name                required
+field: config.expected.type       required
+field: config.expected.min        required
+field: config.expected.max        required
+field: config.received.kind       required
+field: config.received.type       when config.received.kind == wrong-type
+field: config.received.value      when config.received.kind == out-of-range
+field: config.retained.value      required
+
+--- event kmes.buffer-swap-failed
+origin: kmes
+tier: standard
+gating: only when the swap failed with ENOMEM
+cardinality: once per failed swap
+emitters: kmes/kmes.c — pkm_kmes_emit_buffer_swap_failed
+
+The record that KMES could not resize its per-CPU ring buffers and kept the
+capacity it had. A capacity change is a swap — new buffers at the new size,
+surviving events copied across, writers switched over — and this is what
+happens when that swap cannot be completed.
+
+The failure is usually memory pressure, which makes it self-reinforcing in
+a way worth recognising: an administrator typically raises capacity because
+the system is dropping events, and the allocation most likely to fail is
+the one made while the system is already short of memory.
+
+The swap is system-wide rather than per-ring, so no CPU or ring is named.
+
+**Only `ENOMEM` produces a record.** A swap that fails for any other reason
+retains the old capacity and emits nothing, so absence of this event is not
+evidence that a capacity change took effect.
+
+field: buffer.capacity.requested  required
+field: buffer.capacity.retained   required
+field: outcome.errno              required

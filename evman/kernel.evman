@@ -1,0 +1,422 @@
+--- field subject.token.guid
+type: bin.guid
+carried: envelope
+
+The effective token the operation ran under, as a durable GUID. Carried in
+the KMES event header rather than the payload, so it is present on every
+event from every subsystem. Under impersonation this is the client's token;
+`subject.true_token.guid` is the thread's underlying one.
+
+--- field subject.true_token.guid
+type: bin.guid
+carried: envelope
+
+The thread's underlying token, where impersonation is in play. Equal to
+`subject.token.guid` when the thread is not impersonating, so a query for
+events where the two differ is a query for impersonated work.
+
+--- field subject.process.guid
+type: bin.guid
+carried: envelope
+
+The process the event came from, as a durable GUID. A random v4 minted when
+the process's KACS state is allocated, so unlike a PID it is never reused and
+outlives the process. Zero on events emitted outside task context, where
+`current` names whatever task was interrupted rather than a real actor.
+
+--- field subject.token.sid
+type: bin.sid
+
+The user SID of the effective token the operation ran under. Under
+impersonation this is the client's SID, not that of the process doing the
+work.
+
+--- field subject.token.groups
+type: bin.sid[]
+values: see subject.token.group_attributes
+
+The group SIDs carried by the effective token. Access is frequently granted
+through one of these rather than to the user SID directly, so a search by
+principal that ignores them misses most of what that principal actually did.
+
+Reconstructing membership as the access check sees it means applying the
+check's own rule: `SE_GROUP_ENABLED` set and `SE_GROUP_USE_FOR_DENY_ONLY`
+clear, for allow-side matching.
+
+--- field subject.token.group_attributes
+type: uint.flags[]
+values: SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_OWNER | SE_GROUP_USE_FOR_DENY_ONLY | SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED | SE_GROUP_RESOURCE | SE_GROUP_LOGON_ID
+
+Per-group attribute bitmasks, positionally parallel to
+`subject.token.groups`. The two arrays are always the same length, and
+`groups[i]` is described by `group_attributes[i]`.
+
+`SE_GROUP_INTEGRITY` is present for ABI parity only — mandatory integrity
+control reads `subject.token.integrity`, never this flag.
+
+--- field subject.token.integrity
+type: uint.integrity
+values: 0 Untrusted | 4096 Low | 8192 Medium | 12288 High | 16384 System
+
+The integrity RID of the effective token. Mandatory integrity control
+compares this against the object's integrity label before the DACL is
+consulted at all, so a denial here never reaches an ACE.
+
+--- field subject.token.id
+type: uint.luid
+
+The token's own LUID, identifying this specific token rather than the logon
+session it belongs to. Correlates every event produced under one token.
+
+--- field subject.token.auth_id
+type: uint.luid
+
+The LUID of the logon session the effective token belongs to. The join key to
+`kacs.session.destroyed` and to `/sys/kernel/security/kacs/sessions`, and the
+way to gather every event from one sign-on.
+
+--- field subject.token.impersonation
+type: uint.enum
+values: 0 Anonymous | 1 Identification | 2 Impersonation | 3 Delegation
+
+The impersonation level of the effective token. A primary token reports 0.
+Any other value means `subject.token` and `subject.process` describe
+different principals.
+
+--- field subject.token.uid
+type: uint
+
+The Linux UID this token projects onto, for correlating a Peios event with
+Linux-side audit data. A projection for interoperability, never the identity
+KACS decides on.
+
+--- field subject.process.pid
+type: uint
+
+The process ID the event came from. Reliable only in the short term: PIDs are
+reused, so a PID in a week-old record may name something unrelated. Correlate
+durably on `subject.process.guid`.
+
+--- field subject.process.name
+type: str
+
+The kernel's name for the process, typically the executable's basename. Not
+`argv[0]` — a process that rewrote its argv is unaffected here.
+
+--- field subject.process.executable
+type: str.path
+
+The path the process was executed from, resolved at exec with symbolic links
+already followed.
+
+--- field subject.pip.type
+type: uint.enum
+values: 0 None | 512 Protected | 1024 Isolated
+
+The Protected Isolated Process type in force for the access check. Held in
+process state rather than on the token, and a caller of the access-check
+ioctl may supply its own value — so on ioctl-originated events this is
+caller-influenced, and kernel-observed everywhere else.
+
+--- field subject.pip.trust
+type: uint
+
+The PIP trust level in force for the access check. Compared for dominance:
+a caller whose trust does not dominate the target's is denied before the
+DACL is reached. Caller-influenced on ioctl-originated events, as
+`subject.pip.type` is.
+
+--- field object.kind
+type: str.enum
+values: file | process | token | socket | ipc
+
+What sort of thing the operation acted on. Load-bearing rather than
+descriptive: it names the table an access mask in the same record decodes
+against, and without it `access.granted` has no defined meaning.
+
+The mask spaces genuinely collide. `0x0001` is `FILE_READ_DATA` on a file
+and `PROCESS_TERMINATE` on a process; the socket mapping reuses
+`FILE_WRITE_DATA` as a socket's write right.
+
+`socket` and `ipc` have no identity fields yet. A record carrying either
+kind names the object only by its kind, until those enforcement points are
+plumbed to supply one.
+
+--- field object.file.path
+type: str.path
+
+The path of the file the operation acted on, resolved at the enforcement
+point.
+
+--- field object.file.relative_path
+type: str.path
+
+The path of the object within its mount, `/`-prefixed. **Not an absolute
+system path** — deliberately a separate field from `object.file.path`,
+because a search for an absolute path would otherwise match KACS records
+and silently miss these.
+
+StrataFS events fire from inside the filesystem, below the layer where a
+mount is known, so there is no absolute path for them to resolve against.
+The KACS events covering the same operation do carry the caller's absolute
+path, joined by the envelope's `subject.process.guid` and timestamp.
+
+An absolute path to the **backing** object is derivable from this record
+alone: join this onto `destination.stratum.path` for a copy-up, or onto
+`source.stratum.path` for a refusal. That join is unavailable on a refusal
+raised before any provider was determined, where the stratum path is null.
+
+--- field object.key.guid
+type: bin.guid
+
+The registry key an operation acted on. Keys are identified by GUID rather
+than by path, so a record names the key durably but not legibly — nothing
+in the event stream currently binds a key GUID to the path an administrator
+would recognise.
+
+`object.key.*` is the configuration store's key. A cryptographic key is a
+different thing and takes an explicit qualifier rather than this namespace.
+
+--- field object.process.pid
+type: uint
+
+The process ID of the process the operation acted on. As with
+`subject.process.pid`, correlate durably on the GUID instead.
+
+--- field object.process.guid
+type: bin.guid
+
+The durable GUID of the process the operation acted on. Distinct from
+`subject.process.guid` — one record carries both when a process opens
+another process.
+
+--- field object.token.id
+type: uint.luid
+
+The LUID of the token the operation acted on, for token-open and
+token-adjust checks.
+
+--- field object.token.guid
+type: bin.guid
+
+The durable GUID of the token the operation acted on. Distinct from
+`subject.token.guid` — one record carries both when a token is used to
+open or adjust another token.
+
+--- field object.context
+type: bin
+
+A caller-supplied opaque identifier for the object, passed through the
+access-check ioctl and never interpreted by the kernel. Present only on
+ioctl-originated checks; kernel-internal enforcement points identify the
+object with the typed `object.*` fields instead.
+
+--- field access.requested
+type: uint.mask
+
+The access mask the caller asked for, after generic bits have been mapped to
+type-specific ones. Generic bits never survive into an event.
+
+--- field access.granted
+type: uint.mask
+
+The access mask in force. What that means narrows per event — the rights
+this check granted, or the rights a handle was opened with — so read the
+event's own note.
+
+--- field access.matched
+type: uint.mask
+
+The subset of the requested access that overlapped an audit mask and
+therefore caused the record to exist. The bits that triggered the audit,
+not the bits that were used.
+
+--- field access.audit_mask
+type: uint.mask
+
+The full continuous-audit mask cached on a handle, of which
+`access.matched` is the part this operation touched. Present so an operator
+can see what else on that handle would fire, which cannot be derived from
+the intersection alone.
+
+--- field outcome.success
+type: bool
+
+Whether the operation succeeded. What counts as success narrows per event;
+read the event's own note before computing a rate over it.
+
+--- field outcome.reason
+type: str.enum
+
+Why the operation resolved the way it did. Values are drawn from the
+relevant `uapi/pkm/trace.h` family, cited per event as a curated subset —
+the family carries codes that are never event reasons. Rendered with the
+family prefix stripped and case folded, so `KACS_FSR_GRANT_DENY` presents
+as `grant-deny` while the stored identity stays the trace code, and an
+investigation escalating from the event stream to a live trace sees the
+same decision described in the same terms.
+
+--- field outcome.verdict
+type: str.enum
+values: pass | reject | drop
+
+The decision a policy engine reached, where the decision has more than two
+states and `outcome.success` cannot express it. `reject` and `drop` both
+refuse, and differ in whether the refusal is signalled back to the sender
+or the traffic is discarded silently.
+
+--- field outcome.errno
+type: int.errno
+
+The error the operation failed with, as a negative errno, or zero on
+success. Present where an event records an outcome that has a specific
+failure rather than only a boolean.
+
+--- field outcome.deferred
+type: bool
+
+Whether a refusal was raised after the caller had already been told the
+operation succeeded. A deferred refusal has nobody left to receive an
+error, which is why it is recorded unconditionally rather than only for
+the arrangement errors.
+
+--- field trigger.kind
+type: str.enum
+values: sacl | policy
+
+Why an audit record exists at all. `sacl` means an audit ACE on the object,
+or in a central access policy, matched this access. `policy` means nothing
+in any SACL asked for it and the calling token's own audit policy forced it.
+
+The distinction is how volume gets diagnosed: a flood of `policy` is a
+property of the token and is fixed on the token, while a flood of `sacl` is
+a property of the object and is fixed on its SACL.
+
+--- field trigger.ace
+type: bin.ace
+
+The exact ACE that caused this record, so a consumer can identify which rule
+fired. Null when `trigger.kind` is `policy`, because no ACE was involved.
+
+--- field trigger.sacl_match
+type: uint.flags
+values: 0x1 success-audit matched | 0x2 failure-audit matched
+
+Which flavour of audit ACE matched. No other bits are ever set. Distinct
+from `trigger.kind`, which says whether a SACL was involved at all — this
+says which side of one fired, and both bits can be set at once.
+
+--- field operation.name
+type: str.enum
+values: file.access | file.mmap | file.mprotect | file.permission | file.write | file.ioctl | file.lock | file.fcntl | file.truncate | file.fallocate
+
+Which operation was attempted on an already-open handle. The enforcement
+point names it; FACS uses a `file.` prefix for file handles.
+
+--- field operation.fd
+type: uint
+
+The file descriptor a bulk operation transferred through — the sink a
+backup was written to, or the source a restore was read from. Direction is
+given by the event, not by this field.
+
+--- field config.key
+type: str
+
+The registry key the rejected value lives under, in canonical form.
+
+--- field config.name
+type: str
+
+The name of the configuration value being reported on, within
+`config.key`.
+
+--- field config.expected.type
+type: uint.enum
+values: REG_DWORD | REG_QWORD | REG_SZ | REG_BINARY | REG_MULTI_SZ
+
+The registry type the value is required to have.
+
+--- field config.expected.min
+type: uint
+
+The smallest value accepted for this knob.
+
+--- field config.expected.max
+type: uint
+
+The largest value accepted for this knob.
+
+--- field config.received.kind
+type: str.enum
+values: missing | wrong-type | out-of-range
+
+How the stored value failed validation. Three different administrative
+mistakes with three different fixes: a value that was absent, one of the
+wrong type, and one that was well-typed but outside the permitted range.
+
+KMES and LCS reached this vocabulary independently and disagreed —
+`u32_out_of_range` and `u64_out_of_range` against `dword_out_of_range` for
+the same condition. The width was never information the reader needed,
+since `config.expected.type` already carries it, so the three collapse to
+one.
+
+--- field config.received.type
+type: uint.enum
+values: REG_DWORD | REG_QWORD | REG_SZ | REG_BINARY | REG_MULTI_SZ
+
+The registry type the value actually had. Present only when the failure was
+the type itself.
+
+--- field config.received.value
+type: uint
+
+The value that was stored and rejected. Present only when the value was
+well-typed and out of range — there is nothing to report for a value that
+was missing or of the wrong type entirely.
+
+--- field config.retained.value
+type: uint
+
+The value still in effect after the rejection. Configuration validation is
+reject-or-keep and never clamps, so this is the last known-good value, not
+a corrected version of what was stored.
+
+**The registry and this field can legitimately disagree.** The registry
+shows what was written; this shows what the subsystem is actually using.
+
+--- group subject
+include: subject.token.sid
+include: subject.token.groups
+include: subject.token.group_attributes
+include: subject.token.integrity
+include: subject.token.id
+include: subject.token.auth_id
+include: subject.token.impersonation
+include: subject.token.uid
+include: subject.process.pid
+include: subject.process.name
+include: subject.process.executable
+include: subject.pip.type
+include: subject.pip.trust
+
+The security context an operation ran under, carried by every KACS event
+that has a causing principal. Three components: the effective token, the
+process it ran in, and the PIP state in force.
+
+**The token and the process are different principals when impersonating.**
+The token is the client's and the process is the server's, so reading the
+pair as one identity will attribute a client's work to a server or the
+reverse. `subject.token.impersonation` is what tells you they have diverged
+— any value other than 0 means they have.
+
+The token's durable GUIDs are not repeated here. `subject.token.guid`,
+`subject.true_token.guid` and `subject.process.guid` ride in the event
+header, so they are present on every event whether or not this group is.
+
+Privileges, claims, the restricted-SID list, confinement state and the
+default DACL are all deliberately absent. Each is unbounded and an event
+embedding them could grow without limit. Code needing full token state
+queries the token directly while it still exists; this group is for
+correlation, not reconstruction.
+
