@@ -397,12 +397,68 @@ static void unprivileged_child(void)
 	check_errno(mount("none", "/tmp", "ext4", 0, NULL), EPERM,
 		    "ext4 in a private table must be EPERM");
 	errno = 0;
-	check_errno(mount("none", "/tmp", "stratafs", 0, "strata=/sub+ro"), EPERM,
-		    "stratafs in a private table must be EPERM");
-	errno = 0;
 	check_errno(mount("none", "/tmp", "sysfs", 0, NULL), EPERM,
 		    "sysfs in a private table must be EPERM");
 	check(umount2("/proc", 0) == 0, "unmount of the private proc must succeed");
+
+	/*
+	 * stratafs: a read-only or absent-tolerant stack over directories the
+	 * caller can traverse is admitted; a create stratum is refused by
+	 * stratafs itself, whatever the table admits; and the parser, now
+	 * reachable without privilege, rejects what it should.
+	 */
+	make_dir("/tmp/hi");
+	make_dir("/tmp/lo");
+	make_dir("/view");
+	write_text("/tmp/hi/common", "hi");
+	write_text("/tmp/hi/hionly", "hi-only");
+	write_text("/tmp/lo/common", "lo");
+	write_text("/tmp/lo/loonly", "lo-only");
+	check(mount("none", "/view", "stratafs", 0,
+		    "strata=/tmp/hi+ro:/tmp/lo+ro") == 0,
+	      "read-only stratafs stack in a private table must succeed");
+	expect_text("/view/common", "hi");
+	expect_text("/view/hionly", "hi-only");
+	expect_text("/view/loonly", "lo-only");
+	errno = 0;
+	check_errno(open("/view/new", O_WRONLY | O_CREAT | O_CLOEXEC, 0644),
+		    EROFS, "a read-only stack must not create");
+	check(umount2("/view", 0) == 0,
+	      "unmount of the private stratafs must succeed");
+	check(mount("none", "/view", "stratafs", 0,
+		    "strata=/tmp/absent+am:/tmp/lo+ro") == 0,
+	      "absent-tolerant stratafs stack must succeed");
+	expect_text("/view/common", "lo");
+	check(umount2("/view", 0) == 0,
+	      "unmount of the absent-tolerant stack must succeed");
+	errno = 0;
+	check_errno(mount("none", "/view", "stratafs", 0,
+			  "strata=/tmp/hi+create:/tmp/lo+ro"), EPERM,
+		    "a create stratum must stay EPERM without the privilege");
+	errno = 0;
+	check_errno(mount("none", "/view", "stratafs", 0,
+			  "strata=/tmp/hi+create+ro:/tmp/lo"), EINVAL,
+		    "create plus ro must be EINVAL");
+	errno = 0;
+	check_errno(mount("none", "/view", "stratafs", 0,
+			  "strata=tmp/hi+ro"), EINVAL,
+		    "a relative stratum must be EINVAL");
+	errno = 0;
+	check_errno(mount("none", "/view", "stratafs", 0,
+			  "strata=/tmp/hi+ro:/tmp/hi+ro"), EINVAL,
+		    "a duplicate stratum must be EINVAL");
+	errno = 0;
+	check_errno(mount("none", "/view", "stratafs", 0,
+			  "strata=/tmp/absent+ro"), ENOENT,
+		    "a missing non-am stratum must be ENOENT");
+	errno = 0;
+	check_errno(mount("none", "/view", "stratafs", 0,
+			  "strata=/a:/b:/c:/d:/e:/f:/g:/h:/i:/j:/k:/l:/m:/n:/o:/p:/q"),
+		    EINVAL, "seventeen strata must be EINVAL");
+	errno = 0;
+	check_errno(mount("none", "/view", "stratafs", 0, "strata="), EINVAL,
+		    "an empty stack must be EINVAL");
+
 	check(umount2("/tmp", 0) == 0, "unmount of the private tmpfs must succeed");
 	expect_absent("/tmp/scratch");
 

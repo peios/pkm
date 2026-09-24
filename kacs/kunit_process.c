@@ -723,10 +723,12 @@ static void pkm_kunit_mntns_gate_denies_a_descriptor_naming_someone_else(
 }
 
 /*
- * A new filesystem is admitted by the descriptor only for the two types
- * whose parsers read nothing but the caller's own options: tmpfs and proc.
- * The allowlist is an attack-surface list, not policy -- the same descriptor
- * that admits tmpfs refuses ext4 -- and a privileged token is not asked it.
+ * A new filesystem is admitted by the descriptor only for the three types
+ * whose parsers read nothing but the caller's own options: tmpfs, proc and
+ * stratafs (whose own get_tree still refuses a create stratum to anyone
+ * but the TCB). The allowlist is an attack-surface list, not policy -- the
+ * same descriptor that admits tmpfs refuses ext4 -- and a privileged token
+ * is not asked it.
  */
 static void pkm_kunit_mntns_gate_new_fs_allowlist(struct kunit *test)
 {
@@ -736,9 +738,10 @@ static void pkm_kunit_mntns_gate_new_fs_allowlist(struct kunit *test)
 	} cases[] = {
 		{ "tmpfs", true },
 		{ "proc", true },
+		{ "stratafs", true },
 		{ "ext4", false },
 		{ "squashfs", false },
-		{ "stratafs", false },
+		{ "ntfs3", false },
 		{ "sysfs", false },
 		{ "iso9660", false },
 		{ "", false },

@@ -62,7 +62,7 @@ set -e
 
 fail=0
 # Both counts are pinned so a check that silently stops running is noticed.
-child_marker='MNTNS_SMOKE_CHILD_CHECKS: 39'
+child_marker='MNTNS_SMOKE_CHILD_CHECKS: 54'
 pass_marker='MNTNS_SMOKE_PASS: 6 parent checks'
 fatal_re='MNTNS_SMOKE_FAIL:|BUG:|Kernel panic|Oops:|KASAN:|UBSAN:|NULL pointer|Call Trace:|INFO: task .* blocked for more than|WARNING:'
 grep -Fq "$child_marker" "$log" || {

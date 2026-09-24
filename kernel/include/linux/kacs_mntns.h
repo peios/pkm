@@ -23,8 +23,8 @@ struct pkm_kacs_mntns_security;
  * What a mount-table change is, as far as the namespace descriptor is
  * concerned. BIND, UMOUNT and PIVOT_ROOT can be admitted by the descriptor;
  * NEW_FS can be, for the filesystem types KACS keeps on its allowlist
- * (tmpfs and proc, whose parsers take no untrusted image); OTHER always
- * needs the privilege.
+ * (tmpfs, proc and stratafs, whose parsers take no untrusted image); OTHER
+ * always needs the privilege.
  */
 #define PKM_KACS_MNTNS_OP_OTHER		0U
 #define PKM_KACS_MNTNS_OP_BIND		1U

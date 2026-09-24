@@ -17,13 +17,13 @@
  * descriptor, so the root table is reachable only through the privilege,
  * exactly as it was.
  *
- * A bind mount, an unmount, pivot_root, and a new tmpfs or proc can be
- * admitted by the descriptor. Everything else — any other filesystem type, a
- * remount, a move, a propagation change, the new mount API — still needs the
- * privilege, so a private table never puts a filesystem parser that reads an
- * untrusted image in reach of an unprivileged caller. The allowlist is a
- * kernel attack-surface list, never a policy knob: who may change a table is
- * decided by the table's descriptor alone. The other Linux reasons for gating
+ * A bind mount, an unmount, pivot_root, and a new tmpfs, proc or stratafs
+ * can be admitted by the descriptor. Everything else — any other filesystem
+ * type, a remount, a move, a propagation change, the new mount API — still
+ * needs the privilege, so a private table never puts a filesystem parser that
+ * reads an untrusted image in reach of an unprivileged caller. The allowlist
+ * is a kernel attack-surface list, never a policy knob: who may change a
+ * table is decided by the table's descriptor alone. The other Linux reasons for gating
  * a private table do not apply here: the token never changes at exec, and
  * every file access is decided on the real object's descriptor, so a bind
  * mount shows a name and denies at open.
@@ -134,15 +134,21 @@ static bool pkm_kacs_mntns_op_admissible(unsigned int op)
 
 /*
  * The filesystem types an unprivileged caller may bring into being in a
- * table it holds the mount right on. Both read nothing but the caller's
- * own mount options: tmpfs has no backing image and proc is a view of the
- * kernel's own state. A type that parses an image (ext4, squashfs, iso9660,
- * ntfs3 ...) or that KACS itself governs specially (stratafs) is not here
- * and stays privileged whatever a descriptor grants.
+ * table it holds the mount right on. All three read nothing but the
+ * caller's own mount options: tmpfs has no backing image, proc is a view of
+ * the kernel's own state, and stratafs is a view of directories the caller
+ * can already traverse, every access through it decided on the providing
+ * object. A stratafs stack with a create stratum is refused by stratafs
+ * itself (its get_tree demands the initial user namespace and
+ * CAP_SYS_ADMIN, which is SeTcb here), so an unprivileged caller gets
+ * read-only and absent-tolerant stacks only. A type that parses an image
+ * (ext4, squashfs, iso9660, ntfs3 ...) is not here and stays privileged
+ * whatever a descriptor grants.
  */
 static bool pkm_kacs_mntns_fs_type_admissible(const char *fstype)
 {
-	return fstype && (!strcmp(fstype, "tmpfs") || !strcmp(fstype, "proc"));
+	return fstype && (!strcmp(fstype, "tmpfs") || !strcmp(fstype, "proc") ||
+			  !strcmp(fstype, "stratafs"));
 }
 
 bool pkm_kacs_may_mount_op_for_token(const void *subject_token,
