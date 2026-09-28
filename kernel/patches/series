@@ -105,3 +105,6 @@ fs/namespace-mount-namespace-objects.patch
 # super-mount-volume-privilege, whose call it replaces.
 fs/namespace-mount-namespace-new-fs.patch
 fs/super-mount-namespace-objects.patch
+
+# PEI-1184: ordinary IPv4/IPv6 echo datagrams use PNP, not POSIX groups.
+net/icmp-echo-datagram-peios.patch

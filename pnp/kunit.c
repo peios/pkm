@@ -10,6 +10,10 @@
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
 #include <linux/icmp.h>
+#include <linux/delay.h>
+#include <linux/rtnetlink.h>
+#include <net/ip.h>
+#include <net/ipv6.h>
 #include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <linux/netfilter.h>
@@ -1082,6 +1086,174 @@ static void pnp_kunit_own_refusals_bypass_the_seats(struct kunit *test)
 	kfree_skb(skb);
 }
 
+/* Ordinary echo is never a PNP-generated refusal. Both families and both
+ * echo types must traverse Packet and RawPacket enforcement in each direction.
+ */
+static void pnp_kunit_echo_obeys_policy(struct kunit *test)
+{
+	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_hook_state state = { .in = dev, .out = dev, .net = &init_net };
+	u64 bypassed = atomic64_read(&peios_pnp_stats.refusals_bypassed);
+	int family, reply, layer, allow;
+
+	for (layer = 0; layer < 2; layer++) {
+		for (allow = 0; allow < 2; allow++) {
+			void *b = pnp_rust_builder_new(), *forest = NULL;
+			u8 policy_layer = layer ? PEIOS_PNP_LAYER_RAWPACKET :
+				PEIOS_PNP_LAYER_PACKET;
+			KUNIT_ASSERT_NOT_NULL(test, b);
+			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "echo", 4), 0);
+			pnp_test_actions(test, b, allow ? "PASS" : "DROP");
+			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+			KUNIT_ASSERT_EQ(test, pnp_rust_builder_build(b, policy_layer, &forest), 0);
+			KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(
+				layer ? NULL : forest, layer ? forest : NULL, NULL, 1), 0);
+			for (family = 0; family < 2; family++) {
+				for (reply = 0; reply < 2; reply++) {
+					struct sk_buff *skb = alloc_skb(256, GFP_KERNEL);
+					unsigned char *icmp;
+					unsigned int expected = allow ? NF_ACCEPT : NF_DROP;
+					KUNIT_ASSERT_NOT_NULL(test, skb);
+					skb_reserve(skb, 64);
+					skb_reset_network_header(skb);
+					if (family) {
+						struct ipv6hdr *ip = skb_put_zero(skb, sizeof(*ip));
+						ip->version = 6;
+						ip->nexthdr = IPPROTO_ICMPV6;
+						ip->payload_len = htons(8);
+						ip->hop_limit = 64;
+						ip->saddr.s6_addr[15] = 1;
+						ip->daddr.s6_addr[15] = 2;
+						skb->protocol = htons(ETH_P_IPV6);
+						state.pf = NFPROTO_IPV6;
+					} else {
+						struct iphdr *ip = skb_put_zero(skb, sizeof(*ip));
+						ip->version = 4;
+						ip->ihl = 5;
+						ip->protocol = IPPROTO_ICMP;
+						ip->tot_len = htons(sizeof(*ip) + 8);
+						ip->ttl = 64;
+						ip->saddr = htonl(0x0a000001);
+						ip->daddr = htonl(0x0a000002);
+						skb->protocol = htons(ETH_P_IP);
+						state.pf = NFPROTO_IPV4;
+					}
+					skb_reset_transport_header(skb);
+					icmp = skb_put_zero(skb, 8);
+					icmp[0] = family ? (reply ? 129 : 128) :
+						(reply ? ICMP_ECHOREPLY : ICMP_ECHO);
+					KUNIT_EXPECT_FALSE(test, skb->pnp_refusal);
+					state.hook = layer ? NF_NETDEV_INGRESS : NF_INET_LOCAL_IN;
+					KUNIT_EXPECT_EQ(test, layer ?
+						peios_pnp_hook_ingress(NULL, skb, &state) :
+						peios_pnp_hook_local_in(NULL, skb, &state), expected);
+					state.hook = NF_NETDEV_EGRESS;
+					KUNIT_EXPECT_EQ(test, peios_pnp_hook_egress(NULL, skb, &state), expected);
+					kfree_skb(skb);
+				}
+			}
+		}
+	}
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.refusals_bypassed), bypassed);
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1), 0);
+}
+
+/* Actual loopback echo traverses the registered networking hooks. Publishing
+ * one narrowly matched DROP must stop requests and replies independently,
+ * without relying on a caller knowing that a firewall exists.
+ */
+static void pnp_kunit_echo_on_wire(struct kunit *test)
+{
+	struct net_device *lo = init_net.loopback_dev;
+	bool was_up = !!(lo->flags & IFF_UP);
+	int family, block;
+
+	rtnl_lock();
+	KUNIT_EXPECT_EQ(test, dev_open(lo, NULL), 0);
+	rtnl_unlock();
+	msleep(50);
+	for (family = 0; family < 2; family++) {
+		for (block = 0; block < 5; block++) {
+			void *b = pnp_rust_builder_new(), *forest = NULL;
+			struct socket *sock = NULL;
+			struct sockaddr_storage address = { 0 };
+			struct msghdr msg = { 0 };
+			unsigned char packet[8] = { 0 }, response[128];
+			struct kvec vec;
+			int address_len, ret, received = -EAGAIN, retry;
+			unsigned int type = family ? 128 : ICMP_ECHO;
+			KUNIT_ASSERT_NOT_NULL(test, b);
+			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "echo", 4), 0);
+			pnp_test_actions(test, b, "PASS");
+			if (block) {
+				const char *direction = block % 2 ? "out" : "in";
+				unsigned int denied_type = block > 2 ?
+					(family ? 129 : ICMP_ECHOREPLY) : type;
+				KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "deny", 4), 0);
+				KUNIT_ASSERT_EQ(test, pnp_rust_builder_value_str(b,
+					"Direction.Equal", 15, direction, strlen(direction)), 0);
+				KUNIT_ASSERT_EQ(test, pnp_rust_builder_value_int(b,
+					"IcmpType.Equal", 14, denied_type), 0);
+				pnp_test_actions(test, b, "DROP");
+				KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+			}
+			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+			KUNIT_ASSERT_EQ(test, pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET, &forest), 0);
+			KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, NULL, 1), 0);
+			ret = sock_create(family ? AF_INET6 : AF_INET, SOCK_DGRAM,
+				family ? IPPROTO_ICMPV6 : IPPROTO_ICMP, &sock);
+			KUNIT_ASSERT_EQ(test, ret, 0);
+			if (family) {
+				struct sockaddr_in6 *a = (void *)&address;
+				a->sin6_family = AF_INET6;
+				a->sin6_addr = in6addr_loopback;
+				address_len = sizeof(*a);
+			} else {
+				struct sockaddr_in *a = (void *)&address;
+				a->sin_family = AF_INET;
+				a->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+				address_len = sizeof(*a);
+			}
+			packet[0] = type;
+			if (!family)
+				((struct icmphdr *)packet)->checksum = ip_compute_csum(packet, sizeof(packet));
+			msg.msg_name = &address;
+			msg.msg_namelen = address_len;
+			vec.iov_base = packet;
+			vec.iov_len = sizeof(packet);
+			ret = kernel_sendmsg(sock, &msg, &vec, 1, sizeof(packet));
+			if (!block)
+				KUNIT_EXPECT_EQ(test, ret, (int)sizeof(packet));
+			/* A drop may be reported at send or consume the skb later. */
+			for (retry = 0; retry < 20; retry++) {
+				memset(&msg, 0, sizeof(msg));
+				vec.iov_base = response;
+				vec.iov_len = sizeof(response);
+				received = kernel_recvmsg(sock, &msg, &vec, 1,
+						  sizeof(response), MSG_DONTWAIT);
+				if (received != -EAGAIN)
+					break;
+				msleep(5);
+			}
+			if (block)
+				KUNIT_EXPECT_EQ_MSG(test, received, -EAGAIN,
+					"family=%d block=%d", family, block);
+			else {
+				KUNIT_EXPECT_EQ(test, received, (int)sizeof(packet));
+				if (received > 0)
+					KUNIT_EXPECT_EQ(test, response[0], (u8)(family ? 129 : ICMP_ECHOREPLY));
+			}
+			sock_release(sock);
+		}
+	}
+	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1), 0);
+	if (!was_up) {
+		rtnl_lock();
+		dev_close(lo);
+		rtnl_unlock();
+	}
+}
+
 static void pnp_kunit_downward_tag_read_refused(struct kunit *test)
 {
 	void *b, *packet = NULL, *flow = NULL;
@@ -1473,6 +1645,8 @@ static struct kunit_case pnp_kunit_cases[] = {
 	KUNIT_CASE(pnp_kunit_refusal_is_built_and_marked),
 	KUNIT_CASE(pnp_kunit_teardown_resets_the_far_end),
 	KUNIT_CASE(pnp_kunit_own_refusals_bypass_the_seats),
+	KUNIT_CASE(pnp_kunit_echo_obeys_policy),
+	KUNIT_CASE(pnp_kunit_echo_on_wire),
 	KUNIT_CASE(pnp_kunit_downward_tag_read_refused),
 	KUNIT_CASE(pnp_kunit_identity_facts),
 	KUNIT_CASE(pnp_kunit_network_context),

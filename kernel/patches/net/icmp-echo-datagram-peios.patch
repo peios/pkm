@@ -1,0 +1,17 @@
+diff --git a/net/ipv4/ping.c b/net/ipv4/ping.c
+--- a/net/ipv4/ping.c
++++ b/net/ipv4/ping.c
+@@ -259,6 +259,13 @@
+ 
+ 	if (sk->sk_family == AF_INET6)
+ 		sk->sk_ipv6only = 1;
++
++	/* Peios: echo datagrams are ordinary user traffic, governed by PNP.
++	 * This removes only the legacy GID gate. Raw sockets still require
++	 * their existing authority; no packet is exempted from a PNP seat.
++	 */
++	if (IS_ENABLED(CONFIG_SECURITY_PKM))
++		return 0;
+ 
+ 	inet_get_ping_group_range_net(net, &low, &high);
+ 	if (gid_lte(low, group) && gid_lte(group, high))
