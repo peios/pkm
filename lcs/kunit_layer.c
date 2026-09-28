@@ -791,7 +791,12 @@ static void pkm_lcs_kunit_base_layer_default_sd_allows_system_and_admin(
 }
 
 
-static void pkm_lcs_kunit_base_layer_default_sd_denies_service(
+/*
+ * Anyone who has authenticated may write into the base layer, and what they
+ * may write is each key's own descriptor's to say. A service with no
+ * privileges and no administrator's group is such a one.
+ */
+static void pkm_lcs_kunit_base_layer_default_sd_allows_authenticated(
 	struct kunit *test)
 {
 	struct pkm_lcs_key_open_access_plan plan = { };
@@ -809,13 +814,39 @@ static void pkm_lcs_kunit_base_layer_default_sd_denies_service(
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_layer_write_access_check_for_token(
 				token, sd, sd_len, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	pkm_kacs_free((void *)sd);
+	kacs_rust_token_drop(token);
+}
+
+
+/* The anonymous have not authenticated, and the base layer is not theirs. */
+static void pkm_lcs_kunit_base_layer_default_sd_denies_anonymous(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token = pkm_kacs_boot_anonymous_token_ptr();
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	sd = kacs_rust_create_lcs_base_layer_default_sd(&sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	KUNIT_ASSERT_GT(test, sd_len, (size_t)0);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_layer_write_access_check_for_token(
+				token, sd, sd_len, &plan),
 			(long)-EACCES);
 	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
 	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
 	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
 
 	pkm_kacs_free((void *)sd);
-	kacs_rust_token_drop(token);
 }
 
 
@@ -867,7 +898,7 @@ static void pkm_lcs_kunit_base_layer_write_absent_uses_default(
 }
 
 
-static void pkm_lcs_kunit_base_layer_write_absent_denies_service(
+static void pkm_lcs_kunit_base_layer_write_absent_allows_authenticated(
 	struct kunit *test)
 {
 	struct pkm_lcs_key_open_access_plan plan = { };
@@ -880,12 +911,30 @@ static void pkm_lcs_kunit_base_layer_write_absent_denies_service(
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_base_layer_write_access_check_for_token(
 				token, false, NULL, 0, &plan),
+			0L);
+	KUNIT_EXPECT_EQ(test, plan.allowed, 1U);
+	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
+	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, KEY_SET_VALUE);
+
+	kacs_rust_token_drop(token);
+}
+
+
+static void pkm_lcs_kunit_base_layer_write_absent_denies_anonymous(
+	struct kunit *test)
+{
+	struct pkm_lcs_key_open_access_plan plan = { };
+	const void *token = pkm_kacs_boot_anonymous_token_ptr();
+
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_base_layer_write_access_check_for_token(
+				token, false, NULL, 0, &plan),
 			(long)-EACCES);
 	KUNIT_EXPECT_EQ(test, plan.allowed, 0U);
 	KUNIT_EXPECT_EQ(test, plan.requested_access, KEY_SET_VALUE);
 	KUNIT_EXPECT_EQ(test, plan.fd_granted_access, 0U);
-
-	kacs_rust_token_drop(token);
 }
 
 
@@ -2268,10 +2317,12 @@ static struct kunit_case pkm_lcs_kunit_layer_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_layer_write_access_malformed_sd_eio),
 	KUNIT_CASE(pkm_lcs_kunit_layer_write_access_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_default_sd_allows_system_and_admin),
-	KUNIT_CASE(pkm_lcs_kunit_base_layer_default_sd_denies_service),
+	KUNIT_CASE(pkm_lcs_kunit_base_layer_default_sd_allows_authenticated),
+	KUNIT_CASE(pkm_lcs_kunit_base_layer_default_sd_denies_anonymous),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_present_sd_overrides_default),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_uses_default),
-	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_denies_service),
+	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_allows_authenticated),
+	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_absent_denies_anonymous),
 	KUNIT_CASE(pkm_lcs_kunit_base_layer_write_bad_inputs),
 	KUNIT_CASE(pkm_lcs_kunit_layer_table_publish_snapshot_remove),
 	KUNIT_CASE(pkm_lcs_kunit_layer_owner_unresolvable_blocks_publication),

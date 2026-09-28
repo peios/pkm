@@ -170,6 +170,7 @@ const KACS_TOKEN_DEFAULT_SELF_ACCESS: u32 = KACS_TOKEN_QUERY
     | KACS_TOKEN_ADJUST_GROUPS
     | KACS_TOKEN_ADJUST_DEFAULT;
 const LCS_REGISTRY_KEY_ALL_ACCESS: u32 = 0x000F_003F;
+const LCS_REGISTRY_KEY_SET_VALUE: u32 = 0x0000_0002;
 const TOKEN_MANDATORY_POLICY_ALLOWED_MASK: u32 =
     TOKEN_MANDATORY_POLICY_NO_WRITE_UP | TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN;
 const TOKEN_AUDIT_POLICY_ALLOWED_MASK: u32 = AUDIT_POLICY_OBJECT_ACCESS_SUCCESS
@@ -2588,15 +2589,31 @@ fn build_process_sd_bytes(
     let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).map_err(|_| -EINVAL)?;
     let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
     let everyone = Sid::parse(EVERYONE_SID_BYTES).map_err(|_| -EINVAL)?;
+
+    build_allow_sd_bytes(
+        owner_sid,
+        group_sid,
+        &[
+            (self_mask, owner_sid),
+            (admin_mask, administrators),
+            (system_mask, system),
+            (everyone_mask, everyone),
+        ],
+    )
+}
+
+/// A self-relative descriptor with every part defaulted: the owner, the
+/// group, and a DACL holding an allow ACE, in the order given, for each
+/// entry of `aces` that has a mask.
+fn build_allow_sd_bytes(
+    owner_sid: Sid<'_>,
+    group_sid: Sid<'_>,
+    aces: &[(Option<u32>, Sid<'_>)],
+) -> Result<(*mut u8, usize), i32> {
     let mut ace_count = 0usize;
     let mut dacl_len = ACL_HEADER_LEN;
 
-    for (mask, sid) in [
-        (self_mask, owner_sid),
-        (admin_mask, administrators),
-        (system_mask, system),
-        (everyone_mask, everyone),
-    ] {
+    for &(mask, sid) in aces {
         if mask.is_some() {
             ace_count = ace_count.checked_add(1).ok_or(-ERANGE)?;
             dacl_len = dacl_len.checked_add(ace_len_for_sid(sid)?).ok_or(-ERANGE)?;
@@ -2643,12 +2660,7 @@ fn build_process_sd_bytes(
     write_le_u16(bytes, dacl_offset + 4, ace_count as u16);
     write_le_u16(bytes, dacl_offset + 6, 0);
 
-    for (mask, sid) in [
-        (self_mask, owner_sid),
-        (admin_mask, administrators),
-        (system_mask, system),
-        (everyone_mask, everyone),
-    ] {
+    for &(mask, sid) in aces {
         if let Some(mask) = mask {
             let written = write_allow_ace(&mut bytes[dacl_offset..], cursor, mask, sid)?;
             cursor = cursor.checked_add(written).ok_or(-ERANGE)?;
@@ -4645,16 +4657,25 @@ fn build_read_only_socket_sd_bytes(token: &PkmKacsBootToken) -> Result<(*mut u8,
     )
 }
 
+/// Who may write into the base layer while it has no metadata key to say
+/// (LCS §5.3.4): SYSTEM and Administrators everything, and anyone who has
+/// authenticated `KEY_SET_VALUE`, which is the one right a write into a
+/// layer is checked for. A person can then write what a key's own
+/// descriptor lets them, their own `Users\<SID>` first of all, and the base
+/// layer refuses only those who are nobody: the anonymous.
 fn build_lcs_base_layer_default_sd_bytes() -> Result<(*mut u8, usize), i32> {
     let system = Sid::parse(SYSTEM_SID_BYTES).map_err(|_| -EINVAL)?;
+    let administrators = Sid::parse(ADMINISTRATORS_SID_BYTES).map_err(|_| -EINVAL)?;
+    let authenticated_users = Sid::parse(AUTHENTICATED_USERS_SID_BYTES).map_err(|_| -EINVAL)?;
 
-    build_process_sd_bytes(
+    build_allow_sd_bytes(
         system,
         system,
-        None,
-        Some(LCS_REGISTRY_KEY_ALL_ACCESS),
-        Some(LCS_REGISTRY_KEY_ALL_ACCESS),
-        None,
+        &[
+            (Some(LCS_REGISTRY_KEY_ALL_ACCESS), administrators),
+            (Some(LCS_REGISTRY_KEY_ALL_ACCESS), system),
+            (Some(LCS_REGISTRY_KEY_SET_VALUE), authenticated_users),
+        ],
     )
 }
 
@@ -9689,7 +9710,8 @@ pub extern "C" fn kacs_rust_kunit_create_read_only_socket_sd(
 }
 
 #[no_mangle]
-/// Builds the PSD-005 first-boot base-layer metadata SD.
+/// Builds the descriptor that says who may write into the base layer while
+/// it has no metadata key (LCS §5.3.4).
 pub extern "C" fn kacs_rust_create_lcs_base_layer_default_sd(
     len_out: *mut usize,
 ) -> *const u8 {
