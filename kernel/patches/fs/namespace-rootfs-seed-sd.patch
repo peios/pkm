@@ -2,7 +2,7 @@ diff --git a/fs/namespace.c b/fs/namespace.c
 index 854f4fc66..4cb175a62 100644
 --- a/fs/namespace.c
 +++ b/fs/namespace.c
-@@ -6158,6 +6158,50 @@ static void __init init_mount_tree(void)
+@@ -6158,6 +6158,55 @@ static void __init init_mount_tree(void)
  	if (IS_ERR(mnt))
  		panic("Can't create rootfs");
  
@@ -44,9 +44,14 @@ index 854f4fc66..4cb175a62 100644
 +						 sizeof(pkm_rootfs_root_sd),
 +						 0);
 +		inode_unlock(pkm_root_inode);
++		/*
++		 * Fatal: without it nothing the initramfs puts on the rootfs
++		 * can be reached through a StrataFS view, and the boot fails
++		 * later, in a hook, far from the cause.
++		 */
 +		if (pkm_xerr)
-+			pr_warn("pkm: seed rootfs root SD failed: %d\n",
-+				pkm_xerr);
++			panic("pkm: cannot seed the rootfs root's security descriptor: %d\n",
++			      pkm_xerr);
 +	}
 +#endif
 +

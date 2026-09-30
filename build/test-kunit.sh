@@ -44,7 +44,10 @@ suite_marker='pkm: kunit scaffold smoke passed'
 summary_re='# pkm(_lcs)?_kunit[a-z_]*: pass:[0-9]+ fail:0 skip:[0-9]+ total:[0-9]+'
 fatal_re='BUG:|Kernel panic|Oops:|INFO: task .* blocked for more than|EXPECTATION FAILED|ASSERTION FAILED|not ok [0-9]+|# .*fail:[1-9]'
 
-append='console=ttyS0 loglevel=7 ignore_loglevel panic=-1 kunit.enable=1 kunit_shutdown=poweroff'
+# root= is there because an installed system always passes one, and upstream
+# then makes the rootfs a ramfs, which can hold no descriptor (PEI-1211). The
+# device is never opened: kunit_shutdown powers off before any root is mounted.
+append='console=ttyS0 loglevel=7 ignore_loglevel panic=-1 kunit.enable=1 kunit_shutdown=poweroff root=/dev/vda'
 [[ -n "${PKM_KUNIT_FILTER:-}" ]] && append+=" kunit.filter_glob=${PKM_KUNIT_FILTER}"
 
 qemu_args=(

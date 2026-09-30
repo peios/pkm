@@ -107,6 +107,12 @@ fi
 require_set CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY y
 require_set CONFIG_SECURITY_LOCKDOWN_LSM_EARLY y
 
+# The initramfs root is a tmpfs and its root's descriptor is seeded as an
+# xattr (init/rootfs-always-tmpfs.patch, fs/namespace-rootfs-seed-sd.patch).
+# Without tmpfs xattrs the seed fails and the kernel panics at boot (PEI-1211).
+require_set CONFIG_TMPFS y
+require_set CONFIG_TMPFS_XATTR y
+
 # --- PNP: Peios Network Policy (PEI-598) ---
 # The engine must be in, its machinery built-in (built-in PNP calls these
 # symbols on the packet path), and the replaced policy frontends must stay

@@ -231,6 +231,31 @@ static void pkm_kunit_nullfs_root_is_unmanaged_and_unseeded(struct kunit *test)
 }
 
 /*
+ * Section 3.9.5 (PEI-1211): the rootfs is a tmpfs whose root holds the seeded
+ * descriptor, so StrataFS can authorise a walk into it. test-kunit.sh boots
+ * with root= on the command line, which upstream takes as a reason to make
+ * the rootfs a ramfs: no xattrs, so no seed, and every StrataFS view the
+ * initramfs mounts over it refused.
+ */
+static void pkm_kunit_rootfs_is_a_seeded_tmpfs_despite_root_param(
+	struct kunit *test)
+{
+	struct path rootfs = { };
+
+	KUNIT_ASSERT_NOT_NULL(test, pkm_kacs_current_effective_token_ptr());
+	KUNIT_ASSERT_EQ(test, kern_path("/", LOOKUP_DIRECTORY, &rootfs), 0);
+	KUNIT_EXPECT_EQ(test, rootfs.dentry->d_sb->s_magic,
+			(unsigned long)TMPFS_MAGIC);
+	/* What a StrataFS view over it asks: the stored descriptor, never a
+	 * synthesised one. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_stratafs_authorize_path(&rootfs,
+							 KACS_FILE_TRAVERSE),
+			0);
+	path_put(&rootfs);
+}
+
+/*
  * Section 3.9.5: eviction frees the cached descriptor through the RCU
  * destructor with the same pin draining as invalidation, so a permission
  * check holding a pin sees the object intact until it lets go.
@@ -10798,6 +10823,7 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_backing_file_rejects_unsettled_outer_handles),
 	KUNIT_CASE(pkm_kunit_copy_up_backing_file_requires_explicit_adoption),
 	KUNIT_CASE(pkm_kunit_nullfs_root_is_unmanaged_and_unseeded),
+	KUNIT_CASE(pkm_kunit_rootfs_is_a_seeded_tmpfs_despite_root_param),
 	KUNIT_CASE(pkm_kunit_inode_eviction_drains_pins_before_freeing),
 	KUNIT_CASE(pkm_kunit_file_fsync_requires_synchronize_snapshot),
 	KUNIT_CASE(pkm_kunit_file_mmap_snapshot_shared_write),

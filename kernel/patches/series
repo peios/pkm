@@ -108,3 +108,8 @@ fs/super-mount-namespace-objects.patch
 
 # PEI-1184: ordinary IPv4/IPv6 echo datagrams use PNP, not POSIX groups.
 net/icmp-echo-datagram-peios.patch
+
+# PEI-1211: the initramfs root is a tmpfs even when the command line carries
+# root=, so namespace-rootfs-seed-sd has an xattr to write. init/do_mounts.c
+# only; no other patch touches it.
+init/rootfs-always-tmpfs.patch

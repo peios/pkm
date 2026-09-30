@@ -48,12 +48,17 @@ u32 pkm_kacs_mount_policy_for_magic(unsigned long magic)
 		return KACS_MOUNT_POLICY_UNMANAGED;
 	case RAMFS_MAGIC:
 		/*
-		 * rootfs / ramfs ONLY (RAMFS_MAGIC, 0x858458f6) — the initial
-		 * ramfs the kernel populates from the boot cpio and runs before
-		 * switch_root. It has no SD storage and its cpio-extracted
-		 * inodes are not stamped, so DENY_MISSING would block prelude
-		 * itself; synthesize an ephemeral SD from the mount template
-		 * instead. The trust chain is the kernel image it ships with.
+		 * ramfs (RAMFS_MAGIC, 0x858458f6) has no SD storage at all, so
+		 * DENY_MISSING would lock every inode on one; synthesize an
+		 * ephemeral SD from the mount template instead.
+		 *
+		 * This is NOT the initramfs root. Upstream makes rootfs a ramfs
+		 * when the command line carries root=, but on a PKM kernel it is
+		 * always a tmpfs (init/rootfs-always-tmpfs.patch): its root is
+		 * seeded and everything the boot cpio unpacks inherits from it.
+		 * A synthesized SD would not do there, because StrataFS reads a
+		 * provider's stored SD and never synthesizes one, so the views
+		 * the initramfs mounts over a ramfs root refuse every walk.
 		 *
 		 * Deliberately NOT tmpfs or squashfs: those are distinct magics
 		 * (TMPFS_MAGIC 0x01021994, SQUASHFS_MAGIC 0x73717368) and fall
