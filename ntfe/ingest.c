@@ -3,7 +3,7 @@
  * Registry ingestion: Machine\System\Network -> published policy and
  * network context.
  *
- * The kernel reads its own policy (ratified: pnpd is an observer and an
+ * The kernel reads its own policy (ratified: pnpd is an observer and an
  * authoring surface, never in the enforcement path). The walk follows the
  * house idioms — discovery via pkm_lcs_walk_absolute_components (the
  * port-reservations pattern), per-key RSI_ENUM_CHILDREN + RSI_QUERY_VALUES
@@ -36,7 +36,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
@@ -45,21 +45,21 @@
 
 #include "../../security/pkm/lcs/rsi.h"
 #include "../../security/pkm/lcs/source_device.h"
-#include "pnp.h"
+#include "ntfe.h"
 
 /* Registry value type codes (uapi/pkm/lcs.h). */
-#define PNP_REG_SZ			1U
-#define PNP_REG_EXPAND_SZ		2U
-#define PNP_REG_DWORD			4U
-#define PNP_REG_DWORD_BIG_ENDIAN	5U
-#define PNP_REG_MULTI_SZ		7U
-#define PNP_REG_QWORD			11U
+#define NTFE_REG_SZ			1U
+#define NTFE_REG_EXPAND_SZ		2U
+#define NTFE_REG_DWORD			4U
+#define NTFE_REG_DWORD_BIG_ENDIAN	5U
+#define NTFE_REG_MULTI_SZ		7U
+#define NTFE_REG_QWORD			11U
 
-/* Walk bounds: PNP's own, on top of the LCS runtime limits. */
-#define PEIOS_PNP_MAX_RULE_DEPTH	12
-#define PEIOS_PNP_MAX_RULES		4096
+/* Walk bounds: NTFE's own, on top of the LCS runtime limits. */
+#define PEIOS_NTFE_MAX_RULE_DEPTH	12
+#define PEIOS_NTFE_MAX_RULES		4096
 
-struct peios_pnp_walk {
+struct peios_ntfe_walk {
 	u32 source_id;
 	u64 next_sequence;
 	struct pkm_lcs_runtime_limits limits;
@@ -71,14 +71,14 @@ struct peios_pnp_walk {
 };
 
 /* The digest of the last rules walk that published; 0 = never. */
-static u64 pnp_published_digest;
+static u64 ntfe_published_digest;
 /* One refresh at a time: bootstrap and the deferred re-walk may overlap. */
-static DEFINE_MUTEX(pnp_refresh_lock);
+static DEFINE_MUTEX(ntfe_refresh_lock);
 
-#define PNP_FNV_OFFSET	0xcbf29ce484222325ULL
-#define PNP_FNV_PRIME	0x100000001b3ULL
+#define NTFE_FNV_OFFSET	0xcbf29ce484222325ULL
+#define NTFE_FNV_PRIME	0x100000001b3ULL
 
-static void pnp_digest_bytes(struct peios_pnp_walk *walk, const void *data,
+static void ntfe_digest_bytes(struct peios_ntfe_walk *walk, const void *data,
 			     size_t len)
 {
 	const u8 *p = data;
@@ -86,20 +86,20 @@ static void pnp_digest_bytes(struct peios_pnp_walk *walk, const void *data,
 
 	while (len--) {
 		h ^= *p++;
-		h *= PNP_FNV_PRIME;
+		h *= NTFE_FNV_PRIME;
 	}
 	/* A separator, so "ab"+"c" and "a"+"bc" digest differently. */
 	h ^= 0xff;
-	h *= PNP_FNV_PRIME;
+	h *= NTFE_FNV_PRIME;
 	walk->digest = h;
 }
 
-static void pnp_digest_u32(struct peios_pnp_walk *walk, u32 v)
+static void ntfe_digest_u32(struct peios_ntfe_walk *walk, u32 v)
 {
-	pnp_digest_bytes(walk, &v, sizeof(v));
+	ntfe_digest_bytes(walk, &v, sizeof(v));
 }
 
-long peios_pnp_network_root_discover_from_machine_hive(u32 source_id,
+long peios_ntfe_network_root_discover_from_machine_hive(u32 source_id,
 						       const u8 machine_root_guid[16],
 						       bool *present_out,
 						       u8 network_guid_out[16])
@@ -149,56 +149,56 @@ out:
 }
 
 /* Strips registry-string NUL termination (single or REG_MULTI_SZ style). */
-static u32 pnp_str_trim(const u8 *data, u32 len)
+static u32 ntfe_str_trim(const u8 *data, u32 len)
 {
 	while (len && data[len - 1] == '\0')
 		len--;
 	return len;
 }
 
-static long pnp_feed_value(struct peios_pnp_walk *walk, const char *name,
+static long ntfe_feed_value(struct peios_ntfe_walk *walk, const char *name,
 			   u32 name_len, u32 type, const u8 *data, u32 len)
 {
-	pnp_digest_bytes(walk, name, name_len);
-	pnp_digest_u32(walk, type);
-	pnp_digest_bytes(walk, data, len);
+	ntfe_digest_bytes(walk, name, name_len);
+	ntfe_digest_u32(walk, type);
+	ntfe_digest_bytes(walk, data, len);
 	switch (type) {
-	case PNP_REG_SZ:
-	case PNP_REG_EXPAND_SZ:
-		return pnp_rust_builder_value_str(walk->builder, name,
+	case NTFE_REG_SZ:
+	case NTFE_REG_EXPAND_SZ:
+		return ntfe_rust_builder_value_str(walk->builder, name,
 						  name_len, data,
-						  pnp_str_trim(data, len));
-	case PNP_REG_DWORD:
+						  ntfe_str_trim(data, len));
+	case NTFE_REG_DWORD:
 		if (len != 4)
 			return -EINVAL;
-		return pnp_rust_builder_value_int(walk->builder, name,
+		return ntfe_rust_builder_value_int(walk->builder, name,
 						  name_len,
 						  get_unaligned_le32(data));
-	case PNP_REG_DWORD_BIG_ENDIAN:
+	case NTFE_REG_DWORD_BIG_ENDIAN:
 		if (len != 4)
 			return -EINVAL;
-		return pnp_rust_builder_value_int(walk->builder, name,
+		return ntfe_rust_builder_value_int(walk->builder, name,
 						  name_len,
 						  get_unaligned_be32(data));
-	case PNP_REG_QWORD:
+	case NTFE_REG_QWORD:
 		if (len != 8)
 			return -EINVAL;
-		return pnp_rust_builder_value_int(
+		return ntfe_rust_builder_value_int(
 			walk->builder, name, name_len,
 			(s64)get_unaligned_le64(data));
-	case PNP_REG_MULTI_SZ: {
+	case NTFE_REG_MULTI_SZ: {
 		u32 start = 0, i;
 		long ret;
 
-		ret = pnp_rust_builder_value_list_begin(walk->builder, name,
+		ret = ntfe_rust_builder_value_list_begin(walk->builder, name,
 							name_len);
 		if (ret)
 			return ret;
-		len = pnp_str_trim(data, len);
+		len = ntfe_str_trim(data, len);
 		for (i = 0; i <= len; i++) {
 			if (i == len || data[i] == '\0') {
 				if (i > start) {
-					ret = pnp_rust_builder_list_str(
+					ret = ntfe_rust_builder_list_str(
 						walk->builder,
 						(const char *)data + start,
 						i - start);
@@ -208,7 +208,7 @@ static long pnp_feed_value(struct peios_pnp_walk *walk, const char *name,
 				start = i + 1;
 			}
 		}
-		return pnp_rust_builder_value_list_end(walk->builder);
+		return ntfe_rust_builder_value_list_end(walk->builder);
 	}
 	default:
 		/*
@@ -220,20 +220,20 @@ static long pnp_feed_value(struct peios_pnp_walk *walk, const char *name,
 	}
 }
 
-typedef long (*pnp_value_cb)(struct peios_pnp_walk *walk, void *ctx,
+typedef long (*ntfe_value_cb)(struct peios_ntfe_walk *walk, void *ctx,
 			     const char *name, u32 name_len, u32 type,
 			     const u8 *data, u32 len);
 
-static long pnp_feed_value_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_feed_value_cb(struct peios_ntfe_walk *walk, void *ctx,
 			      const char *name, u32 name_len, u32 type,
 			      const u8 *data, u32 len)
 {
-	return pnp_feed_value(walk, name, name_len, type, data, len);
+	return ntfe_feed_value(walk, name, name_len, type, data, len);
 }
 
 /* One RSI_QUERY_VALUES round trip: this key's effective values -> cb. */
-static long pnp_for_each_value(struct peios_pnp_walk *walk, const u8 guid[16],
-			       pnp_value_cb cb, void *ctx)
+static long ntfe_for_each_value(struct peios_ntfe_walk *walk, const u8 guid[16],
+			       ntfe_value_cb cb, void *ctx)
 {
 	struct pkm_lcs_rsi_query_values_batch_result batch = { };
 	struct pkm_lcs_source_response_frame frame = { };
@@ -319,9 +319,9 @@ out:
 	return ret;
 }
 
-static long pnp_walk_values(struct peios_pnp_walk *walk, const u8 guid[16])
+static long ntfe_walk_values(struct peios_ntfe_walk *walk, const u8 guid[16])
 {
-	return pnp_for_each_value(walk, guid, pnp_feed_value_cb, NULL);
+	return ntfe_for_each_value(walk, guid, ntfe_feed_value_cb, NULL);
 }
 
 /*
@@ -330,30 +330,30 @@ static long pnp_walk_values(struct peios_pnp_walk *walk, const u8 guid[16])
  * everything fires — quietness ships as a visible value. Out-of-range
  * values are refused whole, like any other malformed policy.
  */
-#define PNP_REPORTING_LEVEL_NAME	"CurrentReportingLevel"
+#define NTFE_REPORTING_LEVEL_NAME	"CurrentReportingLevel"
 
-static long pnp_reporting_level_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_reporting_level_cb(struct peios_ntfe_walk *walk, void *ctx,
 				   const char *name, u32 name_len, u32 type,
 				   const u8 *data, u32 len)
 {
 	u8 *level = ctx;
 	s64 v;
 
-	if (name_len != sizeof(PNP_REPORTING_LEVEL_NAME) - 1 ||
-	    memcmp(name, PNP_REPORTING_LEVEL_NAME, name_len))
+	if (name_len != sizeof(NTFE_REPORTING_LEVEL_NAME) - 1 ||
+	    memcmp(name, NTFE_REPORTING_LEVEL_NAME, name_len))
 		return 0;
 	switch (type) {
-	case PNP_REG_DWORD:
+	case NTFE_REG_DWORD:
 		if (len != 4)
 			return -EINVAL;
 		v = get_unaligned_le32(data);
 		break;
-	case PNP_REG_DWORD_BIG_ENDIAN:
+	case NTFE_REG_DWORD_BIG_ENDIAN:
 		if (len != 4)
 			return -EINVAL;
 		v = get_unaligned_be32(data);
 		break;
-	case PNP_REG_QWORD:
+	case NTFE_REG_QWORD:
 		if (len != 8)
 			return -EINVAL;
 		v = (s64)get_unaligned_le64(data);
@@ -368,7 +368,7 @@ static long pnp_reporting_level_cb(struct peios_pnp_walk *walk, void *ctx,
 }
 
 /* Walk one rule key: values, then children as exceptions, recursively. */
-static long pnp_walk_rule(struct peios_pnp_walk *walk, const u8 guid[16],
+static long ntfe_walk_rule(struct peios_ntfe_walk *walk, const u8 guid[16],
 			  const char *name, u32 name_len, u32 depth)
 {
 	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
@@ -377,17 +377,17 @@ static long pnp_walk_rule(struct peios_pnp_walk *walk, const u8 guid[16],
 	u32 i;
 	long ret;
 
-	if (depth > PEIOS_PNP_MAX_RULE_DEPTH)
+	if (depth > PEIOS_NTFE_MAX_RULE_DEPTH)
 		return -E2BIG;
-	if (++walk->rules_seen > PEIOS_PNP_MAX_RULES)
+	if (++walk->rules_seen > PEIOS_NTFE_MAX_RULES)
 		return -E2BIG;
 
-	pnp_digest_u32(walk, depth);
-	pnp_digest_bytes(walk, name, name_len);
-	ret = pnp_rust_builder_rule_begin(walk->builder, name, name_len);
+	ntfe_digest_u32(walk, depth);
+	ntfe_digest_bytes(walk, name, name_len);
+	ret = ntfe_rust_builder_rule_begin(walk->builder, name, name_len);
 	if (ret)
 		return ret;
-	ret = pnp_walk_values(walk, guid);
+	ret = ntfe_walk_values(walk, guid);
 	if (ret)
 		return ret;
 
@@ -430,20 +430,20 @@ static long pnp_walk_rule(struct peios_pnp_walk *walk, const u8 guid[16],
 			ret = -ENOMEM;
 			goto out;
 		}
-		ret = pnp_walk_rule(walk, subkey.child_guid, child_name,
+		ret = ntfe_walk_rule(walk, subkey.child_guid, child_name,
 				    subkey.name_len, depth + 1);
 		kfree(child_name);
 		if (ret)
 			goto out;
 	}
-	ret = pnp_rust_builder_rule_end(walk->builder);
+	ret = ntfe_rust_builder_rule_end(walk->builder);
 out:
 	pkm_lcs_source_response_frame_destroy(&frame);
 	return ret;
 }
 
 /* Builds one layer's forest from its layer key, or NULL when absent. */
-static long pnp_build_layer(struct peios_pnp_walk *walk, bool present,
+static long ntfe_build_layer(struct peios_ntfe_walk *walk, bool present,
 			    const u8 guid[16], u8 layer, void **forest_out)
 {
 	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
@@ -453,12 +453,12 @@ static long pnp_build_layer(struct peios_pnp_walk *walk, bool present,
 	long ret;
 
 	*forest_out = NULL;
-	pnp_digest_u32(walk, layer);
-	pnp_digest_u32(walk, present);
+	ntfe_digest_u32(walk, layer);
+	ntfe_digest_u32(walk, present);
 	if (!present)
 		return 0;
 
-	walk->builder = pnp_rust_builder_new();
+	walk->builder = ntfe_rust_builder_new();
 	if (!walk->builder)
 		return -ENOMEM;
 
@@ -501,7 +501,7 @@ static long pnp_build_layer(struct peios_pnp_walk *walk, bool present,
 			ret = -ENOMEM;
 			goto out_builder;
 		}
-		ret = pnp_walk_rule(walk, subkey.child_guid, name,
+		ret = ntfe_walk_rule(walk, subkey.child_guid, name,
 				    subkey.name_len, 0);
 		kfree(name);
 		if (ret)
@@ -510,13 +510,13 @@ static long pnp_build_layer(struct peios_pnp_walk *walk, bool present,
 
 	pkm_lcs_source_response_frame_destroy(&frame);
 	/* build consumes the builder on every path. */
-	ret = pnp_rust_builder_build(walk->builder, layer, forest_out);
+	ret = ntfe_rust_builder_build(walk->builder, layer, forest_out);
 	walk->builder = NULL;
 	return ret;
 
 out_builder:
 	pkm_lcs_source_response_frame_destroy(&frame);
-	pnp_rust_builder_free(walk->builder);
+	ntfe_rust_builder_free(walk->builder);
 	walk->builder = NULL;
 	return ret;
 }
@@ -526,12 +526,12 @@ out_builder:
  * child's guid and its name (a pointer into the retained frame, valid
  * for the callback; nested round trips take their own frames).
  */
-typedef long (*pnp_child_cb)(struct peios_pnp_walk *walk, void *ctx,
+typedef long (*ntfe_child_cb)(struct peios_ntfe_walk *walk, void *ctx,
 			     const u8 child_guid[16], const u8 *name,
 			     u32 name_len);
 
-static long pnp_for_each_child(struct peios_pnp_walk *walk, const u8 guid[16],
-			       pnp_child_cb cb, void *ctx)
+static long ntfe_for_each_child(struct peios_ntfe_walk *walk, const u8 guid[16],
+			       ntfe_child_cb cb, void *ctx)
 {
 	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
 	struct pkm_lcs_source_response_frame frame = { };
@@ -580,31 +580,31 @@ out:
 	return ret;
 }
 
-static bool pnp_name_is(const u8 *name, u32 name_len, const char *want)
+static bool ntfe_name_is(const u8 *name, u32 name_len, const char *want)
 {
 	return name_len == strlen(want) && !memcmp(name, want, name_len);
 }
 
 /* --- the rules ---------------------------------------------------------- */
 
-struct pnp_rules_children {
+struct ntfe_rules_children {
 	u8 packet_guid[16], raw_guid[16], flow_guid[16];
 	bool packet_present, raw_present, flow_present;
 };
 
-static long pnp_rules_child_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_rules_child_cb(struct peios_ntfe_walk *walk, void *ctx,
 			       const u8 child_guid[16], const u8 *name,
 			       u32 name_len)
 {
-	struct pnp_rules_children *c = ctx;
+	struct ntfe_rules_children *c = ctx;
 
-	if (pnp_name_is(name, name_len, "Packet")) {
+	if (ntfe_name_is(name, name_len, "Packet")) {
 		memcpy(c->packet_guid, child_guid, 16);
 		c->packet_present = true;
-	} else if (pnp_name_is(name, name_len, "RawPacket")) {
+	} else if (ntfe_name_is(name, name_len, "RawPacket")) {
 		memcpy(c->raw_guid, child_guid, 16);
 		c->raw_present = true;
-	} else if (pnp_name_is(name, name_len, "Flow")) {
+	} else if (ntfe_name_is(name, name_len, "Flow")) {
 		memcpy(c->flow_guid, child_guid, 16);
 		c->flow_present = true;
 	}
@@ -618,44 +618,44 @@ static long pnp_rules_child_cb(struct peios_pnp_walk *walk, void *ctx,
  * Walks the rules subtree and publishes a new policy generation, unless
  * the walk fed the builder exactly what the last published walk did.
  */
-static long pnp_refresh_rules(struct peios_pnp_walk *walk,
+static long ntfe_refresh_rules(struct peios_ntfe_walk *walk,
 			      const u8 rules_guid[16])
 {
-	struct pnp_rules_children c = { };
+	struct ntfe_rules_children c = { };
 	void *packet_forest = NULL, *raw_forest = NULL, *flow_forest = NULL;
 	u8 reporting_level = 1;
 	long ret;
 
-	walk->digest = PNP_FNV_OFFSET;
+	walk->digest = NTFE_FNV_OFFSET;
 	walk->rules_seen = 0;
 
-	ret = pnp_for_each_value(walk, rules_guid, pnp_reporting_level_cb,
+	ret = ntfe_for_each_value(walk, rules_guid, ntfe_reporting_level_cb,
 				 &reporting_level);
 	if (ret)
 		goto out;
-	pnp_digest_u32(walk, reporting_level);
+	ntfe_digest_u32(walk, reporting_level);
 
 	/* Find the layer keys under Rules: Packet, RawPacket, Flow. */
-	ret = pnp_for_each_child(walk, rules_guid, pnp_rules_child_cb, &c);
+	ret = ntfe_for_each_child(walk, rules_guid, ntfe_rules_child_cb, &c);
 	if (ret)
 		goto out;
 
-	ret = pnp_build_layer(walk, c.packet_present, c.packet_guid,
-			      PEIOS_PNP_LAYER_PACKET, &packet_forest);
+	ret = ntfe_build_layer(walk, c.packet_present, c.packet_guid,
+			      PEIOS_NTFE_LAYER_PACKET, &packet_forest);
 	if (ret)
 		goto out;
 	walk->rules_seen = 0;
-	ret = pnp_build_layer(walk, c.raw_present, c.raw_guid,
-			      PEIOS_PNP_LAYER_RAWPACKET, &raw_forest);
+	ret = ntfe_build_layer(walk, c.raw_present, c.raw_guid,
+			      PEIOS_NTFE_LAYER_RAWPACKET, &raw_forest);
 	if (ret)
 		goto out;
 	walk->rules_seen = 0;
-	ret = pnp_build_layer(walk, c.flow_present, c.flow_guid,
-			      PEIOS_PNP_LAYER_FLOW, &flow_forest);
+	ret = ntfe_build_layer(walk, c.flow_present, c.flow_guid,
+			      PEIOS_NTFE_LAYER_FLOW, &flow_forest);
 	if (ret)
 		goto out;
 
-	if (walk->digest == pnp_published_digest) {
+	if (walk->digest == ntfe_published_digest) {
 		/* The same policy, byte for byte: the active generation
 		 * already is it, even when that policy is no forests at all
 		 * (a Rules key seeded before its layers). Publishing again
@@ -667,47 +667,47 @@ static long pnp_refresh_rules(struct peios_pnp_walk *walk,
 		goto out;
 	}
 
-	ret = peios_pnp_policy_publish(packet_forest, raw_forest, flow_forest,
+	ret = peios_ntfe_policy_publish(packet_forest, raw_forest, flow_forest,
 				       reporting_level);
 	if (!ret) {
-		pnp_published_digest = walk->digest;
+		ntfe_published_digest = walk->digest;
 		packet_forest = NULL;
 		raw_forest = NULL;
 		flow_forest = NULL;
 	}
 out:
 	if (ret)
-		pr_warn("pnp: rules refresh failed (%ld); keeping the previous generation\n",
+		pr_warn("ntfe: rules refresh failed (%ld); keeping the previous generation\n",
 			ret);
-	pnp_rust_forest_free(packet_forest);
-	pnp_rust_forest_free(raw_forest);
-	pnp_rust_forest_free(flow_forest);
+	ntfe_rust_forest_free(packet_forest);
+	ntfe_rust_forest_free(raw_forest);
+	ntfe_rust_forest_free(flow_forest);
 	return ret;
 }
 
 /* --- the network context ------------------------------------------------ */
 
 /* One network record as the walk read it: Networks\<id> Name, Trust. */
-struct pnp_network_record {
-	char id[PEIOS_PNP_NETWORK_ID_LEN];
-	char name[PEIOS_PNP_NETWORK_NAME_LEN];
-	char trust[PEIOS_PNP_NETWORK_TRUST_LEN];
+struct ntfe_network_record {
+	char id[PEIOS_NTFE_NETWORK_ID_LEN];
+	char name[PEIOS_NTFE_NETWORK_NAME_LEN];
+	char trust[PEIOS_NTFE_NETWORK_TRUST_LEN];
 };
 
-#define PNP_MAX_NETWORK_RECORDS	256U
+#define NTFE_MAX_NETWORK_RECORDS	256U
 
-struct pnp_networks {
-	struct pnp_network_record *records;
+struct ntfe_networks {
+	struct ntfe_network_record *records;
 	u32 count;
 };
 
 /* Copies a registry string into a bounded buffer; confesses truncation. */
-static void pnp_copy_str(char *dst, size_t dst_len, const u8 *data, u32 len,
+static void ntfe_copy_str(char *dst, size_t dst_len, const u8 *data, u32 len,
 			 const char *what)
 {
-	len = pnp_str_trim(data, len);
+	len = ntfe_str_trim(data, len);
 	if (len >= dst_len) {
-		pr_warn_once("pnp: network context: %s longer than %zu bytes; truncated\n",
+		pr_warn_once("ntfe: network context: %s longer than %zu bytes; truncated\n",
 			     what, dst_len - 1);
 		len = dst_len - 1;
 	}
@@ -715,38 +715,38 @@ static void pnp_copy_str(char *dst, size_t dst_len, const u8 *data, u32 len,
 	dst[len] = '\0';
 }
 
-static long pnp_network_value_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_network_value_cb(struct peios_ntfe_walk *walk, void *ctx,
 				 const char *name, u32 name_len, u32 type,
 				 const u8 *data, u32 len)
 {
-	struct pnp_network_record *rec = ctx;
+	struct ntfe_network_record *rec = ctx;
 
-	if (type != PNP_REG_SZ && type != PNP_REG_EXPAND_SZ)
+	if (type != NTFE_REG_SZ && type != NTFE_REG_EXPAND_SZ)
 		return 0;
-	if (pnp_name_is(name, name_len, "Name"))
-		pnp_copy_str(rec->name, sizeof(rec->name), data, len,
+	if (ntfe_name_is(name, name_len, "Name"))
+		ntfe_copy_str(rec->name, sizeof(rec->name), data, len,
 			     "a network's Name");
-	else if (pnp_name_is(name, name_len, "Trust"))
-		pnp_copy_str(rec->trust, sizeof(rec->trust), data, len,
+	else if (ntfe_name_is(name, name_len, "Trust"))
+		ntfe_copy_str(rec->trust, sizeof(rec->trust), data, len,
 			     "a network's Trust");
 	return 0;
 }
 
-static long pnp_network_child_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_network_child_cb(struct peios_ntfe_walk *walk, void *ctx,
 				 const u8 child_guid[16], const u8 *name,
 				 u32 name_len)
 {
-	struct pnp_networks *nets = ctx;
-	struct pnp_network_record *rec;
+	struct ntfe_networks *nets = ctx;
+	struct ntfe_network_record *rec;
 	long ret;
 
-	if (name_len >= PEIOS_PNP_NETWORK_ID_LEN) {
-		pr_warn_once("pnp: network context: a Networks record name is not a UUID; ignored\n");
+	if (name_len >= PEIOS_NTFE_NETWORK_ID_LEN) {
+		pr_warn_once("ntfe: network context: a Networks record name is not a UUID; ignored\n");
 		return 0;
 	}
-	if (nets->count >= PNP_MAX_NETWORK_RECORDS) {
-		pr_warn_once("pnp: network context: more than %u network records; the rest are ignored\n",
-			     PNP_MAX_NETWORK_RECORDS);
+	if (nets->count >= NTFE_MAX_NETWORK_RECORDS) {
+		pr_warn_once("ntfe: network context: more than %u network records; the rest are ignored\n",
+			     NTFE_MAX_NETWORK_RECORDS);
 		return 0;
 	}
 	rec = &nets->records[nets->count];
@@ -755,74 +755,74 @@ static long pnp_network_child_cb(struct peios_pnp_walk *walk, void *ctx,
 	/* A record whose values cannot be read is a record with no Name
 	 * and no Trust: the id is still a fact.
 	 */
-	ret = pnp_for_each_value(walk, child_guid, pnp_network_value_cb, rec);
+	ret = ntfe_for_each_value(walk, child_guid, ntfe_network_value_cb, rec);
 	if (ret)
-		pr_warn("pnp: network context: could not read Networks\\%s (%ld)\n",
+		pr_warn("ntfe: network context: could not read Networks\\%s (%ld)\n",
 			rec->id, ret);
 	nets->count++;
 	return 0;
 }
 
 /* Interfaces\<ifid>\Status: Name (the kernel name) and Network (the id). */
-struct pnp_status_values {
+struct ntfe_status_values {
 	char ifname[IFNAMSIZ];
-	char network_id[PEIOS_PNP_NETWORK_ID_LEN];
+	char network_id[PEIOS_NTFE_NETWORK_ID_LEN];
 };
 
-static long pnp_status_value_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_status_value_cb(struct peios_ntfe_walk *walk, void *ctx,
 				const char *name, u32 name_len, u32 type,
 				const u8 *data, u32 len)
 {
-	struct pnp_status_values *v = ctx;
+	struct ntfe_status_values *v = ctx;
 
-	if (type != PNP_REG_SZ && type != PNP_REG_EXPAND_SZ)
+	if (type != NTFE_REG_SZ && type != NTFE_REG_EXPAND_SZ)
 		return 0;
-	if (pnp_name_is(name, name_len, "Name"))
-		pnp_copy_str(v->ifname, sizeof(v->ifname), data, len,
+	if (ntfe_name_is(name, name_len, "Name"))
+		ntfe_copy_str(v->ifname, sizeof(v->ifname), data, len,
 			     "an interface's Name");
-	else if (pnp_name_is(name, name_len, "Network"))
-		pnp_copy_str(v->network_id, sizeof(v->network_id), data, len,
+	else if (ntfe_name_is(name, name_len, "Network"))
+		ntfe_copy_str(v->network_id, sizeof(v->network_id), data, len,
 			     "an interface's Network");
 	return 0;
 }
 
-struct pnp_context_build {
-	const struct pnp_networks *nets;
-	struct peios_pnp_context_table *table;
+struct ntfe_context_build {
+	const struct ntfe_networks *nets;
+	struct peios_ntfe_context_table *table;
 };
 
 /* Under an interface key: only its Status subkey is read. */
-static long pnp_interface_status_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_interface_status_cb(struct peios_ntfe_walk *walk, void *ctx,
 				    const u8 child_guid[16], const u8 *name,
 				    u32 name_len)
 {
-	struct pnp_context_build *b = ctx;
-	struct pnp_status_values v = { };
-	struct peios_pnp_context_entry *e;
+	struct ntfe_context_build *b = ctx;
+	struct ntfe_status_values v = { };
+	struct peios_ntfe_context_entry *e;
 	u32 i;
 	long ret;
 
-	if (!pnp_name_is(name, name_len, "Status"))
+	if (!ntfe_name_is(name, name_len, "Status"))
 		return 0;
-	ret = pnp_for_each_value(walk, child_guid, pnp_status_value_cb, &v);
+	ret = ntfe_for_each_value(walk, child_guid, ntfe_status_value_cb, &v);
 	if (ret) {
-		pr_warn("pnp: network context: could not read an interface's Status (%ld)\n",
+		pr_warn("ntfe: network context: could not read an interface's Status (%ld)\n",
 			ret);
 		return 0;
 	}
 	/* No name, or no network identified on it: no context. */
 	if (!v.ifname[0] || !v.network_id[0])
 		return 0;
-	if (b->table->count >= PEIOS_PNP_MAX_CONTEXTS) {
-		pr_warn_once("pnp: network context: more than %u interfaces; the rest carry no context\n",
-			     PEIOS_PNP_MAX_CONTEXTS);
+	if (b->table->count >= PEIOS_NTFE_MAX_CONTEXTS) {
+		pr_warn_once("ntfe: network context: more than %u interfaces; the rest carry no context\n",
+			     PEIOS_NTFE_MAX_CONTEXTS);
 		return 0;
 	}
 	e = &b->table->entries[b->table->count++];
 	memcpy(e->ifname, v.ifname, sizeof(e->ifname));
 	memcpy(e->network_id, v.network_id, sizeof(e->network_id));
 	for (i = 0; i < b->nets->count; i++) {
-		const struct pnp_network_record *rec = &b->nets->records[i];
+		const struct ntfe_network_record *rec = &b->nets->records[i];
 
 		if (strcmp(rec->id, e->network_id))
 			continue;
@@ -833,11 +833,11 @@ static long pnp_interface_status_cb(struct peios_pnp_walk *walk, void *ctx,
 	return 0;
 }
 
-static long pnp_interface_child_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_interface_child_cb(struct peios_ntfe_walk *walk, void *ctx,
 				   const u8 child_guid[16], const u8 *name,
 				   u32 name_len)
 {
-	return pnp_for_each_child(walk, child_guid, pnp_interface_status_cb,
+	return ntfe_for_each_child(walk, child_guid, ntfe_interface_status_cb,
 				  ctx);
 }
 
@@ -847,46 +847,46 @@ static long pnp_interface_child_cb(struct peios_pnp_walk *walk, void *ctx,
  * cannot be read is an interface without a context, and the table is
  * published with whatever was readable.
  */
-static long pnp_refresh_context(struct peios_pnp_walk *walk,
+static long ntfe_refresh_context(struct peios_ntfe_walk *walk,
 				bool interfaces_present,
 				const u8 interfaces_guid[16],
 				bool networks_present,
 				const u8 networks_guid[16])
 {
-	struct pnp_networks nets = { };
-	struct pnp_context_build b = { .nets = &nets };
+	struct ntfe_networks nets = { };
+	struct ntfe_context_build b = { .nets = &nets };
 	long ret = 0;
 
-	b.table = peios_pnp_context_table_alloc(PEIOS_PNP_MAX_CONTEXTS);
+	b.table = peios_ntfe_context_table_alloc(PEIOS_NTFE_MAX_CONTEXTS);
 	if (!b.table)
 		return -ENOMEM;
 	b.table->count = 0;
 
 	if (networks_present) {
-		nets.records = kvcalloc(PNP_MAX_NETWORK_RECORDS,
+		nets.records = kvcalloc(NTFE_MAX_NETWORK_RECORDS,
 					sizeof(*nets.records), GFP_KERNEL);
 		if (!nets.records) {
 			ret = -ENOMEM;
 			goto out;
 		}
-		ret = pnp_for_each_child(walk, networks_guid,
-					 pnp_network_child_cb, &nets);
+		ret = ntfe_for_each_child(walk, networks_guid,
+					 ntfe_network_child_cb, &nets);
 		if (ret)
 			goto out;
 	}
 	if (interfaces_present) {
-		ret = pnp_for_each_child(walk, interfaces_guid,
-					 pnp_interface_child_cb, &b);
+		ret = ntfe_for_each_child(walk, interfaces_guid,
+					 ntfe_interface_child_cb, &b);
 		if (ret)
 			goto out;
 	}
 
 	/* Takes the table, or frees it when nothing changed. */
-	ret = peios_pnp_context_publish(b.table);
+	ret = peios_ntfe_context_publish(b.table);
 	b.table = NULL;
 out:
 	if (ret)
-		pr_warn("pnp: network context refresh failed (%ld); keeping the previous table\n",
+		pr_warn("ntfe: network context refresh failed (%ld); keeping the previous table\n",
 			ret);
 	kfree(b.table);
 	kvfree(nets.records);
@@ -895,24 +895,24 @@ out:
 
 /* --- the Network key ---------------------------------------------------- */
 
-struct pnp_network_children {
+struct ntfe_network_children {
 	u8 rules_guid[16], interfaces_guid[16], networks_guid[16];
 	bool rules_present, interfaces_present, networks_present;
 };
 
-static long pnp_network_child_key_cb(struct peios_pnp_walk *walk, void *ctx,
+static long ntfe_network_child_key_cb(struct peios_ntfe_walk *walk, void *ctx,
 				     const u8 child_guid[16], const u8 *name,
 				     u32 name_len)
 {
-	struct pnp_network_children *c = ctx;
+	struct ntfe_network_children *c = ctx;
 
-	if (pnp_name_is(name, name_len, "Rules")) {
+	if (ntfe_name_is(name, name_len, "Rules")) {
 		memcpy(c->rules_guid, child_guid, 16);
 		c->rules_present = true;
-	} else if (pnp_name_is(name, name_len, "Interfaces")) {
+	} else if (ntfe_name_is(name, name_len, "Interfaces")) {
 		memcpy(c->interfaces_guid, child_guid, 16);
 		c->interfaces_present = true;
-	} else if (pnp_name_is(name, name_len, "Networks")) {
+	} else if (ntfe_name_is(name, name_len, "Networks")) {
 		memcpy(c->networks_guid, child_guid, 16);
 		c->networks_present = true;
 	}
@@ -920,17 +920,17 @@ static long pnp_network_child_key_cb(struct peios_pnp_walk *walk, void *ctx,
 	return 0;
 }
 
-long peios_pnp_network_refresh_from_key(u32 source_id,
+long peios_ntfe_network_refresh_from_key(u32 source_id,
 					const u8 network_guid[16])
 {
-	struct peios_pnp_walk walk = { .source_id = source_id };
-	struct pnp_network_children c = { };
+	struct peios_ntfe_walk walk = { .source_id = source_id };
+	struct ntfe_network_children c = { };
 	long ret, context_ret;
 
 	if (!source_id || !network_guid)
 		return -EINVAL;
 
-	mutex_lock(&pnp_refresh_lock);
+	mutex_lock(&ntfe_refresh_lock);
 	ret = pkm_lcs_runtime_limits_snapshot(&walk.limits);
 	if (ret)
 		goto out_unlock;
@@ -941,7 +941,7 @@ long peios_pnp_network_refresh_from_key(u32 source_id,
 	if (ret)
 		goto out_unlock;
 
-	ret = pnp_for_each_child(&walk, network_guid, pnp_network_child_key_cb,
+	ret = ntfe_for_each_child(&walk, network_guid, ntfe_network_child_key_cb,
 				 &c);
 	if (ret)
 		goto out;
@@ -950,12 +950,12 @@ long peios_pnp_network_refresh_from_key(u32 source_id,
 	 * stands, exactly as a walk that refused would leave it.
 	 */
 	if (c.rules_present)
-		ret = pnp_refresh_rules(&walk, c.rules_guid);
+		ret = ntfe_refresh_rules(&walk, c.rules_guid);
 	else
-		pr_info_once("pnp: no Rules key; keeping the previous generation\n");
+		pr_info_once("ntfe: no Rules key; keeping the previous generation\n");
 
 	/* The context, whatever the rules did: the two are independent. */
-	context_ret = pnp_refresh_context(&walk, c.interfaces_present,
+	context_ret = ntfe_refresh_context(&walk, c.interfaces_present,
 					  c.interfaces_guid,
 					  c.networks_present, c.networks_guid);
 	if (!ret)
@@ -963,17 +963,17 @@ long peios_pnp_network_refresh_from_key(u32 source_id,
 out:
 	pkm_lcs_source_layer_snapshot_release(&walk.layers);
 out_unlock:
-	mutex_unlock(&pnp_refresh_lock);
-	peios_pnp_policy_note_ingest(ret);
+	mutex_unlock(&ntfe_refresh_lock);
+	peios_ntfe_policy_note_ingest(ret);
 	return ret;
 }
 
 /* --- change-notification coalescing ---------------------------------- */
 
 /* Quiet time after the last change before the re-walk runs. */
-#define PEIOS_PNP_REFRESH_DEBOUNCE_MS	50
+#define PEIOS_NTFE_REFRESH_DEBOUNCE_MS	50
 
-static void peios_pnp_refresh_workfn(struct work_struct *work);
+static void peios_ntfe_refresh_workfn(struct work_struct *work);
 
 static struct {
 	spinlock_t lock;
@@ -981,45 +981,69 @@ static struct {
 	u32 source_id;
 	u8 guid[16];
 	struct delayed_work work;
-} peios_pnp_refresh = {
-	.lock = __SPIN_LOCK_UNLOCKED(peios_pnp_refresh.lock),
-	.work = __DELAYED_WORK_INITIALIZER(peios_pnp_refresh.work,
-					   peios_pnp_refresh_workfn, 0),
+} peios_ntfe_refresh = {
+	.lock = __SPIN_LOCK_UNLOCKED(peios_ntfe_refresh.lock),
+	.work = __DELAYED_WORK_INITIALIZER(peios_ntfe_refresh.work,
+					   peios_ntfe_refresh_workfn, 0),
 };
 
-static void peios_pnp_refresh_workfn(struct work_struct *work)
+/*
+ * In force: `noted` counts changes as the watch delivers them — inside
+ * the registry write that made them, so a writer reads its own change
+ * as noted the moment the write returns. `walked` is the count a re-walk
+ * started from, recorded when it finishes. The walk reads the key after
+ * taking that count, so walked >= N means every change up to the Nth has
+ * been read and either published or refused.
+ */
+static atomic64_t peios_ntfe_changes_noted;
+static atomic64_t peios_ntfe_changes_walked;
+
+void peios_ntfe_ingest_progress(u64 *noted, u64 *walked)
+{
+	/* walked first: a racing walk can only make the pair look less
+	 * finished than it is, never more.
+	 */
+	*walked = atomic64_read(&peios_ntfe_changes_walked);
+	*noted = atomic64_read(&peios_ntfe_changes_noted);
+}
+
+static void peios_ntfe_refresh_workfn(struct work_struct *work)
 {
 	u32 source_id;
 	u8 guid[16];
+	u64 noted;
 
-	spin_lock(&peios_pnp_refresh.lock);
-	if (!peios_pnp_refresh.pending) {
-		spin_unlock(&peios_pnp_refresh.lock);
+	spin_lock(&peios_ntfe_refresh.lock);
+	if (!peios_ntfe_refresh.pending) {
+		spin_unlock(&peios_ntfe_refresh.lock);
 		return;
 	}
-	peios_pnp_refresh.pending = false;
-	source_id = peios_pnp_refresh.source_id;
-	memcpy(guid, peios_pnp_refresh.guid, 16);
-	spin_unlock(&peios_pnp_refresh.lock);
+	peios_ntfe_refresh.pending = false;
+	noted = atomic64_read(&peios_ntfe_changes_noted);
+	source_id = peios_ntfe_refresh.source_id;
+	memcpy(guid, peios_ntfe_refresh.guid, 16);
+	spin_unlock(&peios_ntfe_refresh.lock);
 
 	/* Failure keeps the previous generation; the walk logged why. */
-	peios_pnp_network_refresh_from_key(source_id, guid);
+	peios_ntfe_network_refresh_from_key(source_id, guid);
+	atomic64_set(&peios_ntfe_changes_walked, noted);
 }
 
-void peios_pnp_network_registry_changed(u32 source_id,
+void peios_ntfe_network_registry_changed(u32 source_id,
 					const u8 network_guid[16])
 {
 	if (!source_id || !network_guid)
 		return;
 
-	spin_lock(&peios_pnp_refresh.lock);
-	peios_pnp_refresh.source_id = source_id;
-	memcpy(peios_pnp_refresh.guid, network_guid, 16);
-	peios_pnp_refresh.pending = true;
-	spin_unlock(&peios_pnp_refresh.lock);
+	spin_lock(&peios_ntfe_refresh.lock);
+	peios_ntfe_refresh.source_id = source_id;
+	memcpy(peios_ntfe_refresh.guid, network_guid, 16);
+	peios_ntfe_refresh.pending = true;
+	atomic64_inc(&peios_ntfe_changes_noted);
+	spin_unlock(&peios_ntfe_refresh.lock);
 	/* mod_delayed_work restarts the window: a burst of changes yields
 	 * one re-walk, after the burst goes quiet.
 	 */
-	mod_delayed_work(system_wq, &peios_pnp_refresh.work,
-			 msecs_to_jiffies(PEIOS_PNP_REFRESH_DEBOUNCE_MS));
+	mod_delayed_work(system_wq, &peios_ntfe_refresh.work,
+			 msecs_to_jiffies(PEIOS_NTFE_REFRESH_DEBOUNCE_MS));
 }

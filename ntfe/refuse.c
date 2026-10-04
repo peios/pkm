@@ -18,7 +18,7 @@
  *    The stack's own RST/ICMP handlers then fail the local socket with
  *    ECONNREFUSED or EHOSTUNREACH at once, instead of a connect timeout.
  *
- * Every answer carries the skb refusal bit: PNP does not judge its own
+ * Every answer carries the skb refusal bit: NTFE does not judge its own
  * refusals, and every seat waves them through (seats.c). That also closes
  * the pre-existing hole where an inbound REJECT's RST crossed the egress
  * seat and could be dropped, and mis-attributed, by an outbound rule.
@@ -48,10 +48,10 @@
 #include <net/netfilter/ipv4/nf_reject.h>
 #include <net/netfilter/ipv6/nf_reject.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
-static bool pnp_dst_is_group(const struct sk_buff *skb,
-			     const struct peios_pnp_snapshot *snap)
+static bool ntfe_dst_is_group(const struct sk_buff *skb,
+			     const struct peios_ntfe_snapshot *snap)
 {
 	if (snap->addr_family == 4) {
 		__be32 d;
@@ -74,17 +74,17 @@ static bool pnp_dst_is_group(const struct sk_buff *skb,
 	return true;
 }
 
-struct sk_buff *peios_pnp_refuse_build(struct sk_buff *skb,
+struct sk_buff *peios_ntfe_refuse_build(struct sk_buff *skb,
 				       const struct nf_hook_state *state,
-				       const struct peios_pnp_snapshot *snap,
+				       const struct peios_ntfe_snapshot *snap,
 				       u8 kind)
 {
 	const struct net_device *dev = state->in ? state->in : state->out;
-	bool prohibited = kind == PEIOS_PNP_REJECT_PROHIBITED;
+	bool prohibited = kind == PEIOS_NTFE_REJECT_PROHIBITED;
 	bool tcp = snap->protocol == IPPROTO_TCP;
 	struct sk_buff *nskb = NULL;
 
-	if (pnp_dst_is_group(skb, snap))
+	if (ntfe_dst_is_group(skb, snap))
 		return NULL;
 
 	if (snap->addr_family == 4) {
@@ -115,7 +115,7 @@ struct sk_buff *peios_pnp_refuse_build(struct sk_buff *skb,
 	if (!nskb)
 		return NULL;
 
-	nskb->pnp_refusal = 1;
+	nskb->ntfe_refusal = 1;
 	/* The answer belongs to the flow it refuses (reply direction), so
 	 * conntrack files it rather than tracking it anew.
 	 */
@@ -126,7 +126,7 @@ struct sk_buff *peios_pnp_refuse_build(struct sk_buff *skb,
 }
 
 /* The wire: the answer goes back out the device the frame came in on. */
-static bool pnp_refuse_send_wire(struct sk_buff *nskb, struct sk_buff *skb,
+static bool ntfe_refuse_send_wire(struct sk_buff *nskb, struct sk_buff *skb,
 				 const struct net_device *dev)
 {
 	const struct ethhdr *eth;
@@ -158,9 +158,9 @@ drop:
  * loopback route. Both ends fail at once. New flows have no far end to
  * tear down, and UDP has no connection state; neither gets one.
  */
-struct sk_buff *peios_pnp_teardown_build(const struct sk_buff *skb,
+struct sk_buff *peios_ntfe_teardown_build(const struct sk_buff *skb,
 					 const struct nf_hook_state *state,
-					 const struct peios_pnp_snapshot *snap)
+					 const struct peios_ntfe_snapshot *snap)
 {
 	struct sk_buff *nskb;
 	struct tcphdr _oth, *tcph;
@@ -168,10 +168,10 @@ struct sk_buff *peios_pnp_teardown_build(const struct sk_buff *skb,
 	int thoff;
 
 	if (snap->protocol != IPPROTO_TCP ||
-	    snap->flow_state != PEIOS_PNP_FLOW_ESTABLISHED)
+	    snap->flow_state != PEIOS_NTFE_FLOW_ESTABLISHED)
 		return NULL;
 	/* No reset for a reset (the refusal already answered it). */
-	if (!(snap->has & PEIOS_PNP_HAS_TCP_FLAGS) || (snap->tcp_flags & 0x04))
+	if (!(snap->has & PEIOS_NTFE_HAS_TCP_FLAGS) || (snap->tcp_flags & 0x04))
 		return NULL;
 
 	if (snap->addr_family == 4) {
@@ -255,7 +255,7 @@ struct sk_buff *peios_pnp_teardown_build(const struct sk_buff *skb,
 							   0));
 	}
 
-	nskb->pnp_refusal = 1;
+	nskb->ntfe_refusal = 1;
 	return nskb;
 }
 
@@ -263,7 +263,7 @@ struct sk_buff *peios_pnp_teardown_build(const struct sk_buff *skb,
  * path: a refusal to ourselves lands on the loopback device, a teardown
  * toward the peer goes out to the wire.
  */
-static bool pnp_refuse_send_self(struct sk_buff *nskb, struct sk_buff *skb,
+static bool ntfe_refuse_send_self(struct sk_buff *nskb, struct sk_buff *skb,
 				 const struct nf_hook_state *state, u8 family)
 {
 	struct net *net = state->net;
@@ -289,34 +289,34 @@ drop:
 	return false;
 }
 
-bool peios_pnp_refuse(struct sk_buff *skb, const struct nf_hook_state *state,
-		      const struct peios_pnp_snapshot *snap, u8 kind)
+bool peios_ntfe_refuse(struct sk_buff *skb, const struct nf_hook_state *state,
+		      const struct peios_ntfe_snapshot *snap, u8 kind)
 {
 	struct sk_buff *nskb;
 	bool sent;
 
-	nskb = peios_pnp_refuse_build(skb, state, snap, kind);
+	nskb = peios_ntfe_refuse_build(skb, state, snap, kind);
 	if (!nskb) {
-		atomic64_inc(&peios_pnp_stats.reject_degraded);
+		atomic64_inc(&peios_ntfe_stats.reject_degraded);
 		return false;
 	}
-	if (snap->seat == PEIOS_PNP_SEAT_INGRESS)
-		sent = pnp_refuse_send_wire(nskb, skb, state->in);
+	if (snap->seat == PEIOS_NTFE_SEAT_INGRESS)
+		sent = ntfe_refuse_send_wire(nskb, skb, state->in);
 	else
-		sent = pnp_refuse_send_self(nskb, skb, state, snap->addr_family);
+		sent = ntfe_refuse_send_self(nskb, skb, state, snap->addr_family);
 	if (sent)
-		atomic64_inc(&peios_pnp_stats.refusals_emitted);
+		atomic64_inc(&peios_ntfe_stats.refusals_emitted);
 	else
-		atomic64_inc(&peios_pnp_stats.reject_degraded);
+		atomic64_inc(&peios_ntfe_stats.reject_degraded);
 
 	/* An established TCP connection is torn down at both ends. */
-	if (snap->seat != PEIOS_PNP_SEAT_INGRESS) {
-		struct sk_buff *reset = peios_pnp_teardown_build(skb, state,
+	if (snap->seat != PEIOS_NTFE_SEAT_INGRESS) {
+		struct sk_buff *reset = peios_ntfe_teardown_build(skb, state,
 								 snap);
 
-		if (reset && pnp_refuse_send_self(reset, skb, state,
+		if (reset && ntfe_refuse_send_self(reset, skb, state,
 						  snap->addr_family))
-			atomic64_inc(&peios_pnp_stats.teardowns_emitted);
+			atomic64_inc(&peios_ntfe_stats.teardowns_emitted);
 	}
 	return sent;
 }

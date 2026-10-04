@@ -138,7 +138,7 @@ enum pkm_lcs_internal_watch_target {
 	PKM_LCS_INTERNAL_WATCH_MACHINE_ROOT_FALLBACK = 3,
 	PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION = 4,
 	PKM_LCS_INTERNAL_WATCH_PORT_RESERVATIONS = 5,
-	/* PNP's Machine\System\Network key (net/pnp): the policy rules and
+	/* NTFE's Machine\System\Network key (net/ntfe): the policy rules and
 	 * netd's inventory together; depth-unbounded, all mutation kinds.
 	 */
 	PKM_LCS_INTERNAL_WATCH_NETWORK = 6,

@@ -561,7 +561,7 @@ static void pkm_lcs_kunit_internal_self_watch_fallback_create_rearms_targeted(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
-	/* Likewise PNP's Network key: absent, fallback covers it. */
+	/* Likewise NTFE's Network key: absent, fallback covers it. */
 	static const struct pkm_lcs_kunit_walk_source_step network_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },

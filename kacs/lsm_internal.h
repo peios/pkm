@@ -266,15 +266,15 @@ struct pkm_kacs_socket_security {
 	u32 convey_level;
 	/*
 	 * The identity that governs this socket's traffic for network policy
-	 * (<linux/peios_pnp.h>): the effective token at the last act that
+	 * (<linux/peios_ntfe.h>): the effective token at the last act that
 	 * committed the socket to a role, with the process facts of that
 	 * moment copied alongside. Guarded by owner_lock, taken _bh: the
 	 * writers include the accept path (sk_clone, softirq) and the reader
-	 * is net/pnp at the IP seats (softirq).
+	 * is net/ntfe at the IP seats (softirq).
 	 */
 	spinlock_t owner_lock;
 	const void *owner_token;
-	u8 owner_kind;			/* enum peios_pnp_owner_kind */
+	u8 owner_kind;			/* enum peios_ntfe_owner_kind */
 	u8 owner_guid[16];
 	s32 owner_pid;
 	char owner_comm[16];

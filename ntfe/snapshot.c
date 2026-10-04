@@ -31,11 +31,11 @@
 #include <net/ipv6.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_extend.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
-static void snapshot_time(struct peios_pnp_snapshot *snap)
+static void snapshot_time(struct peios_ntfe_snapshot *snap)
 {
 	time64_t now = ktime_get_real_seconds();
 	struct tm tm;
@@ -50,14 +50,14 @@ static void snapshot_time(struct peios_pnp_snapshot *snap)
 	snap->t_minute = tm.tm_min;
 	snap->t_second = tm.tm_sec;
 	snap->t_secs = now;
-	snap->has |= PEIOS_PNP_HAS_TIME;
+	snap->has |= PEIOS_NTFE_HAS_TIME;
 }
 
-/* The flow's start time (Start.* facts), from the PNP extension. */
+/* The flow's start time (Start.* facts), from the NTFE extension. */
 static void snapshot_start(const struct nf_conn *ct,
-			   struct peios_pnp_snapshot *snap)
+			   struct peios_ntfe_snapshot *snap)
 {
-	const struct peios_pnp_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_PNP);
+	const struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
 	struct tm tm;
 
 	if (!pc || !pc->start_secs)
@@ -70,17 +70,17 @@ static void snapshot_start(const struct nf_conn *ct,
 	snap->s_hour = tm.tm_hour;
 	snap->s_minute = tm.tm_min;
 	snap->s_second = tm.tm_sec;
-	snap->has |= PEIOS_PNP_HAS_START;
+	snap->has |= PEIOS_NTFE_HAS_START;
 }
 
 static void snapshot_flow_state(const struct sk_buff *skb, u8 seat,
-				struct peios_pnp_snapshot *snap)
+				struct peios_ntfe_snapshot *snap)
 {
 	enum ip_conntrack_info ctinfo;
 	struct nf_conn *ct;
 
 	/* The ingress seat stands before conntrack: no flow facts exist. */
-	if (seat == PEIOS_PNP_SEAT_INGRESS)
+	if (seat == PEIOS_NTFE_SEAT_INGRESS)
 		return;
 
 	ct = nf_ct_get(skb, &ctinfo);
@@ -96,29 +96,29 @@ static void snapshot_flow_state(const struct sk_buff *skb, u8 seat,
 		 * conntrack judged incoherent also lands here; the INVALID
 		 * distinction needs the conntrack verdict, a later mint.)
 		 */
-		snap->flow_state = PEIOS_PNP_FLOW_UNTRACKED;
+		snap->flow_state = PEIOS_NTFE_FLOW_UNTRACKED;
 		return;
 	}
 	switch (ctinfo) {
 	case IP_CT_ESTABLISHED:
 	case IP_CT_ESTABLISHED_REPLY:
-		snap->flow_state = PEIOS_PNP_FLOW_ESTABLISHED;
+		snap->flow_state = PEIOS_NTFE_FLOW_ESTABLISHED;
 		break;
 	case IP_CT_RELATED:
 	case IP_CT_RELATED_REPLY:
-		snap->flow_state = PEIOS_PNP_FLOW_RELATED;
+		snap->flow_state = PEIOS_NTFE_FLOW_RELATED;
 		break;
 	case IP_CT_NEW:
-		snap->flow_state = PEIOS_PNP_FLOW_NEW;
+		snap->flow_state = PEIOS_NTFE_FLOW_NEW;
 		break;
 	default:
-		snap->flow_state = PEIOS_PNP_FLOW_UNTRACKED;
+		snap->flow_state = PEIOS_NTFE_FLOW_UNTRACKED;
 		break;
 	}
 }
 
 static void snapshot_l4(const struct sk_buff *skb, int offset, u8 protocol,
-			struct peios_pnp_snapshot *snap)
+			struct peios_ntfe_snapshot *snap)
 {
 	switch (protocol) {
 	case IPPROTO_TCP: {
@@ -130,9 +130,9 @@ static void snapshot_l4(const struct sk_buff *skb, int offset, u8 protocol,
 			return;
 		snap->src_port = ntohs(thp->source);
 		snap->dst_port = ntohs(thp->dest);
-		snap->has |= PEIOS_PNP_HAS_PORTS;
+		snap->has |= PEIOS_NTFE_HAS_PORTS;
 		snap->tcp_flags = ((const u8 *)thp)[13];
-		snap->has |= PEIOS_PNP_HAS_TCP_FLAGS;
+		snap->has |= PEIOS_NTFE_HAS_TCP_FLAGS;
 		break;
 	}
 	case IPPROTO_UDP:
@@ -145,7 +145,7 @@ static void snapshot_l4(const struct sk_buff *skb, int offset, u8 protocol,
 			return;
 		snap->src_port = ntohs(uhp->source);
 		snap->dst_port = ntohs(uhp->dest);
-		snap->has |= PEIOS_PNP_HAS_PORTS;
+		snap->has |= PEIOS_NTFE_HAS_PORTS;
 		break;
 	}
 	case IPPROTO_SCTP: {
@@ -157,7 +157,7 @@ static void snapshot_l4(const struct sk_buff *skb, int offset, u8 protocol,
 			return;
 		snap->src_port = ntohs(shp->source);
 		snap->dst_port = ntohs(shp->dest);
-		snap->has |= PEIOS_PNP_HAS_PORTS;
+		snap->has |= PEIOS_NTFE_HAS_PORTS;
 		break;
 	}
 	case IPPROTO_ICMP: {
@@ -169,7 +169,7 @@ static void snapshot_l4(const struct sk_buff *skb, int offset, u8 protocol,
 			return;
 		snap->icmp_type = ihp->type;
 		snap->icmp_code = ihp->code;
-		snap->has |= PEIOS_PNP_HAS_ICMP;
+		snap->has |= PEIOS_NTFE_HAS_ICMP;
 		break;
 	}
 	case IPPROTO_ICMPV6: {
@@ -181,7 +181,7 @@ static void snapshot_l4(const struct sk_buff *skb, int offset, u8 protocol,
 			return;
 		snap->icmp_type = ihp->icmp6_type;
 		snap->icmp_code = ihp->icmp6_code;
-		snap->has |= PEIOS_PNP_HAS_ICMP;
+		snap->has |= PEIOS_NTFE_HAS_ICMP;
 		break;
 	}
 	default:
@@ -190,7 +190,7 @@ static void snapshot_l4(const struct sk_buff *skb, int offset, u8 protocol,
 }
 
 static int snapshot_ipv4(const struct sk_buff *skb, int offset,
-			 struct peios_pnp_snapshot *snap)
+			 struct peios_ntfe_snapshot *snap)
 {
 	struct iphdr ih;
 	const struct iphdr *ihp;
@@ -205,12 +205,12 @@ static int snapshot_ipv4(const struct sk_buff *skb, int offset,
 	memcpy(snap->dst_addr, &ihp->daddr, 4);
 	snap->protocol = ihp->protocol;
 	snap->ttl = ihp->ttl;
-	snap->has |= PEIOS_PNP_HAS_TTL;
+	snap->has |= PEIOS_NTFE_HAS_TTL;
 	snap->dscp = ihp->tos >> 2;
-	snap->has |= PEIOS_PNP_HAS_DSCP;
+	snap->has |= PEIOS_NTFE_HAS_DSCP;
 	fragmented = (ihp->frag_off & htons(IP_MF | IP_OFFSET)) != 0;
 	snap->fragment = fragmented;
-	snap->has |= PEIOS_PNP_HAS_FRAGMENT;
+	snap->has |= PEIOS_NTFE_HAS_FRAGMENT;
 
 	/* A non-first fragment carries no L4 header: those facts are absent. */
 	if (!(ihp->frag_off & htons(IP_OFFSET)))
@@ -219,7 +219,7 @@ static int snapshot_ipv4(const struct sk_buff *skb, int offset,
 }
 
 static int snapshot_ipv6(const struct sk_buff *skb, int offset,
-			 struct peios_pnp_snapshot *snap)
+			 struct peios_ntfe_snapshot *snap)
 {
 	struct ipv6hdr ih;
 	const struct ipv6hdr *ihp;
@@ -235,11 +235,11 @@ static int snapshot_ipv6(const struct sk_buff *skb, int offset,
 	memcpy(snap->src_addr, &ihp->saddr, 16);
 	memcpy(snap->dst_addr, &ihp->daddr, 16);
 	snap->ttl = ihp->hop_limit;
-	snap->has |= PEIOS_PNP_HAS_TTL;
+	snap->has |= PEIOS_NTFE_HAS_TTL;
 	snap->dscp = ((ihp->priority << 4) | (ihp->flow_lbl[0] >> 4)) >> 2;
-	snap->has |= PEIOS_PNP_HAS_DSCP;
+	snap->has |= PEIOS_NTFE_HAS_DSCP;
 	snap->fragment = 0;
-	snap->has |= PEIOS_PNP_HAS_FRAGMENT;
+	snap->has |= PEIOS_NTFE_HAS_FRAGMENT;
 
 	/* Walk a bounded chain of extension headers to the L4 protocol. */
 	nexthdr = ihp->nexthdr;
@@ -283,9 +283,9 @@ static int snapshot_ipv6(const struct sk_buff *skb, int offset,
 	return 0;
 }
 
-int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
+int peios_ntfe_snapshot_from_skb(const struct sk_buff *skb,
 				const struct net_device *dev, u8 seat,
-				u8 direction, struct peios_pnp_snapshot *snap)
+				u8 direction, struct peios_ntfe_snapshot *snap)
 {
 	int network_offset;
 	u16 ether_type;
@@ -301,7 +301,7 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 		/* The network the interface stands on (context.c): the
 		 * Network.* facts, read from netd's inventory, not the frame.
 		 */
-		peios_pnp_context_fill(dev->name, snap);
+		peios_ntfe_context_fill(dev->name, snap);
 	}
 	snap->length = skb->len;
 	snapshot_time(snap);
@@ -309,7 +309,7 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 
 	ether_type = ntohs(skb->protocol);
 	snap->ether_type = ether_type;
-	snap->has |= PEIOS_PNP_HAS_ETHER_TYPE;
+	snap->has |= PEIOS_NTFE_HAS_ETHER_TYPE;
 
 	/*
 	 * The VLAN is a fact of the frame at the device seats and of the
@@ -320,10 +320,10 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 	 */
 	if (skb_vlan_tag_present(skb)) {
 		snap->vlan = skb_vlan_tag_get_id(skb);
-		snap->has |= PEIOS_PNP_HAS_VLAN;
+		snap->has |= PEIOS_NTFE_HAS_VLAN;
 	} else if (dev && is_vlan_dev(dev)) {
 		snap->vlan = vlan_dev_vlan_id(dev);
-		snap->has |= PEIOS_PNP_HAS_VLAN;
+		snap->has |= PEIOS_NTFE_HAS_VLAN;
 	}
 
 	if (skb_mac_header_was_set(skb) && dev &&
@@ -332,8 +332,8 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 
 		ether_addr_copy(snap->src_mac, eth->h_source);
 		ether_addr_copy(snap->dst_mac, eth->h_dest);
-		snap->has |= PEIOS_PNP_HAS_MACS;
-	} else if (peios_pnp_seat_is_ip(seat) && dev &&
+		snap->has |= PEIOS_NTFE_HAS_MACS;
+	} else if (peios_ntfe_seat_is_ip(seat) && dev &&
 		   dev->type == ARPHRD_ETHER && dev->dev_addr) {
 		/* No link header yet (locally generated): the source is our
 		 * own device — present, so every flow carries the same fact
@@ -341,7 +341,7 @@ int peios_pnp_snapshot_from_skb(const struct sk_buff *skb,
 		 * neighbour resolution, after this seat: absent.
 		 */
 		ether_addr_copy(snap->src_mac, dev->dev_addr);
-		snap->has |= PEIOS_PNP_HAS_SRC_MAC;
+		snap->has |= PEIOS_NTFE_HAS_SRC_MAC;
 	}
 
 	network_offset = skb_network_offset(skb);

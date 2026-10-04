@@ -585,7 +585,7 @@ struct pkm_kacs_kunit_socket_view {
 	const void *socket_sd_ptr;
 	size_t socket_sd_len;
 	u32 max_impersonation;
-	/* The governing identity (net/pnp's owner). */
+	/* The governing identity (net/ntfe's owner). */
 	const void *owner_token;
 	u8 owner_kind;
 	s32 owner_pid;
@@ -1238,7 +1238,7 @@ long pkm_kacs_kunit_socket_pass_token_send(u32 socket_type, u32 level,
 long pkm_kacs_kunit_socket_attach_fd(int fd, u32 socket_level,
 				     const void *server_primary,
 				     const void **token_out);
-struct peios_pnp_owner;
+struct peios_ntfe_owner;
 long pkm_kacs_kunit_socket_owner_open(u32 family, u32 kern, void **handle_out,
 				      struct pkm_kacs_kunit_socket_view *out);
 long pkm_kacs_kunit_socket_owner_act(void *handle, u32 act,
@@ -1246,7 +1246,7 @@ long pkm_kacs_kunit_socket_owner_act(void *handle, u32 act,
 long pkm_kacs_kunit_socket_owner_clone(void *handle,
 				       struct pkm_kacs_kunit_socket_view *out);
 long pkm_kacs_kunit_socket_owner_query(void *handle,
-				       struct peios_pnp_owner *out);
+				       struct peios_ntfe_owner *out);
 void pkm_kacs_kunit_socket_owner_close(void *handle);
 long pkm_kacs_kunit_socket_listen_stamp(u32 level_set, u32 level, u32 restamp,
 					const void **first_out,

@@ -30,16 +30,16 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
-static struct peios_pnp_context_table __rcu *peios_pnp_context_active;
-static DEFINE_MUTEX(peios_pnp_context_lock);
+static struct peios_ntfe_context_table __rcu *peios_ntfe_context_active;
+static DEFINE_MUTEX(peios_ntfe_context_lock);
 
-struct peios_pnp_context_table *peios_pnp_context_table_alloc(u32 count)
+struct peios_ntfe_context_table *peios_ntfe_context_table_alloc(u32 count)
 {
-	struct peios_pnp_context_table *table;
+	struct peios_ntfe_context_table *table;
 
-	if (count > PEIOS_PNP_MAX_CONTEXTS)
+	if (count > PEIOS_NTFE_MAX_CONTEXTS)
 		return NULL;
 	table = kzalloc(struct_size(table, entries, count), GFP_KERNEL);
 	if (table)
@@ -47,8 +47,8 @@ struct peios_pnp_context_table *peios_pnp_context_table_alloc(u32 count)
 	return table;
 }
 
-static bool context_table_equal(const struct peios_pnp_context_table *a,
-				const struct peios_pnp_context_table *b)
+static bool context_table_equal(const struct peios_ntfe_context_table *a,
+				const struct peios_ntfe_context_table *b)
 {
 	u32 na = a ? a->count : 0, nb = b ? b->count : 0;
 
@@ -59,30 +59,30 @@ static bool context_table_equal(const struct peios_pnp_context_table *a,
 	return !memcmp(a->entries, b->entries, sizeof(a->entries[0]) * na);
 }
 
-int peios_pnp_context_publish(struct peios_pnp_context_table *table)
+int peios_ntfe_context_publish(struct peios_ntfe_context_table *table)
 {
-	struct peios_pnp_context_table *old;
+	struct peios_ntfe_context_table *old;
 	u64 generation;
 
-	if (table && table->count > PEIOS_PNP_MAX_CONTEXTS) {
+	if (table && table->count > PEIOS_NTFE_MAX_CONTEXTS) {
 		kfree(table);
 		return -EINVAL;
 	}
 
-	mutex_lock(&peios_pnp_context_lock);
+	mutex_lock(&peios_ntfe_context_lock);
 	old = rcu_dereference_protected(
-		peios_pnp_context_active,
-		lockdep_is_held(&peios_pnp_context_lock));
+		peios_ntfe_context_active,
+		lockdep_is_held(&peios_ntfe_context_lock));
 	if (context_table_equal(old, table)) {
-		mutex_unlock(&peios_pnp_context_lock);
+		mutex_unlock(&peios_ntfe_context_lock);
 		kfree(table);
 		return 0;
 	}
-	rcu_assign_pointer(peios_pnp_context_active, table);
-	generation = pnp_rust_generation_advance();
-	mutex_unlock(&peios_pnp_context_lock);
+	rcu_assign_pointer(peios_ntfe_context_active, table);
+	generation = ntfe_rust_generation_advance();
+	mutex_unlock(&peios_ntfe_context_lock);
 
-	pr_info("pnp: network context: %u interface%s; generation %llu\n",
+	pr_info("ntfe: network context: %u interface%s; generation %llu\n",
 		table ? table->count : 0,
 		(table && table->count == 1) ? "" : "s", generation);
 
@@ -91,20 +91,20 @@ int peios_pnp_context_publish(struct peios_pnp_context_table *table)
 	return 0;
 }
 
-void peios_pnp_context_fill(const char *ifname,
-			    struct peios_pnp_snapshot *snap)
+void peios_ntfe_context_fill(const char *ifname,
+			    struct peios_ntfe_snapshot *snap)
 {
-	const struct peios_pnp_context_table *table;
+	const struct peios_ntfe_context_table *table;
 	u32 i;
 
 	if (!ifname || !ifname[0])
 		return;
 
 	rcu_read_lock();
-	table = rcu_dereference(peios_pnp_context_active);
+	table = rcu_dereference(peios_ntfe_context_active);
 	if (table) {
 		for (i = 0; i < table->count; i++) {
-			const struct peios_pnp_context_entry *e =
+			const struct peios_ntfe_context_entry *e =
 				&table->entries[i];
 
 			if (strncmp(e->ifname, ifname, IFNAMSIZ))
@@ -115,20 +115,20 @@ void peios_pnp_context_fill(const char *ifname,
 			       sizeof(snap->network_name));
 			memcpy(snap->network_trust, e->network_trust,
 			       sizeof(snap->network_trust));
-			snap->has |= PEIOS_PNP_HAS_NETWORK;
+			snap->has |= PEIOS_NTFE_HAS_NETWORK;
 			break;
 		}
 	}
 	rcu_read_unlock();
 }
 
-u32 peios_pnp_context_count(void)
+u32 peios_ntfe_context_count(void)
 {
-	const struct peios_pnp_context_table *table;
+	const struct peios_ntfe_context_table *table;
 	u32 count;
 
 	rcu_read_lock();
-	table = rcu_dereference(peios_pnp_context_active);
+	table = rcu_dereference(peios_ntfe_context_active);
 	count = table ? table->count : 0;
 	rcu_read_unlock();
 	return count;

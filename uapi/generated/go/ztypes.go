@@ -127,7 +127,7 @@ type Kmes_emit_entry struct {
 	Payload_len    uint32
 	_              [4]uint8
 }
-type Peios_pnp_counter_rec struct {
+type Peios_ntfe_counter_rec struct {
 	Name         [64]uint8
 	Hash         uint64
 	Keyspec      uint8
@@ -143,14 +143,14 @@ type Peios_pnp_counter_rec struct {
 	Window_secs  [8]uint32
 	Window_value [8]uint64
 }
-type Peios_pnp_counters_query struct {
+type Peios_ntfe_counters_query struct {
 	Buf     uint64
 	Buf_len uint32
 	Count   uint32
 	Total   uint32
 	_       uint32
 }
-type Peios_pnp_event struct {
+type Peios_ntfe_event struct {
 	Seq               uint64
 	T_ns              uint64
 	Seat              uint8
@@ -189,7 +189,7 @@ type Peios_pnp_event struct {
 	Remote_service    [32]uint8
 	_                 uint32
 }
-type Peios_pnp_flow_rec struct {
+type Peios_ntfe_flow_rec struct {
 	Id                   uint32
 	Family               uint8
 	Protocol             uint8
@@ -229,14 +229,14 @@ type Peios_pnp_flow_rec struct {
 	Owner_user           [136]uint8
 	Owner_service        [64]uint8
 }
-type Peios_pnp_flows_query struct {
+type Peios_ntfe_flows_query struct {
 	Buf     uint64
 	Buf_len uint32
 	Count   uint32
 	Total   uint32
 	_       uint32
 }
-type Peios_pnp_listener_rec struct {
+type Peios_ntfe_listener_rec struct {
 	Family           uint8
 	Protocol         uint8
 	Reuseport        uint8
@@ -255,14 +255,14 @@ type Peios_pnp_listener_rec struct {
 	Owner_user       [68]uint8
 	Owner_service    [32]uint8
 }
-type Peios_pnp_listeners_query struct {
+type Peios_ntfe_listeners_query struct {
 	Buf     uint64
 	Buf_len uint32
 	Count   uint32
 	Total   uint32
 	_       uint32
 }
-type Peios_pnp_status struct {
+type Peios_ntfe_status struct {
 	Abi                 uint64
 	Generation          uint64
 	Enforcing           uint64
@@ -305,7 +305,10 @@ type Peios_pnp_status struct {
 	Refusals_bypassed   uint64
 	Teardowns_emitted   uint64
 	Identity_unresolved uint64
-	_                   [2]uint64
+	Changes_noted       uint64
+	Changes_walked      uint64
+	Contexts            uint64
+	_                   [1]uint64
 }
 type Reg_backup_args struct {
 	Output_fd int32

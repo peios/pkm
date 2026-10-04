@@ -22,7 +22,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include <linux/poll.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -11233,7 +11233,7 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 		 * The Network key roots the whole policy subtree (rules are
 		 * keys, exceptions are subkeys) and netd's inventory beside
 		 * it: any mutation at any depth may change the compiled
-		 * forests or the network context. PNP coalesces the per-key
+		 * forests or the network context. NTFE coalesces the per-key
 		 * events into one deferred re-walk and publishes only what
 		 * changed.
 		 */
@@ -11557,11 +11557,11 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_NETWORK) {
 			/*
-			 * PNP coalesces (per-key events, one deferred
+			 * NTFE coalesces (per-key events, one deferred
 			 * re-walk) and keeps its last known-good policy
 			 * generation and context table if the re-walk fails.
 			 */
-			peios_pnp_network_registry_changed(event->source_id,
+			peios_ntfe_network_registry_changed(event->source_id,
 							 event->guid);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {

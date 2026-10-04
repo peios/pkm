@@ -2329,7 +2329,7 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
-	/* Likewise PNP's Network key: absent, fallback covers it. */
+	/* Likewise NTFE's Network key: absent, fallback covers it. */
 	static const struct pkm_lcs_kunit_walk_source_step network_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
@@ -2529,7 +2529,7 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
-	/* Likewise PNP's Network key: absent, fallback covers it. */
+	/* Likewise NTFE's Network key: absent, fallback covers it. */
 	static const struct pkm_lcs_kunit_walk_source_step network_steps[] = {
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },

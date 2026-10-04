@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * PNP KUnit: kernel-resident glue only — the seat snapshot builder against
+ * NTFE KUnit: kernel-resident glue only — the seat snapshot builder against
  * crafted skbs, and the dispatch predicate. Rules-engine semantics are
  * owned by the pnp-core cargo suite (48 tests); duplicating them here
  * would be testing the same pure code twice.
  */
 
 #include <kunit/test.h>
+#include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
 #include <linux/icmp.h>
-#include <linux/delay.h>
 #include <linux/rtnetlink.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <linux/netfilter.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include <linux/string.h>
 #include <net/netfilter/nf_conntrack_extend.h>
 
-#include <pkm/pnp.h>
+#include <pkm/ntfe.h>
 #include <linux/ipv6.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
@@ -36,9 +36,9 @@
 #include <linux/net.h>
 #include <net/sock.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
-static struct net_device *pnp_test_dev(struct kunit *test, const char *name,
+static struct net_device *ntfe_test_dev(struct kunit *test, const char *name,
 				       bool bridge_port)
 {
 	struct net_device *dev;
@@ -56,36 +56,36 @@ static struct net_device *pnp_test_dev(struct kunit *test, const char *name,
 	return dev;
 }
 
-static void pnp_kunit_rust_probe(struct kunit *test)
+static void ntfe_kunit_rust_probe(struct kunit *test)
 {
 	/* The staged pnp-core is linked and callable, and answers with its
 	 * known constant (MAX_PROMPT_CHAIN).
 	 */
-	KUNIT_EXPECT_EQ(test, pnp_rust_kunit_probe(), 4);
+	KUNIT_EXPECT_EQ(test, ntfe_rust_kunit_probe(), 4);
 }
 
-static void pnp_kunit_dispatch_predicate(struct kunit *test)
+static void ntfe_kunit_dispatch_predicate(struct kunit *test)
 {
-	struct net_device *plain = pnp_test_dev(test, "eth0", false);
-	struct net_device *enslaved = pnp_test_dev(test, "eth1", true);
+	struct net_device *plain = ntfe_test_dev(test, "eth0", false);
+	struct net_device *enslaved = ntfe_test_dev(test, "eth1", true);
 
 	/* IP on a plain device reaches the IP seat: defer. */
-	KUNIT_EXPECT_TRUE(test, peios_pnp_traversal_reaches_ip_seat(
+	KUNIT_EXPECT_TRUE(test, peios_ntfe_traversal_reaches_ip_seat(
 					htons(ETH_P_IP), plain));
-	KUNIT_EXPECT_TRUE(test, peios_pnp_traversal_reaches_ip_seat(
+	KUNIT_EXPECT_TRUE(test, peios_ntfe_traversal_reaches_ip_seat(
 					htons(ETH_P_IPV6), plain));
 	/* Non-IP never reaches the IP hooks: fallback judgment here. */
-	KUNIT_EXPECT_FALSE(test, peios_pnp_traversal_reaches_ip_seat(
+	KUNIT_EXPECT_FALSE(test, peios_ntfe_traversal_reaches_ip_seat(
 					 htons(ETH_P_ARP), plain));
 	/* Bridge-enslaved port: L2-forwarded, never crosses the IP hooks —
 	 * the corrected predicate from the design session.
 	 */
-	KUNIT_EXPECT_FALSE(test, peios_pnp_traversal_reaches_ip_seat(
+	KUNIT_EXPECT_FALSE(test, peios_ntfe_traversal_reaches_ip_seat(
 					 htons(ETH_P_IP), enslaved));
 }
 
 /* An inbound TCP/v4 SYN to the given port; 10.0.0.7 -> 10.0.0.5. */
-static struct sk_buff *pnp_test_tcp4_skb(struct kunit *test, u16 dport)
+static struct sk_buff *ntfe_test_tcp4_skb(struct kunit *test, u16 dport)
 {
 	struct sk_buff *skb;
 	struct iphdr *iph;
@@ -121,16 +121,16 @@ static struct sk_buff *pnp_test_tcp4_skb(struct kunit *test, u16 dport)
 	return skb;
 }
 
-static void pnp_kunit_snapshot_tcp4(struct kunit *test)
+static void ntfe_kunit_snapshot_tcp4(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
-	struct peios_pnp_snapshot snap;
-	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct peios_ntfe_snapshot snap;
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 22);
 
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
 	KUNIT_EXPECT_EQ(test, snap.addr_family, 4);
 	KUNIT_EXPECT_EQ(test, snap.protocol, IPPROTO_TCP);
@@ -140,17 +140,17 @@ static void pnp_kunit_snapshot_tcp4(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snap.dst_port, 22);
 	KUNIT_EXPECT_EQ(test, snap.ttl, 64);
 	KUNIT_EXPECT_EQ(test, snap.dscp, 0x2e);
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_PORTS);
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_TCP_FLAGS);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_PORTS);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_TCP_FLAGS);
 	KUNIT_EXPECT_EQ(test, snap.tcp_flags, 0x02);	/* bare SYN */
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_FRAGMENT);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_FRAGMENT);
 	KUNIT_EXPECT_EQ(test, snap.fragment, 0);
 	/* No mac header was set: MAC facts are absent. */
-	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_MACS);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_NTFE_HAS_MACS);
 	/* Conntrack ran (it's an IP seat) and left nothing: untracked. */
-	KUNIT_EXPECT_EQ(test, snap.flow_state, PEIOS_PNP_FLOW_UNTRACKED);
+	KUNIT_EXPECT_EQ(test, snap.flow_state, PEIOS_NTFE_FLOW_UNTRACKED);
 	/* Clock machinery attached wall-time facts. */
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_TIME);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_TIME);
 	KUNIT_EXPECT_GE(test, snap.t_year, 2026);
 	KUNIT_EXPECT_GE(test, snap.t_day_of_week, 1);
 	KUNIT_EXPECT_LE(test, snap.t_day_of_week, 7);
@@ -159,10 +159,10 @@ static void pnp_kunit_snapshot_tcp4(struct kunit *test)
 	kfree_skb(skb);
 }
 
-static void pnp_kunit_snapshot_arp(struct kunit *test)
+static void ntfe_kunit_snapshot_arp(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
-	struct peios_pnp_snapshot snap;
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct peios_ntfe_snapshot snap;
 	struct sk_buff *skb;
 
 	skb = alloc_skb(64, GFP_KERNEL);
@@ -173,29 +173,29 @@ static void pnp_kunit_snapshot_arp(struct kunit *test)
 	skb->protocol = htons(ETH_P_ARP);
 
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_INGRESS,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_INGRESS,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
 	/* Absent-fact law, at the seat level: an ARP frame has L2 and seat
 	 * facts and nothing else.
 	 */
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_ETHER_TYPE);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_ETHER_TYPE);
 	KUNIT_EXPECT_EQ(test, snap.ether_type, ETH_P_ARP);
 	KUNIT_EXPECT_EQ(test, snap.addr_family, 0);
-	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_PORTS);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_NTFE_HAS_PORTS);
 	/* The ingress seat stands before conntrack: flow facts absent, not
 	 * "untracked".
 	 */
-	KUNIT_EXPECT_EQ(test, snap.flow_state, PEIOS_PNP_FLOW_ABSENT);
+	KUNIT_EXPECT_EQ(test, snap.flow_state, PEIOS_NTFE_FLOW_ABSENT);
 
 	kfree_skb(skb);
 }
 
-static void pnp_kunit_snapshot_udp6(struct kunit *test)
+static void ntfe_kunit_snapshot_udp6(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
-	struct peios_pnp_snapshot snap;
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct peios_ntfe_snapshot snap;
 	struct sk_buff *skb;
 	struct ipv6hdr *ip6;
 	struct udphdr *uh;
@@ -220,9 +220,9 @@ static void pnp_kunit_snapshot_udp6(struct kunit *test)
 	skb->protocol = htons(ETH_P_IPV6);
 
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_EGRESS,
-						    PEIOS_PNP_DIR_OUT, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_EGRESS,
+						    PEIOS_NTFE_DIR_OUT, &snap),
 			0);
 	KUNIT_EXPECT_EQ(test, snap.addr_family, 6);
 	KUNIT_EXPECT_EQ(test, snap.protocol, IPPROTO_UDP);
@@ -230,21 +230,21 @@ static void pnp_kunit_snapshot_udp6(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snap.dst_addr[15], 1);
 	KUNIT_EXPECT_EQ(test, snap.src_port, 5353);
 	KUNIT_EXPECT_EQ(test, snap.ttl, 255);
-	KUNIT_EXPECT_EQ(test, snap.direction, PEIOS_PNP_DIR_OUT);
-	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_TCP_FLAGS);
+	KUNIT_EXPECT_EQ(test, snap.direction, PEIOS_NTFE_DIR_OUT);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_NTFE_HAS_TCP_FLAGS);
 
 	kfree_skb(skb);
 }
 
 /* Feed one action list to the builder. */
-static void pnp_test_actions(struct kunit *test, void *b, const char *action)
+static void ntfe_test_actions(struct kunit *test, void *b, const char *action)
 {
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_list_begin(b, "Actions", 7), 0);
+			ntfe_rust_builder_value_list_begin(b, "Actions", 7), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_list_str(b, action, strlen(action)),
+			ntfe_rust_builder_list_str(b, action, strlen(action)),
 			0);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_value_list_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_value_list_end(b), 0);
 }
 
 /*
@@ -252,71 +252,71 @@ static void pnp_test_actions(struct kunit *test, void *b, const char *action)
  * build it), published under RCU, enforced by the real hook function.
  * "Drop everything inbound, except SSH" — the design-session tree, live.
  */
-static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
+static void ntfe_kunit_end_to_end_enforcement(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
 	struct nf_hook_state state = {
 		.hook = NF_INET_LOCAL_IN,
 		.pf = NFPROTO_IPV4,
 		.in = dev,
 		.net = &init_net,
 	};
-	struct peios_pnp_snapshot snap;
-	struct peios_pnp_outcome out;
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_outcome out;
 	struct sk_buff *skb;
-	u64 gen_before = pnp_rust_generation();
+	u64 gen_before = ntfe_rust_generation();
 	void *b, *forest = NULL;
 
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
 
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_rule_begin(b, "no-inbound", 10), 0);
+			ntfe_rust_builder_rule_begin(b, "no-inbound", 10), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_str(b, "Direction.Equal", 15,
+			ntfe_rust_builder_value_str(b, "Direction.Equal", 15,
 						   "in", 2),
 			0);
-	pnp_test_actions(test, b, "DROP");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "ssh", 3), 0);
+	ntfe_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "ssh", 3), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_int(b, "DstPort.Equal", 13, 22),
+			ntfe_rust_builder_value_int(b, "DstPort.Equal", 13, 22),
 			0);
-	pnp_test_actions(test, b, "PASS");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
 					       &forest),
 			0);
 	KUNIT_ASSERT_NOT_NULL(test, forest);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, NULL, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(forest, NULL, NULL, 1),
 			0);
-	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen_before + 1);
+	KUNIT_EXPECT_EQ(test, ntfe_rust_generation(), gen_before + 1);
 
 	/* SSH passes through the exception... */
-	skb = pnp_test_tcp4_skb(test, 22);
+	skb = ntfe_test_tcp4_skb(test, 22);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_hook_local_in(NULL, skb, &state),
+			peios_ntfe_hook_local_in(NULL, skb, &state),
 			(unsigned int)NF_ACCEPT);
 	/* ...and its attribution is the path through the tree. */
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_PACKET, &snap,
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_PACKET, &snap,
 					      &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_PASS);
 	KUNIT_EXPECT_STREQ(test, out.attributed, "no-inbound/ssh");
 	kfree_skb(skb);
 
 	/* Telnet is dropped by the parent... */
-	skb = pnp_test_tcp4_skb(test, 23);
+	skb = ntfe_test_tcp4_skb(test, 23);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_hook_local_in(NULL, skb, &state),
+			peios_ntfe_hook_local_in(NULL, skb, &state),
 			(unsigned int)NF_DROP);
 	kfree_skb(skb);
 
@@ -324,12 +324,12 @@ static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
 	 * (an unrelated seat judging the same machine's traffic).
 	 */
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_RAWPACKET,
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_RAWPACKET,
 					      &snap, &out),
 			-ENOENT);
 
 	/* Restore permissiveness for whatever runs after this suite. */
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
 			0);
 }
 
@@ -338,34 +338,34 @@ static void pnp_kunit_end_to_end_enforcement(struct kunit *test)
  * the internal pop path (the device read uses the same), check ordering,
  * status, and the confessed-drop counter under overwrite.
  */
-static void pnp_kunit_event_stream(struct kunit *test)
+static void ntfe_kunit_event_stream(struct kunit *test)
 {
-	struct peios_pnp_snapshot snap = {
-		.seat = PEIOS_PNP_SEAT_LOCAL_IN,
-		.direction = PEIOS_PNP_DIR_IN,
+	struct peios_ntfe_snapshot snap = {
+		.seat = PEIOS_NTFE_SEAT_LOCAL_IN,
+		.direction = PEIOS_NTFE_DIR_IN,
 		.addr_family = 4,
 		.protocol = 6,
 		.src_port = 43210,
 		.dst_port = 22,
 		.length = 60,
 	};
-	struct peios_pnp_outcome out = {
-		.verdict = PEIOS_PNP_VERDICT_DROP,
+	struct peios_ntfe_outcome out = {
+		.verdict = PEIOS_NTFE_VERDICT_DROP,
 		.n_reports = 2,
 	};
-	struct peios_pnp_status status;
-	u64 before_dropped = peios_pnp_events_dropped();
+	struct peios_ntfe_status status;
+	u64 before_dropped = peios_ntfe_events_dropped();
 
 	strscpy(out.attributed, "no-inbound", sizeof(out.attributed));
-	peios_pnp_event_emit(&snap, &out, PEIOS_PNP_LAYER_PACKET, 0);
+	peios_ntfe_event_emit(&snap, &out, PEIOS_NTFE_LAYER_PACKET, 0);
 
-	peios_pnp_status_fill(&status);
-	KUNIT_EXPECT_EQ(test, status.abi, (u64)PEIOS_PNP_ABI_VERSION);
+	peios_ntfe_status_fill(&status);
+	KUNIT_EXPECT_EQ(test, status.abi, (u64)PEIOS_NTFE_ABI_VERSION);
 	KUNIT_EXPECT_EQ(test, status.events_dropped, before_dropped);
 	/* Generation was left at its post-publish value by the end-to-end
 	 * test; whatever it is, status must agree with the bridge.
 	 */
-	KUNIT_EXPECT_EQ(test, status.generation, pnp_rust_generation());
+	KUNIT_EXPECT_EQ(test, status.generation, ntfe_rust_generation());
 }
 
 
@@ -376,50 +376,50 @@ static void pnp_kunit_event_stream(struct kunit *test)
  * windows, the absent-key law, re-publication), and REPORT landing in
  * KMES as a network-report event.
  */
-static void pnp_kunit_reject_kinds_cross_the_bridge(struct kunit *test)
+static void ntfe_kunit_reject_kinds_cross_the_bridge(struct kunit *test)
 {
-	struct peios_pnp_snapshot snap = {
-		.seat = PEIOS_PNP_SEAT_LOCAL_IN,
-		.direction = PEIOS_PNP_DIR_IN,
+	struct peios_ntfe_snapshot snap = {
+		.seat = PEIOS_NTFE_SEAT_LOCAL_IN,
+		.direction = PEIOS_NTFE_DIR_IN,
 		.addr_family = 4,
 		.protocol = 6,
 		.length = 60,
 	};
-	struct peios_pnp_outcome out;
+	struct peios_ntfe_outcome out;
 	void *b, *forest = NULL;
 
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "no", 2), 0);
-	pnp_test_actions(test, b, "REJECT(Prohibited)");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "no", 2), 0);
+	ntfe_test_actions(test, b, "REJECT(Prohibited)");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
 					       &forest),
 			0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_evaluate(forest, &snap, PEIOS_PNP_LAYER_PACKET,
+			ntfe_rust_evaluate(forest, &snap, PEIOS_NTFE_LAYER_PACKET,
 					  1, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_REJECT);
-	KUNIT_EXPECT_EQ(test, out.reject_kind, PEIOS_PNP_REJECT_PROHIBITED);
-	pnp_rust_forest_free(forest);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_REJECT);
+	KUNIT_EXPECT_EQ(test, out.reject_kind, PEIOS_NTFE_REJECT_PROHIBITED);
+	ntfe_rust_forest_free(forest);
 
 	/* An unminted kind refuses the forest. */
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "no", 2), 0);
-	pnp_test_actions(test, b, "REJECT(HostUnreachable)");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "no", 2), 0);
+	ntfe_test_actions(test, b, "REJECT(HostUnreachable)");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	forest = NULL;
 	KUNIT_EXPECT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
 					       &forest),
 			-EINVAL);
 	KUNIT_EXPECT_NULL(test, forest);
 }
 
-static struct nf_conn *pnp_test_flow(struct kunit *test)
+static struct nf_conn *ntfe_test_flow(struct kunit *test)
 {
 	struct nf_conntrack_tuple orig = { }, repl = { };
 	struct nf_conn *ct;
@@ -427,68 +427,68 @@ static struct nf_conn *pnp_test_flow(struct kunit *test)
 	ct = nf_conntrack_alloc(&init_net, &nf_ct_zone_dflt, &orig, &repl,
 				GFP_KERNEL);
 	KUNIT_ASSERT_FALSE(test, IS_ERR_OR_NULL(ct));
-	/* init_conntrack does this for real flows (pnp-conntrack-ext patch);
+	/* init_conntrack does this for real flows (ntfe-conntrack-ext patch);
 	 * a directly allocated entry needs it by hand.
 	 */
-	peios_pnp_ct_ext_add(ct);
+	peios_ntfe_ct_ext_add(ct);
 	return ct;
 }
 
-static void pnp_kunit_tag_store(struct kunit *test)
+static void ntfe_kunit_tag_store(struct kunit *test)
 {
-	struct nf_conn *ct = pnp_test_flow(test);
-	u64 untracked_before = atomic64_read(&peios_pnp_stats.tag_untracked);
-	u64 refused_before = atomic64_read(&peios_pnp_stats.tag_refused);
+	struct nf_conn *ct = ntfe_test_flow(test);
+	u64 untracked_before = atomic64_read(&peios_ntfe_stats.tag_untracked);
+	u64 refused_before = atomic64_read(&peios_ntfe_stats.tag_refused);
 	u64 value = 0;
 	u32 i;
 
 	/* Absent until written. */
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 0);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 0);
 
-	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_SET, 7);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 1);
+	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_SET, 7);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 7ULL);
 
-	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_ADD, 5);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 1);
+	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_ADD, 5);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 12ULL);
 
 	/* Add on an absent tag starts from zero. */
-	peios_pnp_tag_apply(ct, 0x1002, PEIOS_PNP_TAG_ADD, 3);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1002, &value), 1);
+	peios_ntfe_tag_apply(ct, 0x1002, PEIOS_NTFE_TAG_ADD, 3);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1002, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 3ULL);
 
 	/* Clear reads as absent; the slot is reusable. */
-	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_CLEAR, 0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 0);
-	peios_pnp_tag_apply(ct, 0x1001, PEIOS_PNP_TAG_SET, 1);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x1001, &value), 1);
+	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_CLEAR, 0);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 0);
+	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_SET, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 1ULL);
 
 	/* Growth past the initial table, up to the tripwire, then refusal
 	 * (confessed). Two tags are already present.
 	 */
-	for (i = 0; i < PEIOS_PNP_TAG_MAX_PER_FLOW - 2; i++)
-		peios_pnp_tag_apply(ct, 0x2000 + i, PEIOS_PNP_TAG_SET, i);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x2000, &value), 1);
+	for (i = 0; i < PEIOS_NTFE_TAG_MAX_PER_FLOW - 2; i++)
+		peios_ntfe_tag_apply(ct, 0x2000 + i, PEIOS_NTFE_TAG_SET, i);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x2000, &value), 1);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_tag_lookup(ct, 0x2000 + PEIOS_PNP_TAG_MAX_PER_FLOW - 3,
+			peios_ntfe_tag_lookup(ct, 0x2000 + PEIOS_NTFE_TAG_MAX_PER_FLOW - 3,
 					     &value),
 			1);
 	KUNIT_EXPECT_EQ(test, value,
-			(u64)(PEIOS_PNP_TAG_MAX_PER_FLOW - 3));
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.tag_refused),
+			(u64)(PEIOS_NTFE_TAG_MAX_PER_FLOW - 3));
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_refused),
 			refused_before);
-	peios_pnp_tag_apply(ct, 0x3000, PEIOS_PNP_TAG_SET, 1);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(ct, 0x3000, &value), 0);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.tag_refused),
+	peios_ntfe_tag_apply(ct, 0x3000, PEIOS_NTFE_TAG_SET, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x3000, &value), 0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_refused),
 			refused_before + 1);
 
 	/* Untracked packets have no flow: no-op, confessed. */
-	peios_pnp_tag_apply(NULL, 0x1001, PEIOS_PNP_TAG_SET, 1);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.tag_untracked),
+	peios_ntfe_tag_apply(NULL, 0x1001, PEIOS_NTFE_TAG_SET, 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_untracked),
 			untracked_before + 1);
-	KUNIT_EXPECT_EQ(test, peios_pnp_tag_lookup(NULL, 0x1001, &value), 0);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(NULL, 0x1001, &value), 0);
 
 	/* An unconfirmed entry is born with refcount 0 (confirmation sets
 	 * it to 1), so it is released the way conntrack's own error paths
@@ -498,77 +498,77 @@ static void pnp_kunit_tag_store(struct kunit *test)
 	nf_conntrack_free(ct);
 }
 
-static void pnp_kunit_counter_store(struct kunit *test)
+static void ntfe_kunit_counter_store(struct kunit *test)
 {
-	struct peios_pnp_view views[2] = {
+	struct peios_ntfe_view views[2] = {
 		{ .name = "hits", .hash = 0xabc, .window_secs = 10,
-		  .keyspec = PEIOS_PNP_KEY_SRC_ADDR },
+		  .keyspec = PEIOS_NTFE_KEY_SRC_ADDR },
 		{ .name = "hits", .hash = 0xabc, .window_secs = 0,
 		  .keyspec = 0 },
 	};
-	struct peios_pnp_snapshot a = {
-		.seat = PEIOS_PNP_SEAT_LOCAL_IN, .addr_family = 4,
+	struct peios_ntfe_snapshot a = {
+		.seat = PEIOS_NTFE_SEAT_LOCAL_IN, .addr_family = 4,
 		.src_addr = { 10, 0, 0, 7 }, .dst_addr = { 10, 0, 0, 5 },
 		.ifindex = 7, .length = 60,
 	};
-	struct peios_pnp_snapshot b = a;
-	struct peios_pnp_snapshot arp = {
-		.seat = PEIOS_PNP_SEAT_INGRESS, .ifindex = 7, .length = 42,
+	struct peios_ntfe_snapshot b = a;
+	struct peios_ntfe_snapshot arp = {
+		.seat = PEIOS_NTFE_SEAT_INGRESS, .ifindex = 7, .length = 42,
 	};
-	u64 absent_before = atomic64_read(&peios_pnp_stats.count_key_absent);
-	u64 cells_before = peios_pnp_counters_cells();
+	u64 absent_before = atomic64_read(&peios_ntfe_stats.count_key_absent);
+	u64 cells_before = peios_ntfe_counters_cells();
 	u64 v = 0;
 
 	b.src_addr[3] = 8;
 
-	KUNIT_ASSERT_EQ(test, peios_pnp_counters_publish(views, 2), 0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_counters_publish(views, 2), 0);
 
 	/* Nothing counted yet: absent, both views. */
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+			peios_ntfe_counter_read(&a, 0xabc, PEIOS_NTFE_KEY_SRC_ADDR,
 					       10, &v),
 			0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xabc, 0, 0, &v), 0);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counter_read(&a, 0xabc, 0, 0, &v), 0);
 
-	peios_pnp_counter_add(&a, 0xabc, 5);
-	peios_pnp_counter_add(&a, 0xabc, 2);
-	peios_pnp_counter_add(&b, 0xabc, 1);
+	peios_ntfe_counter_add(&a, 0xabc, 5);
+	peios_ntfe_counter_add(&a, 0xabc, 2);
+	peios_ntfe_counter_add(&b, 0xabc, 1);
 
 	/* Per-source cells are distinct; the global cell sums everyone. */
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+			peios_ntfe_counter_read(&a, 0xabc, PEIOS_NTFE_KEY_SRC_ADDR,
 					       10, &v),
 			1);
 	KUNIT_EXPECT_EQ(test, v, 7ULL);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&b, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+			peios_ntfe_counter_read(&b, 0xabc, PEIOS_NTFE_KEY_SRC_ADDR,
 					       10, &v),
 			1);
 	KUNIT_EXPECT_EQ(test, v, 1ULL);
-	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xabc, 0, 0, &v), 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counter_read(&a, 0xabc, 0, 0, &v), 1);
 	KUNIT_EXPECT_EQ(test, v, 8ULL);
 	/* A window the table does not answer is absent. */
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+			peios_ntfe_counter_read(&a, 0xabc, PEIOS_NTFE_KEY_SRC_ADDR,
 					       99, &v),
 			0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_counters_cells(), cells_before + 3);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counters_cells(), cells_before + 3);
 
 	/* A stream nobody materialized: nothing happens. */
-	peios_pnp_counter_add(&a, 0xdef, 1);
-	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xdef, 0, 0, &v), 0);
+	peios_ntfe_counter_add(&a, 0xdef, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counter_read(&a, 0xdef, 0, 0, &v), 0);
 
 	/* Absent-fact law: an ARP frame has no SrcAddr for the keyed table
 	 * (confessed), but still lands in the global cell.
 	 */
-	peios_pnp_counter_add(&arp, 0xabc, 1);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.count_key_absent),
+	peios_ntfe_counter_add(&arp, 0xabc, 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.count_key_absent),
 			absent_before + 1);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&arp, 0xabc,
-					       PEIOS_PNP_KEY_SRC_ADDR, 10, &v),
+			peios_ntfe_counter_read(&arp, 0xabc,
+					       PEIOS_NTFE_KEY_SRC_ADDR, 10, &v),
 			0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&arp, 0xabc, 0, 0, &v),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counter_read(&arp, 0xabc, 0, 0, &v),
 			1);
 	KUNIT_EXPECT_EQ(test, v, 9ULL);
 
@@ -576,48 +576,48 @@ static void pnp_kunit_counter_store(struct kunit *test)
 	 * the new window starts empty and converges.
 	 */
 	views[0].window_secs = 60;
-	KUNIT_ASSERT_EQ(test, peios_pnp_counters_publish(views, 2), 0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_counters_publish(views, 2), 0);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+			peios_ntfe_counter_read(&a, 0xabc, PEIOS_NTFE_KEY_SRC_ADDR,
 					       10, &v),
 			0);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+			peios_ntfe_counter_read(&a, 0xabc, PEIOS_NTFE_KEY_SRC_ADDR,
 					       60, &v),
 			1);
 	KUNIT_EXPECT_EQ(test, v, 0ULL);
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_counter_read(&a, 0xabc, PEIOS_PNP_KEY_SRC_ADDR,
+			peios_ntfe_counter_read(&a, 0xabc, PEIOS_NTFE_KEY_SRC_ADDR,
 					       0, &v),
 			1);
 	KUNIT_EXPECT_EQ(test, v, 7ULL);
 
 	/* No views at all: the store retires its tables. */
-	KUNIT_ASSERT_EQ(test, peios_pnp_counters_publish(NULL, 0), 0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_counter_read(&a, 0xabc, 0, 0, &v), 0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_counters_publish(NULL, 0), 0);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counter_read(&a, 0xabc, 0, 0, &v), 0);
 	rcu_barrier();
-	KUNIT_EXPECT_EQ(test, peios_pnp_counters_cells(), cells_before);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counters_cells(), cells_before);
 }
 
-static void pnp_kunit_report_lands_in_kmes(struct kunit *test)
+static void ntfe_kunit_report_lands_in_kmes(struct kunit *test)
 {
-	struct peios_pnp_snapshot snap = {
-		.seat = PEIOS_PNP_SEAT_LOCAL_IN,
-		.direction = PEIOS_PNP_DIR_IN,
+	struct peios_ntfe_snapshot snap = {
+		.seat = PEIOS_NTFE_SEAT_LOCAL_IN,
+		.direction = PEIOS_NTFE_DIR_IN,
 		.addr_family = 4,
 		.protocol = 6,
 		.src_addr = { 192, 0, 2, 9 },
 		.dst_addr = { 10, 0, 0, 5 },
 		.src_port = 4444,
 		.dst_port = 22,
-		.has = PEIOS_PNP_HAS_PORTS,
-		.flow_state = PEIOS_PNP_FLOW_NEW,
+		.has = PEIOS_NTFE_HAS_PORTS,
+		.flow_state = PEIOS_NTFE_FLOW_NEW,
 		.length = 60,
 		.ifindex = 7,
 		.ifname = "eth0",
 	};
 	struct pkm_kmes_kunit_snapshot ring;
-	u64 emitted_before = atomic64_read(&peios_pnp_stats.reports_emitted);
+	u64 emitted_before = atomic64_read(&peios_ntfe_stats.reports_emitted);
 	size_t written = 0;
 	u8 *buf;
 	int ret;
@@ -625,14 +625,14 @@ static void pnp_kunit_report_lands_in_kmes(struct kunit *test)
 	buf = kunit_kzalloc(test, 4096, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buf);
 
-	peios_pnp_report_emit(&snap, "no-inbound/ssh", 14, 4,
-			      PEIOS_PNP_LAYER_PACKET, PEIOS_PNP_VERDICT_REJECT,
-			      PEIOS_PNP_REJECT_PROHIBITED);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.reports_emitted),
+	peios_ntfe_report_emit(&snap, "no-inbound/ssh", 14, 4,
+			      PEIOS_NTFE_LAYER_PACKET, PEIOS_NTFE_VERDICT_REJECT,
+			      PEIOS_NTFE_REJECT_PROHIBITED);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.reports_emitted),
 			emitted_before + 1);
 
 	ret = pkm_kmes_kunit_copy_latest_matching_event(
-		KMES_ORIGIN_PNP, "network-report", 14, buf, 4096, &written,
+		KMES_ORIGIN_NTFE, "network-report", 14, buf, 4096, &written,
 		&ring);
 	if (ret == -ENODEV || ret == -ENOENT)
 		kunit_skip(test, "KMES ring not available in this run (%d)",
@@ -651,43 +651,43 @@ static void pnp_kunit_report_lands_in_kmes(struct kunit *test)
  * cache on a real conntrack entry (judge once, read thereafter, re-judge
  * when stale by generation or by time edge, DROP persists, loopback's two
  * endpoints answer to the stricter sentence), the refusal builder and the
- * seat bypass for PNP's own refusals.
+ * seat bypass for NTFE's own refusals.
  */
-static void pnp_kunit_snapshot_local_out(struct kunit *test)
+static void ntfe_kunit_snapshot_local_out(struct kunit *test)
 {
 	static const u8 mac[6] = { 0x52, 0x54, 0, 0xab, 0xcd, 0xef };
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
-	struct net_device *lo = pnp_test_dev(test, "lo", false);
-	struct peios_pnp_snapshot snap;
-	struct sk_buff *skb = pnp_test_tcp4_skb(test, 443);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct net_device *lo = ntfe_test_dev(test, "lo", false);
+	struct peios_ntfe_snapshot snap;
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 443);
 
 	dev->dev_addr = mac;
 	lo->flags |= IFF_LOOPBACK;
 
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_OUT,
-						    PEIOS_PNP_DIR_OUT, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_OUT,
+						    PEIOS_NTFE_DIR_OUT, &snap),
 			0);
-	KUNIT_EXPECT_EQ(test, snap.seat, PEIOS_PNP_SEAT_LOCAL_OUT);
-	KUNIT_EXPECT_EQ(test, snap.direction, PEIOS_PNP_DIR_OUT);
+	KUNIT_EXPECT_EQ(test, snap.seat, PEIOS_NTFE_SEAT_LOCAL_OUT);
+	KUNIT_EXPECT_EQ(test, snap.direction, PEIOS_NTFE_DIR_OUT);
 	/* No link header yet: the source MAC is our own device's, present
 	 * for the uniform fact set; the destination is absent.
 	 */
-	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_MACS);
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_SRC_MAC);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_NTFE_HAS_MACS);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_SRC_MAC);
 	KUNIT_EXPECT_EQ(test, memcmp(snap.src_mac, mac, 6), 0);
 	KUNIT_EXPECT_FALSE(test, snap.loopback);
 	/* The clock rides along as epoch seconds too. */
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_TIME);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_TIME);
 	KUNIT_EXPECT_GT(test, snap.t_secs, (s64)1700000000);
 	/* Untracked: no flow, no start facts. */
-	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_START);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_NTFE_HAS_START);
 
 	KUNIT_EXPECT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, lo,
-						    PEIOS_PNP_SEAT_LOCAL_OUT,
-						    PEIOS_PNP_DIR_OUT, &snap),
+			peios_ntfe_snapshot_from_skb(skb, lo,
+						    PEIOS_NTFE_SEAT_LOCAL_OUT,
+						    PEIOS_NTFE_DIR_OUT, &snap),
 			0);
 	KUNIT_EXPECT_TRUE(test, snap.loopback);
 
@@ -695,81 +695,81 @@ static void pnp_kunit_snapshot_local_out(struct kunit *test)
 }
 
 /* Publishes a one-rule Flow forest. */
-static void pnp_test_publish_flow(struct kunit *test, const char *cond_key,
+static void ntfe_test_publish_flow(struct kunit *test, const char *cond_key,
 				  const char *cond_val, const char *action)
 {
 	void *b, *forest = NULL;
 
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "r", 1), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "r", 1), 0);
 	if (cond_key)
 		KUNIT_ASSERT_EQ(test,
-				pnp_rust_builder_value_str(b, cond_key,
+				ntfe_rust_builder_value_str(b, cond_key,
 							   strlen(cond_key),
 							   cond_val,
 							   strlen(cond_val)),
 				0);
-	pnp_test_actions(test, b, action);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	ntfe_test_actions(test, b, action);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &forest),
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_FLOW, &forest),
 			0);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, forest, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, forest, 1),
 			0);
 }
 
 /* Publishes a Flow forest: outbound passes, inbound drops. */
-static void pnp_test_publish_flow2(struct kunit *test)
+static void ntfe_test_publish_flow2(struct kunit *test)
 {
 	void *b, *forest = NULL;
 
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "out", 3), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "out", 3), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_str(b, "Direction.Equal", 15,
+			ntfe_rust_builder_value_str(b, "Direction.Equal", 15,
 						   "out", 3),
 			0);
-	pnp_test_actions(test, b, "PASS");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "in", 2), 0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "in", 2), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_str(b, "Direction.Equal", 15,
+			ntfe_rust_builder_value_str(b, "Direction.Equal", 15,
 						   "in", 2),
 			0);
-	pnp_test_actions(test, b, "DROP");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	ntfe_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &forest),
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_FLOW, &forest),
 			0);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, forest, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, forest, 1),
 			0);
 }
 
-static void pnp_kunit_flow_sentence(struct kunit *test)
+static void ntfe_kunit_flow_sentence(struct kunit *test)
 {
-	struct nf_conn *ct = pnp_test_flow(test);
-	struct peios_pnp_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_PNP);
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct nf_conn *ct = ntfe_test_flow(test);
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
 	struct nf_hook_state state = {
 		.hook = NF_INET_LOCAL_OUT,
 		.pf = NFPROTO_IPV4,
 		.out = dev,
 		.net = &init_net,
 	};
-	struct sk_buff *skb = pnp_test_tcp4_skb(test, 443);
-	struct peios_pnp_snapshot snap = {
-		.seat = PEIOS_PNP_SEAT_LOCAL_OUT,
-		.direction = PEIOS_PNP_DIR_OUT,
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 443);
+	struct peios_ntfe_snapshot snap = {
+		.seat = PEIOS_NTFE_SEAT_LOCAL_OUT,
+		.direction = PEIOS_NTFE_DIR_OUT,
 		.addr_family = 4,
 		.protocol = IPPROTO_TCP,
 		.src_addr = { 10, 0, 0, 5 },
 		.dst_addr = { 192, 0, 2, 9 },
 		.src_port = 40000,
 		.dst_port = 443,
-		.has = PEIOS_PNP_HAS_PORTS | PEIOS_PNP_HAS_TIME,
-		.flow_state = PEIOS_PNP_FLOW_NEW,
+		.has = PEIOS_NTFE_HAS_PORTS | PEIOS_NTFE_HAS_TIME,
+		.flow_state = PEIOS_NTFE_FLOW_NEW,
 		.ifindex = 7,
 		.ifname = "eth0",
 		/* 2026-09-02 10:30:00 UTC. */
@@ -778,51 +778,51 @@ static void pnp_kunit_flow_sentence(struct kunit *test)
 		.t_secs = 1788345000,
 		.flow = ct,
 	};
-	struct peios_pnp_snapshot untracked = snap;
-	u64 judged0 = atomic64_read(&peios_pnp_stats.flow_judged);
-	u64 cached0 = atomic64_read(&peios_pnp_stats.flow_cached);
-	u64 rejudged0 = atomic64_read(&peios_pnp_stats.flow_rejudged);
-	u64 expired0 = atomic64_read(&peios_pnp_stats.flow_expired);
-	u64 permissive0 = atomic64_read(&peios_pnp_stats.permissive);
+	struct peios_ntfe_snapshot untracked = snap;
+	u64 judged0 = atomic64_read(&peios_ntfe_stats.flow_judged);
+	u64 cached0 = atomic64_read(&peios_ntfe_stats.flow_cached);
+	u64 rejudged0 = atomic64_read(&peios_ntfe_stats.flow_rejudged);
+	u64 expired0 = atomic64_read(&peios_ntfe_stats.flow_expired);
+	u64 permissive0 = atomic64_read(&peios_ntfe_stats.permissive);
 
 	KUNIT_ASSERT_NOT_NULL(test, pc);
 	KUNIT_EXPECT_GT(test, pc->start_secs, (u64)1700000000);
 	untracked.flow = NULL;
 
 	/* No Flow forest: permissive, nothing cached. */
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
 			0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_ACCEPT);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.permissive),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.permissive),
 			permissive0 + 1);
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].generation, 0ULL);
 
 	/* Judged once: the sentence is written with the generation and,
 	 * for a rule that consulted the hour, the next flip (11:00).
 	 */
-	pnp_test_publish_flow(test, "Time.Hour.Equal", "9-17", "PASS");
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	ntfe_test_publish_flow(test, "Time.Hour.Equal", "9-17", "PASS");
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_ACCEPT);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
 			judged0 + 1);
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].generation,
-			pnp_rust_generation());
+			ntfe_rust_generation());
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].verdict,
-			(u8)PEIOS_PNP_VERDICT_PASS);
+			(u8)PEIOS_NTFE_VERDICT_PASS);
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].expires_at,
 			(s64)(1788345000 - 1788345000 % 3600 + 8 * 3600));
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].rule_hash,
-			peios_pnp_path_hash("r", 1));
-	KUNIT_EXPECT_EQ(test, pc->direction, (u8)PEIOS_PNP_DIR_OUT);
+			peios_ntfe_path_hash("r", 1));
+	KUNIT_EXPECT_EQ(test, pc->direction, (u8)PEIOS_NTFE_DIR_OUT);
 	KUNIT_EXPECT_EQ(test, pc->ifindex, 7);
 
 	/* Read thereafter: no evaluation. */
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_ACCEPT);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
 			judged0 + 1);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_cached),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_cached),
 			cached0 + 1);
 
 	/* Past the edge: re-judged (and the hour rule now says DROP at
@@ -830,32 +830,32 @@ static void pnp_kunit_flow_sentence(struct kunit *test)
 	 */
 	snap.t_hour = 18;
 	snap.t_secs = 1788345000 - 1788345000 % 3600 + 8 * 3600;
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_DROP);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_expired),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_expired),
 			expired0 + 1);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
 			judged0 + 2);
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].verdict,
-			(u8)PEIOS_PNP_VERDICT_DROP);
+			(u8)PEIOS_NTFE_VERDICT_DROP);
 	/* A DROP sentence persists: still no evaluation. */
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_DROP);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
 			judged0 + 2);
 
 	/* A new generation re-judges: this one passes everything. */
-	pnp_test_publish_flow(test, NULL, NULL, "PASS");
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	ntfe_test_publish_flow(test, NULL, NULL, "PASS");
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_ACCEPT);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_rejudged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_rejudged),
 			rejudged0 + 1);
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].expires_at, 0LL);
 
 	/* Untracked: nothing to judge, the Packet verdict stands. */
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &untracked),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &untracked),
 			(unsigned int)NF_ACCEPT);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.flow_judged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
 			judged0 + 3);
 
 	/* A re-judgment on a REPLY packet judges the flow, not the packet:
@@ -863,23 +863,23 @@ static void pnp_kunit_flow_sentence(struct kunit *test)
 	 * out and drops in passes it), with the original tuple. Found live:
 	 * an inbound viewer flow re-judged on its reply as "out".
 	 */
-	pnp_test_publish_flow2(test);
+	ntfe_test_publish_flow2(test);
 	{
-		struct peios_pnp_snapshot reply = snap;
+		struct peios_ntfe_snapshot reply = snap;
 
-		reply.seat = PEIOS_PNP_SEAT_LOCAL_IN;
-		reply.direction = PEIOS_PNP_DIR_IN;
+		reply.seat = PEIOS_NTFE_SEAT_LOCAL_IN;
+		reply.direction = PEIOS_NTFE_DIR_IN;
 		reply.flow_reply = 1;
 		memcpy(reply.src_addr, snap.dst_addr, 16);
 		memcpy(reply.dst_addr, snap.src_addr, 16);
 		reply.src_port = snap.dst_port;
 		reply.dst_port = snap.src_port;
 		KUNIT_EXPECT_EQ(test,
-				peios_pnp_flow_dispatch(skb, &state, &reply),
+				peios_ntfe_flow_dispatch(skb, &state, &reply),
 				(unsigned int)NF_ACCEPT);
 		KUNIT_EXPECT_EQ(test, pc->sentence[0].rule_hash,
-				peios_pnp_path_hash("out", 3));
-		KUNIT_EXPECT_EQ(test, pc->direction, (u8)PEIOS_PNP_DIR_OUT);
+				peios_ntfe_path_hash("out", 3));
+		KUNIT_EXPECT_EQ(test, pc->direction, (u8)PEIOS_NTFE_DIR_OUT);
 	}
 
 	/* Loopback: two endpoints, two sentences, the stricter answers.
@@ -887,60 +887,60 @@ static void pnp_kunit_flow_sentence(struct kunit *test)
 	 * the outbound endpoint (slot 0)...
 	 */
 	snap.loopback = 1;
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_ACCEPT);
 	KUNIT_EXPECT_EQ(test, pc->sentence[0].verdict,
-			(u8)PEIOS_PNP_VERDICT_PASS);
+			(u8)PEIOS_NTFE_VERDICT_PASS);
 	KUNIT_EXPECT_EQ(test, pc->sentence[1].generation, 0ULL);
 	/* ...then at the inbound endpoint (slot 1). */
-	snap.direction = PEIOS_PNP_DIR_IN;
-	snap.seat = PEIOS_PNP_SEAT_LOCAL_IN;
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	snap.direction = PEIOS_NTFE_DIR_IN;
+	snap.seat = PEIOS_NTFE_SEAT_LOCAL_IN;
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_DROP);
 	KUNIT_EXPECT_EQ(test, pc->sentence[1].verdict,
-			(u8)PEIOS_PNP_VERDICT_DROP);
+			(u8)PEIOS_NTFE_VERDICT_DROP);
 	/* The outbound endpoint's own sentence says PASS, but the flow
 	 * answers to the stricter of the two.
 	 */
-	snap.direction = PEIOS_PNP_DIR_OUT;
-	snap.seat = PEIOS_PNP_SEAT_LOCAL_OUT;
-	KUNIT_EXPECT_EQ(test, peios_pnp_flow_dispatch(skb, &state, &snap),
+	snap.direction = PEIOS_NTFE_DIR_OUT;
+	snap.seat = PEIOS_NTFE_SEAT_LOCAL_OUT;
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
 			(unsigned int)NF_DROP);
 
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
 			0);
 	kfree_skb(skb);
 	nf_conntrack_free(ct);
 }
 
-static void pnp_kunit_refusal_is_built_and_marked(struct kunit *test)
+static void ntfe_kunit_refusal_is_built_and_marked(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
 	struct nf_hook_state state = {
 		.hook = NF_INET_LOCAL_IN,
 		.pf = NFPROTO_IPV4,
 		.in = dev,
 		.net = &init_net,
 	};
-	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
-	struct peios_pnp_snapshot snap;
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 22);
+	struct peios_ntfe_snapshot snap;
 	struct sk_buff *nskb;
 	const struct tcphdr *th;
 	const struct icmphdr *ih;
 
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
 
 	/* Refused, TCP: an RST from us (the SYN's destination) to the peer,
 	 * carrying the refusal bit.
 	 */
-	nskb = peios_pnp_refuse_build(skb, &state, &snap,
-				      PEIOS_PNP_REJECT_REFUSED);
+	nskb = peios_ntfe_refuse_build(skb, &state, &snap,
+				      PEIOS_NTFE_REJECT_REFUSED);
 	KUNIT_ASSERT_NOT_NULL(test, nskb);
-	KUNIT_EXPECT_TRUE(test, nskb->pnp_refusal);
+	KUNIT_EXPECT_TRUE(test, nskb->ntfe_refusal);
 	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->saddr, htonl(0x0a000005));
 	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->daddr, htonl(0x0a000007));
 	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->protocol, IPPROTO_TCP);
@@ -956,10 +956,10 @@ static void pnp_kunit_refusal_is_built_and_marked(struct kunit *test)
 	kfree_skb(nskb);
 
 	/* Prohibited: ICMP admin-prohibited, whatever the protocol. */
-	nskb = peios_pnp_refuse_build(skb, &state, &snap,
-				      PEIOS_PNP_REJECT_PROHIBITED);
+	nskb = peios_ntfe_refuse_build(skb, &state, &snap,
+				      PEIOS_NTFE_REJECT_PROHIBITED);
 	KUNIT_ASSERT_NOT_NULL(test, nskb);
-	KUNIT_EXPECT_TRUE(test, nskb->pnp_refusal);
+	KUNIT_EXPECT_TRUE(test, nskb->ntfe_refusal);
 	KUNIT_EXPECT_EQ(test, ip_hdr(nskb)->protocol, IPPROTO_ICMP);
 	ih = (const struct icmphdr *)((const u8 *)ip_hdr(nskb) +
 				      ip_hdr(nskb)->ihl * 4);
@@ -972,25 +972,25 @@ static void pnp_kunit_refusal_is_built_and_marked(struct kunit *test)
 	snap.dst_addr[1] = 255;
 	snap.dst_addr[2] = 255;
 	snap.dst_addr[3] = 255;
-	KUNIT_EXPECT_NULL(test, peios_pnp_refuse_build(skb, &state, &snap,
-						       PEIOS_PNP_REJECT_REFUSED));
+	KUNIT_EXPECT_NULL(test, peios_ntfe_refuse_build(skb, &state, &snap,
+						       PEIOS_NTFE_REJECT_REFUSED));
 
 	kfree_skb(skb);
 }
 
-static void pnp_kunit_teardown_resets_the_far_end(struct kunit *test)
+static void ntfe_kunit_teardown_resets_the_far_end(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
 	struct nf_hook_state state = {
 		.hook = NF_INET_LOCAL_OUT,
 		.pf = NFPROTO_IPV4,
 		.out = dev,
 		.net = &init_net,
 	};
-	struct sk_buff *skb = pnp_test_tcp4_skb(test, 443);
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 443);
 	struct tcphdr *oth = (struct tcphdr *)(skb_network_header(skb) +
 					       sizeof(struct iphdr));
-	struct peios_pnp_snapshot snap;
+	struct peios_ntfe_snapshot snap;
 	struct sk_buff *reset;
 	const struct tcphdr *th;
 
@@ -1001,16 +1001,16 @@ static void pnp_kunit_teardown_resets_the_far_end(struct kunit *test)
 	oth->seq = htonl(5000);
 	oth->ack_seq = htonl(9000);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_OUT,
-						    PEIOS_PNP_DIR_OUT, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_OUT,
+						    PEIOS_NTFE_DIR_OUT, &snap),
 			0);
 	/* No conntrack in this harness: say what the seat would have said. */
-	snap.flow_state = PEIOS_PNP_FLOW_ESTABLISHED;
+	snap.flow_state = PEIOS_NTFE_FLOW_ESTABLISHED;
 
-	reset = peios_pnp_teardown_build(skb, &state, &snap);
+	reset = peios_ntfe_teardown_build(skb, &state, &snap);
 	KUNIT_ASSERT_NOT_NULL(test, reset);
-	KUNIT_EXPECT_TRUE(test, reset->pnp_refusal);
+	KUNIT_EXPECT_TRUE(test, reset->ntfe_refusal);
 	/* Bound the same way as the refused packet, with its numbers. */
 	KUNIT_EXPECT_EQ(test, ip_hdr(reset)->saddr, htonl(0x0a000007));
 	KUNIT_EXPECT_EQ(test, ip_hdr(reset)->daddr, htonl(0x0a000005));
@@ -1025,88 +1025,88 @@ static void pnp_kunit_teardown_resets_the_far_end(struct kunit *test)
 	kfree_skb(reset);
 
 	/* A new flow has no far end to tear down. */
-	snap.flow_state = PEIOS_PNP_FLOW_NEW;
-	KUNIT_EXPECT_NULL(test, peios_pnp_teardown_build(skb, &state, &snap));
+	snap.flow_state = PEIOS_NTFE_FLOW_NEW;
+	KUNIT_EXPECT_NULL(test, peios_ntfe_teardown_build(skb, &state, &snap));
 	/* Nor does a reset get one. */
-	snap.flow_state = PEIOS_PNP_FLOW_ESTABLISHED;
+	snap.flow_state = PEIOS_NTFE_FLOW_ESTABLISHED;
 	snap.tcp_flags |= 0x04;
-	KUNIT_EXPECT_NULL(test, peios_pnp_teardown_build(skb, &state, &snap));
+	KUNIT_EXPECT_NULL(test, peios_ntfe_teardown_build(skb, &state, &snap));
 	/* Nor UDP. */
 	snap.tcp_flags &= ~0x04;
 	snap.protocol = IPPROTO_UDP;
-	KUNIT_EXPECT_NULL(test, peios_pnp_teardown_build(skb, &state, &snap));
+	KUNIT_EXPECT_NULL(test, peios_ntfe_teardown_build(skb, &state, &snap));
 
 	kfree_skb(skb);
 }
 
-static void pnp_kunit_own_refusals_bypass_the_seats(struct kunit *test)
+static void ntfe_kunit_own_refusals_bypass_the_seats(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
 	struct nf_hook_state state = {
 		.hook = NF_INET_LOCAL_IN,
 		.pf = NFPROTO_IPV4,
 		.in = dev,
 		.net = &init_net,
 	};
-	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
-	u64 bypassed0 = atomic64_read(&peios_pnp_stats.refusals_bypassed);
-	u64 judged0 = atomic64_read(&peios_pnp_stats.judged);
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 22);
+	u64 bypassed0 = atomic64_read(&peios_ntfe_stats.refusals_bypassed);
+	u64 judged0 = atomic64_read(&peios_ntfe_stats.judged);
 	void *b, *forest = NULL;
 
 	/* A Packet forest that drops everything... */
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "all", 3), 0);
-	pnp_test_actions(test, b, "DROP");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "all", 3), 0);
+	ntfe_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
 					       &forest),
 			0);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, NULL, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(forest, NULL, NULL, 1),
 			0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_hook_local_in(NULL, skb, &state),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &state),
 			(unsigned int)NF_DROP);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.judged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.judged),
 			judged0 + 1);
 
-	/* ...cannot touch a refusal PNP itself emitted. */
-	skb->pnp_refusal = 1;
-	KUNIT_EXPECT_EQ(test, peios_pnp_hook_local_in(NULL, skb, &state),
+	/* ...cannot touch a refusal NTFE itself emitted. */
+	skb->ntfe_refusal = 1;
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &state),
 			(unsigned int)NF_ACCEPT);
-	KUNIT_EXPECT_EQ(test, peios_pnp_hook_egress(NULL, skb, &state),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_egress(NULL, skb, &state),
 			(unsigned int)NF_ACCEPT);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.judged),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.judged),
 			judged0 + 1);
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.refusals_bypassed),
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.refusals_bypassed),
 			bypassed0 + 2);
 
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
 			0);
 	kfree_skb(skb);
 }
 
-/* Ordinary echo is never a PNP-generated refusal. Both families and both
+/* Ordinary echo is never an NTFE-generated refusal. Both families and both
  * echo types must traverse Packet and RawPacket enforcement in each direction.
  */
-static void pnp_kunit_echo_obeys_policy(struct kunit *test)
+static void ntfe_kunit_echo_obeys_policy(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
 	struct nf_hook_state state = { .in = dev, .out = dev, .net = &init_net };
-	u64 bypassed = atomic64_read(&peios_pnp_stats.refusals_bypassed);
+	u64 bypassed = atomic64_read(&peios_ntfe_stats.refusals_bypassed);
 	int family, reply, layer, allow;
 
 	for (layer = 0; layer < 2; layer++) {
 		for (allow = 0; allow < 2; allow++) {
-			void *b = pnp_rust_builder_new(), *forest = NULL;
-			u8 policy_layer = layer ? PEIOS_PNP_LAYER_RAWPACKET :
-				PEIOS_PNP_LAYER_PACKET;
+			void *b = ntfe_rust_builder_new(), *forest = NULL;
+			u8 policy_layer = layer ? PEIOS_NTFE_LAYER_RAWPACKET :
+				PEIOS_NTFE_LAYER_PACKET;
 			KUNIT_ASSERT_NOT_NULL(test, b);
-			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "echo", 4), 0);
-			pnp_test_actions(test, b, allow ? "PASS" : "DROP");
-			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
-			KUNIT_ASSERT_EQ(test, pnp_rust_builder_build(b, policy_layer, &forest), 0);
-			KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(
+			KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "echo", 4), 0);
+			ntfe_test_actions(test, b, allow ? "PASS" : "DROP");
+			KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+			KUNIT_ASSERT_EQ(test, ntfe_rust_builder_build(b, policy_layer, &forest), 0);
+			KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(
 				layer ? NULL : forest, layer ? forest : NULL, NULL, 1), 0);
 			for (family = 0; family < 2; family++) {
 				for (reply = 0; reply < 2; reply++) {
@@ -1142,27 +1142,27 @@ static void pnp_kunit_echo_obeys_policy(struct kunit *test)
 					icmp = skb_put_zero(skb, 8);
 					icmp[0] = family ? (reply ? 129 : 128) :
 						(reply ? ICMP_ECHOREPLY : ICMP_ECHO);
-					KUNIT_EXPECT_FALSE(test, skb->pnp_refusal);
+					KUNIT_EXPECT_FALSE(test, skb->ntfe_refusal);
 					state.hook = layer ? NF_NETDEV_INGRESS : NF_INET_LOCAL_IN;
 					KUNIT_EXPECT_EQ(test, layer ?
-						peios_pnp_hook_ingress(NULL, skb, &state) :
-						peios_pnp_hook_local_in(NULL, skb, &state), expected);
+						peios_ntfe_hook_ingress(NULL, skb, &state) :
+						peios_ntfe_hook_local_in(NULL, skb, &state), expected);
 					state.hook = NF_NETDEV_EGRESS;
-					KUNIT_EXPECT_EQ(test, peios_pnp_hook_egress(NULL, skb, &state), expected);
+					KUNIT_EXPECT_EQ(test, peios_ntfe_hook_egress(NULL, skb, &state), expected);
 					kfree_skb(skb);
 				}
 			}
 		}
 	}
-	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_pnp_stats.refusals_bypassed), bypassed);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1), 0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.refusals_bypassed), bypassed);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1), 0);
 }
 
 /* Actual loopback echo traverses the registered networking hooks. Publishing
  * one narrowly matched DROP must stop requests and replies independently,
  * without relying on a caller knowing that a firewall exists.
  */
-static void pnp_kunit_echo_on_wire(struct kunit *test)
+static void ntfe_kunit_echo_on_wire(struct kunit *test)
 {
 	struct net_device *lo = init_net.loopback_dev;
 	bool was_up = !!(lo->flags & IFF_UP);
@@ -1174,7 +1174,7 @@ static void pnp_kunit_echo_on_wire(struct kunit *test)
 	msleep(50);
 	for (family = 0; family < 2; family++) {
 		for (block = 0; block < 5; block++) {
-			void *b = pnp_rust_builder_new(), *forest = NULL;
+			void *b = ntfe_rust_builder_new(), *forest = NULL;
 			struct socket *sock = NULL;
 			struct sockaddr_storage address = { 0 };
 			struct msghdr msg = { 0 };
@@ -1183,23 +1183,23 @@ static void pnp_kunit_echo_on_wire(struct kunit *test)
 			int address_len, ret, received = -EAGAIN, retry;
 			unsigned int type = family ? 128 : ICMP_ECHO;
 			KUNIT_ASSERT_NOT_NULL(test, b);
-			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "echo", 4), 0);
-			pnp_test_actions(test, b, "PASS");
+			KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "echo", 4), 0);
+			ntfe_test_actions(test, b, "PASS");
 			if (block) {
 				const char *direction = block % 2 ? "out" : "in";
 				unsigned int denied_type = block > 2 ?
 					(family ? 129 : ICMP_ECHOREPLY) : type;
-				KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "deny", 4), 0);
-				KUNIT_ASSERT_EQ(test, pnp_rust_builder_value_str(b,
+				KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "deny", 4), 0);
+				KUNIT_ASSERT_EQ(test, ntfe_rust_builder_value_str(b,
 					"Direction.Equal", 15, direction, strlen(direction)), 0);
-				KUNIT_ASSERT_EQ(test, pnp_rust_builder_value_int(b,
+				KUNIT_ASSERT_EQ(test, ntfe_rust_builder_value_int(b,
 					"IcmpType.Equal", 14, denied_type), 0);
-				pnp_test_actions(test, b, "DROP");
-				KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+				ntfe_test_actions(test, b, "DROP");
+				KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 			}
-			KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
-			KUNIT_ASSERT_EQ(test, pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET, &forest), 0);
-			KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(forest, NULL, NULL, 1), 0);
+			KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+			KUNIT_ASSERT_EQ(test, ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET, &forest), 0);
+			KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(forest, NULL, NULL, 1), 0);
 			ret = sock_create(family ? AF_INET6 : AF_INET, SOCK_DGRAM,
 				family ? IPPROTO_ICMPV6 : IPPROTO_ICMP, &sock);
 			KUNIT_ASSERT_EQ(test, ret, 0);
@@ -1246,7 +1246,7 @@ static void pnp_kunit_echo_on_wire(struct kunit *test)
 			sock_release(sock);
 		}
 	}
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1), 0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1), 0);
 	if (!was_up) {
 		rtnl_lock();
 		dev_close(lo);
@@ -1254,42 +1254,42 @@ static void pnp_kunit_echo_on_wire(struct kunit *test)
 	}
 }
 
-static void pnp_kunit_downward_tag_read_refused(struct kunit *test)
+static void ntfe_kunit_downward_tag_read_refused(struct kunit *test)
 {
 	void *b, *packet = NULL, *flow = NULL;
 
 	/* Packet reads a tag... */
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "r", 1), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "r", 1), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_int(b, "Tag.admitted.Equal", 18,
+			ntfe_rust_builder_value_int(b, "Tag.admitted.Equal", 18,
 						   1),
 			0);
-	pnp_test_actions(test, b, "PASS");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_PACKET,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
 					       &packet),
 			0);
 	/* ...that Flow writes: a downward read, refused at publication. */
-	b = pnp_rust_builder_new();
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "w", 1), 0);
-	pnp_test_actions(test, b, "TAG(admitted, Set)");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "w", 1), 0);
+	ntfe_test_actions(test, b, "TAG(admitted, Set)");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &flow),
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_FLOW, &flow),
 			0);
-	KUNIT_EXPECT_EQ(test, peios_pnp_policy_publish(packet, NULL, flow, 1),
+	KUNIT_EXPECT_EQ(test, peios_ntfe_policy_publish(packet, NULL, flow, 1),
 			-EINVAL);
-	pnp_rust_forest_free(packet);
-	pnp_rust_forest_free(flow);
+	ntfe_rust_forest_free(packet);
+	ntfe_rust_forest_free(flow);
 }
 
 
 /* The process GUID as the Local.Process fact's text (8-4-4-4-12). */
-static void pnp_test_guid_text(const u8 guid[16], char out[37])
+static void ntfe_test_guid_text(const u8 guid[16], char out[37])
 {
 	static const char hex[] = "0123456789abcdef";
 	int i, o = 0;
@@ -1309,9 +1309,9 @@ static void pnp_test_guid_text(const u8 guid[16], char out[37])
  * socket, the sender — and the bridge lifts a program's token into the
  * Local.* facts a Flow forest judges.
  */
-static void pnp_kunit_identity_facts(struct kunit *test)
+static void ntfe_kunit_identity_facts(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
 	struct nf_hook_state in_state = {
 		.hook = NF_INET_LOCAL_IN,
 		.pf = NFPROTO_IPV4,
@@ -1328,9 +1328,9 @@ static void pnp_kunit_identity_facts(struct kunit *test)
 		.sin_family = AF_INET,
 		.sin_port = htons(2222),
 	};
-	struct peios_pnp_identity id, kernel_id;
-	struct peios_pnp_snapshot snap;
-	struct peios_pnp_outcome out;
+	struct peios_ntfe_identity id, kernel_id;
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_outcome out;
 	struct socket *sock = NULL, *ksock = NULL;
 	struct sk_buff *skb;
 	struct iphdr *iph;
@@ -1348,144 +1348,144 @@ static void pnp_kunit_identity_facts(struct kunit *test)
 			0);
 	KUNIT_ASSERT_EQ(test, kernel_listen(sock, 1), 0);
 
-	skb = pnp_test_tcp4_skb(test, 2222);
+	skb = ntfe_test_tcp4_skb(test, 2222);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
-	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &id);
-	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_PNP_LOCAL_PROGRAM);
+	peios_ntfe_identity_resolve(skb, &in_state, &snap, false, &id);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_PROGRAM);
 	KUNIT_EXPECT_EQ(test, id.unresolved, 0);
 	KUNIT_ASSERT_NOT_NULL(test, id.owner.token);
 	KUNIT_EXPECT_EQ(test, id.owner.pid, (s32)task_tgid_nr(current));
 	KUNIT_EXPECT_NE(test, id.owner.comm[0], '\0');
 	/* Its SIDs cross the bridge: a user SID, and no service SID here. */
-	KUNIT_EXPECT_EQ(test, pnp_rust_owner_sids(id.owner.token, user, service),
+	KUNIT_EXPECT_EQ(test, ntfe_rust_owner_sids(id.owner.token, user, service),
 			0);
 	KUNIT_EXPECT_EQ(test, user[0], 1);	/* SID revision */
 	KUNIT_EXPECT_EQ(test, service[0], 0);
 	kfree_skb(skb);
 
 	/* Nobody listens on the next port: none. */
-	skb = pnp_test_tcp4_skb(test, 2223);
+	skb = ntfe_test_tcp4_skb(test, 2223);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
-	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
-	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_NONE);
+	peios_ntfe_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_NTFE_LOCAL_NONE);
 	KUNIT_EXPECT_NULL(test, kernel_id.owner.token);
-	peios_pnp_identity_release(&kernel_id);
+	peios_ntfe_identity_release(&kernel_id);
 
 	/* The stack consumes ICMP itself: kernel. A protocol nothing
 	 * handles (253, experimental): none.
 	 */
 	iph = ip_hdr(skb);
 	iph->protocol = IPPROTO_ICMP;
-	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
-	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_KERNEL);
-	peios_pnp_identity_release(&kernel_id);
+	peios_ntfe_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_NTFE_LOCAL_KERNEL);
+	peios_ntfe_identity_release(&kernel_id);
 	iph->protocol = 253;
-	peios_pnp_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
-	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_NONE);
-	peios_pnp_identity_release(&kernel_id);
+	peios_ntfe_identity_resolve(skb, &in_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_NTFE_LOCAL_NONE);
+	peios_ntfe_identity_release(&kernel_id);
 	kfree_skb(skb);
 
 	/* Outbound: the sending socket's stamp; a kernel socket is the
 	 * kernel's.
 	 */
-	skb = pnp_test_tcp4_skb(test, 443);
+	skb = ntfe_test_tcp4_skb(test, 443);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_OUT,
-						    PEIOS_PNP_DIR_OUT, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_OUT,
+						    PEIOS_NTFE_DIR_OUT, &snap),
 			0);
 	out_state.sk = sock->sk;
-	peios_pnp_identity_resolve(skb, &out_state, &snap, false, &kernel_id);
-	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_PROGRAM);
+	peios_ntfe_identity_resolve(skb, &out_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_NTFE_LOCAL_PROGRAM);
 	KUNIT_EXPECT_PTR_EQ(test, kernel_id.owner.token, id.owner.token);
-	peios_pnp_identity_release(&kernel_id);
+	peios_ntfe_identity_release(&kernel_id);
 
 	KUNIT_ASSERT_EQ(test,
 			sock_create_kern(&init_net, AF_INET, SOCK_DGRAM, 0,
 					 &ksock),
 			0);
 	out_state.sk = ksock->sk;
-	peios_pnp_identity_resolve(skb, &out_state, &snap, false, &kernel_id);
-	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_PNP_LOCAL_KERNEL);
+	peios_ntfe_identity_resolve(skb, &out_state, &snap, false, &kernel_id);
+	KUNIT_EXPECT_EQ(test, kernel_id.kind, (u8)PEIOS_NTFE_LOCAL_KERNEL);
 	KUNIT_EXPECT_NULL(test, kernel_id.owner.token);
-	peios_pnp_identity_release(&kernel_id);
+	peios_ntfe_identity_release(&kernel_id);
 	sock_release(ksock);
 
 	/* The bridge: a Flow forest over the identity facts, judged against
 	 * the program's token and against the kernel.
 	 */
-	pnp_test_guid_text(id.owner.guid, guid);
-	b = pnp_rust_builder_new();
+	ntfe_test_guid_text(id.owner.guid, guid);
+	b = ntfe_rust_builder_new();
 	KUNIT_ASSERT_NOT_NULL(test, b);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "posture", 7), 0);
-	pnp_test_actions(test, b, "DROP");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "this-process", 12),
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "posture", 7), 0);
+	ntfe_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "this-process", 12),
 			0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_str(b, "Local.Process.Equal", 19,
+			ntfe_rust_builder_value_str(b, "Local.Process.Equal", 19,
 						   guid, strlen(guid)),
 			0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_int(b, "Local.Service.Present",
+			ntfe_rust_builder_value_int(b, "Local.Service.Present",
 						   21, 0),
 			0);
-	pnp_test_actions(test, b, "PASS");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_begin(b, "kernel", 6), 0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "kernel", 6), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_value_str(b, "Local.Equal", 11,
+			ntfe_rust_builder_value_str(b, "Local.Equal", 11,
 						   "kernel", 6),
 			0);
-	pnp_test_actions(test, b, "PASS");
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
-	KUNIT_ASSERT_EQ(test, pnp_rust_builder_rule_end(b), 0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
 	KUNIT_ASSERT_EQ(test,
-			pnp_rust_builder_build(b, PEIOS_PNP_LAYER_FLOW, &forest),
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_FLOW, &forest),
 			0);
 	KUNIT_ASSERT_NOT_NULL(test, forest);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, forest, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, forest, 1),
 			0);
-	KUNIT_EXPECT_TRUE(test, peios_pnp_policy_has_layer(PEIOS_PNP_LAYER_FLOW));
+	KUNIT_EXPECT_TRUE(test, peios_ntfe_policy_has_layer(PEIOS_NTFE_LAYER_FLOW));
 	KUNIT_EXPECT_FALSE(test,
-			   peios_pnp_policy_has_layer(PEIOS_PNP_LAYER_PACKET));
+			   peios_ntfe_policy_has_layer(PEIOS_NTFE_LAYER_PACKET));
 
 	/* This program: the exception speaks. */
-	snap.local_kind = PEIOS_PNP_LOCAL_PROGRAM;
+	snap.local_kind = PEIOS_NTFE_LOCAL_PROGRAM;
 	snap.local_token = id.owner.token;
 	memcpy(snap.local_guid, id.owner.guid, sizeof(snap.local_guid));
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &snap, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_PASS);
 	KUNIT_EXPECT_STREQ(test, out.attributed, "posture/this-process");
 
 	/* Another process (a different GUID): the posture drops it. */
 	snap.local_guid[0] ^= 0xff;
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &snap, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_DROP);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_DROP);
 	KUNIT_EXPECT_STREQ(test, out.attributed, "posture");
 
 	/* The kernel: no principal, the kernel exception speaks. */
-	snap.local_kind = PEIOS_PNP_LOCAL_KERNEL;
+	snap.local_kind = PEIOS_NTFE_LOCAL_KERNEL;
 	snap.local_token = NULL;
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &snap, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_PASS);
 	KUNIT_EXPECT_STREQ(test, out.attributed, "posture/kernel");
 
 	kfree_skb(skb);
-	peios_pnp_identity_release(&id);
+	peios_ntfe_identity_release(&id);
 	sock_release(sock);
 }
 
@@ -1495,167 +1495,202 @@ static void pnp_kunit_identity_facts(struct kunit *test)
  * packet layers. A table that differs from the active one is a new
  * generation (every sentence re-judged); an identical one is nothing.
  */
-static void pnp_kunit_network_context(struct kunit *test)
+static void ntfe_kunit_network_context(struct kunit *test)
 {
-	struct net_device *dev = pnp_test_dev(test, "eth0", false);
-	struct net_device *other = pnp_test_dev(test, "eth1", false);
-	struct peios_pnp_context_table *table;
-	struct peios_pnp_snapshot snap;
-	struct peios_pnp_outcome out;
-	struct sk_buff *skb = pnp_test_tcp4_skb(test, 22);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct net_device *other = ntfe_test_dev(test, "eth1", false);
+	struct peios_ntfe_context_table *table;
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_outcome out;
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 22);
 	u64 gen;
 
 	/* No table: no context on any interface, nothing to advance. */
-	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(NULL), 0);
-	gen = pnp_rust_generation();
+	KUNIT_ASSERT_EQ(test, peios_ntfe_context_publish(NULL), 0);
+	gen = ntfe_rust_generation();
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
-	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
-	KUNIT_EXPECT_EQ(test, peios_pnp_context_count(), 0U);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_NTFE_HAS_NETWORK);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_context_count(), 0U);
 
 	/* eth0 stands on a network the operator called home. */
-	table = peios_pnp_context_table_alloc(1);
+	table = peios_ntfe_context_table_alloc(1);
 	KUNIT_ASSERT_NOT_NULL(test, table);
 	strscpy(table->entries[0].ifname, "eth0", IFNAMSIZ);
 	strscpy(table->entries[0].network_id,
 		"6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718",
-		PEIOS_PNP_NETWORK_ID_LEN);
+		PEIOS_NTFE_NETWORK_ID_LEN);
 	strscpy(table->entries[0].network_name, "palfrey-home",
-		PEIOS_PNP_NETWORK_NAME_LEN);
+		PEIOS_NTFE_NETWORK_NAME_LEN);
 	strscpy(table->entries[0].network_trust, "home",
-		PEIOS_PNP_NETWORK_TRUST_LEN);
-	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(table), 0);
-	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen + 1);
-	KUNIT_EXPECT_EQ(test, peios_pnp_context_count(), 1U);
+		PEIOS_NTFE_NETWORK_TRUST_LEN);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_context_publish(table), 0);
+	KUNIT_EXPECT_EQ(test, ntfe_rust_generation(), gen + 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_context_count(), 1U);
 
 	/* The facts reach a traversal on eth0, and only eth0. */
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_NETWORK);
 	KUNIT_EXPECT_STREQ(test, snap.network_id,
 			   "6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718");
 	KUNIT_EXPECT_STREQ(test, snap.network_name, "palfrey-home");
 	KUNIT_EXPECT_STREQ(test, snap.network_trust, "home");
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, other,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, other,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
-	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
+	KUNIT_EXPECT_FALSE(test, snap.has & PEIOS_NTFE_HAS_NETWORK);
 
 	/* A Flow rule about the network judges by it: it speaks on eth0
 	 * and is simply false (absent-fact law) on eth1.
 	 */
-	pnp_test_publish_flow(test, "Network.Trust.Equal", "home", "PASS");
+	ntfe_test_publish_flow(test, "Network.Trust.Equal", "home", "PASS");
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &snap, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_PASS);
 	KUNIT_EXPECT_STREQ(test, out.attributed, "r");
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, other,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, other,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &snap, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_DROP);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_DROP);
 	KUNIT_EXPECT_STREQ(test, out.attributed, "backstop");
 
 	/* The same table again (netd rewrote Status): nothing changes,
 	 * so nothing advances and no sentence goes stale.
 	 */
-	gen = pnp_rust_generation();
-	table = peios_pnp_context_table_alloc(1);
+	gen = ntfe_rust_generation();
+	table = peios_ntfe_context_table_alloc(1);
 	KUNIT_ASSERT_NOT_NULL(test, table);
 	strscpy(table->entries[0].ifname, "eth0", IFNAMSIZ);
 	strscpy(table->entries[0].network_id,
 		"6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718",
-		PEIOS_PNP_NETWORK_ID_LEN);
+		PEIOS_NTFE_NETWORK_ID_LEN);
 	strscpy(table->entries[0].network_name, "palfrey-home",
-		PEIOS_PNP_NETWORK_NAME_LEN);
+		PEIOS_NTFE_NETWORK_NAME_LEN);
 	strscpy(table->entries[0].network_trust, "home",
-		PEIOS_PNP_NETWORK_TRUST_LEN);
-	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(table), 0);
-	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen);
+		PEIOS_NTFE_NETWORK_TRUST_LEN);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_context_publish(table), 0);
+	KUNIT_EXPECT_EQ(test, ntfe_rust_generation(), gen);
 
 	/* The operator changes the word: a new generation, and the same
 	 * rule no longer speaks for eth0. Name and Trust left off the
 	 * record are absent facts; the id is still one.
 	 */
-	table = peios_pnp_context_table_alloc(1);
+	table = peios_ntfe_context_table_alloc(1);
 	KUNIT_ASSERT_NOT_NULL(test, table);
 	strscpy(table->entries[0].ifname, "eth0", IFNAMSIZ);
 	strscpy(table->entries[0].network_id,
 		"6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718",
-		PEIOS_PNP_NETWORK_ID_LEN);
-	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(table), 0);
-	KUNIT_EXPECT_EQ(test, pnp_rust_generation(), gen + 1);
+		PEIOS_NTFE_NETWORK_ID_LEN);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_context_publish(table), 0);
+	KUNIT_EXPECT_EQ(test, ntfe_rust_generation(), gen + 1);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_snapshot_from_skb(skb, dev,
-						    PEIOS_PNP_SEAT_LOCAL_IN,
-						    PEIOS_PNP_DIR_IN, &snap),
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
 			0);
-	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_PNP_HAS_NETWORK);
+	KUNIT_EXPECT_TRUE(test, snap.has & PEIOS_NTFE_HAS_NETWORK);
 	KUNIT_EXPECT_EQ(test, snap.network_trust[0], 0);
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &snap, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_DROP);
-	pnp_test_publish_flow(test, "Network.Id.Equal",
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_DROP);
+	ntfe_test_publish_flow(test, "Network.Id.Equal",
 			      "6f1c2a3b-9d8e-4f70-a1b2-c3d4e5f60718", "PASS");
 	KUNIT_ASSERT_EQ(test,
-			peios_pnp_policy_eval(PEIOS_PNP_LAYER_FLOW, &snap, &out),
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &snap, &out),
 			0);
-	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_PNP_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_PASS);
 
 	/* Restore for whatever runs after this suite. */
-	KUNIT_ASSERT_EQ(test, peios_pnp_context_publish(NULL), 0);
-	KUNIT_ASSERT_EQ(test, peios_pnp_policy_publish(NULL, NULL, NULL, 1),
+	KUNIT_ASSERT_EQ(test, peios_ntfe_context_publish(NULL), 0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
 			0);
 	kfree_skb(skb);
 }
 
-static struct kunit_case pnp_kunit_cases[] = {
-	KUNIT_CASE(pnp_kunit_rust_probe),
-	KUNIT_CASE(pnp_kunit_dispatch_predicate),
-	KUNIT_CASE(pnp_kunit_snapshot_tcp4),
-	KUNIT_CASE(pnp_kunit_snapshot_arp),
-	KUNIT_CASE(pnp_kunit_snapshot_udp6),
-	KUNIT_CASE(pnp_kunit_end_to_end_enforcement),
-	KUNIT_CASE(pnp_kunit_event_stream),
-	KUNIT_CASE(pnp_kunit_reject_kinds_cross_the_bridge),
-	KUNIT_CASE(pnp_kunit_tag_store),
-	KUNIT_CASE(pnp_kunit_counter_store),
-	KUNIT_CASE(pnp_kunit_report_lands_in_kmes),
-	KUNIT_CASE(pnp_kunit_snapshot_local_out),
-	KUNIT_CASE(pnp_kunit_flow_sentence),
-	KUNIT_CASE(pnp_kunit_refusal_is_built_and_marked),
-	KUNIT_CASE(pnp_kunit_teardown_resets_the_far_end),
-	KUNIT_CASE(pnp_kunit_own_refusals_bypass_the_seats),
-	KUNIT_CASE(pnp_kunit_echo_obeys_policy),
-	KUNIT_CASE(pnp_kunit_echo_on_wire),
-	KUNIT_CASE(pnp_kunit_downward_tag_read_refused),
-	KUNIT_CASE(pnp_kunit_identity_facts),
-	KUNIT_CASE(pnp_kunit_network_context),
+/*
+ * In force: a change is noted the moment the watch delivers it, and
+ * walked once the debounced re-walk that started after it has finished —
+ * here a walk that fails (no such source), which still counts: the
+ * change was read and refused, and status says so.
+ */
+static void ntfe_kunit_ingest_progress(struct kunit *test)
+{
+	static const u8 guid[16] = { 0x5a };
+	struct peios_ntfe_status status;
+	u64 noted, walked;
+	int i;
+
+	peios_ntfe_ingest_progress(&noted, &walked);
+	KUNIT_EXPECT_EQ(test, noted, walked);
+
+	peios_ntfe_network_registry_changed(0x7ffffff0, guid);
+	peios_ntfe_network_registry_changed(0x7ffffff0, guid);
+	peios_ntfe_status_fill(&status);
+	KUNIT_EXPECT_EQ(test, status.changes_noted, noted + 2);
+	KUNIT_EXPECT_EQ(test, status.changes_walked, walked);
+
+	for (i = 0; i < 100; i++) {
+		peios_ntfe_status_fill(&status);
+		if (status.changes_walked == status.changes_noted)
+			break;
+		msleep(20);
+	}
+	KUNIT_EXPECT_EQ(test, status.changes_walked, noted + 2);
+	KUNIT_EXPECT_NE(test, status.last_ingest_error, 0ULL);
+	KUNIT_EXPECT_EQ(test, status.contexts,
+			(u64)peios_ntfe_context_count());
+}
+
+static struct kunit_case ntfe_kunit_cases[] = {
+	KUNIT_CASE(ntfe_kunit_rust_probe),
+	KUNIT_CASE(ntfe_kunit_dispatch_predicate),
+	KUNIT_CASE(ntfe_kunit_snapshot_tcp4),
+	KUNIT_CASE(ntfe_kunit_snapshot_arp),
+	KUNIT_CASE(ntfe_kunit_snapshot_udp6),
+	KUNIT_CASE(ntfe_kunit_end_to_end_enforcement),
+	KUNIT_CASE(ntfe_kunit_event_stream),
+	KUNIT_CASE(ntfe_kunit_reject_kinds_cross_the_bridge),
+	KUNIT_CASE(ntfe_kunit_tag_store),
+	KUNIT_CASE(ntfe_kunit_counter_store),
+	KUNIT_CASE(ntfe_kunit_report_lands_in_kmes),
+	KUNIT_CASE(ntfe_kunit_snapshot_local_out),
+	KUNIT_CASE(ntfe_kunit_flow_sentence),
+	KUNIT_CASE(ntfe_kunit_refusal_is_built_and_marked),
+	KUNIT_CASE(ntfe_kunit_teardown_resets_the_far_end),
+	KUNIT_CASE(ntfe_kunit_own_refusals_bypass_the_seats),
+	KUNIT_CASE(ntfe_kunit_echo_obeys_policy),
+	KUNIT_CASE(ntfe_kunit_echo_on_wire),
+	KUNIT_CASE(ntfe_kunit_downward_tag_read_refused),
+	KUNIT_CASE(ntfe_kunit_identity_facts),
+	KUNIT_CASE(ntfe_kunit_network_context),
+	KUNIT_CASE(ntfe_kunit_ingest_progress),
 	{}
 };
 
-static struct kunit_suite pnp_kunit_suite = {
-	.name = "pkm_kunit_pnp",
-	.test_cases = pnp_kunit_cases,
+static struct kunit_suite ntfe_kunit_suite = {
+	.name = "pkm_kunit_ntfe",
+	.test_cases = ntfe_kunit_cases,
 };
 
-kunit_test_suite(pnp_kunit_suite);
+kunit_test_suite(ntfe_kunit_suite);

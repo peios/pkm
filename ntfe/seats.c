@@ -26,7 +26,7 @@
  * you"). Every seat can answer for IP traffic (refuse.c); only a protocol
  * with no refusal vocabulary (non-IP) degrades REJECT to DROP, counted.
  *
- * PNP does not judge its own refusals: an answer it built carries the skb
+ * NTFE does not judge its own refusals: an answer it built carries the skb
  * refusal bit, and every seat waves it through unjudged (counted).
  *
  * Evaluation failure (atomic allocation exhausted mid-walk) fails
@@ -40,13 +40,13 @@
 #include <linux/netfilter.h>
 #include <linux/skbuff.h>
 
-#include <pkm/pnp.h>
+#include <pkm/ntfe.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
-struct peios_pnp_stats peios_pnp_stats;
+struct peios_ntfe_stats peios_ntfe_stats;
 
-bool peios_pnp_traversal_reaches_ip_seat(__be16 protocol,
+bool peios_ntfe_traversal_reaches_ip_seat(__be16 protocol,
 					 const struct net_device *dev)
 {
 	if (protocol != htons(ETH_P_IP) && protocol != htons(ETH_P_IPV6))
@@ -61,12 +61,12 @@ bool peios_pnp_traversal_reaches_ip_seat(__be16 protocol,
 	return true;
 }
 
-/* The law: a refusal PNP emitted is not traffic PNP judges. */
-static bool pnp_bypass_refusal(const struct sk_buff *skb)
+/* The law: a refusal NTFE emitted is not traffic NTFE judges. */
+static bool ntfe_bypass_refusal(const struct sk_buff *skb)
 {
-	if (!skb->pnp_refusal)
+	if (!skb->ntfe_refusal)
 		return false;
-	atomic64_inc(&peios_pnp_stats.refusals_bypassed);
+	atomic64_inc(&peios_ntfe_stats.refusals_bypassed);
 	return true;
 }
 
@@ -77,53 +77,53 @@ static bool pnp_bypass_refusal(const struct sk_buff *skb)
  */
 static unsigned int judge(struct sk_buff *skb,
 			  const struct nf_hook_state *state,
-			  const struct peios_pnp_snapshot *snap,
+			  const struct peios_ntfe_snapshot *snap,
 			  const u8 *layers, int n_layers)
 {
-	struct peios_pnp_outcome out;
+	struct peios_ntfe_outcome out;
 	int i, ret;
 
 	for (i = 0; i < n_layers; i++) {
 		u8 evflags = 0;
 
-		ret = peios_pnp_policy_eval(layers[i], snap, &out);
+		ret = peios_ntfe_policy_eval(layers[i], snap, &out);
 		if (ret == -ENOENT) {
 			/* No forest for this layer: permissive (gen 0). */
-			atomic64_inc(&peios_pnp_stats.permissive);
+			atomic64_inc(&peios_ntfe_stats.permissive);
 			continue;
 		}
 		if (ret < 0) {
-			atomic64_inc(&peios_pnp_stats.fail_closed);
+			atomic64_inc(&peios_ntfe_stats.fail_closed);
 			memset(&out, 0, sizeof(out));
-			out.verdict = PEIOS_PNP_VERDICT_DROP;
+			out.verdict = PEIOS_NTFE_VERDICT_DROP;
 			strscpy(out.attributed, "fail-closed",
 				sizeof(out.attributed));
-			peios_pnp_event_emit(snap, &out, layers[i],
-					     PEIOS_PNP_EV_F_FAIL_CLOSED);
+			peios_ntfe_event_emit(snap, &out, layers[i],
+					     PEIOS_NTFE_EV_F_FAIL_CLOSED);
 			return NF_DROP;
 		}
 
-		atomic64_inc(&peios_pnp_stats.judged);
-		atomic64_add(out.n_tags, &peios_pnp_stats.fx_tags);
-		atomic64_add(out.n_counts, &peios_pnp_stats.fx_counts);
-		atomic64_add(out.n_reports, &peios_pnp_stats.fx_reports);
-		atomic64_add(out.n_prompts, &peios_pnp_stats.fx_prompts);
+		atomic64_inc(&peios_ntfe_stats.judged);
+		atomic64_add(out.n_tags, &peios_ntfe_stats.fx_tags);
+		atomic64_add(out.n_counts, &peios_ntfe_stats.fx_counts);
+		atomic64_add(out.n_reports, &peios_ntfe_stats.fx_reports);
+		atomic64_add(out.n_prompts, &peios_ntfe_stats.fx_prompts);
 
 		switch (out.verdict) {
-		case PEIOS_PNP_VERDICT_PASS:
-			atomic64_inc(&peios_pnp_stats.verdict_pass);
-			peios_pnp_event_emit(snap, &out, layers[i], 0);
+		case PEIOS_NTFE_VERDICT_PASS:
+			atomic64_inc(&peios_ntfe_stats.verdict_pass);
+			peios_ntfe_event_emit(snap, &out, layers[i], 0);
 			continue;
-		case PEIOS_PNP_VERDICT_REJECT:
-			atomic64_inc(&peios_pnp_stats.verdict_reject);
-			if (!peios_pnp_refuse(skb, state, snap, out.reject_kind))
-				evflags |= PEIOS_PNP_EV_F_REJECT_DEGRADED;
-			peios_pnp_event_emit(snap, &out, layers[i], evflags);
+		case PEIOS_NTFE_VERDICT_REJECT:
+			atomic64_inc(&peios_ntfe_stats.verdict_reject);
+			if (!peios_ntfe_refuse(skb, state, snap, out.reject_kind))
+				evflags |= PEIOS_NTFE_EV_F_REJECT_DEGRADED;
+			peios_ntfe_event_emit(snap, &out, layers[i], evflags);
 			return NF_DROP;
-		case PEIOS_PNP_VERDICT_DROP:
+		case PEIOS_NTFE_VERDICT_DROP:
 		default:
-			atomic64_inc(&peios_pnp_stats.verdict_drop);
-			peios_pnp_event_emit(snap, &out, layers[i], 0);
+			atomic64_inc(&peios_ntfe_stats.verdict_drop);
+			peios_ntfe_event_emit(snap, &out, layers[i], 0);
 			return NF_DROP;
 		}
 	}
@@ -132,89 +132,89 @@ static unsigned int judge(struct sk_buff *skb,
 
 static void build_snapshot(const struct sk_buff *skb,
 			   const struct net_device *dev, u8 seat, u8 direction,
-			   struct peios_pnp_snapshot *snap)
+			   struct peios_ntfe_snapshot *snap)
 {
-	if (peios_pnp_snapshot_from_skb(skb, dev, seat, direction, snap))
-		atomic64_inc(&peios_pnp_stats.parse_errors);
+	if (peios_ntfe_snapshot_from_skb(skb, dev, seat, direction, snap))
+		atomic64_inc(&peios_ntfe_stats.parse_errors);
 }
 
-unsigned int peios_pnp_hook_ingress(void *priv, struct sk_buff *skb,
+unsigned int peios_ntfe_hook_ingress(void *priv, struct sk_buff *skb,
 				    const struct nf_hook_state *state)
 {
 	/* RawPacket judges everything here; the Packet layer joins as
 	 * fallback iff the traversal never reaches its proper seat.
 	 */
-	u8 layers[2] = { PEIOS_PNP_LAYER_RAWPACKET, PEIOS_PNP_LAYER_PACKET };
-	struct peios_pnp_snapshot snap;
+	u8 layers[2] = { PEIOS_NTFE_LAYER_RAWPACKET, PEIOS_NTFE_LAYER_PACKET };
+	struct peios_ntfe_snapshot snap;
 	int n_layers = 1;
 
-	if (pnp_bypass_refusal(skb))
+	if (ntfe_bypass_refusal(skb))
 		return NF_ACCEPT;
-	atomic64_inc(&peios_pnp_stats.seen_ingress);
+	atomic64_inc(&peios_ntfe_stats.seen_ingress);
 
-	if (peios_pnp_traversal_reaches_ip_seat(skb->protocol, state->in)) {
-		atomic64_inc(&peios_pnp_stats.deferred);
+	if (peios_ntfe_traversal_reaches_ip_seat(skb->protocol, state->in)) {
+		atomic64_inc(&peios_ntfe_stats.deferred);
 	} else {
-		atomic64_inc(&peios_pnp_stats.fallback_judged);
+		atomic64_inc(&peios_ntfe_stats.fallback_judged);
 		n_layers = 2;
 	}
-	build_snapshot(skb, state->in, PEIOS_PNP_SEAT_INGRESS, PEIOS_PNP_DIR_IN,
+	build_snapshot(skb, state->in, PEIOS_NTFE_SEAT_INGRESS, PEIOS_NTFE_DIR_IN,
 		       &snap);
 	return judge(skb, state, &snap, layers, n_layers);
 }
 
-unsigned int peios_pnp_hook_egress(void *priv, struct sk_buff *skb,
+unsigned int peios_ntfe_hook_egress(void *priv, struct sk_buff *skb,
 				   const struct nf_hook_state *state)
 {
 	/* Outbound traversal order: the Packet layer's proper seat, then
 	 * wire-proximate RawPacket last.
 	 */
-	static const u8 layers[2] = { PEIOS_PNP_LAYER_PACKET,
-				      PEIOS_PNP_LAYER_RAWPACKET };
-	struct peios_pnp_snapshot snap;
+	static const u8 layers[2] = { PEIOS_NTFE_LAYER_PACKET,
+				      PEIOS_NTFE_LAYER_RAWPACKET };
+	struct peios_ntfe_snapshot snap;
 
-	if (pnp_bypass_refusal(skb))
+	if (ntfe_bypass_refusal(skb))
 		return NF_ACCEPT;
-	atomic64_inc(&peios_pnp_stats.seen_egress);
-	build_snapshot(skb, state->out, PEIOS_PNP_SEAT_EGRESS, PEIOS_PNP_DIR_OUT,
+	atomic64_inc(&peios_ntfe_stats.seen_egress);
+	build_snapshot(skb, state->out, PEIOS_NTFE_SEAT_EGRESS, PEIOS_NTFE_DIR_OUT,
 		       &snap);
 	return judge(skb, state, &snap, layers, 2);
 }
 
-unsigned int peios_pnp_hook_local_in(void *priv, struct sk_buff *skb,
+unsigned int peios_ntfe_hook_local_in(void *priv, struct sk_buff *skb,
 				     const struct nf_hook_state *state)
 {
-	static const u8 layers[1] = { PEIOS_PNP_LAYER_PACKET };
-	struct peios_pnp_snapshot snap;
+	static const u8 layers[1] = { PEIOS_NTFE_LAYER_PACKET };
+	struct peios_ntfe_snapshot snap;
 	unsigned int verdict;
 
-	if (pnp_bypass_refusal(skb))
+	if (ntfe_bypass_refusal(skb))
 		return NF_ACCEPT;
-	atomic64_inc(&peios_pnp_stats.seen_local_in);
-	build_snapshot(skb, state->in, PEIOS_PNP_SEAT_LOCAL_IN,
-		       PEIOS_PNP_DIR_IN, &snap);
+	atomic64_inc(&peios_ntfe_stats.seen_local_in);
+	build_snapshot(skb, state->in, PEIOS_NTFE_SEAT_LOCAL_IN,
+		       PEIOS_NTFE_DIR_IN, &snap);
 	/* Packet first (the cheap per-packet filter), then the flow's
 	 * sentence — or the Flow layer, for a flow with no current one.
 	 */
 	verdict = judge(skb, state, &snap, layers, 1);
 	if (verdict != NF_ACCEPT)
 		return verdict;
-	return peios_pnp_flow_dispatch(skb, state, &snap);
+	return peios_ntfe_flow_dispatch(skb, state, &snap);
 }
 
-unsigned int peios_pnp_hook_local_out(void *priv, struct sk_buff *skb,
+unsigned int peios_ntfe_hook_local_out(void *priv, struct sk_buff *skb,
 				      const struct nf_hook_state *state)
 {
-	struct peios_pnp_snapshot snap;
+	struct peios_ntfe_snapshot snap;
 
-	if (pnp_bypass_refusal(skb))
+	if (ntfe_bypass_refusal(skb))
 		return NF_ACCEPT;
-	atomic64_inc(&peios_pnp_stats.seen_local_out);
+	atomic64_inc(&peios_ntfe_stats.seen_local_out);
 	/* The outbound Flow seat: first point after conntrack for locally
 	 * generated traffic, the entry still unconfirmed, a reject path
 	 * available. Packet and RawPacket follow at egress, in wire order.
 	 */
-	build_snapshot(skb, state->out, PEIOS_PNP_SEAT_LOCAL_OUT,
-		       PEIOS_PNP_DIR_OUT, &snap);
-	return peios_pnp_flow_dispatch(skb, state, &snap);
+	build_snapshot(skb, state->out, PEIOS_NTFE_SEAT_LOCAL_OUT,
+		       PEIOS_NTFE_DIR_OUT, &snap);
+	return peios_ntfe_flow_dispatch(skb, state, &snap);
 }

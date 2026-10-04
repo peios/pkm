@@ -608,7 +608,7 @@ struct pkm_lcs_kunit_source_bootstrap_source_script {
 	struct pkm_lcs_kunit_query_values_source_script kmes_query;
 	/* Port reservations: the discovery walk that follows the KMES stage. */
 	struct pkm_lcs_kunit_walk_source_script port_walk;
-	/* PNP's Network key: the discovery walk that follows port reservations. */
+	/* NTFE's Network key: the discovery walk that follows port reservations. */
 	struct pkm_lcs_kunit_walk_source_script network_walk;
 	struct pkm_lcs_kunit_walk_source_script layers_walk;
 	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script layers_refresh;

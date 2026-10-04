@@ -8,7 +8,7 @@ diff --git a/net/ipv4/ping.c b/net/ipv4/ping.c
 +
 +	/* Peios: echo datagrams are ordinary user traffic, governed by PNP.
 +	 * This removes only the legacy GID gate. Raw sockets still require
-+	 * their existing authority; no packet is exempted from a PNP seat.
++	 * their existing authority; no packet is exempted from an NTFE seat.
 +	 */
 +	if (IS_ENABLED(CONFIG_SECURITY_PKM))
 +		return 0;

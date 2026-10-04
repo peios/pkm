@@ -68,16 +68,16 @@ net/inet-reuseport-tcb-rebind.patch
 ipc/util-lsm-with-object.patch
 arch/x86-prctl-shadow-stack.patch
 arch/syscall-table-pkm.patch
-# PNP (PEI-598): wires net/pnp/ (staged by stage-sources.sh) into the net
+# NTFE (PEI-598): wires net/ntfe/ (staged by stage-sources.sh) into the net
 # build. Touches only net/{Kconfig,Makefile} one-liners; order-independent.
-net/pnp-wireup.patch
-# PNP machinery slice: the flow tag store's conntrack extension (enum slot,
+net/ntfe-wireup.patch
+# NTFE machinery slice: the flow tag store's conntrack extension (enum slot,
 # size table, add at flow creation, release at free). Touches conntrack
 # files no other patch does; order-independent.
-net/pnp-conntrack-ext.patch
-# PNP Flow slice: the refusal bit on sk_buff (PNP does not judge its own
+net/ntfe-conntrack-ext.patch
+# NTFE Flow slice: the refusal bit on sk_buff (NTFE does not judge its own
 # refusals). One hunk in include/linux/skbuff.h; order-independent.
-net/pnp-refusal-bit.patch
+net/ntfe-refusal-bit.patch
 # PEI-1078: CLONE_INTO_CGROUP captured the parent's cgroup kill_seq, so every
 # child cloned into a cgroup that was ever cgroup.kill'ed was SIGKILLed at
 # birth. One hunk in kernel/cgroup/cgroup.c; no other patch touches it.

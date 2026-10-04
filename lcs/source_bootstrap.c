@@ -4,7 +4,7 @@
  */
 
 #include <linux/errno.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 
@@ -105,19 +105,19 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 							    port_guid);
 
 	/*
-	 * PNP's Network key (net/pnp/ingest.c) — the policy rules and netd's
+	 * NTFE's Network key (net/ntfe/ingest.c) — the policy rules and netd's
 	 * inventory, the network context — the fifth kernel-read key,
 	 * discovered last like port reservations: only its discovery walk
-	 * may fail the bootstrap. A rejected forest is not a failure — PNP
+	 * may fail the bootstrap. A rejected forest is not a failure — NTFE
 	 * keeps its previous policy generation and says why.
 	 */
-	ret = peios_pnp_network_root_discover_from_machine_hive(
+	ret = peios_ntfe_network_root_discover_from_machine_hive(
 		source_id, machine_root_guid, &network_root_present, network_guid);
 	if (ret)
 		goto out;
 	result->network_root_present = network_root_present;
 	if (network_root_present)
-		peios_pnp_network_refresh_from_key(source_id, network_guid);
+		peios_ntfe_network_refresh_from_key(source_id, network_guid);
 
 	stage = LCS_BOOT_SELF_WATCH;
 	ret = pkm_lcs_internal_self_watch_arm_full(

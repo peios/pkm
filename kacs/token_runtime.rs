@@ -532,10 +532,10 @@ struct OwnedSidAndAttributes {
 }
 
 /// A token's identity as the network policy engine reads it for the Flow
-/// layer's `Local.*` facts (see `pnp_runtime.rs`). Borrowed from the token;
+/// layer's `Local.*` facts (see `ntfe_runtime.rs`). Borrowed from the token;
 /// no lock, no copy: membership is answered by scanning the fixed SID list
 /// against each group's atomic attributes.
-pub(crate) struct PnpTokenView<'a> {
+pub(crate) struct NtfeTokenView<'a> {
     /// The user SID, binary.
     pub(crate) user: &'a [u8],
     /// Every group SID, in token order (fixed at creation).
@@ -551,7 +551,7 @@ pub(crate) struct PnpTokenView<'a> {
     pub(crate) capabilities: &'a [SidAndAttributes<'static>],
 }
 
-impl<'a> PnpTokenView<'a> {
+impl<'a> NtfeTokenView<'a> {
     /// The enabled groups, deny-only ones excluded: what policy may see.
     pub(crate) fn enabled_groups(&self) -> impl Iterator<Item = &'a [u8]> + '_ {
         self.group_sids
@@ -570,9 +570,9 @@ impl<'a> PnpTokenView<'a> {
 /// # Safety
 /// `token` must be a live token object the caller holds a counted reference
 /// to for as long as the view is used.
-pub(crate) unsafe fn pnp_token_view<'a>(token: *const c_void) -> Option<PnpTokenView<'a>> {
+pub(crate) unsafe fn ntfe_token_view<'a>(token: *const c_void) -> Option<NtfeTokenView<'a>> {
     let token = unsafe { PkmKacsBootToken::from_ptr(token) }?;
-    Some(token.pnp_view())
+    Some(token.ntfe_view())
 }
 
 struct OwnedSid {
@@ -7150,16 +7150,16 @@ impl PkmKacsBootToken {
         self.group_sids.get(index as usize).copied()
     }
 
-    /// The identity net/pnp reads (pnp_runtime.rs): borrowed and
+    /// The identity net/ntfe reads (ntfe_runtime.rs): borrowed and
     /// lock-free — the group SIDs are fixed at creation and each group's
     /// attributes are an atomic — valid while the caller holds a reference
     /// to the token.
-    fn pnp_view(&self) -> PnpTokenView<'_> {
+    fn ntfe_view(&self) -> NtfeTokenView<'_> {
         let n = self
             .group_count
             .min(self.group_sids.len())
             .min(self.group_attributes.len());
-        PnpTokenView {
+        NtfeTokenView {
             user: self.user_sid.as_bytes(),
             group_sids: &self.group_sids[..n],
             group_attributes: &self.group_attributes[..n],

@@ -113,11 +113,11 @@ require_set CONFIG_SECURITY_LOCKDOWN_LSM_EARLY y
 require_set CONFIG_TMPFS y
 require_set CONFIG_TMPFS_XATTR y
 
-# --- PNP: Peios Network Policy (PEI-598) ---
-# The engine must be in, its machinery built-in (built-in PNP calls these
+# --- NTFE: the Network Traffic Filtering Engine (PEI-598) ---
+# The engine must be in, its machinery built-in (built-in NTFE calls these
 # symbols on the packet path), and the replaced policy frontends must stay
 # out — a stray nf_tables would be a second, unratified policy surface.
-require_set CONFIG_PEIOS_PNP y
+require_set CONFIG_PEIOS_NTFE y
 require_set CONFIG_NETFILTER y
 require_set CONFIG_NETFILTER_INGRESS y
 require_set CONFIG_NETFILTER_EGRESS y

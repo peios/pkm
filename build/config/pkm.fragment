@@ -193,11 +193,11 @@ CONFIG_USB_UAS=y
 # Disabling the parent removes the whole subtree.
 # CONFIG_WATCHDOG_PRETIMEOUT_GOV is not set
 
-# --- PNP: Peios Network Policy packet engine (PEI-598) ---
+# --- NTFE: the Network Traffic Filtering Engine, the kernel executor of PNP (PEI-598) ---
 # The engine itself. Built-in (bool); its Rust semantics ride the
 # security/pkm Rust island.
-CONFIG_PEIOS_PNP=y
-# Machinery PNP stands on, forced =y: PNP is built-in and calls these
+CONFIG_PEIOS_NTFE=y
+# Machinery NTFE stands on, forced =y: NTFE is built-in and calls these
 # symbols on the packet path, so modules won't do — and the kunit profile's
 # localmodconfig would otherwise prune them (this fragment merges after the
 # narrowing precisely so these survive).
@@ -216,19 +216,19 @@ CONFIG_NF_DEFRAG_IPV4=y
 CONFIG_NF_DEFRAG_IPV6=y
 # REJECT response emitters (protocol-phrased refusals: RST / ICMP
 # unreachable). Normally selected by the nft/xtables reject targets, which
-# are gone below; PNP is their consumer now.
+# are gone below; NTFE is their consumer now.
 CONFIG_NF_REJECT_IPV4=y
 CONFIG_NF_REJECT_IPV6=y
 # NAT engine: kept DORMANT by ratified decision — compiled, no configurator
-# until PNP steers it at router time.
+# until NTFE steers it at router time.
 CONFIG_NF_NAT=y
 
 # --- the clean slate: every netfilter policy frontend, configured out ---
 # Ratified (PEI-598/PEI-28): nf_tables and the whole xtables family are
-# replaced by PNP. Machinery (hooks, conntrack, defrag, reject emitters,
+# replaced by NTFE. Machinery (hooks, conntrack, defrag, reject emitters,
 # dormant NAT) stays above; every policy surface goes. Config-off, not
 # source excision: unbuilt code ships nothing, and this is reversible
-# while PNP grows into the space.
+# while NTFE grows into the space.
 # CONFIG_NF_TABLES is not set
 # CONFIG_NETFILTER_XTABLES is not set
 # CONFIG_NETFILTER_XTABLES_COMPAT is not set

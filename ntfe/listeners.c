@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * The listeners dump (PEIOS_PNP_IOC_LISTENERS): what this machine is
+ * The listeners dump (PEIOS_NTFE_IOC_LISTENERS): what this machine is
  * prepared to receive, and by whom — every TCP socket in the listening
  * state and every bound UDP socket, with the governing identity KACS
  * stamped on it (identity facts, rung 3). The attack surface as a list,
@@ -17,7 +17,7 @@
 #include <linux/errno.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include <linux/slab.h>
 #include <linux/socket.h>
 #include <linux/spinlock.h>
@@ -31,21 +31,21 @@
 #include <net/tcp.h>
 #include <net/udp.h>
 
-#include <pkm/pnp.h>
+#include <pkm/ntfe.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
 /* UDP-Lite's socket table (net/ipv4/udplite.c exports it, no header does). */
 extern struct udp_table udplite_table;
 
-#define PNP_LISTENERS_BATCH	32
+#define NTFE_LISTENERS_BATCH	32
 
 /* One socket into one record; the owner read takes the socket's lock. */
-static void pnp_listener_fill(struct peios_pnp_listener_rec *rec,
+static void ntfe_listener_fill(struct peios_ntfe_listener_rec *rec,
 			      const struct sock *sk, u8 protocol)
 {
 	const struct inet_sock *inet = inet_sk(sk);
-	struct peios_pnp_owner owner;
+	struct peios_ntfe_owner owner;
 
 	memset(rec, 0, sizeof(*rec));
 	rec->protocol = protocol;
@@ -63,19 +63,19 @@ static void pnp_listener_fill(struct peios_pnp_listener_rec *rec,
 		memcpy(rec->addr, &inet->inet_rcv_saddr, 4);
 
 	if (pkm_kacs_socket_owner(sk, &owner)) {
-		rec->owner_kind = PEIOS_PNP_EV_LOCAL_KERNEL;
+		rec->owner_kind = PEIOS_NTFE_EV_LOCAL_KERNEL;
 		rec->owner_unresolved = 1;
 		return;
 	}
 	switch (owner.kind) {
-	case PEIOS_PNP_OWNER_PROGRAM:
-		rec->owner_kind = PEIOS_PNP_EV_LOCAL_PROGRAM;
+	case PEIOS_NTFE_OWNER_PROGRAM:
+		rec->owner_kind = PEIOS_NTFE_EV_LOCAL_PROGRAM;
 		break;
-	case PEIOS_PNP_OWNER_KERNEL:
-		rec->owner_kind = PEIOS_PNP_EV_LOCAL_KERNEL;
+	case PEIOS_NTFE_OWNER_KERNEL:
+		rec->owner_kind = PEIOS_NTFE_EV_LOCAL_KERNEL;
 		break;
 	default:
-		rec->owner_kind = PEIOS_PNP_EV_LOCAL_KERNEL;
+		rec->owner_kind = PEIOS_NTFE_EV_LOCAL_KERNEL;
 		rec->owner_unresolved = 1;
 		break;
 	}
@@ -83,14 +83,14 @@ static void pnp_listener_fill(struct peios_pnp_listener_rec *rec,
 	memcpy(rec->owner_guid, owner.guid, sizeof(rec->owner_guid));
 	memcpy(rec->owner_comm, owner.comm, sizeof(rec->owner_comm));
 	if (owner.token)
-		pnp_rust_owner_sids(owner.token, rec->owner_user,
+		ntfe_rust_owner_sids(owner.token, rec->owner_user,
 				    rec->owner_service);
 	pkm_kacs_socket_owner_put(&owner);
 }
 
-struct pnp_listeners_walk {
-	struct peios_pnp_listener_rec __user *ubuf;
-	struct peios_pnp_listener_rec *batch;
+struct ntfe_listeners_walk {
+	struct peios_ntfe_listener_rec __user *ubuf;
+	struct peios_ntfe_listener_rec *batch;
 	u32 room;		/* records the user buffer holds */
 	u32 written;
 	u32 total;
@@ -99,7 +99,7 @@ struct pnp_listeners_walk {
 };
 
 /* Copies the batch out; never called under a lock. */
-static void pnp_listeners_flush(struct pnp_listeners_walk *w)
+static void ntfe_listeners_flush(struct ntfe_listeners_walk *w)
 {
 	if (w->err || !w->n)
 		return;
@@ -111,16 +111,16 @@ static void pnp_listeners_flush(struct pnp_listeners_walk *w)
 }
 
 /* Records a socket seen under its bucket lock, if there is room. */
-static void pnp_listeners_note(struct pnp_listeners_walk *w,
+static void ntfe_listeners_note(struct ntfe_listeners_walk *w,
 			       const struct sock *sk, u8 protocol)
 {
 	w->total++;
-	if (w->written + w->n >= w->room || w->n == PNP_LISTENERS_BATCH)
+	if (w->written + w->n >= w->room || w->n == NTFE_LISTENERS_BATCH)
 		return;		/* count only */
-	pnp_listener_fill(&w->batch[w->n++], sk, protocol);
+	ntfe_listener_fill(&w->batch[w->n++], sk, protocol);
 }
 
-static void pnp_listeners_tcp(struct pnp_listeners_walk *w)
+static void ntfe_listeners_tcp(struct ntfe_listeners_walk *w)
 {
 	struct inet_hashinfo *hinfo = init_net.ipv4.tcp_death_row.hashinfo;
 	unsigned int bucket;
@@ -138,14 +138,14 @@ static void pnp_listeners_tcp(struct pnp_listeners_walk *w)
 				continue;
 			if (sk->sk_state != TCP_LISTEN)
 				continue;
-			pnp_listeners_note(w, sk, IPPROTO_TCP);
+			ntfe_listeners_note(w, sk, IPPROTO_TCP);
 		}
 		spin_unlock(&ilb2->lock);
-		pnp_listeners_flush(w);
+		ntfe_listeners_flush(w);
 	}
 }
 
-static void pnp_listeners_udp(struct pnp_listeners_walk *w,
+static void ntfe_listeners_udp(struct ntfe_listeners_walk *w,
 			      struct udp_table *table, u8 protocol)
 {
 	unsigned int bucket;
@@ -164,30 +164,30 @@ static void pnp_listeners_udp(struct pnp_listeners_walk *w,
 				continue;
 			if (!inet_sk(sk)->inet_num)
 				continue;	/* not bound: receives nothing */
-			pnp_listeners_note(w, sk, protocol);
+			ntfe_listeners_note(w, sk, protocol);
 		}
 		spin_unlock_bh(&hslot->lock);
-		pnp_listeners_flush(w);
+		ntfe_listeners_flush(w);
 	}
 }
 
-long peios_pnp_listeners_dump(struct peios_pnp_listeners_query *query)
+long peios_ntfe_listeners_dump(struct peios_ntfe_listeners_query *query)
 {
-	struct pnp_listeners_walk w = {
+	struct ntfe_listeners_walk w = {
 		.ubuf = u64_to_user_ptr(query->buf),
-		.room = query->buf_len / sizeof(struct peios_pnp_listener_rec),
+		.room = query->buf_len / sizeof(struct peios_ntfe_listener_rec),
 	};
 
-	w.batch = kcalloc(PNP_LISTENERS_BATCH, sizeof(*w.batch), GFP_KERNEL);
+	w.batch = kcalloc(NTFE_LISTENERS_BATCH, sizeof(*w.batch), GFP_KERNEL);
 	if (!w.batch)
 		return -ENOMEM;
 
-	pnp_listeners_tcp(&w);
+	ntfe_listeners_tcp(&w);
 	if (!w.err)
-		pnp_listeners_udp(&w, init_net.ipv4.udp_table, IPPROTO_UDP);
+		ntfe_listeners_udp(&w, init_net.ipv4.udp_table, IPPROTO_UDP);
 	if (!w.err)
-		pnp_listeners_udp(&w, &udplite_table, IPPROTO_UDPLITE);
-	pnp_listeners_flush(&w);
+		ntfe_listeners_udp(&w, &udplite_table, IPPROTO_UDPLITE);
+	ntfe_listeners_flush(&w);
 
 	query->count = w.written;
 	query->total = w.total;

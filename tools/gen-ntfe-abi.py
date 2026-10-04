@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the PNP ABI appendix of the Peios Kernel TRM from pkm/uapi/pkm/pnp.h.
+"""Generate the NTFE ABI appendix of the Peios Kernel TRM from pkm/uapi/pkm/ntfe.h.
 
 Constant values and struct layouts are obtained by compiling a probe against
 the real header, so the output cannot drift from the ABI.
@@ -8,7 +8,7 @@ This file owns the appendix outright and overwrites it wholesale. Nothing
 hand-written may live there: prose about the ABI belongs in the notes
 appendix beside it (§6.B), which no generator writes.
 
-Usage:  python3 pkm/tools/gen-pnp-abi.py [--check]
+Usage:  python3 pkm/tools/gen-ntfe-abi.py [--check]
 
 Writes the appendix into learn/. With --check, exits non-zero if the file on
 disk differs from what would be generated, without writing.
@@ -22,11 +22,11 @@ import textwrap
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 UAPI = ROOT / "pkm" / "uapi"
-HDR = UAPI / "pkm" / "pnp.h"
+HDR = UAPI / "pkm" / "ntfe.h"
 OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
-       / "100--peios-kernel.book/6--network-policy/a1--pnp-abi.md")
+       / "100--peios-kernel.book/6--ntfe/a1--ntfe-abi.md")
 
-DESCRIPTION = ("Every PNP ioctl number, event and status structure layout, "
+DESCRIPTION = ("Every NTFE ioctl number, event and status structure layout, "
                "counter record layout and constant, generated from the uapi "
                "header and measured by compilation.")
 
@@ -125,7 +125,7 @@ def parse_header(path):
 
 def probe(consts, structs):
     src = ['#include <stdio.h>', '#include <stddef.h>', '#include <stdint.h>',
-           '#include <pkm/pnp.h>', "int main(void){"]
+           '#include <pkm/ntfe.h>', "int main(void){"]
     for name, args, raw, _, _ in consts:
         if args or raw.startswith('"'):
             continue
@@ -280,16 +280,16 @@ def build():
     w = o.append
 
     w("---")
-    w("title: PNP ABI Reference")
+    w("title: NTFE ABI Reference")
     w(f"description: {DESCRIPTION}")
     w("---")
     w("")
     w("Every name, value, offset and size in this appendix is generated from")
-    w("`pkm/uapi/pkm/pnp.h` by `pkm/tools/gen-pnp-abi.py`, with struct")
+    w("`pkm/uapi/pkm/ntfe.h` by `pkm/tools/gen-ntfe-abi.py`, with struct")
     w("layouts measured by compiling a probe against the real header.")
     w("Regenerate it whenever the ABI changes; do not edit it by hand. The")
     w("names here are the ones a program actually compiles")
-    w("against. [*abi.pnp-generated-from-source]")
+    w("against. [*abi.ntfe-generated-from-source]")
     w("")
     w("What a compiler cannot measure -- the device's read and poll")
     w("semantics, what each ioctl expects, the error vocabulary, and the")
@@ -301,7 +301,7 @@ def build():
     if ioctls:
         w("## Ioctl requests [*abi.ioctl-numbers]")
         w("")
-        w("Request numbers on `/dev/peios-pnp`, packed as `<linux/ioctl.h>`")
+        w("Request numbers on `/dev/peios-ntfe`, packed as `<linux/ioctl.h>`")
         w("packs them (direction, argument size, type `'N'`, number).")
         w("")
         rows = [[f"`{n}`", fmt_value(n, r, VALUES[n]), f"`{r}`"]
@@ -357,7 +357,7 @@ def main():
     if "--check" in sys.argv:
         cur = OUT.read_text() if OUT.exists() else ""
         if cur != text:
-            print(f"{OUT} is out of date; regenerate with gen-pnp-abi.py",
+            print(f"{OUT} is out of date; regenerate with gen-ntfe-abi.py",
                   file=sys.stderr)
             return 1
         print("up to date")

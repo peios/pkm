@@ -9,7 +9,7 @@
  * structure exists:
  *
  *   outbound  the sending socket's governing identity, stamped by KACS
- *             (<linux/peios_pnp.h>): `program` when a process's token
+ *             (<linux/peios_ntfe.h>): `program` when a process's token
  *             stands behind it, else `kernel` (resets, ICMP errors, IGMP,
  *             kernel sockets);
  *   inbound   `shared` for UDP multicast and broadcast, which the stack
@@ -33,7 +33,7 @@
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/netfilter.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include <linux/rcupdate.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
@@ -51,7 +51,7 @@
 #include <net/tcp.h>
 #include <net/udp.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
 /* UDP-Lite's socket table (net/ipv4/udplite.c exports it, no header does). */
 extern struct udp_table udplite_table;
@@ -61,7 +61,7 @@ extern struct udp_table udplite_table;
  * module is built; the underlying lookups are unconditional and hand
  * back an unreferenced socket under RCU, so the reference is taken here.
  */
-static struct sock *pnp_udp4_lookup(struct net *net, u8 protocol, __be32 saddr,
+static struct sock *ntfe_udp4_lookup(struct net *net, u8 protocol, __be32 saddr,
 				    __be16 sport, __be32 daddr, __be16 dport,
 				    int dif, struct sk_buff *skb)
 {
@@ -79,7 +79,7 @@ static struct sock *pnp_udp4_lookup(struct net *net, u8 protocol, __be32 saddr,
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
-static struct sock *pnp_udp6_lookup(struct net *net, u8 protocol,
+static struct sock *ntfe_udp6_lookup(struct net *net, u8 protocol,
 				    const struct in6_addr *saddr, __be16 sport,
 				    const struct in6_addr *daddr, __be16 dport,
 				    int dif, struct sk_buff *skb)
@@ -99,28 +99,28 @@ static struct sock *pnp_udp6_lookup(struct net *net, u8 protocol,
 #endif
 
 /* The owner a socket carries, mapped to the fact's kinds. */
-static void pnp_identity_from_sock(const struct sock *sk,
-				   struct peios_pnp_identity *out)
+static void ntfe_identity_from_sock(const struct sock *sk,
+				   struct peios_ntfe_identity *out)
 {
 	int ret;
 
 	ret = pkm_kacs_socket_owner(sk, &out->owner);
 	if (ret) {
 		/* A socket with no KACS state at all: not attributable. */
-		out->kind = PEIOS_PNP_LOCAL_KERNEL;
+		out->kind = PEIOS_NTFE_LOCAL_KERNEL;
 		out->unresolved = 1;
 		return;
 	}
 	switch (out->owner.kind) {
-	case PEIOS_PNP_OWNER_PROGRAM:
-		out->kind = PEIOS_PNP_LOCAL_PROGRAM;
+	case PEIOS_NTFE_OWNER_PROGRAM:
+		out->kind = PEIOS_NTFE_LOCAL_PROGRAM;
 		break;
-	case PEIOS_PNP_OWNER_KERNEL:
-		out->kind = PEIOS_PNP_LOCAL_KERNEL;
+	case PEIOS_NTFE_OWNER_KERNEL:
+		out->kind = PEIOS_NTFE_LOCAL_KERNEL;
 		break;
 	default:
 		/* An inet socket nobody stamped: the stack's, and confessed. */
-		out->kind = PEIOS_PNP_LOCAL_KERNEL;
+		out->kind = PEIOS_NTFE_LOCAL_KERNEL;
 		out->unresolved = 1;
 		break;
 	}
@@ -130,7 +130,7 @@ static void pnp_identity_from_sock(const struct sock *sk,
  * The full socket behind a lookup result: a request minisock stands for
  * its listener, a TIME_WAIT minisock for nobody (the stack answers it).
  */
-static const struct sock *pnp_full_sock(const struct sock *sk)
+static const struct sock *ntfe_full_sock(const struct sock *sk)
 {
 	if (!sk)
 		return NULL;
@@ -141,7 +141,7 @@ static const struct sock *pnp_full_sock(const struct sock *sk)
 	return NULL;
 }
 
-static struct sock *pnp_raw_v4_lookup(struct net *net, u8 protocol,
+static struct sock *ntfe_raw_v4_lookup(struct net *net, u8 protocol,
 				      __be32 saddr, __be32 daddr, int dif)
 {
 	struct hlist_head *hlist;
@@ -161,7 +161,7 @@ static struct sock *pnp_raw_v4_lookup(struct net *net, u8 protocol,
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
-static struct sock *pnp_raw_v6_lookup(struct net *net, u8 protocol,
+static struct sock *ntfe_raw_v6_lookup(struct net *net, u8 protocol,
 				      const struct in6_addr *saddr,
 				      const struct in6_addr *daddr, int dif)
 {
@@ -187,7 +187,7 @@ static struct sock *pnp_raw_v6_lookup(struct net *net, u8 protocol,
  * releases (sock_gen_put), or NULL. `*handled` says whether the protocol
  * is one the stack consumes when no socket does.
  */
-static struct sock *pnp_receiver_v4(struct net *net, struct sk_buff *skb,
+static struct sock *ntfe_receiver_v4(struct net *net, struct sk_buff *skb,
 				    int dif, bool *handled, bool *shared)
 {
 	const struct iphdr *iph = ip_hdr(skb);
@@ -222,17 +222,17 @@ static struct sock *pnp_receiver_v4(struct net *net, struct sk_buff *skb,
 		uh = skb_header_pointer(skb, thoff, sizeof(_uh), &_uh);
 		if (!uh)
 			return NULL;
-		return pnp_udp4_lookup(net, iph->protocol, iph->saddr,
+		return ntfe_udp4_lookup(net, iph->protocol, iph->saddr,
 				       uh->source, iph->daddr, uh->dest, dif,
 				       skb);
 	default:
-		return pnp_raw_v4_lookup(net, iph->protocol, iph->saddr,
+		return ntfe_raw_v4_lookup(net, iph->protocol, iph->saddr,
 					 iph->daddr, dif);
 	}
 }
 
 #if IS_ENABLED(CONFIG_IPV6)
-static struct sock *pnp_receiver_v6(struct net *net, struct sk_buff *skb,
+static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 				    int dif, bool *handled, bool *shared)
 {
 	const struct ipv6hdr *ip6 = ipv6_hdr(skb);
@@ -267,15 +267,15 @@ static struct sock *pnp_receiver_v6(struct net *net, struct sk_buff *skb,
 		uh = skb_header_pointer(skb, thoff, sizeof(_uh), &_uh);
 		if (!uh)
 			return NULL;
-		return pnp_udp6_lookup(net, (u8)proto, &ip6->saddr, uh->source,
+		return ntfe_udp6_lookup(net, (u8)proto, &ip6->saddr, uh->source,
 				       &ip6->daddr, uh->dest, dif, skb);
 	default:
-		return pnp_raw_v6_lookup(net, proto, &ip6->saddr, &ip6->daddr,
+		return ntfe_raw_v6_lookup(net, proto, &ip6->saddr, &ip6->daddr,
 					 dif);
 	}
 }
 #else
-static struct sock *pnp_receiver_v6(struct net *net, struct sk_buff *skb,
+static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 				    int dif, bool *handled, bool *shared)
 {
 	*handled = false;
@@ -285,9 +285,9 @@ static struct sock *pnp_receiver_v6(struct net *net, struct sk_buff *skb,
 #endif
 
 /* Whether the packet, as it stands, is addressed to this machine. */
-static void pnp_identity_receiver(struct sk_buff *skb,
+static void ntfe_identity_receiver(struct sk_buff *skb,
 				  const struct net_device *dev,
-				  struct peios_pnp_identity *out)
+				  struct peios_ntfe_identity *out)
 {
 	struct net *net = dev ? dev_net(dev) : NULL;
 	bool handled = false, shared = false;
@@ -297,82 +297,82 @@ static void pnp_identity_receiver(struct sk_buff *skb,
 
 	/* Early demux already found the receiver: use it, no lookup. */
 	if (skb->sk && sk_fullsock(skb->sk)) {
-		pnp_identity_from_sock(skb->sk, out);
+		ntfe_identity_from_sock(skb->sk, out);
 		return;
 	}
 	/* No device, or one outside any namespace (a synthetic device in a
 	 * test): nothing to look up in — the stack's, confessed.
 	 */
 	if (!net) {
-		out->kind = PEIOS_PNP_LOCAL_KERNEL;
+		out->kind = PEIOS_NTFE_LOCAL_KERNEL;
 		out->unresolved = 1;
 		return;
 	}
 	dif = dev->ifindex;
 	switch (ntohs(skb->protocol)) {
 	case ETH_P_IP:
-		sk = pnp_receiver_v4(net, skb, dif, &handled, &shared);
+		sk = ntfe_receiver_v4(net, skb, dif, &handled, &shared);
 		break;
 	case ETH_P_IPV6:
-		sk = pnp_receiver_v6(net, skb, dif, &handled, &shared);
+		sk = ntfe_receiver_v6(net, skb, dif, &handled, &shared);
 		break;
 	default:
 		break;
 	}
 	if (shared) {
-		out->kind = PEIOS_PNP_LOCAL_SHARED;
+		out->kind = PEIOS_NTFE_LOCAL_SHARED;
 		return;
 	}
-	full = pnp_full_sock(sk);
+	full = ntfe_full_sock(sk);
 	if (full) {
-		pnp_identity_from_sock(full, out);
+		ntfe_identity_from_sock(full, out);
 	} else if (sk) {
 		/* A TIME_WAIT minisock: the stack answers, nobody receives. */
-		out->kind = PEIOS_PNP_LOCAL_KERNEL;
+		out->kind = PEIOS_NTFE_LOCAL_KERNEL;
 	} else {
-		out->kind = handled ? PEIOS_PNP_LOCAL_KERNEL :
-				      PEIOS_PNP_LOCAL_NONE;
+		out->kind = handled ? PEIOS_NTFE_LOCAL_KERNEL :
+				      PEIOS_NTFE_LOCAL_NONE;
 	}
 	if (sk)
 		sock_gen_put(sk);
 }
 
-void peios_pnp_identity_resolve(struct sk_buff *skb,
+void peios_ntfe_identity_resolve(struct sk_buff *skb,
 				const struct nf_hook_state *state,
-				const struct peios_pnp_snapshot *snap,
-				bool other_end, struct peios_pnp_identity *out)
+				const struct peios_ntfe_snapshot *snap,
+				bool other_end, struct peios_ntfe_identity *out)
 {
 	memset(out, 0, sizeof(*out));
-	out->owner.kind = PEIOS_PNP_OWNER_UNSTAMPED;
+	out->owner.kind = PEIOS_NTFE_OWNER_UNSTAMPED;
 
-	if (snap->seat == PEIOS_PNP_SEAT_LOCAL_OUT && !other_end) {
+	if (snap->seat == PEIOS_NTFE_SEAT_LOCAL_OUT && !other_end) {
 		const struct sock *sk = state->sk ? state->sk : skb->sk;
 
 		if (sk && sk_fullsock(sk))
-			pnp_identity_from_sock(sk, out);
+			ntfe_identity_from_sock(sk, out);
 		else
-			out->kind = PEIOS_PNP_LOCAL_KERNEL;
+			out->kind = PEIOS_NTFE_LOCAL_KERNEL;
 		return;
 	}
-	if (snap->seat == PEIOS_PNP_SEAT_LOCAL_OUT) {
+	if (snap->seat == PEIOS_NTFE_SEAT_LOCAL_OUT) {
 		/* The other end of a loopback flow: the receiver of this very
 		 * packet, looked up early so the inbound seat need not.
 		 */
-		pnp_identity_receiver(skb, state->out, out);
+		ntfe_identity_receiver(skb, state->out, out);
 		return;
 	}
 	if (!other_end) {
-		pnp_identity_receiver(skb, state->in, out);
+		ntfe_identity_receiver(skb, state->in, out);
 		return;
 	}
 	/* The inbound seat cannot see a loopback packet's sender (loopback
 	 * transmission orphans the skb); the outbound seat recorded it.
 	 */
-	out->kind = PEIOS_PNP_LOCAL_ABSENT;
+	out->kind = PEIOS_NTFE_LOCAL_ABSENT;
 	out->unresolved = 1;
 }
 
-void peios_pnp_identity_release(struct peios_pnp_identity *id)
+void peios_ntfe_identity_release(struct peios_ntfe_identity *id)
 {
 	pkm_kacs_socket_owner_put(&id->owner);
 }

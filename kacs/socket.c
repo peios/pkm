@@ -15,7 +15,7 @@
 #include <linux/un.h>
 #include <linux/in.h>
 #include <linux/in6.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include <linux/sched.h>
 
 #include <net/scm.h>
@@ -398,7 +398,7 @@ int pkm_kacs_sk_alloc_security(struct sock *sk, int family, gfp_t priority)
 	sec->convey_level = 0;
 	spin_lock_init(&sec->owner_lock);
 	sec->owner_token = NULL;
-	sec->owner_kind = PEIOS_PNP_OWNER_UNSTAMPED;
+	sec->owner_kind = PEIOS_NTFE_OWNER_UNSTAMPED;
 	memset(sec->owner_guid, 0, sizeof(sec->owner_guid));
 	sec->owner_pid = 0;
 	sec->owner_comm[0] = '\0';
@@ -417,7 +417,7 @@ void pkm_kacs_sk_free_security(struct sock *sk)
 	pkm_kacs_listener_set(sec, NULL);
 	pkm_kacs_binder_set(sec, NULL);
 	sec->rebind_tcb = false;
-	pkm_kacs_socket_owner_set(sec, NULL, PEIOS_PNP_OWNER_UNSTAMPED, NULL, 0,
+	pkm_kacs_socket_owner_set(sec, NULL, PEIOS_NTFE_OWNER_UNSTAMPED, NULL, 0,
 				  NULL);
 	pkm_kacs_socket_convey_drop(sec);
 	pkm_kacs_process_sd_put(sec->socket_sd);
@@ -440,7 +440,7 @@ static void pkm_kacs_binder_set(struct pkm_kacs_socket_security *sec,
 		kacs_rust_token_drop(old);
 }
 
-/* ---- the governing identity (net/pnp's Local.* facts) ---- */
+/* ---- the governing identity (net/ntfe's Local.* facts) ---- */
 
 static bool pkm_kacs_socket_family_inet(int family)
 {
@@ -491,7 +491,7 @@ static void pkm_kacs_socket_stamp_owner(struct pkm_kacs_socket_security *sec,
 	const struct pkm_kacs_process_state *pstate;
 	const void *effective = NULL, *token = NULL;
 	char comm[TASK_COMM_LEN];
-	u8 kind = PEIOS_PNP_OWNER_KERNEL;
+	u8 kind = PEIOS_NTFE_OWNER_KERNEL;
 	const u8 *guid = NULL;
 	s32 pid = 0;
 
@@ -503,11 +503,11 @@ static void pkm_kacs_socket_stamp_owner(struct pkm_kacs_socket_security *sec,
 			pstate = pkm_kacs_current_process_state();
 			guid = pstate ? pstate->process_guid : NULL;
 			pid = task_tgid_nr(current);
-			kind = token ? PEIOS_PNP_OWNER_PROGRAM :
-				       PEIOS_PNP_OWNER_UNSTAMPED;
+			kind = token ? PEIOS_NTFE_OWNER_PROGRAM :
+				       PEIOS_NTFE_OWNER_UNSTAMPED;
 		} else {
 			/* A task with no token: nothing to attribute to. */
-			kind = PEIOS_PNP_OWNER_UNSTAMPED;
+			kind = PEIOS_NTFE_OWNER_UNSTAMPED;
 		}
 	}
 	pkm_kacs_socket_owner_set(sec, token, kind, guid, pid, comm);
@@ -515,14 +515,14 @@ static void pkm_kacs_socket_stamp_owner(struct pkm_kacs_socket_security *sec,
 				0);
 }
 
-int pkm_kacs_socket_owner(const struct sock *sk, struct peios_pnp_owner *out)
+int pkm_kacs_socket_owner(const struct sock *sk, struct peios_ntfe_owner *out)
 {
 	struct pkm_kacs_socket_security *sec;
 
 	if (!out)
 		return -EINVAL;
 	memset(out, 0, sizeof(*out));
-	out->kind = PEIOS_PNP_OWNER_UNSTAMPED;
+	out->kind = PEIOS_NTFE_OWNER_UNSTAMPED;
 	if (!sk || !sk->sk_security)
 		return -ENOENT;
 	sec = pkm_kacs_sock(sk);
@@ -537,7 +537,7 @@ int pkm_kacs_socket_owner(const struct sock *sk, struct peios_pnp_owner *out)
 	return 0;
 }
 
-void pkm_kacs_socket_owner_put(struct peios_pnp_owner *owner)
+void pkm_kacs_socket_owner_put(struct peios_ntfe_owner *owner)
 {
 	if (!owner || !owner->token)
 		return;
@@ -549,7 +549,7 @@ void pkm_kacs_socket_owner_put(struct peios_pnp_owner *owner)
 void pkm_kacs_sk_clone_security(const struct sock *sk, struct sock *newsk)
 {
 	struct pkm_kacs_socket_security *parent, *child;
-	struct peios_pnp_owner owner;
+	struct peios_ntfe_owner owner;
 
 	if (!sk || !newsk || !sk->sk_security || !newsk->sk_security)
 		return;
@@ -1535,7 +1535,7 @@ long pkm_kacs_kunit_socket_owner_clone(void *handle,
 
 /* The engine's read: a counted reference the caller must put. */
 long pkm_kacs_kunit_socket_owner_query(void *handle,
-				       struct peios_pnp_owner *out)
+				       struct peios_ntfe_owner *out)
 {
 	struct pkm_kacs_kunit_owner_socket *s = handle;
 

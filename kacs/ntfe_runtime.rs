@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-//! PNP kernel bridge: the C ABI between net/pnp's hooks and the staged
+//! NTFE kernel bridge: the C ABI between net/ntfe's hooks and the staged
 //! `pnp-core` semantic crate.
 //!
 //! Four surfaces:
@@ -20,7 +20,7 @@
 //! - the **generation** counter: advanced by C at publication; 0 means
 //!   nothing ever ingested (loudly permissive, ratified).
 //!
-//! The `#[repr(C)]` structs mirror `net/pnp/pnp.h` field for field — keep
+//! The `#[repr(C)]` structs mirror `net/ntfe/ntfe.h` field for field — keep
 //! them in lockstep.
 
 use core::ffi::{c_char, c_int, c_void};
@@ -37,35 +37,35 @@ use crate::pnp_core::snapshot::{
 use crate::pnp_core::strutil::str_to_pkm;
 use crate::pnp_core::value::RegValue;
 use crate::pnp_core::{RejectKind, Verdict};
-use crate::token_runtime::{pnp_token_view, PnpTokenView};
+use crate::token_runtime::{ntfe_token_view, NtfeTokenView};
 
 const EINVAL: c_int = 22;
 const ENOMEM: c_int = 12;
 const ENOENT: c_int = 2;
 
 /// Current policy generation. 0 until the first publication.
-static PNP_GENERATION: AtomicU64 = AtomicU64::new(0);
+static NTFE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[no_mangle]
 /// Proves the staged `pnp-core` tree is linked and callable; returns its
 /// known constant (`MAX_PROMPT_CHAIN`).
-pub extern "C" fn pnp_rust_kunit_probe() -> usize {
+pub extern "C" fn ntfe_rust_kunit_probe() -> usize {
     crate::pnp_core::kernel_compile_probe()
 }
 
 #[no_mangle]
 /// The current policy generation (0 = permissive, nothing ever ingested).
-pub extern "C" fn pnp_rust_generation() -> u64 {
-    PNP_GENERATION.load(Ordering::Acquire)
+pub extern "C" fn ntfe_rust_generation() -> u64 {
+    NTFE_GENERATION.load(Ordering::Acquire)
 }
 
 #[no_mangle]
 /// Advances the generation at publication time; returns the new value.
-pub extern "C" fn pnp_rust_generation_advance() -> u64 {
-    PNP_GENERATION.fetch_add(1, Ordering::AcqRel) + 1
+pub extern "C" fn ntfe_rust_generation_advance() -> u64 {
+    NTFE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1
 }
 
-// --- validity bits: keep in lockstep with PEIOS_PNP_HAS_* in pnp.h ---
+// --- validity bits: keep in lockstep with PEIOS_NTFE_HAS_* in ntfe.h ---
 const HAS_ETHER_TYPE: u32 = 1 << 0;
 const HAS_MACS: u32 = 1 << 1;
 const HAS_VLAN: u32 = 1 << 2;
@@ -80,14 +80,14 @@ const HAS_SRC_MAC: u32 = 1 << 10;
 const HAS_START: u32 = 1 << 11;
 const HAS_NETWORK: u32 = 1 << 12;
 
-// --- keep in lockstep with PEIOS_PNP_NETWORK_*_LEN in pnp.h ---
+// --- keep in lockstep with PEIOS_NTFE_NETWORK_*_LEN in ntfe.h ---
 const NETWORK_ID_LEN: usize = 40;
 const NETWORK_NAME_LEN: usize = 64;
 const NETWORK_TRUST_LEN: usize = 32;
 
-/// Mirror of `struct peios_pnp_snapshot` (pnp.h). Field-for-field.
+/// Mirror of `struct peios_ntfe_snapshot` (ntfe.h). Field-for-field.
 #[repr(C)]
-pub struct PnpSnapshotC {
+pub struct NtfeSnapshotC {
     seat: u8,
     direction: u8,
     addr_family: u8,
@@ -130,7 +130,7 @@ pub struct PnpSnapshotC {
     flow_reply: u8,
     loopback: u8,
     flow: *const c_void,
-    /// The identity facts (net/pnp/identity.c), Flow views only.
+    /// The identity facts (net/ntfe/identity.c), Flow views only.
     local_kind: u8,
     remote_kind: u8,
     local_unresolved: u8,
@@ -143,14 +143,14 @@ pub struct PnpSnapshotC {
     remote_comm: [c_char; 16],
     local_token: *const c_void,
     remote_token: *const c_void,
-    /// The network context (net/pnp/context.c): valid iff HAS_NETWORK;
+    /// The network context (net/ntfe/context.c): valid iff HAS_NETWORK;
     /// an empty name or trust is that fact absent.
     network_id: [c_char; NETWORK_ID_LEN],
     network_name: [c_char; NETWORK_NAME_LEN],
     network_trust: [c_char; NETWORK_TRUST_LEN],
 }
 
-// --- endpoint kinds: keep in lockstep with enum peios_pnp_local_kind ---
+// --- endpoint kinds: keep in lockstep with enum peios_ntfe_local_kind ---
 const LOCAL_ABSENT: u8 = 0;
 const LOCAL_PROGRAM: u8 = 1;
 const LOCAL_KERNEL: u8 = 2;
@@ -198,7 +198,7 @@ fn guid_text(guid: &[u8; 16]) -> [u8; 36] {
 /// Flow layer's `Local.*` / `Remote.*` conditions read. Borrows the token
 /// for the judgment (the flow's extension holds the reference).
 struct KernelPrincipal {
-    view: PnpTokenView<'static>,
+    view: NtfeTokenView<'static>,
     user: Sid,
     confinement: Option<Sid>,
     service: Option<Sid>,
@@ -210,7 +210,7 @@ impl KernelPrincipal {
     /// `token` is a live token the caller keeps referenced for the
     /// principal's life.
     unsafe fn new(token: *const c_void, guid: &[u8; 16]) -> Option<Self> {
-        let view = unsafe { pnp_token_view::<'static>(token) }?;
+        let view = unsafe { ntfe_token_view::<'static>(token) }?;
         let user = Sid::from_bytes(view.user)?;
         let confinement = match view.confinement {
             Some(bytes) => Some(Sid::from_bytes(bytes)?),
@@ -272,7 +272,7 @@ unsafe fn principal_for(kind: u8, token: *const c_void, guid: &[u8; 16]) -> Opti
 /// The binary user SID and, for a service, the per-service SID of a live
 /// token, into 68- and 32-byte buffers (zeroed when absent). For the
 /// event stream and the flows dump.
-pub extern "C" fn pnp_rust_owner_sids(
+pub extern "C" fn ntfe_rust_owner_sids(
     token: *const c_void,
     user_out: *mut u8,
     service_out: *mut u8,
@@ -284,7 +284,7 @@ pub extern "C" fn pnp_rust_owner_sids(
     let service_out = unsafe { core::slice::from_raw_parts_mut(service_out, 32) };
     user_out.fill(0);
     service_out.fill(0);
-    let Some(view) = (unsafe { pnp_token_view::<'_>(token) }) else {
+    let Some(view) = (unsafe { ntfe_token_view::<'_>(token) }) else {
         return -EINVAL;
     };
     let n = view.user.len().min(user_out.len());
@@ -296,9 +296,9 @@ pub extern "C" fn pnp_rust_owner_sids(
     0
 }
 
-/// Mirror of `struct peios_pnp_outcome` (pnp.h). Field-for-field.
+/// Mirror of `struct peios_ntfe_outcome` (ntfe.h). Field-for-field.
 #[repr(C)]
-pub struct PnpOutcomeC {
+pub struct NtfeOutcomeC {
     /// 0 = PASS, 1 = REJECT, 2 = DROP (strictness order).
     verdict: u8,
     /// 1 when the backstop answered.
@@ -317,9 +317,9 @@ pub struct PnpOutcomeC {
     expires_at: i64,
 }
 
-/// Mirror of `struct peios_pnp_view` (pnp.h). Field-for-field.
+/// Mirror of `struct peios_ntfe_view` (ntfe.h). Field-for-field.
 #[repr(C)]
-pub struct PnpViewC {
+pub struct NtfeViewC {
     name: [c_char; 64],
     hash: u64,
     window_secs: u32,
@@ -327,20 +327,20 @@ pub struct PnpViewC {
     _pad: [u8; 3],
 }
 
-// The stores, in C (net/pnp/{tags,counters,report}.c).
+// The stores, in C (net/ntfe/{tags,counters,report}.c).
 extern "C" {
-    fn peios_pnp_tag_lookup(flow: *const c_void, hash: u64, value_out: *mut u64) -> c_int;
-    fn peios_pnp_tag_apply(flow: *const c_void, hash: u64, op: u8, operand: u64);
-    fn peios_pnp_counter_read(
-        snap: *const PnpSnapshotC,
+    fn peios_ntfe_tag_lookup(flow: *const c_void, hash: u64, value_out: *mut u64) -> c_int;
+    fn peios_ntfe_tag_apply(flow: *const c_void, hash: u64, op: u8, operand: u64);
+    fn peios_ntfe_counter_read(
+        snap: *const NtfeSnapshotC,
         hash: u64,
         keyspec: u8,
         window_secs: u32,
         value_out: *mut u64,
     ) -> c_int;
-    fn peios_pnp_counter_add(snap: *const PnpSnapshotC, hash: u64, amount: u64);
-    fn peios_pnp_report_emit(
-        snap: *const PnpSnapshotC,
+    fn peios_ntfe_counter_add(snap: *const NtfeSnapshotC, hash: u64, amount: u64);
+    fn peios_ntfe_report_emit(
+        snap: *const NtfeSnapshotC,
         rule: *const c_char,
         rule_len: usize,
         level: u8,
@@ -357,7 +357,7 @@ fn c_str_slice(buf: &[c_char]) -> &str {
     core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
-fn snapshot_from_c<'a>(c: &PnpSnapshotC) -> Result<Snapshot<'a>, ()> {
+fn snapshot_from_c<'a>(c: &NtfeSnapshotC) -> Result<Snapshot<'a>, ()> {
     use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     let mut snap = Snapshot::default();
@@ -462,7 +462,7 @@ fn snapshot_from_c<'a>(c: &PnpSnapshotC) -> Result<Snapshot<'a>, ()> {
 /// else they are absent by law, as ingestion's lint says.
 fn resolve_machinery<'a>(
     forest: &Forest,
-    c: &PnpSnapshotC,
+    c: &NtfeSnapshotC,
     snap: &mut Snapshot<'a>,
     local: Option<&'a KernelPrincipal>,
     remote: Option<&'a KernelPrincipal>,
@@ -500,7 +500,7 @@ fn resolve_machinery<'a>(
     if forest.layer != Layer::RawPacket && !c.flow.is_null() {
         for tag in forest.tag_names.iter() {
             let mut value = 0u64;
-            if unsafe { peios_pnp_tag_lookup(c.flow, tag.hash, &mut value) } == 1 {
+            if unsafe { peios_ntfe_tag_lookup(c.flow, tag.hash, &mut value) } == 1 {
                 snap.tags.push((tag.hash, value)).map_err(|_| ())?;
             }
         }
@@ -508,7 +508,7 @@ fn resolve_machinery<'a>(
     for (i, view) in forest.views.iter().enumerate() {
         let mut value = 0u64;
         let found = unsafe {
-            peios_pnp_counter_read(c, view.hash, view.keyspec, view.window_secs, &mut value)
+            peios_ntfe_counter_read(c, view.hash, view.keyspec, view.window_secs, &mut value)
         };
         if found == 1 {
             snap.counter_views.push((i as u32, value)).map_err(|_| ())?;
@@ -545,7 +545,7 @@ fn builder_mut<'a>(b: *mut c_void) -> Result<&'a mut Builder, c_int> {
 
 #[no_mangle]
 /// Creates a policy builder. Returns NULL on allocation failure.
-pub extern "C" fn pnp_rust_builder_new() -> *mut c_void {
+pub extern "C" fn ntfe_rust_builder_new() -> *mut c_void {
     let builder = Builder {
         roots: PkmVec::new(),
         stack: PkmVec::new(),
@@ -559,7 +559,7 @@ pub extern "C" fn pnp_rust_builder_new() -> *mut c_void {
 
 #[no_mangle]
 /// Frees an unfinished builder.
-pub extern "C" fn pnp_rust_builder_free(b: *mut c_void) {
+pub extern "C" fn ntfe_rust_builder_free(b: *mut c_void) {
     if !b.is_null() {
         drop(unsafe { kernel::alloc::KBox::from_raw(b.cast::<Builder>()) });
     }
@@ -567,7 +567,7 @@ pub extern "C" fn pnp_rust_builder_free(b: *mut c_void) {
 
 #[no_mangle]
 /// Opens a rule (a registry key). Nested calls create exceptions.
-pub extern "C" fn pnp_rust_builder_rule_begin(
+pub extern "C" fn ntfe_rust_builder_rule_begin(
     b: *mut c_void,
     name: *const c_char,
     name_len: usize,
@@ -597,7 +597,7 @@ pub extern "C" fn pnp_rust_builder_rule_begin(
 #[no_mangle]
 /// Closes the innermost open rule, attaching it to its parent (or the
 /// forest roots).
-pub extern "C" fn pnp_rust_builder_rule_end(b: *mut c_void) -> c_int {
+pub extern "C" fn ntfe_rust_builder_rule_end(b: *mut c_void) -> c_int {
     let builder = match builder_mut(b) {
         Ok(v) => v,
         Err(e) => return e,
@@ -633,7 +633,7 @@ fn add_value(builder: &mut Builder, key: &str, value: RegValue) -> c_int {
 
 #[no_mangle]
 /// Adds an integer value to the open rule.
-pub extern "C" fn pnp_rust_builder_value_int(
+pub extern "C" fn ntfe_rust_builder_value_int(
     b: *mut c_void,
     key: *const c_char,
     key_len: usize,
@@ -652,7 +652,7 @@ pub extern "C" fn pnp_rust_builder_value_int(
 
 #[no_mangle]
 /// Adds a string value to the open rule.
-pub extern "C" fn pnp_rust_builder_value_str(
+pub extern "C" fn ntfe_rust_builder_value_str(
     b: *mut c_void,
     key: *const c_char,
     key_len: usize,
@@ -679,7 +679,7 @@ pub extern "C" fn pnp_rust_builder_value_str(
 
 #[no_mangle]
 /// Opens a list value on the open rule.
-pub extern "C" fn pnp_rust_builder_value_list_begin(
+pub extern "C" fn ntfe_rust_builder_value_list_begin(
     b: *mut c_void,
     key: *const c_char,
     key_len: usize,
@@ -704,7 +704,7 @@ pub extern "C" fn pnp_rust_builder_value_list_begin(
 
 #[no_mangle]
 /// Appends a string element to the open list.
-pub extern "C" fn pnp_rust_builder_list_str(
+pub extern "C" fn ntfe_rust_builder_list_str(
     b: *mut c_void,
     value: *const c_char,
     value_len: usize,
@@ -731,7 +731,7 @@ pub extern "C" fn pnp_rust_builder_list_str(
 
 #[no_mangle]
 /// Appends an integer element to the open list.
-pub extern "C" fn pnp_rust_builder_list_int(b: *mut c_void, value: i64) -> c_int {
+pub extern "C" fn ntfe_rust_builder_list_int(b: *mut c_void, value: i64) -> c_int {
     let builder = match builder_mut(b) {
         Ok(v) => v,
         Err(e) => return e,
@@ -747,7 +747,7 @@ pub extern "C" fn pnp_rust_builder_list_int(b: *mut c_void, value: i64) -> c_int
 
 #[no_mangle]
 /// Closes the open list, attaching it to the open rule.
-pub extern "C" fn pnp_rust_builder_value_list_end(b: *mut c_void) -> c_int {
+pub extern "C" fn ntfe_rust_builder_value_list_end(b: *mut c_void) -> c_int {
     let builder = match builder_mut(b) {
         Ok(v) => v,
         Err(e) => return e,
@@ -769,7 +769,7 @@ pub extern "C" fn pnp_rust_builder_value_list_end(b: *mut c_void) -> c_int {
 /// Packet, 1 = RawPacket, 2 = Flow. On success writes the opaque forest pointer to
 /// `out` and returns 0; on validation failure returns -EINVAL (the old
 /// policy generation stays — atomic transitions).
-pub extern "C" fn pnp_rust_builder_build(
+pub extern "C" fn ntfe_rust_builder_build(
     b: *mut c_void,
     layer: u8,
     out: *mut *mut c_void,
@@ -790,7 +790,7 @@ pub extern "C" fn pnp_rust_builder_build(
     match build_forest(layer, builder.roots.as_slice()) {
         Ok(output) => {
             // In-kernel ingestion drops lints: the authoring surface
-            // (pnpd) runs the same lint userspace-side, loudly.
+            // (pnpd) runs the same lint userspace-side, loudly.
             match kernel::alloc::KBox::new(output.forest, kernel::alloc::flags::GFP_KERNEL) {
                 Ok(f) => {
                     unsafe { *out = kernel::alloc::KBox::into_raw(f).cast() };
@@ -806,7 +806,7 @@ pub extern "C" fn pnp_rust_builder_build(
 
 #[no_mangle]
 /// Frees a forest that is no longer published (called from RCU teardown).
-pub extern "C" fn pnp_rust_forest_free(f: *mut c_void) {
+pub extern "C" fn ntfe_rust_forest_free(f: *mut c_void) {
     if !f.is_null() {
         drop(unsafe { kernel::alloc::KBox::from_raw(f.cast::<Forest>()) });
     }
@@ -817,7 +817,7 @@ pub extern "C" fn pnp_rust_forest_free(f: *mut c_void) {
 /// and stream hash uniqueness across all, every view has a writer, no
 /// downward tag reads). Any pointer may be NULL. -EINVAL refuses the
 /// generation.
-pub extern "C" fn pnp_rust_forests_check(
+pub extern "C" fn ntfe_rust_forests_check(
     packet: *const c_void,
     raw: *const c_void,
     flow: *const c_void,
@@ -847,7 +847,7 @@ pub extern "C" fn pnp_rust_forests_check(
 
 #[no_mangle]
 /// Number of counter views the forest materializes (0 for NULL).
-pub extern "C" fn pnp_rust_forest_view_count(f: *const c_void) -> u32 {
+pub extern "C" fn ntfe_rust_forest_view_count(f: *const c_void) -> u32 {
     if f.is_null() {
         return 0;
     }
@@ -857,10 +857,10 @@ pub extern "C" fn pnp_rust_forest_view_count(f: *const c_void) -> u32 {
 
 #[no_mangle]
 /// Copies view `index` out; -ENOENT past the end.
-pub extern "C" fn pnp_rust_forest_view(
+pub extern "C" fn ntfe_rust_forest_view(
     f: *const c_void,
     index: u32,
-    out: *mut PnpViewC,
+    out: *mut NtfeViewC,
 ) -> c_int {
     if f.is_null() || out.is_null() {
         return -EINVAL;
@@ -890,12 +890,12 @@ pub extern "C" fn pnp_rust_forest_view(
 /// Returns 0 with `out` filled, -EINVAL on bad arguments, -ENOMEM when
 /// atomic allocation failed mid-evaluation (the caller fails closed),
 /// -ENOENT for a null forest.
-pub extern "C" fn pnp_rust_evaluate(
+pub extern "C" fn ntfe_rust_evaluate(
     f: *const c_void,
-    snap: *const PnpSnapshotC,
+    snap: *const NtfeSnapshotC,
     layer: u8,
     reporting_level: u8,
-    out: *mut PnpOutcomeC,
+    out: *mut NtfeOutcomeC,
 ) -> c_int {
     if snap.is_null() || out.is_null() {
         return -EINVAL;
@@ -950,16 +950,16 @@ pub extern "C" fn pnp_rust_evaluate(
         match effect {
             Effect::Tag { hash, op, .. } => {
                 out.n_tags += 1;
-                unsafe { peios_pnp_tag_apply(snap_c.flow, *hash, op.code(), op.operand()) };
+                unsafe { peios_ntfe_tag_apply(snap_c.flow, *hash, op.code(), op.operand()) };
             }
             Effect::Count { hash, amount, .. } => {
                 out.n_counts += 1;
-                unsafe { peios_pnp_counter_add(snap_c, *hash, *amount) };
+                unsafe { peios_ntfe_counter_add(snap_c, *hash, *amount) };
             }
             Effect::Report { rule, level } => {
                 out.n_reports += 1;
                 unsafe {
-                    peios_pnp_report_emit(
+                    peios_ntfe_report_emit(
                         snap_c,
                         rule.as_bytes().as_ptr().cast::<c_char>(),
                         rule.as_bytes().len(),

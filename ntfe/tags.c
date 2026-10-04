@@ -4,7 +4,7 @@
  *
  * TAG writes flow-scoped named unsigned integers. The store is a conntrack
  * extension of exactly one pointer, added to every flow at creation
- * (init_conntrack, via the pnp-conntrack-ext patch) and NULL until the
+ * (init_conntrack, via the ntfe-conntrack-ext patch) and NULL until the
  * flow's first TAG — most flows are never tagged, and they pay eight
  * bytes. The first TAG allocates a small table of (name hash, value)
  * pairs; a full table is replaced by one twice the size (copy, RCU swap,
@@ -18,7 +18,7 @@
  * a pointer can, and it costs untagged flows nothing.
  *
  * Bounds, confessed in stats: a flow may carry at most
- * PEIOS_PNP_TAG_MAX_PER_FLOW distinct tags (a tripwire — the forest
+ * PEIOS_NTFE_TAG_MAX_PER_FLOW distinct tags (a tripwire — the forest
  * defines only so many names), and an atomic allocation can fail.
  * Untracked packets have no flow: the write no-ops, counted.
  *
@@ -33,33 +33,33 @@
 #include <linux/string.h>
 #include <net/netfilter/nf_conntrack.h>
 #include <net/netfilter/nf_conntrack_extend.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 
-#include <pkm/pnp.h>
+#include <pkm/ntfe.h>
 
-#include "pnp.h"
+#include "ntfe.h"
 
-struct peios_pnp_tag_entry {
+struct peios_ntfe_tag_entry {
 	u64 hash;
 	u64 value;
 	u8 present;			/* 0 = cleared (tombstone, reusable) */
 	u8 _pad[7];
 };
 
-struct peios_pnp_tag_table {
+struct peios_ntfe_tag_table {
 	struct rcu_head rcu;
 	u32 cap;
 	u32 len;			/* entries in use, tombstones included */
-	struct peios_pnp_tag_entry e[];
+	struct peios_ntfe_tag_entry e[];
 };
 
-#define PNP_TAG_INITIAL_CAP	8
+#define NTFE_TAG_INITIAL_CAP	8
 
-static struct peios_pnp_ct *pnp_ct_of(const void *flow);
+static struct peios_ntfe_ct *ntfe_ct_of(const void *flow);
 
-static struct peios_pnp_tag_table *pnp_tag_table_alloc(u32 cap)
+static struct peios_ntfe_tag_table *ntfe_tag_table_alloc(u32 cap)
 {
-	struct peios_pnp_tag_table *t;
+	struct peios_ntfe_tag_table *t;
 
 	t = kzalloc(struct_size(t, e, cap), GFP_ATOMIC);
 	if (t)
@@ -67,11 +67,11 @@ static struct peios_pnp_tag_table *pnp_tag_table_alloc(u32 cap)
 	return t;
 }
 
-void peios_pnp_ct_ext_add(struct nf_conn *ct)
+void peios_ntfe_ct_ext_add(struct nf_conn *ct)
 {
-	struct peios_pnp_ct *pc;
+	struct peios_ntfe_ct *pc;
 
-	pc = nf_ct_ext_add(ct, NF_CT_EXT_PNP, GFP_ATOMIC);
+	pc = nf_ct_ext_add(ct, NF_CT_EXT_NTFE, GFP_ATOMIC);
 	if (pc) {
 		memset(pc, 0, sizeof(*pc));
 		RCU_INIT_POINTER(pc->tags, NULL);
@@ -84,11 +84,11 @@ void peios_pnp_ct_ext_add(struct nf_conn *ct)
 	 */
 }
 
-u32 peios_pnp_tags_snapshot(const struct nf_conn *ct, u64 *hashes,
+u32 peios_ntfe_tags_snapshot(const struct nf_conn *ct, u64 *hashes,
 			    u64 *values, u32 max)
 {
-	struct peios_pnp_ct *pc = pnp_ct_of(ct);
-	struct peios_pnp_tag_table *t;
+	struct peios_ntfe_ct *pc = ntfe_ct_of(ct);
+	struct peios_ntfe_tag_table *t;
 	u32 i, n = 0;
 
 	if (!pc)
@@ -110,10 +110,10 @@ u32 peios_pnp_tags_snapshot(const struct nf_conn *ct, u64 *hashes,
 	return n;
 }
 
-void peios_pnp_ct_destroy(struct nf_conn *ct)
+void peios_ntfe_ct_destroy(struct nf_conn *ct)
 {
-	struct peios_pnp_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_PNP);
-	struct peios_pnp_tag_table *t;
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+	struct peios_ntfe_tag_table *t;
 
 	if (!pc)
 		return;
@@ -129,19 +129,19 @@ void peios_pnp_ct_destroy(struct nf_conn *ct)
 	pkm_kacs_socket_owner_put(&pc->owner[1]);
 }
 
-static struct peios_pnp_ct *pnp_ct_of(const void *flow)
+static struct peios_ntfe_ct *ntfe_ct_of(const void *flow)
 {
 	struct nf_conn *ct = (struct nf_conn *)flow;
 
 	if (!ct)
 		return NULL;
-	return nf_ct_ext_find(ct, NF_CT_EXT_PNP);
+	return nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
 }
 
-int peios_pnp_tag_lookup(const void *flow, u64 hash, u64 *value_out)
+int peios_ntfe_tag_lookup(const void *flow, u64 hash, u64 *value_out)
 {
-	struct peios_pnp_ct *pc = pnp_ct_of(flow);
-	struct peios_pnp_tag_table *t;
+	struct peios_ntfe_ct *pc = ntfe_ct_of(flow);
+	struct peios_ntfe_tag_table *t;
 	u32 i;
 
 	if (!pc)
@@ -163,11 +163,11 @@ int peios_pnp_tag_lookup(const void *flow, u64 hash, u64 *value_out)
 /* Under the flow lock. Returns the entry for `hash`, allocating a slot
  * (or a bigger table) as needed; NULL when refused.
  */
-static struct peios_pnp_tag_entry *
-pnp_tag_slot(struct peios_pnp_ct *pc, u64 hash, bool create)
+static struct peios_ntfe_tag_entry *
+ntfe_tag_slot(struct peios_ntfe_ct *pc, u64 hash, bool create)
 {
-	struct peios_pnp_tag_table *t, *bigger;
-	struct peios_pnp_tag_entry *tomb = NULL;
+	struct peios_ntfe_tag_table *t, *bigger;
+	struct peios_ntfe_tag_entry *tomb = NULL;
 	u32 i;
 
 	t = rcu_dereference_protected(pc->tags, true);
@@ -186,15 +186,15 @@ pnp_tag_slot(struct peios_pnp_ct *pc, u64 hash, bool create)
 		return tomb;
 	}
 	if (!t) {
-		t = pnp_tag_table_alloc(PNP_TAG_INITIAL_CAP);
+		t = ntfe_tag_table_alloc(NTFE_TAG_INITIAL_CAP);
 		if (!t)
 			return NULL;
 		rcu_assign_pointer(pc->tags, t);
 	} else if (t->len == t->cap) {
-		if (t->cap >= PEIOS_PNP_TAG_MAX_PER_FLOW)
+		if (t->cap >= PEIOS_NTFE_TAG_MAX_PER_FLOW)
 			return NULL;
-		bigger = pnp_tag_table_alloc(min_t(u32, t->cap * 2,
-						   PEIOS_PNP_TAG_MAX_PER_FLOW));
+		bigger = ntfe_tag_table_alloc(min_t(u32, t->cap * 2,
+						   PEIOS_NTFE_TAG_MAX_PER_FLOW));
 		if (!bigger)
 			return NULL;
 		memcpy(bigger->e, t->e, sizeof(t->e[0]) * t->len);
@@ -212,39 +212,39 @@ pnp_tag_slot(struct peios_pnp_ct *pc, u64 hash, bool create)
 	return &t->e[t->len - 1];
 }
 
-void peios_pnp_tag_apply(const void *flow, u64 hash, u8 op, u64 operand)
+void peios_ntfe_tag_apply(const void *flow, u64 hash, u8 op, u64 operand)
 {
 	struct nf_conn *ct = (struct nf_conn *)flow;
-	struct peios_pnp_ct *pc = pnp_ct_of(flow);
-	struct peios_pnp_tag_entry *e;
+	struct peios_ntfe_ct *pc = ntfe_ct_of(flow);
+	struct peios_ntfe_tag_entry *e;
 
 	if (!ct) {
-		atomic64_inc(&peios_pnp_stats.tag_untracked);
+		atomic64_inc(&peios_ntfe_stats.tag_untracked);
 		return;
 	}
 	if (!pc) {
-		atomic64_inc(&peios_pnp_stats.tag_refused);
+		atomic64_inc(&peios_ntfe_stats.tag_refused);
 		return;
 	}
 
 	spin_lock_bh(&ct->lock);
-	e = pnp_tag_slot(pc, hash, op != PEIOS_PNP_TAG_CLEAR);
+	e = ntfe_tag_slot(pc, hash, op != PEIOS_NTFE_TAG_CLEAR);
 	if (!e) {
 		spin_unlock_bh(&ct->lock);
-		if (op == PEIOS_PNP_TAG_CLEAR) {
+		if (op == PEIOS_NTFE_TAG_CLEAR) {
 			/* Clearing an absent tag is a no-op, not a refusal. */
-			atomic64_inc(&peios_pnp_stats.tag_writes);
+			atomic64_inc(&peios_ntfe_stats.tag_writes);
 			return;
 		}
-		atomic64_inc(&peios_pnp_stats.tag_refused);
+		atomic64_inc(&peios_ntfe_stats.tag_refused);
 		return;
 	}
 	switch (op) {
-	case PEIOS_PNP_TAG_SET:
+	case PEIOS_NTFE_TAG_SET:
 		WRITE_ONCE(e->value, operand);
 		WRITE_ONCE(e->present, 1);
 		break;
-	case PEIOS_PNP_TAG_ADD: {
+	case PEIOS_NTFE_TAG_ADD: {
 		u64 cur = e->present ? e->value : 0;
 		u64 sum = cur + operand;
 
@@ -252,11 +252,11 @@ void peios_pnp_tag_apply(const void *flow, u64 hash, u8 op, u64 operand)
 		WRITE_ONCE(e->present, 1);
 		break;
 	}
-	case PEIOS_PNP_TAG_CLEAR:
+	case PEIOS_NTFE_TAG_CLEAR:
 	default:
 		WRITE_ONCE(e->present, 0);
 		break;
 	}
 	spin_unlock_bh(&ct->lock);
-	atomic64_inc(&peios_pnp_stats.tag_writes);
+	atomic64_inc(&peios_ntfe_stats.tag_writes);
 }

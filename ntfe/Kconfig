@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
-config PEIOS_PNP
-	bool "PNP — Peios Network Policy packet engine"
+config PEIOS_NTFE
+	bool "NTFE — the Network Traffic Filtering Engine (PNP in the kernel)"
 	depends on SECURITY_PKM
 	depends on NETFILTER
 	depends on NETFILTER_INGRESS
@@ -19,16 +19,16 @@ config PEIOS_PNP
 	  and conntrack machinery stay. Until the first policy generation
 	  ingests, the engine is loudly permissive (generation 0).
 
-	  conntrack must be built-in (=y): PNP itself is built-in and reads
+	  conntrack must be built-in (=y): NTFE itself is built-in and reads
 	  flow facts on the packet path.
 
 	  If unsure, say N.
 
-config PEIOS_PNP_KUNIT
-	bool "PNP KUnit tests"
-	depends on PEIOS_PNP && KUNIT
+config PEIOS_NTFE_KUNIT
+	bool "NTFE KUnit tests"
+	depends on PEIOS_NTFE && KUNIT
 	default SECURITY_PKM_KUNIT
 	help
-	  In-kernel tests for PNP's kernel-resident glue: the seat snapshot
+	  In-kernel tests for NTFE's kernel-resident glue: the seat snapshot
 	  builder and the dispatch predicate. Pure rules-engine semantics
 	  remain owned by the pnp-core cargo suite.

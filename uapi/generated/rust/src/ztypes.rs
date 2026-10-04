@@ -3003,7 +3003,7 @@ fn bindgen_test_layout_reg_src_hive_entry() {
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct peios_pnp_event {
+pub struct peios_ntfe_event {
     pub seq: __u64,
     pub t_ns: __u64,
     pub seat: __u8,
@@ -3043,25 +3043,25 @@ pub struct peios_pnp_event {
     pub _pad2: __u32,
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_event() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_event> = ::core::mem::MaybeUninit::uninit();
+fn bindgen_test_layout_peios_ntfe_event() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_event> = ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_event>(),
+        ::core::mem::size_of::<peios_ntfe_event>(),
         456usize,
-        concat!("Size of: ", stringify!(peios_pnp_event))
+        concat!("Size of: ", stringify!(peios_ntfe_event))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_event>(),
+        ::core::mem::align_of::<peios_ntfe_event>(),
         8usize,
-        concat!("Alignment of ", stringify!(peios_pnp_event))
+        concat!("Alignment of ", stringify!(peios_ntfe_event))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).seq) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(seq)
         )
@@ -3071,7 +3071,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(t_ns)
         )
@@ -3081,7 +3081,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(seat)
         )
@@ -3091,7 +3091,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         17usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(layer)
         )
@@ -3101,7 +3101,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         18usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(verdict)
         )
@@ -3111,7 +3111,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         19usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(flags)
         )
@@ -3121,7 +3121,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         20usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(direction)
         )
@@ -3131,7 +3131,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         21usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(addr_family)
         )
@@ -3141,7 +3141,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         22usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(protocol)
         )
@@ -3151,7 +3151,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         23usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(flow_state)
         )
@@ -3161,7 +3161,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         24usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(ifindex)
         )
@@ -3171,7 +3171,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         28usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(src_port)
         )
@@ -3181,7 +3181,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         30usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(dst_port)
         )
@@ -3191,7 +3191,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         32usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(ether_type)
         )
@@ -3201,7 +3201,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         34usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(reject_kind)
         )
@@ -3211,7 +3211,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         35usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(_pad0)
         )
@@ -3221,7 +3221,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         36usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(src_addr)
         )
@@ -3231,7 +3231,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         52usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(dst_addr)
         )
@@ -3241,7 +3241,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         68usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(length)
         )
@@ -3251,7 +3251,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         72usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(effects)
         )
@@ -3261,7 +3261,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         76usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(attributed)
         )
@@ -3271,7 +3271,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         172usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(_pad1)
         )
@@ -3281,7 +3281,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         176usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(local_kind)
         )
@@ -3291,7 +3291,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         177usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(remote_kind)
         )
@@ -3301,7 +3301,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         178usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(local_unresolved)
         )
@@ -3311,7 +3311,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         179usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(remote_unresolved)
         )
@@ -3321,7 +3321,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         180usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(local_pid)
         )
@@ -3331,7 +3331,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         184usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(remote_pid)
         )
@@ -3341,7 +3341,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         188usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(local_guid)
         )
@@ -3351,7 +3351,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         204usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(remote_guid)
         )
@@ -3361,7 +3361,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         220usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(local_comm)
         )
@@ -3371,7 +3371,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         236usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(remote_comm)
         )
@@ -3381,7 +3381,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         252usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(local_user)
         )
@@ -3391,7 +3391,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         320usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(remote_user)
         )
@@ -3401,7 +3401,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         388usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(local_service)
         )
@@ -3411,7 +3411,7 @@ fn bindgen_test_layout_peios_pnp_event() {
         420usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(remote_service)
         )
@@ -3421,13 +3421,13 @@ fn bindgen_test_layout_peios_pnp_event() {
         452usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_event),
+            stringify!(peios_ntfe_event),
             "::",
             stringify!(_pad2)
         )
     );
 }
-impl Default for peios_pnp_event {
+impl Default for peios_ntfe_event {
     fn default() -> Self {
         let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
         unsafe {
@@ -3438,7 +3438,7 @@ impl Default for peios_pnp_event {
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
-pub struct peios_pnp_status {
+pub struct peios_ntfe_status {
     pub abi: __u64,
     pub generation: __u64,
     pub enforcing: __u64,
@@ -3481,28 +3481,31 @@ pub struct peios_pnp_status {
     pub refusals_bypassed: __u64,
     pub teardowns_emitted: __u64,
     pub identity_unresolved: __u64,
-    pub _reserved: [__u64; 2usize],
+    pub changes_noted: __u64,
+    pub changes_walked: __u64,
+    pub contexts: __u64,
+    pub _reserved: [__u64; 1usize],
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_status() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_status> = ::core::mem::MaybeUninit::uninit();
+fn bindgen_test_layout_peios_ntfe_status() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_status> = ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_status>(),
-        352usize,
-        concat!("Size of: ", stringify!(peios_pnp_status))
+        ::core::mem::size_of::<peios_ntfe_status>(),
+        368usize,
+        concat!("Size of: ", stringify!(peios_ntfe_status))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_status>(),
+        ::core::mem::align_of::<peios_ntfe_status>(),
         8usize,
-        concat!("Alignment of ", stringify!(peios_pnp_status))
+        concat!("Alignment of ", stringify!(peios_ntfe_status))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).abi) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(abi)
         )
@@ -3512,7 +3515,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(generation)
         )
@@ -3522,7 +3525,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(enforcing)
         )
@@ -3532,7 +3535,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         24usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(events_dropped)
         )
@@ -3542,7 +3545,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         32usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(seen_ingress)
         )
@@ -3552,7 +3555,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         40usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(seen_egress)
         )
@@ -3562,7 +3565,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         48usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(seen_local_in)
         )
@@ -3572,7 +3575,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         56usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(deferred)
         )
@@ -3582,7 +3585,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         64usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(fallback_judged)
         )
@@ -3592,7 +3595,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         72usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(parse_errors)
         )
@@ -3602,7 +3605,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         80usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(judged)
         )
@@ -3612,7 +3615,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         88usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(permissive)
         )
@@ -3622,7 +3625,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         96usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(fail_closed)
         )
@@ -3632,7 +3635,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         104usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(verdict_pass)
         )
@@ -3642,7 +3645,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         112usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(verdict_drop)
         )
@@ -3652,7 +3655,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         120usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(verdict_reject)
         )
@@ -3662,7 +3665,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         128usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(reject_degraded)
         )
@@ -3672,7 +3675,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         136usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(fx_tags)
         )
@@ -3682,7 +3685,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         144usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(fx_counts)
         )
@@ -3692,7 +3695,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         152usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(fx_reports)
         )
@@ -3702,7 +3705,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         160usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(fx_prompts)
         )
@@ -3712,7 +3715,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         168usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(last_ingest_error)
         )
@@ -3722,7 +3725,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         176usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(last_ingest_t_ns)
         )
@@ -3732,7 +3735,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         184usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(tag_writes)
         )
@@ -3742,7 +3745,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         192usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(tag_untracked)
         )
@@ -3752,7 +3755,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         200usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(tag_refused)
         )
@@ -3762,7 +3765,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         208usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(count_writes)
         )
@@ -3772,7 +3775,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         216usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(count_key_absent)
         )
@@ -3782,7 +3785,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         224usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(count_refused)
         )
@@ -3792,7 +3795,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         232usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(reports_emitted)
         )
@@ -3802,7 +3805,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         240usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(counter_cells)
         )
@@ -3812,7 +3815,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         248usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(reporting_level)
         )
@@ -3822,7 +3825,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         256usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(seen_local_out)
         )
@@ -3832,7 +3835,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         264usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(flow_judged)
         )
@@ -3842,7 +3845,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         272usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(flow_cached)
         )
@@ -3852,7 +3855,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         280usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(flow_rejudged)
         )
@@ -3862,7 +3865,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         288usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(flow_expired)
         )
@@ -3872,7 +3875,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         296usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(flow_uncached)
         )
@@ -3882,7 +3885,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         304usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(refusals_emitted)
         )
@@ -3892,7 +3895,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         312usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(refusals_bypassed)
         )
@@ -3902,7 +3905,7 @@ fn bindgen_test_layout_peios_pnp_status() {
         320usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(teardowns_emitted)
         )
@@ -3912,17 +3915,47 @@ fn bindgen_test_layout_peios_pnp_status() {
         328usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(identity_unresolved)
         )
     );
     assert_eq!(
-        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        unsafe { ::core::ptr::addr_of!((*ptr).changes_noted) as usize - ptr as usize },
         336usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_status),
+            stringify!(peios_ntfe_status),
+            "::",
+            stringify!(changes_noted)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).changes_walked) as usize - ptr as usize },
+        344usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_ntfe_status),
+            "::",
+            stringify!(changes_walked)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).contexts) as usize - ptr as usize },
+        352usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_ntfe_status),
+            "::",
+            stringify!(contexts)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr)._reserved) as usize - ptr as usize },
+        360usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(peios_ntfe_status),
             "::",
             stringify!(_reserved)
         )
@@ -3930,7 +3963,7 @@ fn bindgen_test_layout_peios_pnp_status() {
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct peios_pnp_counter_rec {
+pub struct peios_ntfe_counter_rec {
     pub name: [__u8; 64usize],
     pub hash: __u64,
     pub keyspec: __u8,
@@ -3947,26 +3980,26 @@ pub struct peios_pnp_counter_rec {
     pub window_value: [__u64; 8usize],
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_counter_rec() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_counter_rec> =
+fn bindgen_test_layout_peios_ntfe_counter_rec() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_counter_rec> =
         ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_counter_rec>(),
+        ::core::mem::size_of::<peios_ntfe_counter_rec>(),
         232usize,
-        concat!("Size of: ", stringify!(peios_pnp_counter_rec))
+        concat!("Size of: ", stringify!(peios_ntfe_counter_rec))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_counter_rec>(),
+        ::core::mem::align_of::<peios_ntfe_counter_rec>(),
         8usize,
-        concat!("Alignment of ", stringify!(peios_pnp_counter_rec))
+        concat!("Alignment of ", stringify!(peios_ntfe_counter_rec))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).name) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(name)
         )
@@ -3976,7 +4009,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         64usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(hash)
         )
@@ -3986,7 +4019,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         72usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(keyspec)
         )
@@ -3996,7 +4029,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         73usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(family)
         )
@@ -4006,7 +4039,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         74usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(_pad0)
         )
@@ -4016,7 +4049,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         76usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(ifindex)
         )
@@ -4026,7 +4059,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         80usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(src_addr)
         )
@@ -4036,7 +4069,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         96usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(dst_addr)
         )
@@ -4046,7 +4079,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         112usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(total)
         )
@@ -4056,7 +4089,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         120usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(last_secs)
         )
@@ -4066,7 +4099,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         128usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(n_windows)
         )
@@ -4076,7 +4109,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         132usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(_pad1)
         )
@@ -4086,7 +4119,7 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         136usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(window_secs)
         )
@@ -4096,13 +4129,13 @@ fn bindgen_test_layout_peios_pnp_counter_rec() {
         168usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counter_rec),
+            stringify!(peios_ntfe_counter_rec),
             "::",
             stringify!(window_value)
         )
     );
 }
-impl Default for peios_pnp_counter_rec {
+impl Default for peios_ntfe_counter_rec {
     fn default() -> Self {
         let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
         unsafe {
@@ -4113,7 +4146,7 @@ impl Default for peios_pnp_counter_rec {
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
-pub struct peios_pnp_counters_query {
+pub struct peios_ntfe_counters_query {
     pub buf: __u64,
     pub buf_len: __u32,
     pub count: __u32,
@@ -4121,26 +4154,26 @@ pub struct peios_pnp_counters_query {
     pub _pad0: __u32,
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_counters_query() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_counters_query> =
+fn bindgen_test_layout_peios_ntfe_counters_query() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_counters_query> =
         ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_counters_query>(),
+        ::core::mem::size_of::<peios_ntfe_counters_query>(),
         24usize,
-        concat!("Size of: ", stringify!(peios_pnp_counters_query))
+        concat!("Size of: ", stringify!(peios_ntfe_counters_query))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_counters_query>(),
+        ::core::mem::align_of::<peios_ntfe_counters_query>(),
         8usize,
-        concat!("Alignment of ", stringify!(peios_pnp_counters_query))
+        concat!("Alignment of ", stringify!(peios_ntfe_counters_query))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).buf) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counters_query),
+            stringify!(peios_ntfe_counters_query),
             "::",
             stringify!(buf)
         )
@@ -4150,7 +4183,7 @@ fn bindgen_test_layout_peios_pnp_counters_query() {
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counters_query),
+            stringify!(peios_ntfe_counters_query),
             "::",
             stringify!(buf_len)
         )
@@ -4160,7 +4193,7 @@ fn bindgen_test_layout_peios_pnp_counters_query() {
         12usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counters_query),
+            stringify!(peios_ntfe_counters_query),
             "::",
             stringify!(count)
         )
@@ -4170,7 +4203,7 @@ fn bindgen_test_layout_peios_pnp_counters_query() {
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counters_query),
+            stringify!(peios_ntfe_counters_query),
             "::",
             stringify!(total)
         )
@@ -4180,7 +4213,7 @@ fn bindgen_test_layout_peios_pnp_counters_query() {
         20usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_counters_query),
+            stringify!(peios_ntfe_counters_query),
             "::",
             stringify!(_pad0)
         )
@@ -4188,7 +4221,7 @@ fn bindgen_test_layout_peios_pnp_counters_query() {
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct peios_pnp_flow_rec {
+pub struct peios_ntfe_flow_rec {
     pub id: __u32,
     pub family: __u8,
     pub protocol: __u8,
@@ -4229,25 +4262,26 @@ pub struct peios_pnp_flow_rec {
     pub owner_service: [__u8; 64usize],
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_flow_rec() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_flow_rec> = ::core::mem::MaybeUninit::uninit();
+fn bindgen_test_layout_peios_ntfe_flow_rec() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_flow_rec> =
+        ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_flow_rec>(),
+        ::core::mem::size_of::<peios_ntfe_flow_rec>(),
         568usize,
-        concat!("Size of: ", stringify!(peios_pnp_flow_rec))
+        concat!("Size of: ", stringify!(peios_ntfe_flow_rec))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_flow_rec>(),
+        ::core::mem::align_of::<peios_ntfe_flow_rec>(),
         8usize,
-        concat!("Alignment of ", stringify!(peios_pnp_flow_rec))
+        concat!("Alignment of ", stringify!(peios_ntfe_flow_rec))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).id) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(id)
         )
@@ -4257,7 +4291,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         4usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(family)
         )
@@ -4267,7 +4301,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         5usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(protocol)
         )
@@ -4277,7 +4311,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         6usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(direction)
         )
@@ -4287,7 +4321,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         7usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(loopback)
         )
@@ -4297,7 +4331,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(seen_reply)
         )
@@ -4307,7 +4341,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         9usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(assured)
         )
@@ -4317,7 +4351,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         10usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(related)
         )
@@ -4327,7 +4361,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         11usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(judged)
         )
@@ -4337,7 +4371,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         12usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(ifindex)
         )
@@ -4347,7 +4381,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(timeout_secs)
         )
@@ -4357,7 +4391,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         20usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(src_addr)
         )
@@ -4367,7 +4401,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         36usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(dst_addr)
         )
@@ -4377,7 +4411,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         52usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(src_port)
         )
@@ -4387,7 +4421,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         54usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(dst_port)
         )
@@ -4397,7 +4431,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         56usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(icmp_type)
         )
@@ -4407,7 +4441,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         57usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(icmp_code)
         )
@@ -4417,7 +4451,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         58usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(n_tags)
         )
@@ -4427,7 +4461,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         59usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(_pad0)
         )
@@ -4437,7 +4471,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         64usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(start_secs)
         )
@@ -4447,7 +4481,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         72usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(packets)
         )
@@ -4457,7 +4491,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         88usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(bytes)
         )
@@ -4467,7 +4501,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         104usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(sentence_generation)
         )
@@ -4477,7 +4511,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         120usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(sentence_expires_at)
         )
@@ -4487,7 +4521,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         136usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(sentence_rule_hash)
         )
@@ -4497,7 +4531,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         152usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(sentence_verdict)
         )
@@ -4507,7 +4541,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         154usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(sentence_reject_kind)
         )
@@ -4517,7 +4551,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         156usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(_pad1)
         )
@@ -4527,7 +4561,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         160usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(tag_hash)
         )
@@ -4537,7 +4571,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         224usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(tag_value)
         )
@@ -4547,7 +4581,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         288usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(owner_kind)
         )
@@ -4557,7 +4591,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         290usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(owner_unresolved)
         )
@@ -4567,7 +4601,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         292usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(_pad2)
         )
@@ -4577,7 +4611,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         296usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(owner_pid)
         )
@@ -4587,7 +4621,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         304usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(owner_guid)
         )
@@ -4597,7 +4631,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         336usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(owner_comm)
         )
@@ -4607,7 +4641,7 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         368usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(owner_user)
         )
@@ -4617,13 +4651,13 @@ fn bindgen_test_layout_peios_pnp_flow_rec() {
         504usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flow_rec),
+            stringify!(peios_ntfe_flow_rec),
             "::",
             stringify!(owner_service)
         )
     );
 }
-impl Default for peios_pnp_flow_rec {
+impl Default for peios_ntfe_flow_rec {
     fn default() -> Self {
         let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
         unsafe {
@@ -4634,7 +4668,7 @@ impl Default for peios_pnp_flow_rec {
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
-pub struct peios_pnp_flows_query {
+pub struct peios_ntfe_flows_query {
     pub buf: __u64,
     pub buf_len: __u32,
     pub count: __u32,
@@ -4642,26 +4676,26 @@ pub struct peios_pnp_flows_query {
     pub _pad0: __u32,
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_flows_query() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_flows_query> =
+fn bindgen_test_layout_peios_ntfe_flows_query() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_flows_query> =
         ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_flows_query>(),
+        ::core::mem::size_of::<peios_ntfe_flows_query>(),
         24usize,
-        concat!("Size of: ", stringify!(peios_pnp_flows_query))
+        concat!("Size of: ", stringify!(peios_ntfe_flows_query))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_flows_query>(),
+        ::core::mem::align_of::<peios_ntfe_flows_query>(),
         8usize,
-        concat!("Alignment of ", stringify!(peios_pnp_flows_query))
+        concat!("Alignment of ", stringify!(peios_ntfe_flows_query))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).buf) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flows_query),
+            stringify!(peios_ntfe_flows_query),
             "::",
             stringify!(buf)
         )
@@ -4671,7 +4705,7 @@ fn bindgen_test_layout_peios_pnp_flows_query() {
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flows_query),
+            stringify!(peios_ntfe_flows_query),
             "::",
             stringify!(buf_len)
         )
@@ -4681,7 +4715,7 @@ fn bindgen_test_layout_peios_pnp_flows_query() {
         12usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flows_query),
+            stringify!(peios_ntfe_flows_query),
             "::",
             stringify!(count)
         )
@@ -4691,7 +4725,7 @@ fn bindgen_test_layout_peios_pnp_flows_query() {
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flows_query),
+            stringify!(peios_ntfe_flows_query),
             "::",
             stringify!(total)
         )
@@ -4701,7 +4735,7 @@ fn bindgen_test_layout_peios_pnp_flows_query() {
         20usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_flows_query),
+            stringify!(peios_ntfe_flows_query),
             "::",
             stringify!(_pad0)
         )
@@ -4709,7 +4743,7 @@ fn bindgen_test_layout_peios_pnp_flows_query() {
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct peios_pnp_listener_rec {
+pub struct peios_ntfe_listener_rec {
     pub family: __u8,
     pub protocol: __u8,
     pub reuseport: __u8,
@@ -4729,26 +4763,26 @@ pub struct peios_pnp_listener_rec {
     pub owner_service: [__u8; 32usize],
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_listener_rec() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_listener_rec> =
+fn bindgen_test_layout_peios_ntfe_listener_rec() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_listener_rec> =
         ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_listener_rec>(),
+        ::core::mem::size_of::<peios_ntfe_listener_rec>(),
         168usize,
-        concat!("Size of: ", stringify!(peios_pnp_listener_rec))
+        concat!("Size of: ", stringify!(peios_ntfe_listener_rec))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_listener_rec>(),
+        ::core::mem::align_of::<peios_ntfe_listener_rec>(),
         4usize,
-        concat!("Alignment of ", stringify!(peios_pnp_listener_rec))
+        concat!("Alignment of ", stringify!(peios_ntfe_listener_rec))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).family) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(family)
         )
@@ -4758,7 +4792,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         1usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(protocol)
         )
@@ -4768,7 +4802,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         2usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(reuseport)
         )
@@ -4778,7 +4812,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         3usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(connected)
         )
@@ -4788,7 +4822,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         4usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(v6only)
         )
@@ -4798,7 +4832,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         5usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(owner_kind)
         )
@@ -4808,7 +4842,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         6usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(owner_unresolved)
         )
@@ -4818,7 +4852,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         7usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(_pad0)
         )
@@ -4828,7 +4862,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(port)
         )
@@ -4838,7 +4872,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         10usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(_pad1)
         )
@@ -4848,7 +4882,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         12usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(ifindex)
         )
@@ -4858,7 +4892,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(addr)
         )
@@ -4868,7 +4902,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         32usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(owner_pid)
         )
@@ -4878,7 +4912,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         36usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(owner_guid)
         )
@@ -4888,7 +4922,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         52usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(owner_comm)
         )
@@ -4898,7 +4932,7 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         68usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(owner_user)
         )
@@ -4908,13 +4942,13 @@ fn bindgen_test_layout_peios_pnp_listener_rec() {
         136usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listener_rec),
+            stringify!(peios_ntfe_listener_rec),
             "::",
             stringify!(owner_service)
         )
     );
 }
-impl Default for peios_pnp_listener_rec {
+impl Default for peios_ntfe_listener_rec {
     fn default() -> Self {
         let mut s = ::core::mem::MaybeUninit::<Self>::uninit();
         unsafe {
@@ -4925,7 +4959,7 @@ impl Default for peios_pnp_listener_rec {
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
-pub struct peios_pnp_listeners_query {
+pub struct peios_ntfe_listeners_query {
     pub buf: __u64,
     pub buf_len: __u32,
     pub count: __u32,
@@ -4933,26 +4967,26 @@ pub struct peios_pnp_listeners_query {
     pub _pad0: __u32,
 }
 #[test]
-fn bindgen_test_layout_peios_pnp_listeners_query() {
-    const UNINIT: ::core::mem::MaybeUninit<peios_pnp_listeners_query> =
+fn bindgen_test_layout_peios_ntfe_listeners_query() {
+    const UNINIT: ::core::mem::MaybeUninit<peios_ntfe_listeners_query> =
         ::core::mem::MaybeUninit::uninit();
     let ptr = UNINIT.as_ptr();
     assert_eq!(
-        ::core::mem::size_of::<peios_pnp_listeners_query>(),
+        ::core::mem::size_of::<peios_ntfe_listeners_query>(),
         24usize,
-        concat!("Size of: ", stringify!(peios_pnp_listeners_query))
+        concat!("Size of: ", stringify!(peios_ntfe_listeners_query))
     );
     assert_eq!(
-        ::core::mem::align_of::<peios_pnp_listeners_query>(),
+        ::core::mem::align_of::<peios_ntfe_listeners_query>(),
         8usize,
-        concat!("Alignment of ", stringify!(peios_pnp_listeners_query))
+        concat!("Alignment of ", stringify!(peios_ntfe_listeners_query))
     );
     assert_eq!(
         unsafe { ::core::ptr::addr_of!((*ptr).buf) as usize - ptr as usize },
         0usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listeners_query),
+            stringify!(peios_ntfe_listeners_query),
             "::",
             stringify!(buf)
         )
@@ -4962,7 +4996,7 @@ fn bindgen_test_layout_peios_pnp_listeners_query() {
         8usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listeners_query),
+            stringify!(peios_ntfe_listeners_query),
             "::",
             stringify!(buf_len)
         )
@@ -4972,7 +5006,7 @@ fn bindgen_test_layout_peios_pnp_listeners_query() {
         12usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listeners_query),
+            stringify!(peios_ntfe_listeners_query),
             "::",
             stringify!(count)
         )
@@ -4982,7 +5016,7 @@ fn bindgen_test_layout_peios_pnp_listeners_query() {
         16usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listeners_query),
+            stringify!(peios_ntfe_listeners_query),
             "::",
             stringify!(total)
         )
@@ -4992,7 +5026,7 @@ fn bindgen_test_layout_peios_pnp_listeners_query() {
         20usize,
         concat!(
             "Offset of field: ",
-            stringify!(peios_pnp_listeners_query),
+            stringify!(peios_ntfe_listeners_query),
             "::",
             stringify!(_pad0)
         )

@@ -109,11 +109,11 @@ set that produced it rather than to whatever is loaded when the record is
 read.
 
 --- event ntfe.report
-origin: pnp
+origin: ntfe
 tier: standard
 gating: an explicit report directive in the matching rule
 cardinality: once per matching evaluation
-emitters: pnp/report.c
+emitters: ntfe/report.c
 
 The record of a traffic policy decision that a rule explicitly asked to be
 reported. Not a record of every decision — the engine evaluates constantly

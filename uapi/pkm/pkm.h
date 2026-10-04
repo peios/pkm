@@ -43,6 +43,6 @@
 #include <pkm/kmes.h>
 #include <pkm/lcs.h>
 #include <pkm/trace.h>
-#include <pkm/pnp.h>
+#include <pkm/ntfe.h>
 
 #endif /* _UAPI_PKM_H */

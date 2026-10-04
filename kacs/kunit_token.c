@@ -10,7 +10,7 @@
 #include <uapi/linux/shm.h>
 #include <linux/stat.h>
 #include <pkm/ipc.h>
-#include <linux/peios_pnp.h>
+#include <linux/peios_ntfe.h>
 #include "exec.h"
 #include "ipc.h"
 #include "lsm_internal.h"
@@ -12986,7 +12986,7 @@ static void pkm_kunit_token_duplicate_to_anonymous_strips_identity(
 }
 
 
-/* ---- the governing identity on inet sockets (net/pnp's owner) ---- */
+/* ---- the governing identity on inet sockets (net/ntfe's owner) ---- */
 
 static void pkm_kunit_socket_owner_is_stamped_at_creation(struct kunit *test)
 {
@@ -13002,7 +13002,7 @@ static void pkm_kunit_socket_owner_is_stamped_at_creation(struct kunit *test)
 	/* A program's socket: the effective token and the process facts. */
 	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 0, &h, &view);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
-	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_PROGRAM);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_NTFE_OWNER_PROGRAM);
 	KUNIT_EXPECT_PTR_EQ(test, view.owner_token,
 			    pkm_kacs_current_effective_token_ptr());
 	KUNIT_EXPECT_EQ(test, view.owner_pid, (s32)task_tgid_nr(current));
@@ -13013,13 +13013,13 @@ static void pkm_kunit_socket_owner_is_stamped_at_creation(struct kunit *test)
 	/* IPv6 alike. */
 	ret = pkm_kacs_kunit_socket_owner_open(AF_INET6, 0, &h, &view);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
-	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_PROGRAM);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_NTFE_OWNER_PROGRAM);
 	pkm_kacs_kunit_socket_owner_close(h);
 
 	/* A kernel socket is the kernel's: no token to attribute to. */
 	ret = pkm_kacs_kunit_socket_owner_open(AF_INET, 1, &h, &view);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
-	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_KERNEL);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_NTFE_OWNER_KERNEL);
 	KUNIT_EXPECT_NULL(test, view.owner_token);
 	KUNIT_EXPECT_EQ(test, view.owner_pid, 0);
 	pkm_kacs_kunit_socket_owner_close(h);
@@ -13027,7 +13027,7 @@ static void pkm_kunit_socket_owner_is_stamped_at_creation(struct kunit *test)
 	/* Other families are not stamped at all. */
 	ret = pkm_kacs_kunit_socket_owner_open(AF_UNIX, 0, &h, &view);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
-	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_PNP_OWNER_UNSTAMPED);
+	KUNIT_EXPECT_EQ(test, view.owner_kind, (u8)PEIOS_NTFE_OWNER_UNSTAMPED);
 	KUNIT_EXPECT_NULL(test, view.owner_token);
 	pkm_kacs_kunit_socket_owner_close(h);
 }
@@ -13071,7 +13071,7 @@ static void pkm_kunit_socket_owner_follows_the_committing_acts(
 		ret = pkm_kacs_kunit_socket_owner_act(h, act, &view);
 		KUNIT_ASSERT_EQ(test, ret, 0L);
 		KUNIT_EXPECT_EQ(test, view.owner_kind,
-				(u8)PEIOS_PNP_OWNER_PROGRAM);
+				(u8)PEIOS_NTFE_OWNER_PROGRAM);
 		KUNIT_EXPECT_PTR_EQ(test, view.owner_token, impersonated);
 
 		/* Reverted, the same act hands it back. */
@@ -13120,7 +13120,7 @@ static void pkm_kunit_socket_owner_query_is_a_counted_reference(
 	struct kunit *test)
 {
 	struct pkm_kacs_kunit_socket_view view = { };
-	struct peios_pnp_owner owner = { };
+	struct peios_ntfe_owner owner = { };
 	void *h = NULL;
 	long ret;
 
@@ -13130,7 +13130,7 @@ static void pkm_kunit_socket_owner_query_is_a_counted_reference(
 
 	ret = pkm_kacs_kunit_socket_owner_query(h, &owner);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
-	KUNIT_EXPECT_EQ(test, owner.kind, (u8)PEIOS_PNP_OWNER_PROGRAM);
+	KUNIT_EXPECT_EQ(test, owner.kind, (u8)PEIOS_NTFE_OWNER_PROGRAM);
 	KUNIT_EXPECT_PTR_EQ(test, owner.token, view.owner_token);
 	KUNIT_EXPECT_EQ(test, owner.pid, view.owner_pid);
 	KUNIT_EXPECT_EQ(test, memcmp(owner.guid, view.owner_guid,
@@ -13148,7 +13148,7 @@ static void pkm_kunit_socket_owner_query_is_a_counted_reference(
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 	ret = pkm_kacs_kunit_socket_owner_query(h, &owner);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
-	KUNIT_EXPECT_EQ(test, owner.kind, (u8)PEIOS_PNP_OWNER_KERNEL);
+	KUNIT_EXPECT_EQ(test, owner.kind, (u8)PEIOS_NTFE_OWNER_KERNEL);
 	KUNIT_EXPECT_NULL(test, owner.token);
 	pkm_kacs_socket_owner_put(&owner);
 	pkm_kacs_kunit_socket_owner_close(h);

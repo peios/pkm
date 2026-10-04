@@ -30,11 +30,11 @@ fi
 
 pkm_dir="$tree/security/pkm"
 stratafs_dir="$tree/fs/stratafs"
-pnp_dir="$tree/net/pnp"
+ntfe_dir="$tree/net/ntfe"
 uapi_dir="$tree/include/uapi/pkm"
 linux_include_dir="$tree/include/linux"
 
-rm -rf "$pkm_dir" "$stratafs_dir" "$pnp_dir" "$uapi_dir"
+rm -rf "$pkm_dir" "$stratafs_dir" "$ntfe_dir" "$uapi_dir"
 mkdir -p "$pkm_dir/kacs" "$pkm_dir/lcs" "$pkm_dir/kmes" "$uapi_dir"
 
 # Peiosutils deliberately does not emulate GNU install's POSIX mode/ownership
@@ -61,7 +61,7 @@ stage_flat_dir "$pkm/kmes" "$pkm_dir/kmes"
 #     header (incl. psb.h), so the whole set must be staged together; staging
 #     pkm.h without psb.h leaves <pkm/pkm.h> unbuildable (an old-installer bug
 #     this list fixes). ---
-for h in pkm psb syscall sid sd token socket ipc net mntns access file process kmes lcs trace pnp; do
+for h in pkm psb syscall sid sd token socket ipc net mntns access file process kmes lcs trace ntfe; do
 	stage_file "$pkm/uapi/pkm/$h.h" "$uapi_dir/$h.h"
 done
 
@@ -71,8 +71,8 @@ stage_file "$here/include/linux/kacs_stratafs.h" \
 	"$linux_include_dir/kacs_stratafs.h"
 stage_file "$here/include/linux/kacs_mntns.h" \
 	"$linux_include_dir/kacs_mntns.h"
-stage_file "$here/include/linux/peios_pnp.h" \
-	"$linux_include_dir/peios_pnp.h"
+stage_file "$here/include/linux/peios_ntfe.h" \
+	"$linux_include_dir/peios_ntfe.h"
 
 # --- Static tracepoint event headers, staged into the canonical
 #     include/trace/events/ so <trace/events/{kacs,kmes,lcs}.h> resolve with no
@@ -93,11 +93,11 @@ stage_file "$here/Makefile" "$pkm_dir/Makefile"
 mkdir -p "$stratafs_dir"
 stage_flat_dir "$pkm/stratafs" "$stratafs_dir"
 
-# --- PNP: the network-policy packet engine, staged into net/. Its Rust
+# --- NTFE: the network-policy packet engine, staged into net/. Its Rust
 #     semantics live in the security/pkm Rust island (pnp_core below); the
-#     C here reaches them over the pnp_rust_* C ABI. ---
-mkdir -p "$pnp_dir"
-stage_flat_dir "$pkm/pnp" "$pnp_dir"
+#     C here reaches them over the ntfe_rust_* C ABI. ---
+mkdir -p "$ntfe_dir"
+stage_flat_dir "$pkm/ntfe" "$ntfe_dir"
 
 
 # --- generated TCB built-in signing-key header (overwrites the copied stub) ---

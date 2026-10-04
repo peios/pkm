@@ -43,13 +43,13 @@ mod kmes_payload;
 #[allow(dead_code)]
 #[path = "../stratafs_core/mod.rs"]
 mod stratafs_core;
-// `pnp-core` is the PNP rules-engine crate (48 cargo tests standalone);
+// `pnp-core` is the PNP rule-language crate NTFE evaluates with (48 cargo tests standalone);
 // the kernel glue drives a fraction of its surface so far.
 #[allow(dead_code, unused_imports)]
 #[path = "../pnp_core/mod.rs"]
 mod pnp_core;
-#[path = "pnp_runtime.rs"]
-mod pnp_runtime;
+#[path = "ntfe_runtime.rs"]
+mod ntfe_runtime;
 #[path = "../kmes/kmes_validate.rs"]
 mod kmes_validate;
 // KACS token-runtime scaffolding: constants, fields, and helpers for
