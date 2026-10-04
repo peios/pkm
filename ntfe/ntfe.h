@@ -534,4 +534,45 @@ int ntfe_rust_evaluate(const void *forest,
 		      const struct peios_ntfe_snapshot *snap, u8 layer,
 		      u8 reporting_level, struct peios_ntfe_outcome *out);
 
+/*
+ * KUnit-only seams (kunit.c; this kernel has no CONFIG_FAULT_INJECTION).
+ * Each is consulted at its production sites and is a constant (no code)
+ * when the suite is configured out:
+ *  - eval: peios_ntfe_policy_eval answers -ENOMEM, as a refused atomic
+ *    allocation mid-walk would;
+ *  - alloc: the device read's batch and the three dumps' buffers read as
+ *    refused;
+ *  - identity_resolved: between a flow endpoint's resolution and its
+ *    record, so a test can be the CPU that records first.
+ * The wrappers expose static internals the suite asserts through.
+ */
+#ifdef CONFIG_PEIOS_NTFE_KUNIT
+struct file_operations;
+struct sock;
+bool peios_ntfe_kunit_eval_should_fail(void);
+bool peios_ntfe_kunit_alloc_should_fail(void);
+void peios_ntfe_kunit_identity_resolved(struct nf_conn *ct,
+				       struct peios_ntfe_ct *pc, u32 slot);
+u32 peios_ntfe_kunit_events_pop(struct peios_ntfe_event *out, u32 max);
+const struct file_operations *peios_ntfe_kunit_dev_fops(void);
+void peios_ntfe_kunit_listener_fill(struct peios_ntfe_listener_rec *rec,
+				    const struct sock *sk, u8 protocol);
+#else
+static inline bool peios_ntfe_kunit_eval_should_fail(void)
+{
+	return false;
+}
+
+static inline bool peios_ntfe_kunit_alloc_should_fail(void)
+{
+	return false;
+}
+
+static inline void peios_ntfe_kunit_identity_resolved(struct nf_conn *ct,
+						     struct peios_ntfe_ct *pc,
+						     u32 slot)
+{
+}
+#endif
+
 #endif /* _NET_NTFE_NTFE_H */

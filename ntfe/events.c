@@ -172,7 +172,8 @@ static ssize_t peios_ntfe_dev_read(struct file *file, char __user *ubuf,
 		return -EINVAL;
 	want = min_t(u32, want, 64);
 
-	batch = kmalloc_array(want, sizeof(*batch), GFP_KERNEL);
+	batch = peios_ntfe_kunit_alloc_should_fail() ? NULL :
+		kmalloc_array(want, sizeof(*batch), GFP_KERNEL);
 	if (!batch)
 		return -ENOMEM;
 
@@ -278,6 +279,18 @@ static struct miscdevice peios_ntfe_dev = {
 	.mode = 0600,
 	.fops = &peios_ntfe_dev_fops,
 };
+
+#ifdef CONFIG_PEIOS_NTFE_KUNIT
+u32 peios_ntfe_kunit_events_pop(struct peios_ntfe_event *out, u32 max)
+{
+	return peios_ntfe_events_pop(out, max);
+}
+
+const struct file_operations *peios_ntfe_kunit_dev_fops(void)
+{
+	return &peios_ntfe_dev_fops;
+}
+#endif
 
 int __init peios_ntfe_events_init(void)
 {

@@ -538,7 +538,8 @@ long peios_ntfe_counters_dump(struct peios_ntfe_counters_query *query)
 	u64 now = ntfe_now_secs();
 	long ret = 0;
 
-	rec = kzalloc(sizeof(*rec), GFP_KERNEL);
+	rec = peios_ntfe_kunit_alloc_should_fail() ? NULL :
+		kzalloc(sizeof(*rec), GFP_KERNEL);
 	if (!rec)
 		return -ENOMEM;
 

@@ -142,6 +142,10 @@ int peios_ntfe_policy_eval(u8 layer, const struct peios_ntfe_snapshot *snap,
 		return -ENOENT;
 	}
 	level = policy->reporting_level;
+	if (peios_ntfe_kunit_eval_should_fail()) {
+		rcu_read_unlock();
+		return -ENOMEM;
+	}
 	/* Bounded, non-sleeping work: pnp-core allocates GFP_ATOMIC, and
 	 * the stores it calls back into are softirq-safe.
 	 */

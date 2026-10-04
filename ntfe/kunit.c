@@ -10,10 +10,14 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/etherdevice.h>
+#include <linux/fcntl.h>
+#include <linux/fs.h>
 #include <linux/icmp.h>
 #include <linux/rtnetlink.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
+#include <net/protocol.h>
+#include <net/tcp.h>
 #include <linux/if_arp.h>
 #include <linux/ip.h>
 #include <linux/netfilter.h>
@@ -37,6 +41,37 @@
 #include <net/sock.h>
 
 #include "ntfe.h"
+
+/*
+ * The seams (ntfe.h): how many of the next evaluations fail, how many of
+ * the next device-side allocations are refused, and who records a flow
+ * endpoint's identity between its resolution and its record. The suite's
+ * exit resets all three, so a failed case cannot leak one into the next.
+ */
+static atomic_t ntfe_kunit_fail_evals = ATOMIC_INIT(0);
+static atomic_t ntfe_kunit_fail_allocs = ATOMIC_INIT(0);
+static void (*ntfe_kunit_on_resolved)(struct nf_conn *ct,
+				      struct peios_ntfe_ct *pc, u32 slot);
+
+bool peios_ntfe_kunit_eval_should_fail(void)
+{
+	return atomic_add_unless(&ntfe_kunit_fail_evals, -1, 0);
+}
+
+bool peios_ntfe_kunit_alloc_should_fail(void)
+{
+	return atomic_add_unless(&ntfe_kunit_fail_allocs, -1, 0);
+}
+
+void peios_ntfe_kunit_identity_resolved(struct nf_conn *ct,
+				       struct peios_ntfe_ct *pc, u32 slot)
+{
+	void (*fn)(struct nf_conn *ct, struct peios_ntfe_ct *pc, u32 slot) =
+		READ_ONCE(ntfe_kunit_on_resolved);
+
+	if (fn)
+		fn(ct, pc, slot);
+}
 
 static struct net_device *ntfe_test_dev(struct kunit *test, const char *name,
 				       bool bridge_port)
@@ -1662,6 +1697,782 @@ static void ntfe_kunit_ingest_progress(struct kunit *test)
 			(u64)peios_ntfe_context_count());
 }
 
+/*
+ * The statements no guest can reach (PEI-1284's kunit stubs): an
+ * evaluation that fails, an end nobody stamped, the sentence's and the
+ * identity record's concurrency protocols, a handler with no socket, the
+ * flow pointer's lifetime, and the device's allocation failures. The
+ * failures are made on demand through the seams above.
+ */
+
+/* Empties the verdict ring: earlier cases leave their events behind. */
+static void ntfe_test_events_drain(void)
+{
+	struct peios_ntfe_event ev;
+
+	while (peios_ntfe_kunit_events_pop(&ev, 1))
+		;
+}
+
+/*
+ * Drains the ring, keeping the first event of @layer about @dst_port —
+ * the one the step under test emitted (anything else the stack judged
+ * meanwhile is passed over).
+ */
+static bool ntfe_test_event_find(u8 layer, u16 dst_port,
+				 struct peios_ntfe_event *out)
+{
+	struct peios_ntfe_event ev;
+	bool found = false;
+
+	while (peios_ntfe_kunit_events_pop(&ev, 1)) {
+		if (!found && ev.layer == layer && ev.dst_port == dst_port) {
+			*out = ev;
+			found = true;
+		}
+	}
+	return found;
+}
+
+/* An outbound TCP flow's first packet at LOCAL_OUT, 10:30 UTC. */
+static void ntfe_test_flow_snap(struct peios_ntfe_snapshot *snap,
+			       struct nf_conn *ct)
+{
+	static const u8 src[4] = { 10, 0, 0, 5 }, dst[4] = { 192, 0, 2, 9 };
+
+	memset(snap, 0, sizeof(*snap));
+	snap->seat = PEIOS_NTFE_SEAT_LOCAL_OUT;
+	snap->direction = PEIOS_NTFE_DIR_OUT;
+	snap->addr_family = 4;
+	snap->protocol = IPPROTO_TCP;
+	memcpy(snap->src_addr, src, 4);
+	memcpy(snap->dst_addr, dst, 4);
+	snap->src_port = 40000;
+	snap->dst_port = 443;
+	snap->has = PEIOS_NTFE_HAS_PORTS | PEIOS_NTFE_HAS_TIME;
+	snap->flow_state = PEIOS_NTFE_FLOW_NEW;
+	snap->ifindex = 7;
+	strscpy(snap->ifname, "eth0", IFNAMSIZ);
+	/* 2026-09-02 10:30:00 UTC. */
+	snap->t_year = 2026;
+	snap->t_month = 9;
+	snap->t_day_of_month = 2;
+	snap->t_day_of_week = 3;
+	snap->t_hour = 10;
+	snap->t_minute = 30;
+	snap->t_secs = 1788345000;
+	snap->flow = ct;
+}
+
+/* Publishes a one-rule Packet forest. */
+static void ntfe_test_publish_packet(struct kunit *test, const char *action)
+{
+	void *b, *forest = NULL;
+
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "all", 3), 0);
+	ntfe_test_actions(test, b, action);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
+					       &forest),
+			0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(forest, NULL, NULL, 1),
+			0);
+}
+
+/* Feeds a two-action list to the builder. */
+static void ntfe_test_actions2(struct kunit *test, void *b, const char *first,
+			       const char *second)
+{
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_value_list_begin(b, "Actions", 7), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_list_str(b, first, strlen(first)), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_list_str(b, second, strlen(second)),
+			0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_value_list_end(b), 0);
+}
+
+/*
+ * Failing closed (§6.2): an evaluation that cannot finish — the walk's
+ * atomic allocation refused, here by the eval seam — drops the packet,
+ * counts fail_closed and emits an event attributed `fail-closed` with
+ * FAIL_CLOSED. At a per-packet seat, and at the Flow dispatch, which
+ * writes no sentence for a judgment it never made.
+ */
+static void ntfe_kunit_eval_failure_fails_closed(struct kunit *test)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state in_state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct nf_hook_state out_state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	struct nf_conn *ct = ntfe_test_flow(test);
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_event *ev;
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 22);
+	u64 failed0 = atomic64_read(&peios_ntfe_stats.fail_closed);
+	u64 judged0 = atomic64_read(&peios_ntfe_stats.judged);
+	u64 dropped0 = atomic64_read(&peios_ntfe_stats.verdict_drop);
+	u64 flow_judged0;
+
+	ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	KUNIT_ASSERT_NOT_NULL(test, pc);
+
+	/* A Packet forest that passes everything... */
+	ntfe_test_publish_packet(test, "PASS");
+	ntfe_test_events_drain();
+
+	/* ...has no answer when its evaluation fails: the packet drops. */
+	atomic_set(&ntfe_kunit_fail_evals, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &in_state),
+			(unsigned int)NF_DROP);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ntfe_kunit_fail_evals), 0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.fail_closed),
+			failed0 + 1);
+	/* A failure is not a verdict: nothing was judged, nothing dropped
+	 * by a rule.
+	 */
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.judged), judged0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.verdict_drop),
+			dropped0);
+	KUNIT_ASSERT_TRUE(test,
+			  ntfe_test_event_find(PEIOS_NTFE_LAYER_PACKET, 22, ev));
+	KUNIT_EXPECT_EQ(test, ev->seat, (u8)PEIOS_NTFE_EV_SEAT_LOCAL_IN);
+	KUNIT_EXPECT_EQ(test, ev->verdict, (u8)PEIOS_NTFE_EV_VERDICT_DROP);
+	KUNIT_EXPECT_TRUE(test, ev->flags & PEIOS_NTFE_EV_F_FAIL_CLOSED);
+	KUNIT_EXPECT_STREQ(test, (const char *)ev->attributed, "fail-closed");
+
+	/* The same packet, the evaluation whole: the forest passes it. */
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &in_state),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.fail_closed),
+			failed0 + 1);
+
+	/* The Flow dispatch: a new flow's first judgment fails. */
+	ntfe_test_publish_flow(test, NULL, NULL, "PASS");
+	ntfe_test_flow_snap(&snap, ct);
+	flow_judged0 = atomic64_read(&peios_ntfe_stats.flow_judged);
+	ntfe_test_events_drain();
+	atomic_set(&ntfe_kunit_fail_evals, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &out_state, &snap),
+			(unsigned int)NF_DROP);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ntfe_kunit_fail_evals), 0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.fail_closed),
+			failed0 + 2);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
+			flow_judged0);
+	/* No judgment, no sentence. */
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].generation, 0ULL);
+	KUNIT_ASSERT_TRUE(test,
+			  ntfe_test_event_find(PEIOS_NTFE_LAYER_FLOW, 443, ev));
+	KUNIT_EXPECT_EQ(test, ev->verdict, (u8)PEIOS_NTFE_EV_VERDICT_DROP);
+	KUNIT_EXPECT_TRUE(test, ev->flags & PEIOS_NTFE_EV_F_FAIL_CLOSED);
+	KUNIT_EXPECT_STREQ(test, (const char *)ev->attributed, "fail-closed");
+
+	/* The flow's next packet is simply judged, and sentenced. */
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &out_state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
+			flow_judged0 + 1);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].generation,
+			ntfe_rust_generation());
+
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	kfree_skb(skb);
+	nf_conntrack_free(ct);
+}
+
+/*
+ * An end that cannot be attributed (§6.7, §6.9). An inet socket nobody
+ * stamped — allocated by the stack with no creation hook run, so KACS
+ * holds state for it but no owner — reads as the kernel's, confessed in
+ * identity_unresolved, on the event's flag and in the flow's slot; its
+ * listener record says the same. A loopback flow with no extension,
+ * judged at the inbound seat, cannot see its sender: Remote is absent,
+ * confessed alike.
+ */
+static void ntfe_kunit_identity_unresolved(struct kunit *test)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state in_state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct nf_hook_state out_state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	struct nf_conntrack_tuple orig = { }, repl = { };
+	struct nf_conn *ct = ntfe_test_flow(test), *bare;
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+	struct peios_ntfe_listener_rec *rec;
+	struct peios_ntfe_identity id;
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_event *ev;
+	struct socket *sock = NULL;
+	struct sk_buff *skb;
+	struct sock *sk;
+	u64 unresolved0, uncached0;
+
+	ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	rec = kunit_kzalloc(test, sizeof(*rec), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, rec);
+	KUNIT_ASSERT_NOT_NULL(test, pc);
+	dev_net_set(dev, &init_net);
+
+	sk = sk_alloc(&init_net, PF_INET, GFP_KERNEL, &tcp_prot, 1);
+	KUNIT_ASSERT_NOT_NULL(test, sk);
+	skb = ntfe_test_tcp4_skb(test, 443);
+
+	/* Resolved directly: the kernel's, unresolved, no token. */
+	ntfe_test_flow_snap(&snap, ct);
+	out_state.sk = sk;
+	peios_ntfe_identity_resolve(skb, &out_state, &snap, false, &id);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_KERNEL);
+	KUNIT_EXPECT_EQ(test, id.unresolved, 1);
+	KUNIT_EXPECT_NULL(test, id.owner.token);
+	peios_ntfe_identity_release(&id);
+
+	/* At a flow's first judgment: counted, recorded on the slot as
+	 * unresolved (the flows record reads those fields), flagged on the
+	 * event.
+	 */
+	ntfe_test_publish_flow(test, NULL, NULL, "PASS");
+	ntfe_test_events_drain();
+	unresolved0 = atomic64_read(&peios_ntfe_stats.identity_unresolved);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &out_state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test,
+			atomic64_read(&peios_ntfe_stats.identity_unresolved),
+			unresolved0 + 1);
+	KUNIT_EXPECT_EQ(test, pc->owner_recorded[0], 1);
+	KUNIT_EXPECT_EQ(test, pc->owner_kind[0], (u8)PEIOS_NTFE_LOCAL_KERNEL);
+	KUNIT_EXPECT_EQ(test, pc->owner_unresolved[0], 1);
+	KUNIT_EXPECT_NULL(test, pc->owner[0].token);
+	KUNIT_ASSERT_TRUE(test,
+			  ntfe_test_event_find(PEIOS_NTFE_LAYER_FLOW, 443, ev));
+	KUNIT_EXPECT_TRUE(test, ev->flags & PEIOS_NTFE_EV_F_IDENTITY_UNRESOLVED);
+	KUNIT_EXPECT_EQ(test, ev->local_kind, (u8)PEIOS_NTFE_EV_LOCAL_KERNEL);
+	KUNIT_EXPECT_EQ(test, ev->local_unresolved, 1);
+
+	/* Its listener record: KERNEL, with owner_unresolved set... */
+	peios_ntfe_kunit_listener_fill(rec, sk, IPPROTO_TCP);
+	KUNIT_EXPECT_EQ(test, rec->owner_kind, (u8)PEIOS_NTFE_EV_LOCAL_KERNEL);
+	KUNIT_EXPECT_EQ(test, rec->owner_unresolved, 1);
+	/* ...where a socket a program made reads as the program's. */
+	KUNIT_ASSERT_EQ(test, sock_create(AF_INET, SOCK_STREAM, 0, &sock), 0);
+	peios_ntfe_kunit_listener_fill(rec, sock->sk, IPPROTO_TCP);
+	KUNIT_EXPECT_EQ(test, rec->owner_kind, (u8)PEIOS_NTFE_EV_LOCAL_PROGRAM);
+	KUNIT_EXPECT_EQ(test, rec->owner_unresolved, 0);
+	KUNIT_EXPECT_EQ(test, rec->owner_pid, (s32)task_tgid_nr(current));
+	sock_release(sock);
+
+	/* A loopback flow with no extension, at the inbound seat: the
+	 * sender was never recorded and cannot be seen here. Remote is
+	 * absent and confessed; the local end (nobody on the port) is not.
+	 */
+	bare = nf_conntrack_alloc(&init_net, &nf_ct_zone_dflt, &orig, &repl,
+				  GFP_KERNEL);
+	KUNIT_ASSERT_FALSE(test, IS_ERR_OR_NULL(bare));
+	KUNIT_ASSERT_NULL(test, nf_ct_ext_find(bare, NF_CT_EXT_NTFE));
+	ntfe_test_flow_snap(&snap, bare);
+	snap.seat = PEIOS_NTFE_SEAT_LOCAL_IN;
+	snap.direction = PEIOS_NTFE_DIR_IN;
+	snap.loopback = 1;
+	ntfe_test_events_drain();
+	unresolved0 = atomic64_read(&peios_ntfe_stats.identity_unresolved);
+	uncached0 = atomic64_read(&peios_ntfe_stats.flow_uncached);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &in_state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test,
+			atomic64_read(&peios_ntfe_stats.identity_unresolved),
+			unresolved0 + 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_uncached),
+			uncached0 + 1);
+	KUNIT_ASSERT_TRUE(test,
+			  ntfe_test_event_find(PEIOS_NTFE_LAYER_FLOW, 443, ev));
+	KUNIT_EXPECT_TRUE(test, ev->flags & PEIOS_NTFE_EV_F_IDENTITY_UNRESOLVED);
+	KUNIT_EXPECT_EQ(test, ev->remote_kind, (u8)PEIOS_NTFE_EV_LOCAL_ABSENT);
+	KUNIT_EXPECT_EQ(test, ev->remote_unresolved, 1);
+	KUNIT_EXPECT_EQ(test, ev->local_kind, (u8)PEIOS_NTFE_EV_LOCAL_NONE);
+	KUNIT_EXPECT_EQ(test, ev->local_unresolved, 0);
+
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	nf_conntrack_free(bare);
+	nf_conntrack_free(ct);
+	kfree_skb(skb);
+	sk_free(sk);
+}
+
+/*
+ * The sentence's concurrency protocol (§6.8). A writer zeroes the
+ * generation, writes the fields and publishes the generation last; a
+ * reader that finds it mid-write — fields set, generation zero — reads
+ * the slot as absent and the flow is simply judged, never answered by
+ * the half-written verdict. (The other torn form, a whole write landing
+ * between the reader's two generation loads, needs a second CPU at an
+ * instant one thread cannot arrange.) Two first packets of a new flow
+ * may both evaluate: both judgments run their effects and the second
+ * write is the sentence.
+ */
+static void ntfe_kunit_sentence_concurrency(struct kunit *test)
+{
+	struct nf_conn *ct = ntfe_test_flow(test), *race = ntfe_test_flow(test);
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+	struct peios_ntfe_ct *rpc = nf_ct_ext_find(race, NF_CT_EXT_NTFE);
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 443);
+	struct peios_ntfe_snapshot snap, second;
+	u64 judged0, cached0, rejudged0, expired0, tags0, writes0;
+	u64 value = 0;
+	void *b, *forest = NULL;
+
+	KUNIT_ASSERT_NOT_NULL(test, pc);
+	KUNIT_ASSERT_NOT_NULL(test, rpc);
+	ntfe_test_publish_flow(test, NULL, NULL, "PASS");
+
+	/* A slot caught mid-write: a DROP in the fields, no generation. */
+	pc->sentence[0].expires_at = 0;
+	pc->sentence[0].rule_hash = 0xdead;
+	pc->sentence[0].verdict = PEIOS_NTFE_VERDICT_DROP;
+	pc->sentence[0].reject_kind = 0;
+	KUNIT_ASSERT_EQ(test, pc->sentence[0].generation, 0ULL);
+	ntfe_test_flow_snap(&snap, ct);
+	judged0 = atomic64_read(&peios_ntfe_stats.flow_judged);
+	cached0 = atomic64_read(&peios_ntfe_stats.flow_cached);
+	rejudged0 = atomic64_read(&peios_ntfe_stats.flow_rejudged);
+	expired0 = atomic64_read(&peios_ntfe_stats.flow_expired);
+	/* Not applied: read as absent, the flow is judged (and passes). */
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
+			judged0 + 1);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_cached),
+			cached0);
+	/* Absent, not stale: neither re-judgment counter moves. */
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_rejudged),
+			rejudged0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_expired),
+			expired0);
+	/* The judgment's own write is whole, its generation published. */
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].generation,
+			ntfe_rust_generation());
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].verdict,
+			(u8)PEIOS_NTFE_VERDICT_PASS);
+	KUNIT_EXPECT_EQ(test, pc->sentence[0].rule_hash,
+			peios_ntfe_path_hash("r", 1));
+
+	/* The same holds where a loopback flow reads its other endpoint's
+	 * sentence: a half-written DROP there does not make this one
+	 * stricter. Slot 0 is current, so this packet reads it.
+	 */
+	pc->sentence[1].verdict = PEIOS_NTFE_VERDICT_DROP;
+	KUNIT_ASSERT_EQ(test, pc->sentence[1].generation, 0ULL);
+	snap.loopback = 1;
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_cached),
+			cached0 + 1);
+
+	/* The first-packet race. Daytime passes and nighttime drops, both
+	 * counting the flow in a tag.
+	 */
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "day", 3), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_value_str(b, "Time.Hour.Equal", 15,
+						   "9-17", 4),
+			0);
+	ntfe_test_actions2(test, b, "TAG(seen, Add)", "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "night", 5), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_value_str(b, "Time.Hour.Equal", 15,
+						   "18-23", 5),
+			0);
+	ntfe_test_actions2(test, b, "TAG(seen, Add)", "DROP");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_FLOW, &forest),
+			0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, forest, 1),
+			0);
+
+	/* Two packets of one new flow (two snapshots, one entry), both
+	 * having read the slot empty: the first judged at 10:30...
+	 */
+	ntfe_test_flow_snap(&snap, race);
+	second = snap;
+	second.t_hour = 18;
+	second.t_minute = 0;
+	second.t_secs = 1788345000 - 1788345000 % 3600 + 8 * 3600;
+	judged0 = atomic64_read(&peios_ntfe_stats.flow_judged);
+	cached0 = atomic64_read(&peios_ntfe_stats.flow_cached);
+	rejudged0 = atomic64_read(&peios_ntfe_stats.flow_rejudged);
+	expired0 = atomic64_read(&peios_ntfe_stats.flow_expired);
+	tags0 = atomic64_read(&peios_ntfe_stats.fx_tags);
+	writes0 = atomic64_read(&peios_ntfe_stats.tag_writes);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, rpc->sentence[0].verdict,
+			(u8)PEIOS_NTFE_VERDICT_PASS);
+	/* ...and the second, which read the slot before that write landed
+	 * (the empty slot it saw, restored), judged at 18:00.
+	 */
+	WRITE_ONCE(rpc->sentence[0].generation, 0);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &second),
+			(unsigned int)NF_DROP);
+	/* Both evaluated, and both ran their effects. */
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_judged),
+			judged0 + 2);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_cached),
+			cached0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_rejudged),
+			rejudged0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.flow_expired),
+			expired0);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.fx_tags),
+			tags0 + 2);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_writes),
+			writes0 + 2);
+	KUNIT_EXPECT_EQ(test,
+			peios_ntfe_tag_lookup(race,
+					     peios_ntfe_path_hash("seen", 4),
+					     &value),
+			1);
+	KUNIT_EXPECT_EQ(test, value, 2ULL);
+	/* The second write won: the slot holds the second outcome. */
+	KUNIT_EXPECT_EQ(test, rpc->sentence[0].generation,
+			ntfe_rust_generation());
+	KUNIT_EXPECT_EQ(test, rpc->sentence[0].verdict,
+			(u8)PEIOS_NTFE_VERDICT_DROP);
+	KUNIT_EXPECT_EQ(test, rpc->sentence[0].rule_hash,
+			peios_ntfe_path_hash("night", 5));
+
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	kfree_skb(skb);
+	nf_conntrack_free(race);
+	nf_conntrack_free(ct);
+}
+
+/* The CPU that recorded first, played from inside the seam. */
+static int ntfe_test_race_runs;
+
+static void ntfe_test_record_first(struct nf_conn *ct,
+				   struct peios_ntfe_ct *pc, u32 slot)
+{
+	spin_lock_bh(&ct->lock);
+	memset(&pc->owner[slot], 0, sizeof(pc->owner[slot]));
+	pc->owner[slot].kind = PEIOS_NTFE_OWNER_KERNEL;
+	strscpy(pc->owner[slot].comm, "first", sizeof(pc->owner[slot].comm));
+	WRITE_ONCE(pc->owner_kind[slot], PEIOS_NTFE_LOCAL_KERNEL);
+	WRITE_ONCE(pc->owner_unresolved[slot], 0);
+	smp_store_release(&pc->owner_recorded[slot], 1);
+	spin_unlock_bh(&ct->lock);
+	ntfe_test_race_runs++;
+}
+
+/*
+ * Two CPUs resolving a new flow's endpoint (§6.9): this one resolved a
+ * program's socket, and before it took the flow's lock another recorded
+ * the kernel. The first record stands — the judgment, the event and the
+ * extension all carry it — and this one's resolution is let go.
+ */
+static void ntfe_kunit_identity_resolve_race(struct kunit *test)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	struct nf_conn *ct = ntfe_test_flow(test);
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 443);
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_identity id;
+	struct peios_ntfe_event *ev;
+	struct socket *sock = NULL;
+
+	ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	KUNIT_ASSERT_NOT_NULL(test, pc);
+
+	/* A program's socket: on its own it resolves as the program. */
+	KUNIT_ASSERT_EQ(test, sock_create(AF_INET, SOCK_STREAM, 0, &sock), 0);
+	state.sk = sock->sk;
+	ntfe_test_flow_snap(&snap, ct);
+	peios_ntfe_identity_resolve(skb, &state, &snap, false, &id);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_PROGRAM);
+	KUNIT_EXPECT_NOT_NULL(test, id.owner.token);
+	peios_ntfe_identity_release(&id);
+
+	ntfe_test_publish_flow(test, NULL, NULL, "PASS");
+	ntfe_test_events_drain();
+	ntfe_test_race_runs = 0;
+	WRITE_ONCE(ntfe_kunit_on_resolved, ntfe_test_record_first);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_ACCEPT);
+	WRITE_ONCE(ntfe_kunit_on_resolved, NULL);
+	/* The losing branch was taken, once. */
+	KUNIT_EXPECT_EQ(test, ntfe_test_race_runs, 1);
+
+	/* The first record stands on the extension... */
+	KUNIT_EXPECT_EQ(test, pc->owner_kind[0], (u8)PEIOS_NTFE_LOCAL_KERNEL);
+	KUNIT_EXPECT_NULL(test, pc->owner[0].token);
+	KUNIT_EXPECT_STREQ(test, pc->owner[0].comm, "first");
+	/* ...and is what was judged and told. */
+	KUNIT_ASSERT_TRUE(test,
+			  ntfe_test_event_find(PEIOS_NTFE_LAYER_FLOW, 443, ev));
+	KUNIT_EXPECT_EQ(test, ev->local_kind, (u8)PEIOS_NTFE_EV_LOCAL_KERNEL);
+	KUNIT_EXPECT_EQ(test, ev->local_pid, 0);
+	KUNIT_EXPECT_STREQ(test, (const char *)ev->local_comm, "first");
+
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	kfree_skb(skb);
+	nf_conntrack_free(ct);
+	sock_release(sock);
+}
+
+static int ntfe_test_proto_rcv(struct sk_buff *skb)
+{
+	kfree_skb(skb);
+	return 0;
+}
+
+static const struct net_protocol ntfe_test_proto = {
+	.handler = ntfe_test_proto_rcv,
+};
+
+/*
+ * The classification is a rule, not a list (§6.9): a protocol nobody
+ * receives on a socket reads `kernel` while the stack has a handler
+ * registered for it — SCTP while its module is loaded — and `none` once
+ * it has not. Played with an experimental protocol number.
+ */
+static void ntfe_kunit_identity_handler_reads_kernel(struct kunit *test)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 2223);
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_identity id;
+
+	dev_net_set(dev, &init_net);
+	ip_hdr(skb)->protocol = 253;
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
+			0);
+
+	/* No handler, no socket: nothing will receive it. */
+	peios_ntfe_identity_resolve(skb, &state, &snap, false, &id);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_NONE);
+	peios_ntfe_identity_release(&id);
+
+	/* A handler registered: the stack's. */
+	KUNIT_ASSERT_EQ(test, inet_add_protocol(&ntfe_test_proto, 253), 0);
+	peios_ntfe_identity_resolve(skb, &state, &snap, false, &id);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_KERNEL);
+	KUNIT_EXPECT_EQ(test, id.unresolved, 0);
+	peios_ntfe_identity_release(&id);
+	KUNIT_ASSERT_EQ(test, inet_del_protocol(&ntfe_test_proto, 253), 0);
+
+	/* Unregistered again: none. */
+	peios_ntfe_identity_resolve(skb, &state, &snap, false, &id);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_NONE);
+	peios_ntfe_identity_release(&id);
+	kfree_skb(skb);
+}
+
+/*
+ * The snapshot's flow pointer (§6.3) is valid for the hook because the
+ * skb holds the entry: with every other reference gone, an evaluation
+ * still reads and writes the entry's tags, and the entry dies when the
+ * skb does, not before.
+ */
+static void ntfe_kunit_flow_pointer_held_by_skb(struct kunit *test)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct nf_conn *ct = ntfe_test_flow(test);
+	struct sk_buff *skb = ntfe_test_tcp4_skb(test, 22);
+	struct peios_ntfe_snapshot snap;
+	u64 hits = peios_ntfe_path_hash("hits", 4), value = 0;
+	void *b, *forest = NULL;
+	u32 count;
+
+	/* The table's reference, as confirmation sets it; then the skb's. */
+	refcount_set(&ct->ct_general.use, 1);
+	nf_conntrack_get(&ct->ct_general);
+	nf_ct_set(skb, ct, IP_CT_NEW);
+	/* Every reference but the skb's goes. */
+	nf_ct_put(ct);
+	KUNIT_EXPECT_EQ(test, refcount_read(&ct->ct_general.use), 1U);
+
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
+			0);
+	KUNIT_EXPECT_PTR_EQ(test, snap.flow, (const void *)ct);
+	KUNIT_EXPECT_EQ(test, snap.flow_state, PEIOS_NTFE_FLOW_NEW);
+
+	/* A Packet forest that counts the flow in a tag and drops it once
+	 * the tag reads one.
+	 */
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "count", 5), 0);
+	ntfe_test_actions2(test, b, "TAG(hits, Add)", "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "again", 5), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_value_int(b, "Tag.hits.Equal", 14, 1),
+			0);
+	ntfe_test_actions(test, b, "DROP");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
+					       &forest),
+			0);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(forest, NULL, NULL, 1),
+			0);
+
+	/* Written through the pointer, then read back through it. */
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &state),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &state),
+			(unsigned int)NF_DROP);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, hits, &value), 1);
+	KUNIT_EXPECT_EQ(test, value, 2ULL);
+	/* Still alive on the skb's reference alone. */
+	KUNIT_EXPECT_EQ(test, refcount_read(&ct->ct_general.use), 1U);
+
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
+			0);
+	/* The skb goes, and the entry with it. */
+	count = nf_conntrack_count(&init_net);
+	kfree_skb(skb);
+	KUNIT_EXPECT_EQ(test, nf_conntrack_count(&init_net), count - 1);
+}
+
+/*
+ * The device's allocation failures (§6.A2): read()'s batch, and the
+ * counters, flows and listeners dumps' buffers, refused by the alloc
+ * seam, are ENOMEM — before any user memory is touched, and with the
+ * ring's events still there to read.
+ */
+static void ntfe_kunit_device_allocation_enomem(struct kunit *test)
+{
+	struct peios_ntfe_snapshot snap = {
+		.seat = PEIOS_NTFE_SEAT_LOCAL_IN,
+		.direction = PEIOS_NTFE_DIR_IN,
+		.addr_family = 4,
+		.protocol = 6,
+		.src_port = 43210,
+		.dst_port = 7,
+		.length = 60,
+	};
+	struct peios_ntfe_outcome out = {
+		.verdict = PEIOS_NTFE_VERDICT_PASS,
+	};
+	struct peios_ntfe_counters_query counters = { };
+	struct peios_ntfe_flows_query flows = { };
+	struct peios_ntfe_listeners_query listeners = { };
+	const struct file_operations *fops = peios_ntfe_kunit_dev_fops();
+	struct peios_ntfe_event *ev;
+	struct file *file;
+	loff_t pos = 0;
+
+	ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	file = kunit_kzalloc(test, sizeof(*file), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, file);
+	file->f_flags = O_NONBLOCK;
+
+	/* The three dumps, each refused its buffer. */
+	atomic_set(&ntfe_kunit_fail_allocs, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counters_dump(&counters),
+			(long)-ENOMEM);
+	atomic_set(&ntfe_kunit_fail_allocs, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flows_dump(&flows), (long)-ENOMEM);
+	atomic_set(&ntfe_kunit_fail_allocs, 1);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_listeners_dump(&listeners),
+			(long)-ENOMEM);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ntfe_kunit_fail_allocs), 0);
+	/* With the allocation whole, the same queries (no room) answer. */
+	KUNIT_EXPECT_EQ(test, peios_ntfe_counters_dump(&counters), 0L);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_flows_dump(&flows), 0L);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_listeners_dump(&listeners), 0L);
+
+	/* read(): an event waits; the batch is refused. */
+	ntfe_test_events_drain();
+	strscpy(out.attributed, "enomem-probe", sizeof(out.attributed));
+	peios_ntfe_event_emit(&snap, &out, PEIOS_NTFE_LAYER_PACKET, 0);
+	atomic_set(&ntfe_kunit_fail_allocs, 1);
+	KUNIT_EXPECT_EQ(test,
+			fops->read(file, NULL, sizeof(struct peios_ntfe_event),
+				   &pos),
+			(ssize_t)-ENOMEM);
+	KUNIT_EXPECT_EQ(test, atomic_read(&ntfe_kunit_fail_allocs), 0);
+	/* The read claimed the stream; closing gives it back. */
+	fops->release(NULL, file);
+	/* The ring is untouched: the event is still there. */
+	KUNIT_ASSERT_TRUE(test,
+			  ntfe_test_event_find(PEIOS_NTFE_LAYER_PACKET, 7, ev));
+	KUNIT_EXPECT_STREQ(test, (const char *)ev->attributed, "enomem-probe");
+}
+
+static void ntfe_kunit_exit(struct kunit *test)
+{
+	atomic_set(&ntfe_kunit_fail_evals, 0);
+	atomic_set(&ntfe_kunit_fail_allocs, 0);
+	WRITE_ONCE(ntfe_kunit_on_resolved, NULL);
+}
+
 static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_rust_probe),
 	KUNIT_CASE(ntfe_kunit_dispatch_predicate),
@@ -1685,11 +2496,19 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_identity_facts),
 	KUNIT_CASE(ntfe_kunit_network_context),
 	KUNIT_CASE(ntfe_kunit_ingest_progress),
+	KUNIT_CASE(ntfe_kunit_eval_failure_fails_closed),
+	KUNIT_CASE(ntfe_kunit_identity_unresolved),
+	KUNIT_CASE(ntfe_kunit_sentence_concurrency),
+	KUNIT_CASE(ntfe_kunit_identity_resolve_race),
+	KUNIT_CASE(ntfe_kunit_identity_handler_reads_kernel),
+	KUNIT_CASE(ntfe_kunit_flow_pointer_held_by_skb),
+	KUNIT_CASE(ntfe_kunit_device_allocation_enomem),
 	{}
 };
 
 static struct kunit_suite ntfe_kunit_suite = {
 	.name = "pkm_kunit_ntfe",
+	.exit = ntfe_kunit_exit,
 	.test_cases = ntfe_kunit_cases,
 };
 

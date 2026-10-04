@@ -88,6 +88,14 @@ static void ntfe_listener_fill(struct peios_ntfe_listener_rec *rec,
 	pkm_kacs_socket_owner_put(&owner);
 }
 
+#ifdef CONFIG_PEIOS_NTFE_KUNIT
+void peios_ntfe_kunit_listener_fill(struct peios_ntfe_listener_rec *rec,
+				    const struct sock *sk, u8 protocol)
+{
+	ntfe_listener_fill(rec, sk, protocol);
+}
+#endif
+
 struct ntfe_listeners_walk {
 	struct peios_ntfe_listener_rec __user *ubuf;
 	struct peios_ntfe_listener_rec *batch;
@@ -178,7 +186,8 @@ long peios_ntfe_listeners_dump(struct peios_ntfe_listeners_query *query)
 		.room = query->buf_len / sizeof(struct peios_ntfe_listener_rec),
 	};
 
-	w.batch = kcalloc(NTFE_LISTENERS_BATCH, sizeof(*w.batch), GFP_KERNEL);
+	w.batch = peios_ntfe_kunit_alloc_should_fail() ? NULL :
+		kcalloc(NTFE_LISTENERS_BATCH, sizeof(*w.batch), GFP_KERNEL);
 	if (!w.batch)
 		return -ENOMEM;
 

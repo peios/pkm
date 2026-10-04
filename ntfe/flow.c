@@ -271,6 +271,7 @@ static void ntfe_flow_identity(struct sk_buff *skb,
 			p->owned[s] = true;
 			continue;
 		}
+		peios_ntfe_kunit_identity_resolved(ct, pc, s);
 		spin_lock_bh(&ct->lock);
 		if (!pc->owner_recorded[s]) {
 			pc->owner[s] = id->owner;
@@ -590,7 +591,8 @@ long peios_ntfe_flows_dump(struct peios_ntfe_flows_query *query)
 	u32 written = 0, total = 0, n = 0, i;
 	long ret = 0;
 
-	batch = kcalloc(NTFE_FLOWS_BATCH, sizeof(*batch), GFP_KERNEL);
+	batch = peios_ntfe_kunit_alloc_should_fail() ? NULL :
+		kcalloc(NTFE_FLOWS_BATCH, sizeof(*batch), GFP_KERNEL);
 	if (!batch)
 		return -ENOMEM;
 
