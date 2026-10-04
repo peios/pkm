@@ -13,6 +13,7 @@
 #include <linux/vmalloc.h>
 
 #include "access_check.h"
+#include "signing.h"
 #include "token_fd.h"
 #include "token_runtime.h"
 
@@ -21,6 +22,7 @@
 static struct dentry *pkm_kacs_securityfs_dir;
 static struct dentry *pkm_kacs_securityfs_self;
 static struct dentry *pkm_kacs_securityfs_logon_sessions;
+static struct dentry *pkm_kacs_securityfs_signing_keys;
 
 int pkm_kacs_securityfs_open_self_token_file(struct file *file)
 {
@@ -111,12 +113,54 @@ static const struct file_operations pkm_kacs_securityfs_logon_sessions_fops = {
 	.llseek = default_llseek,
 };
 
+/*
+ * The keys this kernel verifies signatures with. They are public keys
+ * compiled into the image, so reading them is not access-checked: whoever
+ * may open the file may read it.
+ */
+static ssize_t pkm_kacs_securityfs_signing_keys_read(struct file *file,
+						     char __user *buf,
+						     size_t count, loff_t *ppos)
+{
+	size_t required = 0;
+	char *kbuf;
+	ssize_t copied;
+	int ret;
+
+	(void)file;
+	ret = pkm_kacs_signing_key_listing(NULL, 0, &required);
+	if (ret)
+		return ret;
+	if (*ppos >= required || !required)
+		return 0;
+
+	kbuf = kvzalloc(required, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	ret = pkm_kacs_signing_key_listing(kbuf, required, &required);
+	if (ret) {
+		kvfree(kbuf);
+		return ret;
+	}
+
+	copied = simple_read_from_buffer(buf, count, ppos, kbuf, required);
+	kvfree(kbuf);
+	return copied;
+}
+
+static const struct file_operations pkm_kacs_securityfs_signing_keys_fops = {
+	.read = pkm_kacs_securityfs_signing_keys_read,
+	.llseek = default_llseek,
+};
+
 static int __init pkm_kacs_securityfs_init(void)
 {
 	int ret;
 
 	if (pkm_kacs_securityfs_dir || pkm_kacs_securityfs_self ||
-	    pkm_kacs_securityfs_logon_sessions)
+	    pkm_kacs_securityfs_logon_sessions ||
+	    pkm_kacs_securityfs_signing_keys)
 		return 0;
 
 	pkm_kacs_securityfs_dir = securityfs_create_dir("kacs", NULL);
@@ -152,6 +196,24 @@ static int __init pkm_kacs_securityfs_init(void)
 		securityfs_remove(pkm_kacs_securityfs_dir);
 		pkm_kacs_securityfs_dir = NULL;
 		pr_err("pkm: securityfs kacs/sessions init failed (%d)\n",
+		       ret);
+		trace_kacs_securityfs(KACS_SFS_INIT, ret);
+		return ret;
+	}
+
+	pkm_kacs_securityfs_signing_keys = securityfs_create_file(
+		"signing_keys", 0444, pkm_kacs_securityfs_dir, NULL,
+		&pkm_kacs_securityfs_signing_keys_fops);
+	if (IS_ERR(pkm_kacs_securityfs_signing_keys)) {
+		ret = PTR_ERR(pkm_kacs_securityfs_signing_keys);
+		pkm_kacs_securityfs_signing_keys = NULL;
+		securityfs_remove(pkm_kacs_securityfs_logon_sessions);
+		pkm_kacs_securityfs_logon_sessions = NULL;
+		securityfs_remove(pkm_kacs_securityfs_self);
+		pkm_kacs_securityfs_self = NULL;
+		securityfs_remove(pkm_kacs_securityfs_dir);
+		pkm_kacs_securityfs_dir = NULL;
+		pr_err("pkm: securityfs kacs/signing_keys init failed (%d)\n",
 		       ret);
 		trace_kacs_securityfs(KACS_SFS_INIT, ret);
 		return ret;

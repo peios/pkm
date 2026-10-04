@@ -76,6 +76,16 @@ int pkm_kacs_exec_pip_from_material(
 	const struct pkm_kacs_signing_material *material, u32 *pip_type_out,
 	u32 *pip_trust_out);
 
+/*
+ * One line of kacs/signing_keys at its longest: "key_sha256=" and 64 hex
+ * digits, " pip_type=" and " pip_trust=" each with a u32 in decimal, and
+ * the newline, with room to spare.
+ */
+#define PKM_KACS_SIGNING_KEY_LINE_MAX 128U
+
+/* The built-in key table as kacs/signing_keys lists it. */
+int pkm_kacs_signing_key_listing(char *buf, size_t size, size_t *required);
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 int pkm_kacs_signing_material_from_kunit_probe(
 	const struct pkm_kacs_kunit_signing_probe *material,

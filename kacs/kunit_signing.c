@@ -1359,6 +1359,49 @@ static void pkm_kunit_builtin_signing_key_table_has_one_tcb_key(
 }
 
 /*
+ * kacs/signing_keys: the KUnit table's one key, named by the SHA-256 of its
+ * raw public key, with the tier it confers; the length is asked for first,
+ * and a buffer one byte short is refused rather than filled with part of it.
+ */
+static void pkm_kunit_signing_key_listing_names_each_key(struct kunit *test)
+{
+	static const u8 public_key[PKM_KACS_SIGNING_PUBLIC_KEY_LEN] = {
+		PKM_KUNIT_MLDSA65_PUBKEY_INIT
+	};
+	u8 digest[SHA256_DIGEST_SIZE];
+	char expected[PKM_KACS_SIGNING_KEY_LINE_MAX];
+	size_t required = 0;
+	size_t again = 0;
+	char *listing;
+	int len;
+
+	sha256(public_key, sizeof(public_key), digest);
+	len = scnprintf(expected, sizeof(expected),
+			"key_sha256=%*phN pip_type=512 pip_trust=8192\n",
+			SHA256_DIGEST_SIZE, digest);
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_signing_key_listing(NULL, 0, &required),
+			0);
+	KUNIT_ASSERT_EQ(test, required, (size_t)len);
+
+	listing = kunit_kzalloc(test, required + 1, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, listing);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_signing_key_listing(listing, required - 1,
+						     &again),
+			-ENOSPC);
+	KUNIT_EXPECT_EQ(test, again, required);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_signing_key_listing(listing, required, &again),
+			0);
+	KUNIT_EXPECT_EQ(test, again, required);
+	KUNIT_EXPECT_STREQ(test, listing, expected);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_signing_key_listing(listing, 0, NULL),
+			-EINVAL);
+}
+
+/*
  * Firmware verdict (firmware.c, PEI-493): only a signature verified at the
  * PeiosTcb tier allows; every other outcome -- unsigned, no key, a lower
  * tier, and crucially "could not verify" -- refuses under enforce and is
@@ -1470,6 +1513,7 @@ static struct kunit_case pkm_kunit_signing_cases[] = {
 	KUNIT_CASE(pkm_kunit_signing_verify_missing_terminator_fails_closed),
 	KUNIT_CASE(pkm_kunit_signing_verify_terminator_stops_iteration),
 	KUNIT_CASE(pkm_kunit_builtin_signing_key_table_has_one_tcb_key),
+	KUNIT_CASE(pkm_kunit_signing_key_listing_names_each_key),
 	KUNIT_CASE(pkm_kunit_firmware_verdict_requires_tcb),
 	{}
 };

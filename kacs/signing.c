@@ -878,6 +878,55 @@ static bool pkm_kacs_signing_key_tier_valid(u32 pip_type, u32 pip_trust)
 	       pip_trust == PKM_KACS_PIP_TRUST_PEIOS_TCB;
 }
 
+/*
+ * The built-in key table as kacs/signing_keys shows it: one line per key
+ * before the terminator, naming the key by the SHA-256 of its raw public
+ * key, with the tier it confers.
+ *
+ * The keys are public -- each is the half of a pair whose other half never
+ * leaves the build infrastructure -- so the listing carries no secret and
+ * needs no access check beyond being able to open the file. Entries are
+ * listed as they are, valid tier or not: the listing reports the table,
+ * and the validator is what refuses one.
+ *
+ * `buf` may be NULL to ask only for the length. *required is always the
+ * whole listing's length; a buffer too small for it is -ENOSPC.
+ */
+int pkm_kacs_signing_key_listing(char *buf, size_t size, size_t *required)
+{
+	size_t used = 0;
+	size_t i;
+
+	if (!required)
+		return -EINVAL;
+
+	for (i = 0; i < ARRAY_SIZE(pkm_kacs_builtin_signing_keys); i++) {
+		const struct pkm_kacs_signing_key_entry *entry =
+			&pkm_kacs_builtin_signing_keys[i];
+		u8 digest[SHA256_DIGEST_SIZE];
+		char line[PKM_KACS_SIGNING_KEY_LINE_MAX];
+		int len;
+
+		if (pkm_kacs_signing_key_entry_zero(entry))
+			break;
+
+		sha256(entry->public_key, sizeof(entry->public_key), digest);
+		len = scnprintf(line, sizeof(line),
+				"key_sha256=%*phN pip_type=%u pip_trust=%u\n",
+				SHA256_DIGEST_SIZE, digest,
+				le32_to_cpu(entry->pip_type),
+				le32_to_cpu(entry->pip_trust));
+		if (buf && used + len <= size)
+			memcpy(buf + used, line, len);
+		used += len;
+	}
+
+	*required = used;
+	if (buf && used > size)
+		return -ENOSPC;
+	return 0;
+}
+
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 int pkm_kacs_kunit_builtin_signing_key_table_shape(u32 *usable_count_out,
 						   u32 *terminated_out)
