@@ -146,7 +146,7 @@ whole chain of them. An exception is a rule, with the same values meaning
 the same things, so this is its page too however deep it sits.
 
 This page covers all four layers. netd builds and judges `Rules\Interface`
-with `pnp-core`, the kernel's own engine, so a rule key means the same
+with `pnp-core`, the same rule engine NTFE uses in the kernel, so a rule key means the same
 thing there — but that layer's facts, verdicts and effects are its own,
 and are on its page.
 
