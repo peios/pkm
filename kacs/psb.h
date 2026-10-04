@@ -5,8 +5,11 @@
 #include <linux/types.h>
 
 struct file;
+struct seq_file;
+struct task_struct;
 struct vm_area_struct;
 
+int pkm_kacs_proc_pid_psb_show(struct seq_file *m, struct task_struct *task);
 int pkm_kacs_task_prctl(int option, unsigned long arg2,
 			unsigned long arg3, unsigned long arg4,
 			unsigned long arg5);

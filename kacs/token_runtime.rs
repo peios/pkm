@@ -4509,10 +4509,14 @@ fn build_token_sd_bytes(
     } else {
         creator_mask
     };
+    // Administrators may read any token, so that who a process runs as and
+    // which logon session it belongs to can be seen machine-wide. Reading
+    // only: duplicating, impersonating or adjusting still needs the token's
+    // own grants.
     let administrators_mask = if include_administrators {
         Some(KACS_TOKEN_ALL_ACCESS)
     } else {
-        None
+        Some(KACS_TOKEN_QUERY)
     };
     let mut ace_count = 0usize;
     let mut dacl_len = ACL_HEADER_LEN;

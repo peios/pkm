@@ -14,6 +14,7 @@
 #include <linux/sched.h>
 #include <linux/sched/coredump.h>
 #include <linux/sched/mm.h>
+#include <linux/seq_file.h>
 #include <linux/syscalls.h>
 #include <linux/types.h>
 
@@ -1121,3 +1122,92 @@ SYSCALL_DEFINE2(kacs_set_psb, int, pidfd, u32, mitigations)
 
 	return ret;
 }
+
+/*
+ * Reading a PSB: /proc/<pid>/psb. The process's descriptor decides, at
+ * PROCESS_QUERY_LIMITED, and PIP dominance is deliberately not applied:
+ * that a process is protected, and how, is what lets a caller understand
+ * why everything else about it is closed to them. The refusals already
+ * reveal it; this says it plainly.
+ */
+static long pkm_kacs_authorize_psb_read_core(
+	const void *subject_token,
+	const struct pkm_kacs_process_state *caller_state,
+	const struct pkm_kacs_process_state *target_state, bool self_target)
+{
+	struct pkm_kacs_process_sd *process_sd;
+	long ret;
+
+	if (!subject_token || !caller_state || !target_state)
+		return -EACCES;
+	if (self_target)
+		return 0;
+
+	process_sd = pkm_kacs_process_state_get_sd(
+		(struct pkm_kacs_process_state *)target_state);
+	if (!process_sd)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_process_sd_access(
+		subject_token, process_sd, KACS_PROCESS_QUERY_LIMITED,
+		READ_ONCE(caller_state->pip_type),
+		READ_ONCE(caller_state->pip_trust));
+	pkm_kacs_process_sd_put(process_sd);
+	return ret;
+}
+
+int pkm_kacs_proc_pid_psb_show(struct seq_file *m, struct task_struct *task)
+{
+	struct pkm_kacs_process_state *caller_state;
+	struct pkm_kacs_process_state *target_state;
+	const void *subject_token;
+	long ret;
+
+	if (!m || !task || !task->security)
+		return -EACCES;
+
+	caller_state = pkm_kacs_current_process_state();
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_state = pkm_kacs_task(task)->process_state;
+	if (!caller_state || !subject_token || !target_state)
+		return -EACCES;
+
+	ret = pkm_kacs_authorize_psb_read_core(subject_token, caller_state,
+					       target_state,
+					       caller_state == target_state);
+	if (ret)
+		return (int)ret;
+
+	seq_printf(m, "pip_type=%u pip_trust=%u mitigations=0x%03x process_guid=%pUb\n",
+		   READ_ONCE(target_state->pip_type),
+		   READ_ONCE(target_state->pip_trust),
+		   READ_ONCE(target_state->mitigation_bits),
+		   target_state->process_guid);
+	return 0;
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+long pkm_kacs_kunit_authorize_psb_read_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args)
+{
+	struct pkm_kacs_process_sd process_sd = {};
+	struct pkm_kacs_process_state caller_state = {};
+	struct pkm_kacs_process_state target_state = {};
+
+	if (!args)
+		return -EINVAL;
+
+	process_sd.bytes = args->target_process_sd_ptr;
+	process_sd.len = args->target_process_sd_len;
+	refcount_set(&process_sd.refs, 1);
+	caller_state.pip_type = args->caller_pip_type;
+	caller_state.pip_trust = args->caller_pip_trust;
+	target_state.pip_type = args->target_pip_type;
+	target_state.pip_trust = args->target_pip_trust;
+	target_state.process_sd = &process_sd;
+
+	return pkm_kacs_authorize_psb_read_core(args->subject_token,
+						&caller_state, &target_state,
+						args->self_target != 0);
+}
+#endif /* CONFIG_SECURITY_PKM_KUNIT */

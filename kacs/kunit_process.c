@@ -3859,6 +3859,187 @@ static void pkm_kunit_proc_token_inspection_denied_by_pip(
 }
 
 
+/*
+ * PEI-1246: the process's descriptor lets the caller in, the token's own
+ * descriptor does not. LocalService, outside Administrators, may inspect a
+ * process whose descriptor names it, but not read the SYSTEM token it runs on.
+ */
+static void pkm_kunit_proc_token_inspection_denied_by_token_sd(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_token_open_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long ret;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_create_default_process_sd(subject_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_token = target_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	ret = pkm_kacs_kunit_open_process_token_inspection_for_subject(&args);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+
+/*
+ * PEI-1246: the default token descriptor gives Administrators TOKEN_QUERY,
+ * so the same inspection succeeds for a caller in Administrators who is
+ * neither the token's user, its creator nor SYSTEM, and still yields a
+ * query-only handle.
+ */
+static void pkm_kunit_proc_token_inspection_administrators_may_query(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_token_open_args args = { };
+	struct pkm_kacs_token_fd_view view = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+	long fd;
+
+	subject_token = kacs_rust_kunit_create_local_administrator_token();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_create_default_process_sd(subject_token,
+							 &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_token = target_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+
+	fd = pkm_kacs_kunit_open_process_token_inspection_for_subject(&args);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_snapshot((int)fd, &view), 0);
+	KUNIT_EXPECT_PTR_EQ(test, view.token, target_token);
+	KUNIT_EXPECT_EQ(test, view.access_mask, KACS_TOKEN_QUERY);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kacs_free((void *)process_sd);
+	kacs_rust_token_drop(subject_token);
+}
+
+
+/*
+ * self-relative SD owned by SYSTEM: DACL present, empty ACL -- nobody is
+ * granted anything
+ */
+static const u8 pkm_kunit_psb_empty_dacl_sd[52] = {
+	1, 0, 0x04, 0x80, 20, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0, 0,
+	44, 0, 0, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	2, 0, 8, 0, 0, 0, 0, 0
+};
+
+/*
+ * PEI-1246: /proc/<pid>/psb is read under the process's descriptor at
+ * QUERY_LIMITED and nothing else. A protected process whose descriptor gives
+ * Everyone QUERY_LIMITED shows its PSB to a caller its PIP is not dominated
+ * by, which is what lets that caller see why the rest is closed.
+ */
+static void pkm_kunit_psb_read_query_limited_crosses_pip(struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_token_open_args args = { };
+	const void *subject_token;
+	const void *target_token;
+	const u8 *process_sd;
+	size_t process_sd_len = 0;
+
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	target_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	KUNIT_ASSERT_NOT_NULL(test, target_token);
+
+	process_sd = kacs_rust_kunit_create_query_limited_process_sd(
+		target_token, &process_sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, process_sd);
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = process_sd;
+	args.target_process_sd_len = process_sd_len;
+	args.target_pip_type = PKM_KUNIT_PIP_TYPE_PROTECTED;
+	args.target_pip_trust = PKM_KUNIT_PIP_TRUST_TEST;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_authorize_psb_read_for_subject(&args),
+			0L);
+	/* The token stays closed to the same caller. */
+	args.target_token = target_token;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_open_process_token_inspection_for_subject(
+				&args),
+			(long)-EACCES);
+
+	pkm_kacs_free((void *)process_sd);
+}
+
+
+static void pkm_kunit_psb_read_denied_without_query_limited(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_token_open_args args = { };
+	const void *subject_token;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = pkm_kunit_psb_empty_dacl_sd;
+	args.target_process_sd_len = sizeof(pkm_kunit_psb_empty_dacl_sd);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_authorize_psb_read_for_subject(&args),
+			(long)-EACCES);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+
+static void pkm_kunit_psb_read_self_needs_no_grant(struct kunit *test)
+{
+	struct pkm_kacs_kunit_process_token_open_args args = { };
+	const void *subject_token;
+
+	subject_token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	args.subject_token = subject_token;
+	args.target_process_sd_ptr = pkm_kunit_psb_empty_dacl_sd;
+	args.target_process_sd_len = sizeof(pkm_kunit_psb_empty_dacl_sd);
+	args.self_target = 1;
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_authorize_psb_read_for_subject(&args),
+			0L);
+
+	kacs_rust_token_drop(subject_token);
+}
+
+
 /* PEI-148: the same-process exemption is structural, never SD-based. */
 static void pkm_kunit_signal_same_process_is_structural(struct kunit *test)
 {
@@ -10453,6 +10634,11 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_proc_token_inspection_self_bypasses_process_sd),
 	KUNIT_CASE(pkm_kunit_proc_token_inspection_denied_by_process_sd),
 	KUNIT_CASE(pkm_kunit_proc_token_inspection_denied_by_pip),
+	KUNIT_CASE(pkm_kunit_proc_token_inspection_denied_by_token_sd),
+	KUNIT_CASE(pkm_kunit_proc_token_inspection_administrators_may_query),
+	KUNIT_CASE(pkm_kunit_psb_read_query_limited_crosses_pip),
+	KUNIT_CASE(pkm_kunit_psb_read_denied_without_query_limited),
+	KUNIT_CASE(pkm_kunit_psb_read_self_needs_no_grant),
 	KUNIT_CASE(pkm_kunit_signal_terminate_success),
 	KUNIT_CASE(pkm_kunit_signal_same_process_is_structural),
 	KUNIT_CASE(pkm_kunit_signal_info_success),

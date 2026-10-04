@@ -3390,12 +3390,16 @@ static void pkm_kunit_create_token_same_sid_creator_keeps_self_limited(
 				   snapshot.own_sd_len, 2, KACS_TOKEN_ALL_ACCESS,
 				   pkm_kunit_system_sid,
 				   sizeof(pkm_kunit_system_sid));
+	pkm_kunit_expect_allow_ace(test, snapshot.own_sd_ptr,
+				   snapshot.own_sd_len, 3, KACS_TOKEN_QUERY,
+				   pkm_kunit_administrators_sid,
+				   sizeof(pkm_kunit_administrators_sid));
 	KUNIT_EXPECT_PTR_EQ(test,
 			    pkm_kunit_dacl_ace_const(snapshot.own_sd_ptr,
-						     snapshot.own_sd_len, 3),
+						     snapshot.own_sd_len, 4),
 			    NULL);
 
-	query_fd = pkm_kacs_kunit_open_token_fd_for_subject(
+	query_fd =pkm_kacs_kunit_open_token_fd_for_subject(
 		creator_token, view.token, KACS_TOKEN_QUERY);
 	KUNIT_ASSERT_GE(test, query_fd, 0L);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)query_fd), 0);
@@ -3508,9 +3512,13 @@ static void pkm_kunit_create_token_distinct_sid_default_sd_template(
 				   snapshot.own_sd_len, 2, KACS_TOKEN_ALL_ACCESS,
 				   pkm_kunit_system_sid,
 				   sizeof(pkm_kunit_system_sid));
+	pkm_kunit_expect_allow_ace(test, snapshot.own_sd_ptr,
+				   snapshot.own_sd_len, 3, KACS_TOKEN_QUERY,
+				   pkm_kunit_administrators_sid,
+				   sizeof(pkm_kunit_administrators_sid));
 	KUNIT_EXPECT_PTR_EQ(test,
 			    pkm_kunit_dacl_ace_const(snapshot.own_sd_ptr,
-						     snapshot.own_sd_len, 3),
+						     snapshot.own_sd_len, 4),
 			    NULL);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
@@ -8011,9 +8019,13 @@ static void pkm_kunit_token_get_linked_query_copy_fresh_sd_and_default_dacl(
 	pkm_kunit_expect_allow_ace(test, copy.own_sd_ptr, copy.own_sd_len, 2,
 				   KACS_TOKEN_ALL_ACCESS, pkm_kunit_system_sid,
 				   sizeof(pkm_kunit_system_sid));
+	pkm_kunit_expect_allow_ace(test, copy.own_sd_ptr, copy.own_sd_len, 3,
+				   KACS_TOKEN_QUERY,
+				   pkm_kunit_administrators_sid,
+				   sizeof(pkm_kunit_administrators_sid));
 	KUNIT_EXPECT_PTR_EQ(test,
 			    pkm_kunit_dacl_ace_const(copy.own_sd_ptr,
-						     copy.own_sd_len, 3),
+						     copy.own_sd_len, 4),
 			    NULL);
 
 	pkm_kacs_free((void *)result_sd);

@@ -113,3 +113,8 @@ net/icmp-echo-datagram-peios.patch
 # root=, so namespace-rootfs-seed-sd has an xattr to write. init/do_mounts.c
 # only; no other patch touches it.
 init/rootfs-always-tmpfs.patch
+
+# PEI-1246: /proc/<pid>/psb, a process's PIP and mitigations, read under
+# KACS's own check. Cut against the whole series above (beside the token
+# files of proc-base-token-files).
+fs/proc-base-psb-file.patch

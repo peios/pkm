@@ -66,15 +66,21 @@ static long pkm_kacs_open_process_token_core(
 	return ret;
 }
 
+/*
+ * Another process's token is read with two checks, as the syscall does: the
+ * process's descriptor must give QUERY_INFORMATION, and the token's own
+ * descriptor must give TOKEN_QUERY. Passing the first says the caller may
+ * inspect the process; it says nothing about the token.
+ */
 static long pkm_kacs_authorize_process_token_inspection_core(
 	const void *subject_token,
 	const struct pkm_kacs_process_state *caller_state,
 	const struct pkm_kacs_process_state *target_state,
-	bool self_target)
+	const void *target_token, bool self_target)
 {
 	long ret;
 
-	if (!subject_token || !caller_state || !target_state) {
+	if (!subject_token || !caller_state || !target_state || !target_token) {
 		trace_kacs_process_token_open((u64)(uintptr_t)subject_token, 0,
 					      KACS_TOKEN_QUERY, KACS_PTO_BAD_ARGS,
 					      -EACCES);
@@ -90,7 +96,13 @@ static long pkm_kacs_authorize_process_token_inspection_core(
 		subject_token, target_state, READ_ONCE(caller_state->pip_type),
 		READ_ONCE(caller_state->pip_trust),
 		KACS_PROCESS_QUERY_INFORMATION);
-	trace_kacs_process_token_open((u64)(uintptr_t)subject_token, 0,
+	if (!ret)
+		ret = kacs_rust_token_open_check(
+			subject_token, target_token, KACS_TOKEN_QUERY,
+			READ_ONCE(caller_state->pip_type),
+			READ_ONCE(caller_state->pip_trust), NULL);
+	trace_kacs_process_token_open((u64)(uintptr_t)subject_token,
+				      (u64)(uintptr_t)target_token,
 				      KACS_TOKEN_QUERY, KACS_PTO_CROSS, ret);
 	return ret;
 }
@@ -103,11 +115,9 @@ static long pkm_kacs_open_process_token_inspection_core(
 {
 	long ret;
 
-	if (!target_token)
-		return -EACCES;
-
 	ret = pkm_kacs_authorize_process_token_inspection_core(
-		subject_token, caller_state, target_state, self_target);
+		subject_token, caller_state, target_state, target_token,
+		self_target);
 	if (ret)
 		return ret;
 
@@ -125,7 +135,8 @@ static int pkm_kacs_bind_process_token_inspection_file(
 	long ret;
 
 	ret = pkm_kacs_authorize_process_token_inspection_core(
-		subject_token, caller_state, target_state, self_target);
+		subject_token, caller_state, target_state, target_token,
+		self_target);
 	if (ret)
 		return (int)ret;
 

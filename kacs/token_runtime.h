@@ -1009,6 +1009,8 @@ long pkm_kacs_kunit_open_process_token_inspection_for_subject(
 long pkm_kacs_kunit_open_thread_token_inspection_for_subject(
 	const struct pkm_kacs_kunit_process_token_open_args *args);
 long pkm_kacs_kunit_open_self_token_inspection_for_subject(void);
+long pkm_kacs_kunit_authorize_psb_read_for_subject(
+	const struct pkm_kacs_kunit_process_token_open_args *args);
 long pkm_kacs_kunit_read_securityfs_logon_sessions_for_subject(
 	const void *subject_token, u8 *buf, size_t buf_len,
 	size_t *required_out);
