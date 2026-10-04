@@ -50,6 +50,12 @@ static void mp_byte(struct ntfe_mp *m, u8 b)
 	mp_put(m, &b, 1);
 }
 
+/* The bytes mp_str's header takes for a string of n bytes. */
+static size_t mp_str_header(size_t n)
+{
+	return n < 32 ? 1 : n < 256 ? 2 : 3;
+}
+
 static void mp_str(struct ntfe_mp *m, const char *s, size_t n)
 {
 	if (n < 32) {
@@ -58,12 +64,13 @@ static void mp_str(struct ntfe_mp *m, const char *s, size_t n)
 		mp_byte(m, 0xd9);
 		mp_byte(m, (u8)n);
 	} else {
-		/* Nothing we emit is this long; truncate rather than lie
-		 * about the length.
-		 */
-		n = 255;
-		mp_byte(m, 0xd9);
-		mp_byte(m, 0xff);
+		__be16 be;
+
+		/* No more fits in the payload than str16 can say. */
+		n = min_t(size_t, n, U16_MAX);
+		be = cpu_to_be16((u16)n);
+		mp_byte(m, 0xda);
+		mp_put(m, &be, 2);
 	}
 	mp_put(m, s, n);
 }
@@ -194,13 +201,14 @@ void peios_ntfe_report_emit(const struct peios_ntfe_snapshot *snap,
 	u8 payload[NTFE_REPORT_MAX_PAYLOAD];
 	struct ntfe_mp m = { .buf = payload, .cap = sizeof(payload) };
 	char addr[INET6_ADDRSTRLEN];
+	size_t room, n = rule_len;
+	bool truncated = false;
 	__be16 count;
 
 	/* map16 header, count patched at the end. */
 	mp_byte(&m, 0xde);
 	mp_put(&m, "\0\0", 2);
 
-	mp_key_str(&m, "rule", rule, rule_len);
 	mp_key_uint(&m, "level", level);
 	mp_key_cstr(&m, "layer", ntfe_layer_name(layer));
 	mp_key_cstr(&m, "seat", ntfe_seat_name(snap->seat));
@@ -234,6 +242,28 @@ void peios_ntfe_report_emit(const struct peios_ntfe_snapshot *snap,
 	mp_key_uint(&m, "length", snap->length);
 	mp_key_uint(&m, "generation", ntfe_rust_generation());
 	mp_key_uint(&m, "t_ns", ktime_get_real_ns());
+
+	/*
+	 * The rule last: it is the one key of unbounded length (a path down
+	 * a tree of key names). The hash of the whole path always goes in,
+	 * so a reader can resolve a path the payload could not hold; a path
+	 * that does not fit is cut at a character boundary and the cut is
+	 * said (PEI-1310: the whole event was once dropped, silently).
+	 */
+	mp_key_uint(&m, "rule_hash", peios_ntfe_path_hash(rule, rule_len));
+	room = m.overflow ? 0 : m.cap - m.len;
+	if (sizeof("rule") + mp_str_header(n) + n > room) {
+		/* "rule" (5) and a str16 header (3), "rule_truncated" (15)
+		 * and its value (1).
+		 */
+		n = room > 5 + 3 + 16 ? room - (5 + 3 + 16) : 0;
+		while (n && ((u8)rule[n] & 0xc0) == 0x80)
+			n--;
+		truncated = true;
+	}
+	mp_key_str(&m, "rule", rule, n);
+	if (truncated)
+		mp_key_uint(&m, "rule_truncated", 1);
 
 	if (m.overflow)
 		return;	/* cannot happen at these sizes; never emit a lie */

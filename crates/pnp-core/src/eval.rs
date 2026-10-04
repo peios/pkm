@@ -133,11 +133,8 @@ pub fn evaluate(
     let mut trace = MatchTrace::default();
 
     for root in forest.roots.iter() {
-        let mut chain: PkmVec<&Rule> = PkmVec::new();
         walk(
             root,
-            &mut chain,
-            "",
             snap,
             ctx,
             &mut effects,
@@ -194,105 +191,115 @@ pub fn evaluate(
     }
 }
 
-/// Recursive descent. Returns whether `rule` matched (so the parent knows
-/// it was shadowed). On a triggered node (matched, no matching child), the
-/// node's actions resolve; if it abstains, the parentage walk finds its
-/// speaker.
-#[allow(clippy::too_many_arguments)]
-fn walk<'a>(
+/// One matched rule on the walk's stack: the rule, its path, the next
+/// child to try, and whether any child has matched (shadowing it).
+struct WalkFrame<'a> {
     rule: &'a Rule,
-    chain: &mut PkmVec<&'a Rule>,
-    parent_path: &str,
+    path: PkmString,
+    next: usize,
+    any_child: bool,
+}
+
+/// Depth-first descent from one root, with an explicit stack rather than
+/// recursion: evaluation runs on the packet path's kernel stack, and depth
+/// must cost heap, not stack (PEI-1299). A rule is pushed when it matches
+/// and popped once its children are done; popped unshadowed, it has
+/// triggered: its actions resolve, and if it abstains the stack beneath it
+/// (exactly its ancestors) is searched for its speaker.
+fn walk<'a>(
+    root: &'a Rule,
     snap: &Snapshot<'_>,
     ctx: &EvalContext,
     effects: &mut PkmVec<Effect>,
     candidates: &mut PkmVec<VerdictCandidate>,
     spoken: &mut PkmVec<*const Rule>,
     trace: &mut MatchTrace,
-) -> Result<bool, AllocError> {
-    if !rule.matches_traced(snap, trace) {
-        return Ok(false);
+) -> Result<(), AllocError> {
+    if !root.matches_traced(snap, trace) {
+        return Ok(());
     }
-    let path = join_path(parent_path, rule.name.as_str())?;
+    let mut stack: PkmVec<WalkFrame<'a>> = PkmVec::new();
+    stack.push(WalkFrame {
+        rule: root,
+        path: join_path("", root.name.as_str())?,
+        next: 0,
+        any_child: false,
+    })?;
 
-    let mut any_child = false;
-    chain.push(rule)?;
-    for child in rule.children.iter() {
-        any_child |= walk(
-            child,
-            chain,
-            path.as_str(),
-            snap,
-            ctx,
-            effects,
-            candidates,
-            spoken,
-            trace,
-        )?;
-    }
-    chain.pop();
-
-    if any_child {
-        // Shadowed: a matching descendant speaks for this region.
-        return Ok(true);
-    }
-
-    // Triggered: side effects always execute.
-    let yielded = resolve_rule(rule, path.as_str(), snap, ctx, effects)?;
-    match yielded {
-        Some(verdict) => candidates.push(VerdictCandidate {
-            verdict,
-            priority: rule.priority,
-            rule: path,
-        })?,
-        None => {
-            // Abstention: walk up this rule's own parentage to the first
-            // ancestor with a direct verdict. Intermediate abstaining
-            // ancestors execute nothing.
-            let mut speaker: Option<(usize, &Rule)> = None;
-            for (i, ancestor) in chain.iter().enumerate().rev() {
-                if ancestor.has_direct_verdict() {
-                    speaker = Some((i, *ancestor));
-                    break;
-                }
+    while let Some(top) = stack.last_mut() {
+        let rule: &'a Rule = top.rule;
+        if let Some(child) = rule.children.get(top.next) {
+            top.next += 1;
+            if child.matches_traced(snap, trace) {
+                top.any_child = true;
+                let path = join_path(top.path.as_str(), child.name.as_str())?;
+                stack.push(WalkFrame {
+                    rule: child,
+                    path,
+                    next: 0,
+                    any_child: false,
+                })?;
             }
-            if let Some((depth, ancestor)) = speaker {
-                let already = spoken
-                    .iter()
-                    .any(|p| core::ptr::eq(*p, ancestor as *const Rule));
-                if !already {
-                    spoken.push(ancestor as *const Rule)?;
-                    let speaker_path = chain_path(&chain[..=depth])?;
-                    let verdict =
-                        resolve_rule(ancestor, speaker_path.as_str(), snap, ctx, effects)?;
-                    // has_direct_verdict guarantees at least one verdict.
-                    if let Some(verdict) = verdict {
-                        candidates.push(VerdictCandidate {
-                            verdict,
-                            priority: ancestor.priority,
-                            rule: speaker_path,
-                        })?;
-                    }
-                }
-            }
-            // No speaker in the parentage: this branch contributes nothing;
-            // other branches or the backstop answer.
+            continue;
         }
+        let Some(done) = stack.pop() else { break };
+        if done.any_child {
+            // Shadowed: a matching descendant speaks for this region.
+            continue;
+        }
+        trigger(done, &stack, snap, ctx, effects, candidates, spoken)?;
     }
-    Ok(true)
+    Ok(())
 }
 
-fn chain_path(chain: &[&Rule]) -> Result<PkmString, AllocError> {
-    let mut path = PkmString::new();
-    for (i, rule) in chain.iter().enumerate() {
-        if i > 0 {
-            path.push('/')?;
-        }
-        for c in rule.name.as_str().chars() {
-            path.push(c)?;
-        }
+/// A triggered rule: side effects always execute; a verdict is a
+/// candidate; an abstention walks up the rule's own parentage to the
+/// first ancestor with a direct verdict, which speaks once for the region.
+/// Intermediate abstaining ancestors execute nothing.
+fn trigger(
+    done: WalkFrame<'_>,
+    ancestors: &[WalkFrame<'_>],
+    snap: &Snapshot<'_>,
+    ctx: &EvalContext,
+    effects: &mut PkmVec<Effect>,
+    candidates: &mut PkmVec<VerdictCandidate>,
+    spoken: &mut PkmVec<*const Rule>,
+) -> Result<(), AllocError> {
+    let rule = done.rule;
+    if let Some(verdict) = resolve_rule(rule, done.path.as_str(), snap, ctx, effects)? {
+        return candidates.push(VerdictCandidate {
+            verdict,
+            priority: rule.priority,
+            rule: done.path,
+        });
     }
-    Ok(path)
+    let Some(speaker) = ancestors
+        .iter()
+        .rev()
+        .find(|frame| frame.rule.has_direct_verdict())
+    else {
+        // No speaker in the parentage: this branch contributes nothing;
+        // other branches or the backstop answer.
+        return Ok(());
+    };
+    let ancestor = speaker.rule;
+    if spoken
+        .iter()
+        .any(|p| core::ptr::eq(*p, ancestor as *const Rule))
+    {
+        return Ok(());
+    }
+    spoken.push(ancestor as *const Rule)?;
+    let verdict = resolve_rule(ancestor, speaker.path.as_str(), snap, ctx, effects)?;
+    // has_direct_verdict guarantees at least one verdict.
+    if let Some(verdict) = verdict {
+        candidates.push(VerdictCandidate {
+            verdict,
+            priority: ancestor.priority,
+            rule: speaker.path.try_clone()?,
+        })?;
+    }
+    Ok(())
 }
 
 /// Resolves one rule's action list: pushes its side effects (report dedup

@@ -222,6 +222,10 @@ struct peios_ntfe_outcome {
 	 * 0 = never. The Flow layer's sentence expiry.
 	 */
 	s64 expires_at;
+	/* FNV-1a-64 of the whole path, however long: `attributed` is cut
+	 * for the event, and a sentence's rule hash must name the rule.
+	 */
+	u64 attributed_hash;
 };
 
 /*
@@ -349,6 +353,14 @@ struct peios_ntfe_context_entry {
 
 #define PEIOS_NTFE_MAX_CONTEXTS		64U
 
+/*
+ * Walk bounds: NTFE's own, on top of the LCS runtime limits. A layer's
+ * root rules are at depth 0; a rule deeper than the bound refuses the
+ * generation.
+ */
+#define PEIOS_NTFE_MAX_RULE_DEPTH	12
+#define PEIOS_NTFE_MAX_RULES		4096
+
 struct peios_ntfe_context_table {
 	struct rcu_head rcu;
 	u32 count;
@@ -445,6 +457,7 @@ struct sk_buff *peios_ntfe_teardown_build(const struct sk_buff *skb,
 					 const struct peios_ntfe_snapshot *snap);
 bool peios_ntfe_refuse(struct sk_buff *skb, const struct nf_hook_state *state,
 		      const struct peios_ntfe_snapshot *snap, u8 kind);
+void peios_ntfe_refuse_init(void);
 
 /*
  * The counter store (counters.c): machine-scoped streams, materialized as

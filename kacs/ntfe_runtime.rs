@@ -27,6 +27,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::pnp_core::eval::{evaluate, Effect, EvalContext};
+use crate::pnp_core::hash::name_hash;
 use crate::pnp_core::ingest::{build_forest, check_forests, RuleInput};
 use crate::pnp_core::pkm_alloc::{String as PkmString, Vec as PkmVec};
 use crate::pnp_core::rule::{Forest, Layer};
@@ -181,12 +182,17 @@ fn is_service_sid(sid: &[u8]) -> bool {
 /// hyphenated 8-4-4-4-12.
 fn guid_text(guid: &[u8; 16]) -> [u8; 36] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
+    // PCDS §2 (String Format): Data1, Data2 and Data3 are little-endian
+    // numbers written most significant nibble first; Data4 is bytes in
+    // order (PEI-1309 — this once wrote all sixteen in storage order).
+    const ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
     let mut out = [b'-'; 36];
     let mut o = 0usize;
-    for (i, b) in guid.iter().enumerate() {
+    for (i, &at) in ORDER.iter().enumerate() {
         if i == 4 || i == 6 || i == 8 || i == 10 {
             o += 1;
         }
+        let b = guid[at];
         out[o] = HEX[usize::from(b >> 4)];
         out[o + 1] = HEX[usize::from(b & 0xf)];
         o += 2;
@@ -315,6 +321,8 @@ pub struct NtfeOutcomeC {
     /// Epoch seconds when a consulted live-time condition next flips;
     /// 0 = never (the Flow layer's sentence expiry).
     expires_at: i64,
+    /// FNV-1a-64 of the whole attribution path, however long.
+    attributed_hash: u64,
 }
 
 /// Mirror of `struct peios_ntfe_view` (ntfe.h). Field-for-field.
@@ -979,5 +987,6 @@ pub extern "C" fn ntfe_rust_evaluate(
         out.attributed[i] = byte as c_char;
     }
     out.attributed[n] = 0;
+    out.attributed_hash = name_hash(evaluation.attributed_to.as_str());
     0
 }

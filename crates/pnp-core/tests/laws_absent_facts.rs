@@ -119,6 +119,41 @@ fn rawpacket_lints_flow_state_and_tags_loudly() {
     assert!(lints.is_empty());
 }
 
+/// What the lint says is what evaluation does: a fact the layer never has
+/// is false there even when the snapshot handed in carries it (the kernel
+/// builds one snapshot per seat and judges every layer from it, PEI-1302).
+#[test]
+fn facts_never_at_a_layer_never_match_there() {
+    let mut snap = tcp_in("10.0.0.7", 5555, "10.0.0.5", 22);
+    snap.ttl = Some(64);
+    snap.length = Some(60);
+    snap.tcp_flags = Some(0x02);
+    snap.flow_state = Some(FlowState::New);
+    for rule in [
+        rb("ttl").int("Ttl.Equal", 64),
+        rb("length").int("Length.Equal", 60),
+        rb("flags").list("TcpFlags.Has", &["syn"]),
+    ] {
+        let ev = judge_in(Layer::Flow, vec![rule.actions(&["PASS"])], &snap);
+        assert!(ev.backstop, "{} matched at Flow", ev.attributed_to.as_str());
+    }
+    for layer in [Layer::Flow, Layer::RawPacket] {
+        let ev = judge_in(
+            layer,
+            vec![rb("r").s("FlowState.Equal", "new").actions(&["PASS"])],
+            &snap,
+        );
+        assert!(ev.backstop, "FlowState matched at {layer:?}");
+    }
+    // At the Packet layer the same facts are the packet's, and match.
+    let ev = judge_in(
+        Layer::Packet,
+        vec![rb("r").int("Ttl.Equal", 64).actions(&["PASS"])],
+        &snap,
+    );
+    assert_eq!(ev.verdict, Verdict::Pass);
+}
+
 #[test]
 fn time_facts_compare_as_integers() {
     let roots = || {

@@ -55,10 +55,6 @@
 #define NTFE_REG_MULTI_SZ		7U
 #define NTFE_REG_QWORD			11U
 
-/* Walk bounds: NTFE's own, on top of the LCS runtime limits. */
-#define PEIOS_NTFE_MAX_RULE_DEPTH	12
-#define PEIOS_NTFE_MAX_RULES		4096
-
 struct peios_ntfe_walk {
 	u32 source_id;
 	u64 next_sequence;
@@ -837,8 +833,17 @@ static long ntfe_interface_child_cb(struct peios_ntfe_walk *walk, void *ctx,
 				   const u8 child_guid[16], const u8 *name,
 				   u32 name_len)
 {
-	return ntfe_for_each_child(walk, child_guid, ntfe_interface_status_cb,
-				  ctx);
+	long ret;
+
+	ret = ntfe_for_each_child(walk, child_guid, ntfe_interface_status_cb,
+				 ctx);
+	/* An interface key that cannot be listed is an interface without
+	 * a context, not a failed table (PEI-1306).
+	 */
+	if (ret)
+		pr_warn("ntfe: network context: could not list an interface's subkeys (%ld)\n",
+			ret);
+	return 0;
 }
 
 /*
@@ -869,6 +874,11 @@ static long ntfe_refresh_context(struct peios_ntfe_walk *walk,
 			ret = -ENOMEM;
 			goto out;
 		}
+		/* A list that cannot be read keeps the previous table: a
+		 * table published from half a list would strip every network
+		 * after the failure of its Name and Trust, and with them every
+		 * rule that names them. Only a single record is skipped.
+		 */
 		ret = ntfe_for_each_child(walk, networks_guid,
 					 ntfe_network_child_cb, &nets);
 		if (ret)

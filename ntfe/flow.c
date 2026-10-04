@@ -21,8 +21,10 @@
  * registry must not lie about what is enforced.
  *
  * The cache holds the verdict only. Effects run at evaluation and never
- * per packet. DROP and REJECT sentences persist: a cached REJECT refuses
- * every subsequent packet of the flow (each retransmit gets its answer).
+ * per packet. DROP and REJECT sentences persist on a confirmed flow: a
+ * cached REJECT refuses every later packet of it. A new flow refused on
+ * its first packet is never confirmed, so its entry dies with the packet
+ * and a retransmission is judged afresh.
  * A flow whose extension could not be allocated has nowhere to hold a
  * sentence and is evaluated on every packet, counted.
  *
@@ -265,8 +267,19 @@ static void ntfe_flow_identity(struct sk_buff *skb,
 		peios_ntfe_identity_resolve(skb, state, snap, other, id);
 		if (id->unresolved)
 			atomic64_inc(&peios_ntfe_stats.identity_unresolved);
-		if (id->kind == PEIOS_NTFE_LOCAL_ABSENT)
+		if (id->kind == PEIOS_NTFE_LOCAL_ABSENT) {
+			/* Not recorded: the outbound seat may still record
+			 * this end. Until it does, the slot confesses that it
+			 * went unattributed (PEI-1308).
+			 */
+			if (pc && id->unresolved) {
+				spin_lock_bh(&ct->lock);
+				if (!pc->owner_recorded[s])
+					WRITE_ONCE(pc->owner_unresolved[s], 1);
+				spin_unlock_bh(&ct->lock);
+			}
 			continue;
+		}
 		if (!pc) {
 			p->owned[s] = true;
 			continue;
@@ -281,7 +294,8 @@ static void ntfe_flow_identity(struct sk_buff *skb,
 			spin_unlock_bh(&ct->lock);
 		} else {
 			/* Two CPUs on a new flow's first packets: the first
-			 * record stands, as the first sentence does.
+			 * record stands (unlike a sentence, where the second
+			 * write wins), and this CPU judges what it recorded.
 			 */
 			spin_unlock_bh(&ct->lock);
 			peios_ntfe_identity_release(id);
@@ -349,7 +363,7 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 	struct peios_ntfe_ct *pc;
 	u64 gen = ntfe_rust_generation();
 	u8 evflags = 0;
-	bool hit = false;
+	bool hit = false, other_rules = false;
 	u32 slot;
 	int ret;
 
@@ -422,9 +436,10 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 
 		cur.generation = gen;
 		cur.expires_at = out.expires_at;
-		cur.rule_hash = peios_ntfe_path_hash(out.attributed,
-						    strnlen(out.attributed,
-							    sizeof(out.attributed)));
+		/* The whole path's hash: `attributed` is cut short for the
+		 * event, and a long path's prefix names no rule (PEI-1308).
+		 */
+		cur.rule_hash = out.attributed_hash;
 		cur.verdict = out.verdict;
 		cur.reject_kind = out.reject_kind;
 		if (pc) {
@@ -434,37 +449,46 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 			atomic64_inc(&peios_ntfe_stats.flow_uncached);
 		}
 
-		/* The refusal, when it is one, answers the packet in hand
-		 * (the packet snapshot, not the flow view) and goes out before
-		 * the event so the event can confess a degradation. The event
-		 * describes the flow as judged.
-		 */
-		if (out.verdict == PEIOS_NTFE_VERDICT_REJECT) {
-			bool sent = peios_ntfe_refuse(skb, state, snap,
-						     out.reject_kind);
-
-			if (!sent)
-				evflags |= PEIOS_NTFE_EV_F_REJECT_DEGRADED;
-			peios_ntfe_event_emit(&view, &out, PEIOS_NTFE_LAYER_FLOW,
-					     evflags);
-			ntfe_identity_pair_release(&ids);
-			return NF_DROP;
-		}
-		peios_ntfe_event_emit(&view, &out, PEIOS_NTFE_LAYER_FLOW, evflags);
-		ntfe_identity_pair_release(&ids);
 	}
 
 	/* A loopback flow answers to both endpoints' sentences: the other
 	 * endpoint's, when current, can only make this one stricter. A stale
-	 * one is that seat's to refresh when it next sees the flow.
+	 * one is that seat's to refresh when it next sees the flow. This
+	 * comes before any refusal: a REJECT the other end's DROP overrules
+	 * sends nothing (PEI-1303).
 	 */
 	if (snap->loopback && pc &&
 	    ntfe_sentence_read(&pc->sentence[slot ^ 1], &other) &&
 	    ntfe_sentence_current(&other, gen, snap->t_secs) &&
 	    ntfe_sentence_stricter(&other, &cur))
-		cur = other;
+		other_rules = true;
 
-	return ntfe_apply_sentence(skb, state, snap, &cur);
+	if (!hit) {
+		const struct peios_ntfe_sentence *final = other_rules ? &other :
+								      &cur;
+		unsigned int nf = NF_DROP;
+
+		/* The refusal, when it is one, answers the packet in hand
+		 * (the packet snapshot, not the flow view) and goes out before
+		 * the event so the event can confess a degradation. The event
+		 * describes the flow as this seat judged it.
+		 */
+		if (final->verdict == PEIOS_NTFE_VERDICT_REJECT) {
+			bool sent = peios_ntfe_refuse(skb, state, snap,
+						     final->reject_kind);
+
+			if (!sent && !other_rules)
+				evflags |= PEIOS_NTFE_EV_F_REJECT_DEGRADED;
+		} else if (final->verdict == PEIOS_NTFE_VERDICT_PASS) {
+			nf = NF_ACCEPT;
+		}
+		peios_ntfe_event_emit(&view, &out, PEIOS_NTFE_LAYER_FLOW, evflags);
+		ntfe_identity_pair_release(&ids);
+		return nf;
+	}
+
+	return ntfe_apply_sentence(skb, state, snap,
+				   other_rules ? &other : &cur);
 }
 
 /* --- the flows dump ------------------------------------------------- */
@@ -489,8 +513,12 @@ static void ntfe_owner_to_rec(const struct peios_ntfe_ct *pc,
 {
 	const struct peios_ntfe_owner *o = &pc->owner[slot];
 
-	if (!smp_load_acquire(&pc->owner_recorded[slot]))
+	if (!smp_load_acquire(&pc->owner_recorded[slot])) {
+		/* An end judged but never seen: absent, and confessed. */
+		rec->owner_unresolved[slot] =
+			READ_ONCE(pc->owner_unresolved[slot]);
 		return;
+	}
 	rec->owner_kind[slot] = READ_ONCE(pc->owner_kind[slot]);
 	rec->owner_unresolved[slot] = READ_ONCE(pc->owner_unresolved[slot]);
 	rec->owner_pid[slot] = o->pid;
@@ -571,11 +599,12 @@ static void ntfe_flow_fill(struct peios_ntfe_flow_rec *rec,
 		ntfe_sentence_to_rec(&pc->sentence[1], rec, 1);
 		ntfe_owner_to_rec(pc, rec, 0);
 		ntfe_owner_to_rec(pc, rec, 1);
-		rec->n_tags = min_t(u32,
-				    peios_ntfe_tags_snapshot(ct, rec->tag_hash,
-							    rec->tag_value,
-							    PEIOS_NTFE_FLOW_MAX_TAGS),
-				    PEIOS_NTFE_FLOW_MAX_TAGS);
+		/* The flow's total: a reader seeing more than the record
+		 * lists knows some are missing (PEI-1308).
+		 */
+		rec->n_tags = peios_ntfe_tags_snapshot(ct, rec->tag_hash,
+						      rec->tag_value,
+						      PEIOS_NTFE_FLOW_MAX_TAGS);
 	}
 }
 
@@ -599,13 +628,19 @@ long peios_ntfe_flows_dump(struct peios_ntfe_flows_query *query)
 	local_bh_disable();
 	for (i = 0; i < nf_conntrack_htable_size; i++) {
 		spinlock_t *lockp = &nf_conntrack_locks[i % CONNTRACK_LOCKS];
+		u32 taken = 0, skip, idx;
+		bool first = true, more;
 
+again:
 		nf_conntrack_lock(lockp);
 		/* The table may have been resized while unlocked. */
 		if (i >= nf_conntrack_htable_size) {
 			spin_unlock(lockp);
 			break;
 		}
+		skip = taken;
+		idx = 0;
+		more = false;
 		hlist_nulls_for_each_entry(h, nn, &nf_conntrack_hash[i], hnnode) {
 			struct nf_conn *ct = nf_ct_tuplehash_to_ctrack(h);
 
@@ -615,17 +650,29 @@ long peios_ntfe_flows_dump(struct peios_ntfe_flows_query *query)
 				continue;
 			if (nf_ct_is_expired(ct) || nf_ct_is_dying(ct))
 				continue;
-			total++;
-			if (written + n >= room || n == NTFE_FLOWS_BATCH)
+			if (first)
+				total++;
+			if (idx++ < skip)
+				continue;	/* taken on an earlier pass */
+			if (written + n >= room)
 				continue;	/* count only */
+			if (n == NTFE_FLOWS_BATCH) {
+				more = true;
+				continue;
+			}
 			ntfe_flow_fill(&batch[n++], ct);
+			taken++;
 		}
 		spin_unlock(lockp);
 
-		/* Flush between buckets, never inside one (a bucket is walked
-		 * under its lock; copying to user must not be).
+		/* Flush between passes over a bucket, never inside one (a
+		 * bucket is walked under its lock; copying to user must not
+		 * be). A bucket with more flows than the batch holds is walked
+		 * again from where the batch filled, rather than losing the
+		 * rest (PEI-1308); a flow that came or went between the passes
+		 * is the dump's ordinary race.
 		 */
-		if (n >= NTFE_FLOWS_BATCH / 2) {
+		if (n >= NTFE_FLOWS_BATCH / 2 || more) {
 			local_bh_enable();
 			if (copy_to_user(ubuf + written, batch, n * sizeof(*batch))) {
 				ret = -EFAULT;
@@ -634,6 +681,10 @@ long peios_ntfe_flows_dump(struct peios_ntfe_flows_query *query)
 			written += n;
 			n = 0;
 			local_bh_disable();
+		}
+		if (more) {
+			first = false;
+			goto again;
 		}
 	}
 	local_bh_enable();

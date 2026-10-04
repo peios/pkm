@@ -159,9 +159,45 @@ pub fn build_forest(layer: Layer, roots: &[RuleInput]) -> Result<BuildOutput, Bu
         view_sites: PkmVec::new(),
         profiles: PkmVec::new(),
     };
+    // The tree is walked with an explicit stack, not recursion: this runs
+    // on a kernel stack, and a rule's parse is too large a frame to repeat
+    // once per level of nesting (PEI-1299). Depth costs heap here.
+    let mut stack: PkmVec<BuildFrame<'_>> = PkmVec::new();
     for input in roots {
-        let rule = build_rule(layer, input, "", 0, &mut lints, &mut collector)?;
-        out_roots.push(rule)?;
+        let rule = build_node(layer, input, "", 0, &mut lints, &mut collector)?;
+        stack.push(BuildFrame {
+            input,
+            rule,
+            path: join_path("", input.name.as_str())?,
+            next: 0,
+        })?;
+        while let Some(top) = stack.last_mut() {
+            let input: &RuleInput = top.input;
+            if let Some(child) = input.children.get(top.next) {
+                top.next += 1;
+                let rule = build_node(
+                    layer,
+                    child,
+                    top.path.as_str(),
+                    top.rule.priority,
+                    &mut lints,
+                    &mut collector,
+                )?;
+                let path = join_path(top.path.as_str(), child.name.as_str())?;
+                stack.push(BuildFrame {
+                    input: child,
+                    rule,
+                    path,
+                    next: 0,
+                })?;
+                continue;
+            }
+            let Some(done) = stack.pop() else { break };
+            match stack.last_mut() {
+                Some(parent) => parent.rule.children.push(done.rule)?,
+                None => out_roots.push(done.rule)?,
+            }
+        }
     }
     check_collisions(&collector.tag_names, true)?;
     check_collisions(&collector.streams, false)?;
@@ -257,7 +293,20 @@ fn check_collisions(names: &[NamedHash], tags: bool) -> Result<(), BuildError> {
     Ok(())
 }
 
-fn build_rule(
+/// One open rule on the build stack: its input, the rule built from its
+/// own values, its path, and the next child to build.
+struct BuildFrame<'i> {
+    input: &'i RuleInput,
+    rule: Rule,
+    path: PkmString,
+    next: usize,
+}
+
+/// Builds one rule from its own values, without its exceptions (the
+/// caller attaches those). Never inlined: its frame must appear on the
+/// stack once, whatever the depth of the tree.
+#[inline(never)]
+fn build_node(
     layer: Layer,
     input: &RuleInput,
     parent_path: &str,
@@ -316,8 +365,8 @@ fn build_rule(
                 }
             }
             _ => {
-                let condition = parse_condition(key.as_str(), value, &path, collector)?;
-                lint_condition(layer, &condition, &path, key.as_str(), lints)?;
+                let mut condition = parse_condition(key.as_str(), value, &path, collector)?;
+                condition.never = lint_condition(layer, &condition, &path, key.as_str(), lints)?;
                 if condition.is_live_time() {
                     time_conditions.push(condition)?;
                 } else {
@@ -334,25 +383,13 @@ fn build_rule(
     // A rule key with no Actions value is legal and means NULL (abstain):
     // authors nest pure-grouping rules. An empty Actions list means the same.
 
-    let mut children = PkmVec::new();
-    for child in input.children.iter() {
-        children.push(build_rule(
-            layer,
-            child,
-            path.as_str(),
-            priority,
-            lints,
-            collector,
-        )?)?;
-    }
-
     Ok(Rule {
         name: str_to_pkm(name)?,
         conditions,
         priority,
         enabled,
         actions,
-        children,
+        children: PkmVec::new(),
     })
 }
 
@@ -488,15 +525,21 @@ fn parse_condition(
             CondOp::EqualInt(patterns)
         }
         ("Equal", FactFamily::Str) => {
-            // Process GUIDs compare as lowercase text: the glue emits
-            // lowercase, so patterns are folded once here.
+            // Process GUIDs compare as lowercase unbraced PCDS text: the
+            // glue emits that, so patterns are folded once here, and the
+            // braced canonical form PCDS parsers accept is unbraced.
             let fold = matches!(
                 fact_for_names,
                 Some(FactId::LocalProcess) | Some(FactId::RemoteProcess)
             );
             let mut patterns = PkmVec::new();
             for_each_element(value, &mut |el| {
-                let s = el.as_str().ok_or(())?;
+                let mut s = el.as_str().ok_or(())?;
+                if fold {
+                    if let Some(inner) = s.strip_prefix('{').and_then(|t| t.strip_suffix('}')) {
+                        s = inner;
+                    }
+                }
                 let mut out = PkmString::new();
                 for c in s.chars() {
                     out.push(if fold { c.to_ascii_lowercase() } else { c })
@@ -548,7 +591,11 @@ fn parse_condition(
         _ => return Err(bad_op()),
     };
 
-    Ok(Condition { key: cond_key, op })
+    Ok(Condition {
+        key: cond_key,
+        op,
+        never: false,
+    })
 }
 
 /// Builds a `BadPattern`/`BadOperator` error; if allocating the message
@@ -771,14 +818,16 @@ fn flag_mask(value: &RegValue) -> Option<u8> {
 /// can never hold (absent-fact law), so the authoring surface should shout.
 /// One exception is not legal: `Present`, which looks through the law,
 /// would turn such a fact into an always-true or always-false condition
-/// with a meaningful-looking name, so it refuses the generation.
+/// with a meaningful-looking name, so it refuses the generation. Returns
+/// whether the key never exists at the layer, so the condition can be
+/// built never to hold.
 fn lint_condition(
     layer: Layer,
     condition: &Condition,
     path: &PkmString,
     key: &str,
     lints: &mut PkmVec<LintWarning>,
-) -> Result<(), BuildError> {
+) -> Result<bool, BuildError> {
     let never = match layer {
         // The interface layer has no stores: a tag or counter read there
         // is not dead, it is meaningless, so it refuses outright. Its
@@ -828,7 +877,7 @@ fn lint_condition(
             kind: LintKind::FactNeverPresentAtLayer,
         })?;
     }
-    Ok(())
+    Ok(never)
 }
 
 /// Small extension: fallible clone that maps into `BuildError`.

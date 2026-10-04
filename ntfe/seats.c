@@ -23,8 +23,9 @@
  * REJECT tells the story its kind names (ratified): Refused = RST for
  * TCP, ICMP/ICMPv6 port-unreachable otherwise ("nothing is listening");
  * Prohibited = ICMP admin-prohibited for every protocol ("policy refused
- * you"). Every seat can answer for IP traffic (refuse.c); only a protocol
- * with no refusal vocabulary (non-IP) degrades REJECT to DROP, counted.
+ * you"). Every seat can answer for IP traffic (refuse.c); what cannot be
+ * answered (non-IP, a group destination, a packet the builders decline)
+ * degrades REJECT to DROP, counted.
  *
  * NTFE does not judge its own refusals: an answer it built carries the skb
  * refusal bit, and every seat waves it through unjudged (counted).

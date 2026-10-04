@@ -631,6 +631,12 @@ pub struct Condition {
     pub key: CondKey,
     /// How it compares.
     pub op: CondOp,
+    /// The key never exists at the forest's layer (ingestion's
+    /// `FactNeverPresentAtLayer` lint): the condition is false by the
+    /// absent-fact law whatever the snapshot carries. Snapshots are built
+    /// per seat, not per layer, so the law is kept here rather than
+    /// trusted to every snapshot's builder (PEI-1302).
+    pub never: bool,
 }
 
 impl Condition {
@@ -713,6 +719,9 @@ impl Condition {
     /// Evaluates the condition against a snapshot (absent-fact law: an
     /// unresolvable key is false).
     pub fn matches(&self, snap: &Snapshot<'_>) -> bool {
+        if self.never {
+            return false;
+        }
         if let CondOp::Present(want) = self.op {
             return self.present(snap) == want;
         }

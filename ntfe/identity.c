@@ -183,12 +183,27 @@ static struct sock *ntfe_raw_v6_lookup(struct net *net, u8 protocol,
 #endif
 
 /*
+ * The receiver early demux already found, with a reference. Only a
+ * unicast transport's: early demux also attaches the one socket a
+ * multicast datagram matches when it matches one, but that datagram is
+ * still `shared` (PEI-1305), so the callers ask after that check.
+ */
+static struct sock *ntfe_early_receiver(struct sock *early)
+{
+	if (early)
+		sock_hold(early);
+	return early;
+}
+
+/*
  * The socket that will receive this packet, with a reference the caller
  * releases (sock_gen_put), or NULL. `*handled` says whether the protocol
- * is one the stack consumes when no socket does.
+ * is one the stack consumes when no socket does. `early` is the receiver
+ * early demux attached to the packet, if any.
  */
 static struct sock *ntfe_receiver_v4(struct net *net, struct sk_buff *skb,
-				    int dif, bool *handled, bool *shared)
+				    int dif, struct sock *early, bool *handled,
+				    bool *shared)
 {
 	const struct iphdr *iph = ip_hdr(skb);
 	const struct rtable *rt = skb_rtable(skb);
@@ -207,6 +222,8 @@ static struct sock *ntfe_receiver_v4(struct net *net, struct sk_buff *skb,
 	*shared = false;
 	switch (iph->protocol) {
 	case IPPROTO_TCP:
+		if (early)
+			return ntfe_early_receiver(early);
 		th = skb_header_pointer(skb, thoff, sizeof(_th), &_th);
 		if (!th)
 			return NULL;
@@ -215,10 +232,13 @@ static struct sock *ntfe_receiver_v4(struct net *net, struct sk_buff *skb,
 				   th->dest, dif);
 	case IPPROTO_UDP:
 	case IPPROTO_UDPLITE:
-		if (rt && (rt->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST))) {
+		if (ipv4_is_multicast(iph->daddr) || ipv4_is_lbcast(iph->daddr) ||
+		    (rt && (rt->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST)))) {
 			*shared = true;
 			return NULL;
 		}
+		if (early)
+			return ntfe_early_receiver(early);
 		uh = skb_header_pointer(skb, thoff, sizeof(_uh), &_uh);
 		if (!uh)
 			return NULL;
@@ -233,7 +253,8 @@ static struct sock *ntfe_receiver_v4(struct net *net, struct sk_buff *skb,
 
 #if IS_ENABLED(CONFIG_IPV6)
 static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
-				    int dif, bool *handled, bool *shared)
+				    int dif, struct sock *early, bool *handled,
+				    bool *shared)
 {
 	const struct ipv6hdr *ip6 = ipv6_hdr(skb);
 	struct tcphdr _th;
@@ -252,6 +273,8 @@ static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 		   rcu_access_pointer(inet6_protos[proto]) != NULL;
 	switch (proto) {
 	case IPPROTO_TCP:
+		if (early)
+			return ntfe_early_receiver(early);
 		th = skb_header_pointer(skb, thoff, sizeof(_th), &_th);
 		if (!th)
 			return NULL;
@@ -264,6 +287,8 @@ static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 			*shared = true;
 			return NULL;
 		}
+		if (early)
+			return ntfe_early_receiver(early);
 		uh = skb_header_pointer(skb, thoff, sizeof(_uh), &_uh);
 		if (!uh)
 			return NULL;
@@ -276,7 +301,8 @@ static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 }
 #else
 static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
-				    int dif, bool *handled, bool *shared)
+				    int dif, struct sock *early, bool *handled,
+				    bool *shared)
 {
 	*handled = false;
 	*shared = false;
@@ -284,26 +310,33 @@ static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 }
 #endif
 
-/* Whether the packet, as it stands, is addressed to this machine. */
+/*
+ * Who receives the packet, as it stands. Inbound, a socket on the skb is
+ * the receiver early demux found, and saves the lookup; on a loopback
+ * packet at the outbound seat it is the sender, and is no answer at all
+ * (PEI-1301), so the caller says which it is.
+ */
 static void ntfe_identity_receiver(struct sk_buff *skb,
-				  const struct net_device *dev,
+				  const struct net_device *dev, bool inbound,
 				  struct peios_ntfe_identity *out)
 {
 	struct net *net = dev ? dev_net(dev) : NULL;
 	bool handled = false, shared = false;
+	struct sock *early = NULL;
 	const struct sock *full;
 	struct sock *sk = NULL;
 	int dif;
 
-	/* Early demux already found the receiver: use it, no lookup. */
-	if (skb->sk && sk_fullsock(skb->sk)) {
-		ntfe_identity_from_sock(skb->sk, out);
-		return;
-	}
+	if (inbound && skb->sk && sk_fullsock(skb->sk))
+		early = skb->sk;
 	/* No device, or one outside any namespace (a synthetic device in a
 	 * test): nothing to look up in — the stack's, confessed.
 	 */
 	if (!net) {
+		if (early) {
+			ntfe_identity_from_sock(early, out);
+			return;
+		}
 		out->kind = PEIOS_NTFE_LOCAL_KERNEL;
 		out->unresolved = 1;
 		return;
@@ -311,10 +344,10 @@ static void ntfe_identity_receiver(struct sk_buff *skb,
 	dif = dev->ifindex;
 	switch (ntohs(skb->protocol)) {
 	case ETH_P_IP:
-		sk = ntfe_receiver_v4(net, skb, dif, &handled, &shared);
+		sk = ntfe_receiver_v4(net, skb, dif, early, &handled, &shared);
 		break;
 	case ETH_P_IPV6:
-		sk = ntfe_receiver_v6(net, skb, dif, &handled, &shared);
+		sk = ntfe_receiver_v6(net, skb, dif, early, &handled, &shared);
 		break;
 	default:
 		break;
@@ -358,11 +391,11 @@ void peios_ntfe_identity_resolve(struct sk_buff *skb,
 		/* The other end of a loopback flow: the receiver of this very
 		 * packet, looked up early so the inbound seat need not.
 		 */
-		ntfe_identity_receiver(skb, state->out, out);
+		ntfe_identity_receiver(skb, state->out, false, out);
 		return;
 	}
 	if (!other_end) {
-		ntfe_identity_receiver(skb, state->in, out);
+		ntfe_identity_receiver(skb, state->in, true, out);
 		return;
 	}
 	/* The inbound seat cannot see a loopback packet's sender (loopback

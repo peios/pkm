@@ -191,6 +191,8 @@ static int __init peios_ntfe_init(void)
 	 */
 	init_net.ct.sysctl_acct = 1;
 
+	peios_ntfe_refuse_init();
+
 	/* The verdict event stream and /dev/peios-ntfe. */
 	ret = peios_ntfe_events_init();
 	if (ret) {

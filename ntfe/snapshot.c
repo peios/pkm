@@ -241,7 +241,12 @@ static int snapshot_ipv6(const struct sk_buff *skb, int offset,
 	snap->fragment = 0;
 	snap->has |= PEIOS_NTFE_HAS_FRAGMENT;
 
-	/* Walk a bounded chain of extension headers to the L4 protocol. */
+	/*
+	 * Walk a bounded chain of extension headers to the L4 protocol.
+	 * Every exit names the header the walk stopped at as the protocol
+	 * (PEI-1304): one it could not read, or the one after the last hop
+	 * it may take; only a header it reached by walking gets L4 facts.
+	 */
 	nexthdr = ihp->nexthdr;
 	for (hops = 0; hops < 8; hops++) {
 		struct ipv6_opt_hdr oh;
@@ -254,7 +259,7 @@ static int snapshot_ipv6(const struct sk_buff *skb, int offset,
 			ohp = skb_header_pointer(skb, l4_offset, sizeof(oh),
 						 &oh);
 			if (!ohp)
-				return 0;
+				goto stop;
 			nexthdr = ohp->nexthdr;
 			l4_offset += (ohp->hdrlen + 1) * 8;
 			continue;
@@ -265,12 +270,15 @@ static int snapshot_ipv6(const struct sk_buff *skb, int offset,
 			fhp = skb_header_pointer(skb, l4_offset, sizeof(fh),
 						 &fh);
 			if (!fhp)
-				return 0;
+				goto stop;
 			snap->fragment = 1;
-			/* Non-first fragment: no L4 facts. */
-			if (fhp->frag_off & htons(0xfff8))
-				return 0;
 			nexthdr = fhp->nexthdr;
+			/* Non-first fragment: the protocol its fragment header
+			 * names, as IPv4's later fragments read theirs, and no
+			 * L4 facts (there are none to read).
+			 */
+			if (fhp->frag_off & htons(0xfff8))
+				goto stop;
 			l4_offset += sizeof(struct frag_hdr);
 			continue;
 		}
@@ -280,6 +288,22 @@ static int snapshot_ipv6(const struct sk_buff *skb, int offset,
 			return 0;
 		}
 	}
+	/* Eight hops taken: the header after them is the protocol, with L4
+	 * facts if it is not yet another extension header.
+	 */
+	switch (nexthdr) {
+	case NEXTHDR_HOP:
+	case NEXTHDR_ROUTING:
+	case NEXTHDR_DEST:
+	case NEXTHDR_FRAGMENT:
+		break;
+	default:
+		snap->protocol = nexthdr;
+		snapshot_l4(skb, l4_offset, nexthdr, snap);
+		return 0;
+	}
+stop:
+	snap->protocol = nexthdr;
 	return 0;
 }
 

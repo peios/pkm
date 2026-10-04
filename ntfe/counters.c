@@ -527,69 +527,95 @@ u64 peios_ntfe_counters_cells(void)
 
 /* --- the viewer's read: dump every cell of every table ------------------ */
 
+static void ntfe_counter_fill(struct peios_ntfe_counter_rec *rec,
+			      const struct ntfe_counter_table *t,
+			      struct ntfe_counter_cell *c, u64 now)
+{
+	u32 w;
+
+	memset(rec, 0, sizeof(*rec));
+	memcpy(rec->name, t->name, sizeof(rec->name));
+	rec->hash = t->hash;
+	rec->keyspec = t->keyspec;
+	rec->family = c->key.family;
+	rec->ifindex = c->key.ifindex;
+	memcpy(rec->src_addr, c->key.src, 16);
+	memcpy(rec->dst_addr, c->key.dst, 16);
+	rec->total = READ_ONCE(c->total);
+	rec->last_secs = c->last_secs;
+	rec->n_windows = t->n_windows;
+	for (w = 0; w < t->n_windows; w++) {
+		rec->window_secs[w] = t->windows[w];
+		rec->window_value[w] = ntfe_ring_sum(&c->rings[w],
+						     t->windows[w], now);
+	}
+}
+
+/* The most records one pass gathers before copying out. */
+#define NTFE_COUNTERS_BATCH		4096U
+
+/*
+ * The cells are gathered into a kernel batch under one RCU read section
+ * and copied out after it: the walk never leaves the read section while
+ * it holds a table or a cell (PEI-1308 — it once dropped the lock to
+ * copy each record, and walked on through memory it no longer
+ * protected). A store with more cells than the batch takes more than
+ * one pass, each resuming after the cells already written; the dump is
+ * a best-effort snapshot (counters are approximate by design), so a cell
+ * that came or went between passes may be missed or seen twice.
+ */
 long peios_ntfe_counters_dump(struct peios_ntfe_counters_query *query)
 {
 	struct peios_ntfe_counter_rec __user *urec =
 		u64_to_user_ptr(query->buf);
 	u32 max = query->buf_len / sizeof(struct peios_ntfe_counter_rec);
-	struct peios_ntfe_counter_rec *rec;
+	struct peios_ntfe_counter_rec *recs;
 	struct ntfe_counter_table *t;
-	u32 written = 0, total = 0;
+	u32 written = 0, total = 0, room, n;
 	u64 now = ntfe_now_secs();
+	bool first = true;
 	long ret = 0;
 
-	rec = peios_ntfe_kunit_alloc_should_fail() ? NULL :
-		kzalloc(sizeof(*rec), GFP_KERNEL);
-	if (!rec)
+	room = clamp_t(u64, min_t(u64, max, peios_ntfe_counters_cells()), 1,
+		       NTFE_COUNTERS_BATCH);
+	recs = peios_ntfe_kunit_alloc_should_fail() ? NULL :
+		kvcalloc(room, sizeof(*recs), GFP_KERNEL);
+	if (!recs)
 		return -ENOMEM;
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(t, &ntfe_counter_tables, list) {
-		u32 b, w;
+	do {
+		u32 idx = 0;
 
-		for (b = 0; b < NTFE_COUNTER_HASH; b++) {
-			struct ntfe_counter_cell *c;
+		n = 0;
+		rcu_read_lock();
+		list_for_each_entry_rcu(t, &ntfe_counter_tables, list) {
+			u32 b;
 
-			hlist_for_each_entry_rcu(c, &t->heads[b], node) {
-				total++;
-				if (written >= max)
-					continue;
-				memset(rec, 0, sizeof(*rec));
-				memcpy(rec->name, t->name, sizeof(rec->name));
-				rec->hash = t->hash;
-				rec->keyspec = t->keyspec;
-				rec->family = c->key.family;
-				rec->ifindex = c->key.ifindex;
-				memcpy(rec->src_addr, c->key.src, 16);
-				memcpy(rec->dst_addr, c->key.dst, 16);
-				rec->total = READ_ONCE(c->total);
-				rec->last_secs = c->last_secs;
-				rec->n_windows = t->n_windows;
-				for (w = 0; w < t->n_windows; w++) {
-					rec->window_secs[w] = t->windows[w];
-					rec->window_value[w] = ntfe_ring_sum(
-						&c->rings[w], t->windows[w],
-						now);
+			for (b = 0; b < NTFE_COUNTER_HASH; b++) {
+				struct ntfe_counter_cell *c;
+
+				hlist_for_each_entry_rcu(c, &t->heads[b], node) {
+					if (first)
+						total++;
+					if (idx++ < written)
+						continue;
+					if (written + n >= max || n == room)
+						continue;
+					ntfe_counter_fill(&recs[n++], t, c, now);
 				}
-				rcu_read_unlock();
-				if (copy_to_user(&urec[written], rec,
-						 sizeof(*rec))) {
-					ret = -EFAULT;
-					goto out;
-				}
-				written++;
-				rcu_read_lock();
-				/* The list may have changed under us; the
-				 * dump is a snapshot at best-effort accuracy
-				 * (counters are approximate by design).
-				 */
 			}
 		}
-	}
-	rcu_read_unlock();
-out:
+		rcu_read_unlock();
+		first = false;
+		if (n && copy_to_user(&urec[written], recs, n * sizeof(*recs))) {
+			ret = -EFAULT;
+			break;
+		}
+		written += n;
+	} while (n == room && written < max);
+
 	query->count = written;
 	query->total = total;
-	kfree(rec);
+	kvfree(recs);
 	return ret;
 }

@@ -15,8 +15,9 @@
  *    peer answer, routed to a local address), so it goes through the
  *    normal output path and, for the local case, the loopback device —
  *    which retains the route, so no source validation stands in the way.
- *    The stack's own RST/ICMP handlers then fail the local socket with
- *    ECONNREFUSED or EHOSTUNREACH at once, instead of a connect timeout.
+ *    The stack's own RST/ICMP handlers then fail the local socket at once
+ *    (ECONNREFUSED, EHOSTUNREACH, or EACCES for IPv6 admin-prohibited),
+ *    instead of a connect timeout; see the deferred refusals below.
  *
  * Every answer carries the skb refusal bit: NTFE does not judge its own
  * refusals, and every seat waves them through (seats.c). That also closes
@@ -25,8 +26,10 @@
  *
  * What still degrades to DROP (counted, and confessed in the event): a
  * protocol with no refusal vocabulary (non-IP), a broadcast or multicast
- * destination, a packet the builders refuse to answer (fragments, a
- * failed checksum, a refusal of a refusal), or an allocation failure.
+ * destination, a packet the builders refuse to answer (a non-first
+ * fragment, a failed checksum, a refusal of a refusal), an ingress frame
+ * on a non-Ethernet device (no link header to answer through), or an
+ * allocation failure.
  */
 
 #include <linux/etherdevice.h>
@@ -40,6 +43,7 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv6.h>
 #include <linux/skbuff.h>
+#include <linux/workqueue.h>
 #include <net/ip.h>
 #include <net/ip6_checksum.h>
 #include <net/ipv6.h>
@@ -83,9 +87,23 @@ struct sk_buff *peios_ntfe_refuse_build(struct sk_buff *skb,
 	bool prohibited = kind == PEIOS_NTFE_REJECT_PROHIBITED;
 	bool tcp = snap->protocol == IPPROTO_TCP;
 	struct sk_buff *nskb = NULL;
+	int noff = skb_network_offset(skb);
 
 	if (ntfe_dst_is_group(skb, snap))
 		return NULL;
+
+	/*
+	 * The builders read the offending packet's headers, lengths and
+	 * transport offset relative to skb->data, assuming it points at the
+	 * network header, as it does at every hook they were written for.
+	 * At the egress seat it points at the link header the device has
+	 * already pushed, and the answer came out built from the wrong
+	 * bytes (PEI-1300). The packet is pulled to its network header for
+	 * the build, and pushed back after it.
+	 */
+	if (noff < 0)
+		return NULL;
+	__skb_pull(skb, noff);
 
 	if (snap->addr_family == 4) {
 		if (prohibited)
@@ -112,6 +130,7 @@ struct sk_buff *peios_ntfe_refuse_build(struct sk_buff *skb,
 							state->hook,
 							ICMPV6_PORT_UNREACH);
 	}
+	__skb_push(skb, noff);
 	if (!nskb)
 		return NULL;
 
@@ -259,13 +278,76 @@ struct sk_buff *peios_ntfe_teardown_build(const struct sk_buff *skb,
 	return nskb;
 }
 
+/*
+ * Deferred refusals. An outbound packet is refused in its sender's own
+ * context more often than not — connect() sends its SYN holding the
+ * socket — and the answer to ourselves is handled on the spot, as the
+ * loopback device delivers it when the transmit path re-enables bottom
+ * halves. TCP files an ICMP error that reaches a socket its owner holds
+ * as a soft error, which fails the connect only at the first SYN
+ * retransmission (PEI-1307; IPv4's error queue happened to wake a
+ * poller, IPv6's does not). A RST is safe: TCP queues it on the socket's
+ * backlog and handles it when the owner lets go. So an ICMP refusal of
+ * a TCP sender that is held is sent a tick later instead, by which time
+ * the call that sent the refused packet has returned. A full queue sends
+ * at once (the soft error is the old behaviour, not a lost answer).
+ */
+#define NTFE_DEFERRED_REFUSALS_MAX	256
+
+static struct sk_buff_head ntfe_deferred_refusals;
+
+static void ntfe_deferred_refusals_workfn(struct work_struct *work)
+{
+	struct sk_buff *nskb;
+
+	while ((nskb = skb_dequeue(&ntfe_deferred_refusals))) {
+		struct net *net = dev_net(skb_dst(nskb)->dev);
+
+		local_bh_disable();
+		if (nskb->protocol == htons(ETH_P_IP))
+			ip_local_out(net, NULL, nskb);
+		else
+			ip6_local_out(net, NULL, nskb);
+		local_bh_enable();
+	}
+}
+
+static DECLARE_DELAYED_WORK(ntfe_deferred_refusals_work,
+			    ntfe_deferred_refusals_workfn);
+
+void __init peios_ntfe_refuse_init(void)
+{
+	skb_queue_head_init(&ntfe_deferred_refusals);
+}
+
+/* Whether the answer must wait for the refused packet's sender to let go
+ * of its socket. Only an outbound packet's socket is its sender: inbound,
+ * a socket on the skb is the receiver early demux found.
+ */
+static bool ntfe_refusal_must_wait(const struct sk_buff *nskb,
+				   const struct sk_buff *skb, bool outbound)
+{
+	const struct sock *sk = skb->sk;
+	u8 proto;
+
+	if (!outbound || !sk || !sk_fullsock(sk) ||
+	    sk->sk_protocol != IPPROTO_TCP ||
+	    !sock_owned_by_user_nocheck(sk))
+		return false;
+	proto = nskb->protocol == htons(ETH_P_IP) ? ip_hdr(nskb)->protocol :
+						    ipv6_hdr(nskb)->nexthdr;
+	return proto == IPPROTO_ICMP || proto == IPPROTO_ICMPV6;
+}
+
 /* Route the packet by its own destination and hand it to the output
  * path: a refusal to ourselves lands on the loopback device, a teardown
  * toward the peer goes out to the wire.
  */
 static bool ntfe_refuse_send_self(struct sk_buff *nskb, struct sk_buff *skb,
-				 const struct nf_hook_state *state, u8 family)
+				 const struct nf_hook_state *state,
+				 const struct peios_ntfe_snapshot *snap)
 {
+	u8 family = snap->addr_family;
 	struct net *net = state->net;
 
 	/* The route helpers read the old route's device to choose. */
@@ -277,12 +359,23 @@ static bool ntfe_refuse_send_self(struct sk_buff *nskb, struct sk_buff *skb,
 			goto drop;
 		if (nskb->len > dst4_mtu(skb_dst(nskb)))
 			goto drop;
-		ip_local_out(net, NULL, nskb);
 	} else {
 		if (ip6_route_me_harder(net, NULL, nskb))
 			goto drop;
-		ip6_local_out(net, NULL, nskb);
 	}
+	/* The route is now the answer's own, counted: it can wait. */
+	if (ntfe_refusal_must_wait(nskb, skb,
+				   snap->direction == PEIOS_NTFE_DIR_OUT) &&
+	    skb_queue_len_lockless(&ntfe_deferred_refusals) <
+		    NTFE_DEFERRED_REFUSALS_MAX) {
+		skb_queue_tail(&ntfe_deferred_refusals, nskb);
+		schedule_delayed_work(&ntfe_deferred_refusals_work, 1);
+		return true;
+	}
+	if (family == 4)
+		ip_local_out(net, NULL, nskb);
+	else
+		ip6_local_out(net, NULL, nskb);
 	return true;
 drop:
 	kfree_skb(nskb);
@@ -303,7 +396,7 @@ bool peios_ntfe_refuse(struct sk_buff *skb, const struct nf_hook_state *state,
 	if (snap->seat == PEIOS_NTFE_SEAT_INGRESS)
 		sent = ntfe_refuse_send_wire(nskb, skb, state->in);
 	else
-		sent = ntfe_refuse_send_self(nskb, skb, state, snap->addr_family);
+		sent = ntfe_refuse_send_self(nskb, skb, state, snap);
 	if (sent)
 		atomic64_inc(&peios_ntfe_stats.refusals_emitted);
 	else
@@ -314,8 +407,7 @@ bool peios_ntfe_refuse(struct sk_buff *skb, const struct nf_hook_state *state,
 		struct sk_buff *reset = peios_ntfe_teardown_build(skb, state,
 								 snap);
 
-		if (reset && ntfe_refuse_send_self(reset, skb, state,
-						  snap->addr_family))
+		if (reset && ntfe_refuse_send_self(reset, skb, state, snap))
 			atomic64_inc(&peios_ntfe_stats.teardowns_emitted);
 	}
 	return sent;

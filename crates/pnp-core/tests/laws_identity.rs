@@ -257,6 +257,19 @@ fn the_process_guid_is_a_fact_for_runtime_authors() {
         &snap,
     );
     assert_eq!(ev.verdict, Verdict::Drop);
+
+    // PCDS's canonical form is braced; parsers accept it.
+    let ev = judge_in(
+        Layer::Flow,
+        vec![rb("this-process")
+            .s(
+                "Local.Process.Equal",
+                "{0f3a9c2e-1b4d-4e5f-8a6b-7c8d9e0f1a2b}",
+            )
+            .actions(&["DROP"])],
+        &snap,
+    );
+    assert_eq!(ev.verdict, Verdict::Drop);
 }
 
 #[test]

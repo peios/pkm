@@ -369,6 +369,105 @@ static void ntfe_kunit_end_to_end_enforcement(struct kunit *test)
 }
 
 /*
+ * The deepest tree ingestion admits, every rule carrying conditions,
+ * builds and evaluates. Building it once overflowed the kernel stack:
+ * the builder recursed per level with a frame of about a kilobyte
+ * (PEI-1299). The builder and the evaluator now walk with a heap stack,
+ * so depth costs no kernel stack. A leaf hit is attributed down the
+ * whole chain; a miss below the root is answered by the root.
+ */
+static void ntfe_kunit_deepest_tree(struct kunit *test)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_IN,
+		.pf = NFPROTO_IPV4,
+		.in = dev,
+		.net = &init_net,
+	};
+	struct peios_ntfe_snapshot snap;
+	struct peios_ntfe_outcome out;
+	char expect[(PEIOS_NTFE_MAX_RULE_DEPTH + 1) * 4];
+	struct sk_buff *skb;
+	void *b, *forest = NULL;
+	char name[4];
+	int depth, len = 0;
+
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	for (depth = 0; depth <= PEIOS_NTFE_MAX_RULE_DEPTH; depth++) {
+		snprintf(name, sizeof(name), "r%d", depth);
+		len += scnprintf(expect + len, sizeof(expect) - len, "%s%s",
+				 depth ? "/" : "", name);
+		KUNIT_ASSERT_EQ(test,
+				ntfe_rust_builder_rule_begin(b, name,
+							     strlen(name)),
+				0);
+		KUNIT_ASSERT_EQ(test,
+				ntfe_rust_builder_value_str(b, "Direction.Equal",
+							   15, "in", 2),
+				0);
+		if (depth == 0) {
+			ntfe_test_actions(test, b, "DROP");
+			continue;
+		}
+		KUNIT_ASSERT_EQ(test,
+				ntfe_rust_builder_value_int(b, "DstPort.Equal", 13,
+							   22),
+				0);
+		KUNIT_ASSERT_EQ(test,
+				ntfe_rust_builder_value_int(b, "Protocol.Equal", 14,
+							   IPPROTO_TCP),
+				0);
+		if (depth == PEIOS_NTFE_MAX_RULE_DEPTH)
+			ntfe_test_actions(test, b, "PASS");
+	}
+	for (depth = 0; depth <= PEIOS_NTFE_MAX_RULE_DEPTH; depth++)
+		KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
+					       &forest),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, forest);
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(forest, NULL, NULL, 1),
+			0);
+
+	skb = ntfe_test_tcp4_skb(test, 22);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &state),
+			(unsigned int)NF_ACCEPT);
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_PACKET, &snap,
+					      &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_PASS);
+	KUNIT_EXPECT_STREQ(test, out.attributed, expect);
+	kfree_skb(skb);
+
+	skb = ntfe_test_tcp4_skb(test, 23);
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_snapshot_from_skb(skb, dev,
+						    PEIOS_NTFE_SEAT_LOCAL_IN,
+						    PEIOS_NTFE_DIR_IN, &snap),
+			0);
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_PACKET, &snap,
+					      &out),
+			0);
+	KUNIT_EXPECT_EQ(test, out.verdict, PEIOS_NTFE_VERDICT_DROP);
+	KUNIT_EXPECT_STREQ(test, out.attributed, "r0");
+	kfree_skb(skb);
+
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1),
+			0);
+}
+
+/*
  * The verdict event ring: emit from a crafted snapshot/outcome, drain via
  * the internal pop path (the device read uses the same), check ordering,
  * status, and the confessed-drop counter under overwrite.
@@ -1002,6 +1101,29 @@ static void ntfe_kunit_refusal_is_built_and_marked(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ih->code, ICMP_PKT_FILTERED);
 	kfree_skb(nskb);
 
+	/* At the egress seat the device has pushed its link header, and
+	 * skb->data points at it: the answer is built from the same bytes,
+	 * and the packet is left as it was found (PEI-1300).
+	 */
+	skb_push(skb, ETH_HLEN);
+	skb_reset_mac_header(skb);
+	memset(skb->data, 0xee, ETH_HLEN);
+	snap.seat = PEIOS_NTFE_SEAT_EGRESS;
+	state.hook = NF_NETDEV_EGRESS;
+	nskb = peios_ntfe_refuse_build(skb, &state, &snap,
+				      PEIOS_NTFE_REJECT_REFUSED);
+	KUNIT_ASSERT_NOT_NULL(test, nskb);
+	th = (const struct tcphdr *)((const u8 *)ip_hdr(nskb) +
+				     ip_hdr(nskb)->ihl * 4);
+	KUNIT_EXPECT_TRUE(test, th->rst);
+	KUNIT_EXPECT_EQ(test, th->source, htons(22));
+	KUNIT_EXPECT_EQ(test, th->dest, htons(43210));
+	KUNIT_EXPECT_EQ(test, th->ack_seq, htonl(1001));
+	kfree_skb(nskb);
+	KUNIT_EXPECT_PTR_EQ(test, skb->data, skb_mac_header(skb));
+	KUNIT_EXPECT_EQ(test, skb_network_offset(skb), ETH_HLEN);
+	skb_pull(skb, ETH_HLEN);
+
 	/* A broadcast destination gets no answer. */
 	snap.dst_addr[0] = 255;
 	snap.dst_addr[1] = 255;
@@ -1324,18 +1446,10 @@ static void ntfe_kunit_downward_tag_read_refused(struct kunit *test)
 
 
 /* The process GUID as the Local.Process fact's text (8-4-4-4-12). */
+/* PCDS §2's text: %pUl is the little-endian GUID form, lowercase. */
 static void ntfe_test_guid_text(const u8 guid[16], char out[37])
 {
-	static const char hex[] = "0123456789abcdef";
-	int i, o = 0;
-
-	for (i = 0; i < 16; i++) {
-		if (i == 4 || i == 6 || i == 8 || i == 10)
-			out[o++] = '-';
-		out[o++] = hex[guid[i] >> 4];
-		out[o++] = hex[guid[i] & 0xf];
-	}
-	out[o] = '\0';
+	snprintf(out, 37, "%pUl", guid);
 }
 
 /*
@@ -2480,6 +2594,7 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_snapshot_arp),
 	KUNIT_CASE(ntfe_kunit_snapshot_udp6),
 	KUNIT_CASE(ntfe_kunit_end_to_end_enforcement),
+	KUNIT_CASE(ntfe_kunit_deepest_tree),
 	KUNIT_CASE(ntfe_kunit_event_stream),
 	KUNIT_CASE(ntfe_kunit_reject_kinds_cross_the_bridge),
 	KUNIT_CASE(ntfe_kunit_tag_store),
