@@ -129,6 +129,13 @@ void pkm_kacs_task_free(struct task_struct *task)
 			KACS_TASK_FREE, 0);
 	pkm_kacs_process_state_put(sec->process_state);
 	sec->process_state = NULL;
+	/*
+	 * A thread that exits while impersonating still holds its own
+	 * credential's effective reference here, parked by override_creds();
+	 * exit_creds() puts only what real_cred and cred point at (PEI-1313).
+	 */
+	if (sec->impersonation_saved_cred)
+		put_cred(sec->impersonation_saved_cred);
 	sec->impersonation_saved_cred = NULL;
 	sec->pending_exec_pip_type = 0;
 	sec->pending_exec_pip_trust = 0;

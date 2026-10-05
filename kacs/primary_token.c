@@ -170,7 +170,15 @@ static long pkm_kacs_revert_current_impersonation(void)
 		(u64)(uintptr_t)pkm_kacs_cred(task_sec->impersonation_saved_cred)
 			->token,
 		0, KACS_PRIM_IMPERSONATE_REVERT, 0);
-	revert_creds(task_sec->impersonation_saved_cred);
+	/*
+	 * override_creds() and revert_creds() take and drop no references:
+	 * the impersonation cred's one reference passed to current->cred at
+	 * impersonate time and comes back here. Dropping it is what frees
+	 * the impersonation token and, with its last token, its logon
+	 * session; it was once discarded, leaking a cred and a token on
+	 * every revert (PEI-1313).
+	 */
+	put_cred(revert_creds(task_sec->impersonation_saved_cred));
 	task_sec->impersonation_saved_cred = NULL;
 	return 0;
 }
