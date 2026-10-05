@@ -4,26 +4,27 @@
 //! PNP packet layers. Its device is how a program sees what it is doing:
 //!
 //! - the engine's [`Status`]: the generation in force, whether a write has
-//!   been walked yet ([`Status::in_force_after`]), and every confession
+//!   been walked and taken ([`Status::walk_after`]), and every confession
 //!   counter;
-//! - the verdict stream ([`Device::events`]): one [`Event`] per evaluation,
-//!   with the rule that decided and who stood at each end. The stream has
-//!   one reader at a time; another gets `EBUSY`;
+//! - the verdict stream ([`Stream`]): one [`Event`] per evaluation, with the
+//!   rule that decided and who stood at each end;
 //! - three dumps, each a best-effort snapshot of a table that changes
 //!   under the walk: the counter cells ([`Device::counters`]), the live
 //!   flows with their cached sentences ([`Device::flows`]), and the
 //!   sockets prepared to receive ([`Device::listeners`]).
 //!
 //! The records are the generated ones in `peios-uapi`, laid out as
-//! `uapi/pkm/ntfe.h` declares them; this crate checks the ABI word and
-//! decodes them into owned values. The layouts are documented in the
-//! kernel TRM's NTFE ABI appendix. The device is mode 0600: reading it
-//! takes the authority to open it.
+//! `uapi/pkm/ntfe.h` declares them; this crate checks the ABI word once, at
+//! [`Device::open`] (NTFE is built into the kernel, so it cannot change
+//! under an open device), and decodes the records into owned values. The
+//! layouts are documented in the kernel TRM's NTFE ABI appendix. The device
+//! is mode 0600: reading it takes the authority to open it.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 
 use peios_uapi as uapi;
 
@@ -35,20 +36,25 @@ pub const ABI: u64 = uapi::PEIOS_NTFE_ABI_VERSION as u64;
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
-    /// The engine speaks another ABI: nothing it says can be decoded.
+    /// The engine speaks another ABI, or none this crate knows the status
+    /// of (`engine` is 0 then): nothing it says can be decoded.
     Abi {
         engine: u64,
     },
+    /// Another reader holds the verdict stream.
+    Busy,
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Io(e) => write!(f, "{DEVICE}: {e}"),
+            Error::Abi { engine: 0 } => write!(f, "{DEVICE}: the engine does not speak ABI {ABI}"),
             Error::Abi { engine } => write!(
                 f,
                 "{DEVICE}: the engine speaks ABI {engine}, this reader {ABI}"
             ),
+            Error::Busy => write!(f, "{DEVICE}: another reader holds the verdict stream"),
         }
     }
 }
@@ -63,8 +69,10 @@ impl From<io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The FNV-1a-64 hash NTFE identifies a rule path by in a flow's sentence:
-/// the path relative to its layer key, `/`-separated (`ssh/too-fast`).
+/// The FNV-1a-64 hash NTFE identifies a rule path by: in a flow's sentence,
+/// and in a report. The path is relative to its layer key, `/`-separated
+/// (`ssh/too-fast`). An event's `attributed` text is truncated at 95
+/// bytes, so hash the rule's own path, not an event's copy of it.
 pub fn rule_hash(path: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in path.bytes() {
@@ -72,6 +80,12 @@ pub fn rule_hash(path: &str) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// How many events were lost between two events read from the stream: the gap in
+/// their sequence numbers. The ring drops the oldest for a slow reader.
+pub fn missed(before: u64, after: u64) -> u64 {
+    after.saturating_sub(before.saturating_add(1))
 }
 
 /// A rules layer the engine judges.
@@ -191,7 +205,7 @@ impl FlowState {
 /// What stood at one end of a flow: the `Local` and `Remote` facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointKind {
-    /// Not known: not a Flow-layer record, or not yet resolved.
+    /// Not known: not a Flow-layer record, or not resolved.
     Absent,
     /// A program's socket.
     Program,
@@ -220,11 +234,14 @@ impl EndpointKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub kind: EndpointKind,
-    /// The endpoint could not be attributed when it was resolved.
+    /// The endpoint was judged but could not be attributed: `kind` is then
+    /// usually [`EndpointKind::Absent`].
     pub unresolved: bool,
     pub pid: i32,
     /// The process GUID, as its 16 bytes.
     pub guid: [u8; 16],
+    /// The thread group's name at the stamp. The kernel truncates it to 15
+    /// bytes, which can split a character: it is decoded lossily.
     pub comm: String,
     /// The token's user SID, binary, when there is one.
     pub user: Option<Vec<u8>>,
@@ -232,8 +249,9 @@ pub struct Endpoint {
     pub service: Option<Vec<u8>>,
 }
 
-/// A self-sized binary SID out of a fixed field: `None` when the field is
-/// all zero (absent), else its 8 + 4 × count bytes.
+/// A self-sized binary SID out of a fixed field: `None` when the field
+/// starts with a zero revision (absent), else its 8 + 4 × count bytes, at
+/// most the field.
 fn sid(field: &[u8]) -> Option<Vec<u8>> {
     if field.first().copied().unwrap_or(0) == 0 {
         return None;
@@ -272,7 +290,21 @@ fn guid(field: &[u8]) -> [u8; 16] {
     out
 }
 
-/// The engine's status. Counters are cumulative since boot.
+/// Where a write to the policy stands, from [`Status::walk_after`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Walk {
+    /// Not walked yet.
+    Pending,
+    /// Walked and taken: what was written is what is enforced. A walk that
+    /// found nothing different publishes no generation, so the generation
+    /// need not have moved.
+    InForce,
+    /// Walked and refused, with this errno: the previous generation stands.
+    Refused(i32),
+}
+
+/// The engine's status. Counters are cumulative since boot; the raw record
+/// is `.0` for any this does not name.
 #[derive(Debug, Clone, Copy)]
 pub struct Status(pub uapi::peios_ntfe_status);
 
@@ -293,15 +325,28 @@ impl Status {
         (self.0.last_ingest_error != 0).then_some(self.0.last_ingest_error as i32)
     }
 
-    /// Whether every change noted when `noted` was read has been walked:
-    /// read [`Status::changes_noted`] after a write, then wait for this.
-    /// A walk that was refused counts as walked: see [`Status::refusal`].
-    pub fn in_force_after(&self, noted: u64) -> bool {
-        self.0.changes_walked >= noted
-    }
-
+    /// Every change to the Network key noted so far, counted before the
+    /// write that made it returns: read it after a write, then ask
+    /// [`Status::walk_after`].
     pub fn changes_noted(&self) -> u64 {
         self.0.changes_noted
+    }
+
+    /// Where a write stands, given [`Status::changes_noted`] read after it.
+    ///
+    /// The status read takes the walk's error before its count, the reverse
+    /// of the order a walk writes them, so one read can pair a finished
+    /// count with the previous walk's error. A refusal is worth confirming
+    /// with a second read.
+    pub fn walk_after(&self, noted: u64) -> Walk {
+        if self.0.changes_walked < noted {
+            Walk::Pending
+        } else {
+            match self.refusal() {
+                Some(errno) => Walk::Refused(errno),
+                None => Walk::InForce,
+            }
+        }
     }
 
     /// Changes noted and not yet walked.
@@ -313,9 +358,42 @@ impl Status {
     pub fn reporting_level(&self) -> u64 {
         self.0.reporting_level
     }
+
+    /// Interfaces in the network context table.
+    pub fn contexts(&self) -> u64 {
+        self.0.contexts
+    }
+
+    /// Events the ring overwrote since boot, for every reader there has
+    /// been: not this reader's loss, which [`missed`] measures.
+    pub fn events_dropped(&self) -> u64 {
+        self.0.events_dropped
+    }
+
+    /// Evaluations, and their verdicts as (pass, reject, drop).
+    pub fn judged(&self) -> (u64, (u64, u64, u64)) {
+        (
+            self.0.judged,
+            (
+                self.0.verdict_pass,
+                self.0.verdict_reject,
+                self.0.verdict_drop,
+            ),
+        )
+    }
+
+    /// `network-report` events emitted.
+    pub fn reports(&self) -> u64 {
+        self.0.reports_emitted
+    }
+
+    /// Live counter cells across every table.
+    pub fn counter_cells(&self) -> u64 {
+        self.0.counter_cells
+    }
 }
 
-/// The side effects an evaluation yielded, counted.
+/// The side effects an evaluation yielded, counted (each saturating at 255).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Effects {
     pub tags: u8,
@@ -327,7 +405,7 @@ pub struct Effects {
 /// One evaluation, from the verdict stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Event {
-    /// Monotonic; a gap is events the ring dropped, and confessed.
+    /// Monotonic; a gap is events the ring dropped ([`missed`]).
     pub seq: u64,
     /// When, as CLOCK_REALTIME nanoseconds.
     pub time_ns: u64,
@@ -343,6 +421,8 @@ pub struct Event {
     pub reject_degraded: bool,
     /// A stale sentence was judged again.
     pub rejudged: bool,
+    /// An endpoint could not be attributed.
+    pub identity_unresolved: bool,
     pub protocol: u8,
     pub flow_state: Option<FlowState>,
     pub ifindex: u32,
@@ -354,7 +434,8 @@ pub struct Event {
     pub ether_type: u16,
     pub length: u32,
     pub effects: Effects,
-    /// The deciding rule's path in its layer, or `backstop`.
+    /// The deciding rule's path in its layer, or `backstop`; truncated at 95
+    /// bytes.
     pub attributed: String,
     pub local: Endpoint,
     pub remote: Endpoint,
@@ -377,6 +458,7 @@ impl Event {
             user: sid(user),
             service: sid(service),
         };
+        let flag = |f: u32| u32::from(e.flags) & f != 0;
         Event {
             seq: e.seq,
             time_ns: e.t_ns,
@@ -384,10 +466,11 @@ impl Event {
             layer: Layer::from_raw(e.layer),
             verdict: Verdict::from_raw(e.verdict, e.reject_kind),
             direction: Direction::from_raw(e.direction),
-            backstop: u32::from(e.flags) & uapi::PEIOS_NTFE_EV_F_BACKSTOP != 0,
-            fail_closed: u32::from(e.flags) & uapi::PEIOS_NTFE_EV_F_FAIL_CLOSED != 0,
-            reject_degraded: u32::from(e.flags) & uapi::PEIOS_NTFE_EV_F_REJECT_DEGRADED != 0,
-            rejudged: u32::from(e.flags) & uapi::PEIOS_NTFE_EV_F_REJUDGED != 0,
+            backstop: flag(uapi::PEIOS_NTFE_EV_F_BACKSTOP),
+            fail_closed: flag(uapi::PEIOS_NTFE_EV_F_FAIL_CLOSED),
+            reject_degraded: flag(uapi::PEIOS_NTFE_EV_F_REJECT_DEGRADED),
+            rejudged: flag(uapi::PEIOS_NTFE_EV_F_REJUDGED),
+            identity_unresolved: flag(uapi::PEIOS_NTFE_EV_F_IDENTITY_UNRESOLVED),
             protocol: e.protocol,
             flow_state: FlowState::from_raw(e.flow_state),
             ifindex: e.ifindex,
@@ -498,22 +581,36 @@ pub struct Sentence {
     pub verdict: Option<Verdict>,
 }
 
+/// One local end of a flow: its sentence, and who stood there. Slot 0 is
+/// the flow's own (on loopback, its outbound end's); slot 1 is a loopback
+/// flow's inbound end's, else empty.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Slot {
+    pub sentence: Option<Sentence>,
+    /// Present once the end was judged, even when it could not be
+    /// attributed ([`Endpoint::unresolved`]).
+    pub owner: Option<Endpoint>,
+}
+
 /// One live flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Flow {
     /// Connection tracking's id for it.
     pub id: u32,
     pub protocol: u8,
-    /// The originator's side, once the Flow layer has judged it.
+    /// Whether the Flow layer has judged it: what follows from judgment
+    /// (direction, loopback, the interface) is known only then.
+    pub judged: bool,
+    /// The originator's side.
     pub direction: Option<Direction>,
-    /// Both ends on this machine: two sentences.
+    /// Both ends on this machine: two slots.
     pub loopback: bool,
     pub seen_reply: bool,
     pub assured: bool,
     /// Expected by another flow.
     pub related: bool,
     /// The interface at its first judgment.
-    pub ifindex: i32,
+    pub ifindex: Option<i32>,
     /// Connection tracking's remaining lifetime for it.
     pub timeout_secs: u32,
     /// The original direction's tuple.
@@ -529,50 +626,44 @@ pub struct Flow {
     /// Original direction, then reply.
     pub packets: [u64; 2],
     pub bytes: [u64; 2],
-    /// Its sentence; a loopback flow's inbound end's too.
-    pub sentences: Vec<Sentence>,
-    /// Who stood at the end each sentence is for.
-    pub owners: Vec<Endpoint>,
+    pub slots: [Slot; 2],
     /// Up to eight of its tags, as (name hash, value).
     pub tags: Vec<(u64, u64)>,
+    /// How many tags it carries: more than [`Flow::tags`] holds when the
+    /// record had no room for them all.
+    pub n_tags: u8,
 }
 
 impl Flow {
     pub fn decode(f: &uapi::peios_ntfe_flow_rec) -> Flow {
-        let slots = uapi::PEIOS_NTFE_FLOW_SENTENCES as usize;
-        let sentences = (0..slots)
-            .filter(|&s| f.sentence_generation[s] != 0)
-            .map(|s| Sentence {
+        let slot = |s: usize| Slot {
+            sentence: (f.sentence_generation[s] != 0).then(|| Sentence {
                 generation: f.sentence_generation[s],
                 expires_at: (f.sentence_expires_at[s] != 0).then_some(f.sentence_expires_at[s]),
                 rule_hash: f.sentence_rule_hash[s],
                 verdict: Verdict::from_raw(f.sentence_verdict[s], f.sentence_reject_kind[s]),
-            })
-            .collect();
-        let owners = (0..slots)
-            .filter(|&s| f.owner_kind[s] != 0)
-            .map(|s| Endpoint {
+            }),
+            owner: (f.owner_kind[s] != 0 || f.owner_unresolved[s] != 0).then(|| Endpoint {
                 kind: EndpointKind::from_raw(f.owner_kind[s]),
                 unresolved: f.owner_unresolved[s] != 0,
                 pid: f.owner_pid[s],
-                guid: guid(&f.owner_guid[s * 16..]),
+                guid: guid(&f.owner_guid[s * 16..s * 16 + 16]),
                 comm: text(&f.owner_comm[s * 16..s * 16 + 16]),
                 user: sid(&f.owner_user[s * 68..s * 68 + 68]),
                 service: sid(&f.owner_service[s * 32..s * 32 + 32]),
-            })
-            .collect();
-        let tags = (0..usize::from(f.n_tags).min(f.tag_hash.len()))
-            .map(|i| (f.tag_hash[i], f.tag_value[i]))
-            .collect();
+            }),
+        };
+        let judged = f.judged != 0;
         Flow {
             id: f.id,
             protocol: f.protocol,
-            direction: (f.judged != 0).then(|| Direction::from_raw(f.direction)),
-            loopback: f.loopback != 0,
+            judged,
+            direction: judged.then(|| Direction::from_raw(f.direction)),
+            loopback: judged && f.loopback != 0,
             seen_reply: f.seen_reply != 0,
             assured: f.assured != 0,
             related: f.related != 0,
-            ifindex: f.ifindex,
+            ifindex: judged.then_some(f.ifindex),
             timeout_secs: f.timeout_secs,
             src: addr(f.family, &f.src_addr),
             dst: addr(f.family, &f.dst_addr),
@@ -583,10 +674,22 @@ impl Flow {
             start_secs: f.start_secs,
             packets: f.packets,
             bytes: f.bytes,
-            sentences,
-            owners,
-            tags,
+            slots: [slot(0), slot(1)],
+            tags: (0..usize::from(f.n_tags).min(f.tag_hash.len()))
+                .map(|i| (f.tag_hash[i], f.tag_value[i]))
+                .collect(),
+            n_tags: f.n_tags,
         }
+    }
+
+    /// The flow's own sentence: slot 0's.
+    pub fn sentence(&self) -> Option<&Sentence> {
+        self.slots[0].sentence.as_ref()
+    }
+
+    /// Who stood at the flow's own end: slot 0's.
+    pub fn owner(&self) -> Option<&Endpoint> {
+        self.slots[0].owner.as_ref()
     }
 }
 
@@ -630,16 +733,19 @@ impl Listener {
     }
 }
 
-/// A dump: as many records as fitted, and how many there were.
+/// A dump: as many records as fitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dump<T> {
     pub records: Vec<T>,
-    /// How many the walk saw; more than `records` holds when the buffer
-    /// was too small.
+    /// The buffer filled: there may be more, so ask again with more room.
+    pub more: bool,
+    /// How many the walk saw. Not a measure of room: a walk can count
+    /// records it did not write even with room to spare, so ask for more by
+    /// [`Dump::more`], never until this is reached.
     pub total: u32,
 }
 
-/// The device, open.
+/// The device, open, speaking this crate's ABI.
 #[derive(Debug)]
 pub struct Device(File);
 
@@ -663,33 +769,45 @@ const _: () = assert!(
     std::mem::size_of::<Query>() == std::mem::size_of::<uapi::peios_ntfe_listeners_query>()
 );
 
+fn ioctl<T>(fd: RawFd, request: u64, arg: *mut T) -> io::Result<()> {
+    // SAFETY: `request` is one of the device's ioctl numbers, each of which
+    // reads or writes exactly the record `arg` points to (and, for a dump,
+    // the buffer that record names), all alive for the call.
+    let rc = unsafe { libc::ioctl(fd, request as _, arg) };
+    if rc != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn status(fd: RawFd) -> Result<Status> {
+    // SAFETY: the record is plain integers; all zero is a valid value.
+    let mut raw: uapi::peios_ntfe_status = unsafe { std::mem::zeroed() };
+    match ioctl(fd, uapi::PEIOS_NTFE_IOC_STATUS, &mut raw) {
+        Ok(()) => {}
+        // A status record of another size is another ioctl number.
+        Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => return Err(Error::Abi { engine: 0 }),
+        Err(e) => return Err(e.into()),
+    }
+    if raw.abi != ABI {
+        return Err(Error::Abi { engine: raw.abi });
+    }
+    Ok(Status(raw))
+}
+
 impl Device {
-    /// Opens the device. It is mode 0600.
+    /// Opens the device and checks the engine speaks this crate's ABI. It is
+    /// mode 0600.
     pub fn open() -> Result<Device> {
-        Ok(Device(File::open(DEVICE)?))
+        let file = File::open(DEVICE)?;
+        status(file.as_raw_fd())?;
+        Ok(Device(file))
     }
 
-    fn ioctl<T>(&self, request: u64, arg: *mut T) -> io::Result<()> {
-        // SAFETY: `request` is one of the device's ioctl numbers, each of
-        // which reads or writes exactly the record `arg` points to (and, for
-        // a dump, the buffer that record names), all alive for the call.
-        let rc = unsafe { libc::ioctl(self.0.as_raw_fd(), request as libc::c_ulong, arg) };
-        if rc != 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-
-    /// The engine's status, refused when it speaks another ABI.
+    /// The engine's status.
     pub fn status(&self) -> Result<Status> {
-        // SAFETY: the record is plain integers; all zero is a valid value.
-        let mut raw: uapi::peios_ntfe_status = unsafe { std::mem::zeroed() };
-        self.ioctl(uapi::PEIOS_NTFE_IOC_STATUS, &mut raw)?;
-        if raw.abi != ABI {
-            return Err(Error::Abi { engine: raw.abi });
-        }
-        Ok(Status(raw))
+        status(self.0.as_raw_fd())
     }
 
     fn dump<T: Copy, U>(
@@ -698,7 +816,7 @@ impl Device {
         capacity: usize,
         decode: impl Fn(&T) -> U,
     ) -> Result<Dump<U>> {
-        self.status()?;
+        let capacity = capacity.clamp(1, u32::MAX as usize / std::mem::size_of::<T>());
         // SAFETY: each record is plain integers and byte arrays; all zero
         // is a valid value.
         let mut buf: Vec<T> = vec![unsafe { std::mem::zeroed() }; capacity];
@@ -707,10 +825,11 @@ impl Device {
             buf_len: (capacity * std::mem::size_of::<T>()) as u32,
             ..Query::default()
         };
-        self.ioctl(request, &mut query)?;
+        ioctl(self.0.as_raw_fd(), request, &mut query)?;
         let count = (query.count as usize).min(capacity);
         Ok(Dump {
             records: buf[..count].iter().map(decode).collect(),
+            more: count == capacity,
             total: query.total,
         })
     }
@@ -729,13 +848,50 @@ impl Device {
     pub fn listeners(&self, capacity: usize) -> Result<Dump<Listener>> {
         self.dump(uapi::PEIOS_NTFE_IOC_LISTENERS, capacity, Listener::decode)
     }
+}
 
-    /// Reads up to `max` events from the stream, blocking until there is
-    /// one. The stream has one reader at a time: another gets `EBUSY`.
-    pub fn events(&mut self, max: usize) -> Result<Vec<Event>> {
+impl AsFd for Device {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+/// The verdict stream, on a descriptor of its own.
+///
+/// The stream has one reader at a time. The first read through a `Stream`
+/// claims it, whatever comes of the read, and holds it until the `Stream` is
+/// dropped; a read through any other gets [`Error::Busy`]. Opened
+/// non-blocking, it is for a poll loop: poll its descriptor for input, and
+/// a read with nothing waiting returns no events.
+#[derive(Debug)]
+pub struct Stream(File);
+
+impl Stream {
+    /// Opens the stream, checking the engine's ABI.
+    pub fn open(nonblocking: bool) -> Result<Stream> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(if nonblocking { libc::O_NONBLOCK } else { 0 })
+            .open(DEVICE)?;
+        status(file.as_raw_fd())?;
+        Ok(Stream(file))
+    }
+
+    /// Reads up to `max` whole events: blocking until there is one, unless
+    /// non-blocking, when it may be none. The engine bounds how many one
+    /// read returns, so fewer than `max` says nothing about what is left.
+    pub fn read(&mut self, max: usize) -> Result<Vec<Event>> {
         let size = std::mem::size_of::<uapi::peios_ntfe_event>();
         let mut bytes = vec![0u8; size * max.max(1)];
-        let n = self.0.read(&mut bytes)?;
+        let n = loop {
+            match self.0.read(&mut bytes) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Vec::new()),
+                Err(e) if e.raw_os_error() == Some(libc::EBUSY) => return Err(Error::Busy),
+                Err(e) => return Err(e.into()),
+            }
+        };
         Ok(bytes[..n - n % size]
             .chunks_exact(size)
             .map(|chunk| {
@@ -747,6 +903,18 @@ impl Device {
                 Event::decode(&raw)
             })
             .collect())
+    }
+}
+
+impl AsFd for Stream {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.0.as_fd()
+    }
+}
+
+impl AsRawFd for Stream {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_raw_fd()
     }
 }
 
@@ -872,39 +1040,81 @@ mod tests {
     }
 
     #[test]
-    fn a_rule_path_hashes_as_the_engine_hashes_it() {
+    fn a_rule_path_hashes_as_fnv_1a_64() {
+        // The FNV-1a 64-bit test vectors.
         assert_eq!(rule_hash(""), 0xcbf2_9ce4_8422_2325);
-        assert_ne!(rule_hash("ssh"), rule_hash("ssh/too-fast"));
+        assert_eq!(rule_hash("a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(rule_hash("foobar"), 0x8594_4171_f739_67e8);
     }
 
     #[test]
-    fn an_event_decodes_its_verdict_and_who_was_there() {
+    fn a_gap_in_the_stream_is_counted() {
+        assert_eq!(missed(7, 8), 0);
+        assert_eq!(missed(7, 12), 4);
+        assert_eq!(missed(9, 8), 0);
+    }
+
+    fn sid_field<const N: usize>(service: bool) -> [u8; N] {
+        let mut f = [0u8; N];
+        f[0] = 1;
+        f[1] = if service { 6 } else { 1 };
+        f[7] = if service { 80 } else { 18 };
+        f
+    }
+
+    #[test]
+    fn an_event_decodes_its_verdict_and_who_was_at_each_end() {
         // SAFETY: plain integers and bytes; all zero is valid.
         let mut raw: uapi::peios_ntfe_event = unsafe { std::mem::zeroed() };
         raw.seq = 7;
         raw.layer = uapi::PEIOS_NTFE_EV_LAYER_FLOW as u8;
         raw.verdict = uapi::PEIOS_NTFE_EV_VERDICT_REJECT as u8;
         raw.reject_kind = uapi::PEIOS_NTFE_EV_REJECT_PROHIBITED as u8;
-        raw.addr_family = 4;
-        raw.src_addr[..4].copy_from_slice(&[203, 0, 113, 50]);
+        raw.flags =
+            (uapi::PEIOS_NTFE_EV_F_IDENTITY_UNRESOLVED | uapi::PEIOS_NTFE_EV_F_REJUDGED) as u8;
+        raw.addr_family = 6;
+        raw.src_addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x50).octets();
         raw.dst_port = 22;
-        raw.effects = 1 << 16;
+        raw.effects = 1 << 16 | 2 << 8;
         raw.attributed[..12].copy_from_slice(b"ssh/too-fast");
         raw.local_kind = uapi::PEIOS_NTFE_EV_LOCAL_PROGRAM as u8;
         raw.local_comm[..4].copy_from_slice(b"sshd");
-        raw.local_service[..2].copy_from_slice(&[1, 6]);
+        raw.local_service = sid_field(true);
+        raw.local_user = sid_field(false);
+        raw.remote_kind = uapi::PEIOS_NTFE_EV_LOCAL_KERNEL as u8;
+        raw.remote_unresolved = 1;
+        raw.remote_pid = -1;
         let e = Event::decode(&raw);
         assert_eq!(e.layer, Some(Layer::Flow));
         assert_eq!(e.verdict, Some(Verdict::Reject(RejectKind::Prohibited)));
-        assert_eq!(e.src, Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 50))));
-        assert_eq!(e.effects.reports, 1);
+        assert!(e.identity_unresolved && e.rejudged && !e.backstop);
+        assert_eq!(
+            e.src,
+            Some(IpAddr::V6(Ipv6Addr::new(
+                0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x50
+            )))
+        );
+        assert_eq!((e.effects.reports, e.effects.counts), (1, 2));
         assert_eq!(e.attributed, "ssh/too-fast");
         assert_eq!(
             (e.local.kind, e.local.comm.as_str()),
             (EndpointKind::Program, "sshd")
         );
         assert_eq!(e.local.service.map(|s| s.len()), Some(32));
-        assert_eq!(e.remote.kind, EndpointKind::Absent);
+        assert_eq!(e.local.user.map(|s| s.len()), Some(12));
+        assert_eq!(
+            (e.remote.kind, e.remote.unresolved, e.remote.pid),
+            (EndpointKind::Kernel, true, -1)
+        );
+    }
+
+    #[test]
+    fn a_sid_is_never_read_past_its_field() {
+        let mut field = [0u8; 32];
+        field[0] = 1;
+        field[1] = 15;
+        assert_eq!(sid(&field).map(|s| s.len()), Some(32));
+        assert_eq!(sid(&[0u8; 68]), None);
     }
 
     #[test]
@@ -925,26 +1135,87 @@ mod tests {
         assert_eq!(c.windows, vec![(60, 14)]);
     }
 
+    /// A loopback flow fills both slots: each is read at its own stride.
     #[test]
-    fn a_flow_lists_only_its_filled_sentences_and_tags() {
+    fn a_loopback_flow_keeps_each_end_in_its_own_slot() {
         // SAFETY: plain integers and bytes; all zero is valid.
         let mut raw: uapi::peios_ntfe_flow_rec = unsafe { std::mem::zeroed() };
         raw.family = 4;
         raw.judged = 1;
+        raw.loopback = 1;
+        raw.ifindex = 1;
         raw.direction = uapi::PEIOS_NTFE_EV_DIR_OUT as u8;
-        raw.sentence_generation[0] = 42;
-        raw.sentence_rule_hash[0] = rule_hash("outbound-ok");
-        raw.n_tags = 1;
-        raw.tag_hash[0] = 9;
-        raw.tag_value[0] = 2;
-        raw.owner_kind[0] = uapi::PEIOS_NTFE_EV_LOCAL_PROGRAM as u8;
-        raw.owner_comm[..6].copy_from_slice(b"peipkg");
+        raw.sentence_generation = [42, 42];
+        raw.sentence_rule_hash = [rule_hash("outbound-ok"), rule_hash("loopback")];
+        raw.sentence_verdict = [
+            uapi::PEIOS_NTFE_EV_VERDICT_PASS as u8,
+            uapi::PEIOS_NTFE_EV_VERDICT_DROP as u8,
+        ];
+        raw.n_tags = 9;
+        raw.tag_hash = [1, 2, 3, 4, 5, 6, 7, 8];
+        // Slot 0 was judged but could not be attributed; slot 1 is sshd.
+        raw.owner_unresolved[0] = 1;
+        raw.owner_kind[1] = uapi::PEIOS_NTFE_EV_LOCAL_PROGRAM as u8;
+        raw.owner_pid[1] = 4242;
+        raw.owner_guid[16] = 0xab;
+        raw.owner_comm[16..20].copy_from_slice(b"sshd");
+        raw.owner_user[68..100].copy_from_slice(&sid_field::<32>(true));
+        raw.owner_service[32..64].copy_from_slice(&sid_field::<32>(true));
         let f = Flow::decode(&raw);
-        assert_eq!(f.direction, Some(Direction::Out));
-        assert_eq!(f.sentences.len(), 1);
-        assert_eq!(f.sentences[0].verdict, Some(Verdict::Pass));
-        assert_eq!(f.sentences[0].rule_hash, rule_hash("outbound-ok"));
-        assert_eq!(f.tags, vec![(9, 2)]);
-        assert_eq!(f.owners[0].comm, "peipkg");
+        assert_eq!(
+            (f.direction, f.loopback, f.ifindex),
+            (Some(Direction::Out), true, Some(1))
+        );
+        assert_eq!(
+            f.slots[0].sentence.as_ref().map(|s| s.rule_hash),
+            Some(rule_hash("outbound-ok"))
+        );
+        assert_eq!(
+            f.slots[1].sentence.as_ref().map(|s| s.verdict),
+            Some(Some(Verdict::Drop))
+        );
+        let unattributed = f.slots[0]
+            .owner
+            .as_ref()
+            .expect("judged, though unattributed");
+        assert_eq!(
+            (unattributed.kind, unattributed.unresolved),
+            (EndpointKind::Absent, true)
+        );
+        let sshd = f.slots[1].owner.as_ref().expect("the inbound end");
+        assert_eq!(
+            (sshd.pid, sshd.guid[0], sshd.comm.as_str()),
+            (4242, 0xab, "sshd")
+        );
+        assert_eq!(sshd.service.as_ref().map(|s| s.len()), Some(32));
+        assert_eq!((f.tags.len(), f.n_tags), (8, 9));
+    }
+
+    #[test]
+    fn what_follows_from_judgment_waits_for_it() {
+        // SAFETY: plain integers and bytes; all zero is valid.
+        let mut raw: uapi::peios_ntfe_flow_rec = unsafe { std::mem::zeroed() };
+        raw.family = 4;
+        raw.loopback = 1;
+        raw.ifindex = 3;
+        let f = Flow::decode(&raw);
+        assert_eq!(
+            (f.judged, f.direction, f.loopback, f.ifindex),
+            (false, None, false, None)
+        );
+        assert_eq!(f.slots, [Slot::default(), Slot::default()]);
+    }
+
+    #[test]
+    fn a_walk_is_pending_in_force_or_refused() {
+        // SAFETY: plain integers; all zero is valid.
+        let mut raw: uapi::peios_ntfe_status = unsafe { std::mem::zeroed() };
+        raw.changes_noted = 10;
+        raw.changes_walked = 9;
+        assert_eq!(Status(raw).walk_after(10), Walk::Pending);
+        raw.changes_walked = 10;
+        assert_eq!(Status(raw).walk_after(10), Walk::InForce);
+        raw.last_ingest_error = 22;
+        assert_eq!(Status(raw).walk_after(10), Walk::Refused(22));
     }
 }
