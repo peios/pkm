@@ -916,6 +916,14 @@ bool pkm_kunit_contains_bytes(const u8 *haystack, size_t haystack_len,
 
 void pkm_kunit_reset_kmes(void)
 {
+	/*
+	 * Settle what earlier cases left to RCU first: a cred freed by a
+	 * revert drops its token from an RCU callback, and a token's last
+	 * drop destroys its logon session and emits logon-session-destroyed
+	 * on whichever CPU runs the callback — into a case that expects its
+	 * own events alone, on one ring (PEI-1313 made those frees real).
+	 */
+	rcu_barrier();
 	pkm_kmes_kunit_reset_all();
 	pkm_kmes_kunit_clear_process_override();
 	(void)pkm_kmes_kunit_set_current_process_rate_refill_frozen(false);
