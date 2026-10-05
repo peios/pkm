@@ -769,11 +769,26 @@ const _: () = assert!(
     std::mem::size_of::<Query>() == std::mem::size_of::<uapi::peios_ntfe_listeners_query>()
 );
 
+// The little of libc this crate needs, declared here: the pkm workspace takes
+// no registry dependencies (its release gate builds offline), and std links
+// libc regardless. Linux's generic values, as on x86-64 and arm64.
+mod sys {
+    use std::os::raw::{c_int, c_ulong};
+
+    unsafe extern "C" {
+        pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    }
+
+    pub const O_NONBLOCK: c_int = 0o4000;
+    pub const EBUSY: i32 = 16;
+    pub const ENOTTY: i32 = 25;
+}
+
 fn ioctl<T>(fd: RawFd, request: u64, arg: *mut T) -> io::Result<()> {
     // SAFETY: `request` is one of the device's ioctl numbers, each of which
     // reads or writes exactly the record `arg` points to (and, for a dump,
     // the buffer that record names), all alive for the call.
-    let rc = unsafe { libc::ioctl(fd, request as _, arg) };
+    let rc = unsafe { sys::ioctl(fd, request as _, arg) };
     if rc != 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -787,7 +802,7 @@ fn status(fd: RawFd) -> Result<Status> {
     match ioctl(fd, uapi::PEIOS_NTFE_IOC_STATUS, &mut raw) {
         Ok(()) => {}
         // A status record of another size is another ioctl number.
-        Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => return Err(Error::Abi { engine: 0 }),
+        Err(e) if e.raw_os_error() == Some(sys::ENOTTY) => return Err(Error::Abi { engine: 0 }),
         Err(e) => return Err(e.into()),
     }
     if raw.abi != ABI {
@@ -871,7 +886,7 @@ impl Stream {
     pub fn open(nonblocking: bool) -> Result<Stream> {
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(if nonblocking { libc::O_NONBLOCK } else { 0 })
+            .custom_flags(if nonblocking { sys::O_NONBLOCK } else { 0 })
             .open(DEVICE)?;
         status(file.as_raw_fd())?;
         Ok(Stream(file))
@@ -888,7 +903,7 @@ impl Stream {
                 Ok(n) => break n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Vec::new()),
-                Err(e) if e.raw_os_error() == Some(libc::EBUSY) => return Err(Error::Busy),
+                Err(e) if e.raw_os_error() == Some(sys::EBUSY) => return Err(Error::Busy),
                 Err(e) => return Err(e.into()),
             }
         };
