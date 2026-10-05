@@ -31,6 +31,10 @@
     "                            earns outbound strictness.",
     "             loopback       A loopback flow has two endpoints; the inbound",
     "                            one needs its own yes.",
+    "             dhcpv6-client  A DHCPv6 REPLY is unicast from the server's",
+    "                            link-local address to a request sent to a",
+    "                            multicast group, so conntrack sees a new inbound",
+    "                            flow (PEI-1366).",
     "             dev-viewer-ports  DEV-ONLY: atrium-server (8080) and the pnpd",
     "                            viewer (8081) stay reachable through QEMU",
     "                            hostfwd. Delete the day this baseline grows up.",
@@ -109,6 +113,17 @@
       "path": "Machine\\System\\Network\\Rules\\Flow\\loopback",
       "values": [
         { "name": "Interface.Equal", "type": "sz", "data": "lo" },
+        { "name": "Actions", "type": "multi", "data": ["PASS"] }
+      ]
+    },
+    {
+      "path": "Machine\\System\\Network\\Rules\\Flow\\dhcpv6-client",
+      "values": [
+        { "name": "Direction.Equal", "type": "sz", "data": "in" },
+        { "name": "Protocol.Equal", "type": "sz", "data": "udp" },
+        { "name": "SrcAddr.Equal", "type": "sz", "data": "fe80::/10" },
+        { "name": "SrcPort.Equal", "type": "dword", "data": 547 },
+        { "name": "DstPort.Equal", "type": "dword", "data": 546 },
         { "name": "Actions", "type": "multi", "data": ["PASS"] }
       ]
     },
