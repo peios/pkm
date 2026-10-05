@@ -229,6 +229,12 @@ void peios_ntfe_status_fill(struct peios_ntfe_status *status)
 	status->fx_counts = atomic64_read(&peios_ntfe_stats.fx_counts);
 	status->fx_reports = atomic64_read(&peios_ntfe_stats.fx_reports);
 	status->fx_prompts = atomic64_read(&peios_ntfe_stats.fx_prompts);
+	/* Progress before the walk's result: a reader that sees a change as
+	 * walked then sees that walk's error, never an older "none"
+	 * (PEI-1378; the release/acquire pair is in ingest.c).
+	 */
+	peios_ntfe_ingest_progress(&status->changes_noted,
+				   &status->changes_walked);
 	status->last_ingest_error =
 		atomic64_read(&peios_ntfe_last_ingest_error);
 	status->last_ingest_t_ns =
@@ -258,7 +264,5 @@ void peios_ntfe_status_fill(struct peios_ntfe_status *status)
 		atomic64_read(&peios_ntfe_stats.teardowns_emitted);
 	status->identity_unresolved =
 		atomic64_read(&peios_ntfe_stats.identity_unresolved);
-	peios_ntfe_ingest_progress(&status->changes_noted,
-				   &status->changes_walked);
 	status->contexts = peios_ntfe_context_count();
 }

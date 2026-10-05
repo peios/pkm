@@ -1011,9 +1011,11 @@ static atomic64_t peios_ntfe_changes_walked;
 void peios_ntfe_ingest_progress(u64 *noted, u64 *walked)
 {
 	/* walked first: a racing walk can only make the pair look less
-	 * finished than it is, never more.
+	 * finished than it is, never more. Acquire pairs with the release
+	 * in the work function, so anything read after this — the status's
+	 * last_ingest_error — is that walk's or a later one's (PEI-1378).
 	 */
-	*walked = atomic64_read(&peios_ntfe_changes_walked);
+	*walked = atomic64_read_acquire(&peios_ntfe_changes_walked);
 	*noted = atomic64_read(&peios_ntfe_changes_noted);
 }
 
@@ -1034,9 +1036,12 @@ static void peios_ntfe_refresh_workfn(struct work_struct *work)
 	memcpy(guid, peios_ntfe_refresh.guid, 16);
 	spin_unlock(&peios_ntfe_refresh.lock);
 
-	/* Failure keeps the previous generation; the walk logged why. */
+	/* Failure keeps the previous generation; the walk logged why. The
+	 * walk noted its result before returning; release publishes that
+	 * result with the count.
+	 */
 	peios_ntfe_network_refresh_from_key(source_id, guid);
-	atomic64_set(&peios_ntfe_changes_walked, noted);
+	atomic64_set_release(&peios_ntfe_changes_walked, noted);
 }
 
 void peios_ntfe_network_registry_changed(u32 source_id,
