@@ -1762,12 +1762,16 @@ void pkm_lcs_kunit_flush_source_bootstrap_work(void);
  * the first after a waiter's completion is published and before its wake,
  * with the waiter's wait.lock held and interrupts off, so it must not sleep;
  * the second after a response is accepted and before its waiter is
- * completed, with no lock held.
+ * completed, with no lock held; the third just before a waiter is
+ * completed, with the LCS table mutex and the source's queue_lock held, so
+ * it may sleep but must not take either.
  */
 extern void (*pkm_lcs_kunit_waiter_publish_hook)(
 	struct pkm_lcs_source_response_waiter *waiter);
 extern void (*pkm_lcs_kunit_response_accepted_hook)(
 	const struct pkm_lcs_source_response_result *result);
+extern void (*pkm_lcs_kunit_waiter_completing_hook)(
+	struct pkm_lcs_source_response_waiter *waiter);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */

@@ -270,8 +270,15 @@ out:
 	 * The response-wait leg of a source round trip: `waited` is always true
 	 * here, `timed_out` distinguishes the deadline expiry. op is unknown at
 	 * this shared sink (0); txn_id is only meaningful once completed.
+	 *
+	 * Completion beats a signal (PEI-1389): a signalled waiter is detached
+	 * under queue_lock, the lock the completer completes under, so once it
+	 * has tried, ->completed says who won. If the response did, the source
+	 * has applied it and its effects were taken here — the caller reports
+	 * the response, not -ERESTARTSYS.
 	 */
 	if (READ_ONCE(waiter->completed)) {
+		rc = waiter->response_errno;
 		if (result)
 			*result = waiter->response;
 		trace_lcs_rsi_roundtrip_complete(waiter->source_id, 0,

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/sched/signal.h>
+
 #include "kunit_common.h"
 #include "source_internal.h"
 
@@ -11885,6 +11887,133 @@ static void pkm_lcs_kunit_source_waiter_cannot_return_before_wake(
 
 
 /*
+ * PEI-1389. A signal reaches the waiting caller while the completer holds
+ * queue_lock with the response in hand. The caller sees the signal before
+ * ->completed, and its detach waits on the completer's locks; by the time it
+ * gets them the response has completed it. The source has applied the
+ * operation, so the caller reports the response, not -ERESTARTSYS.
+ */
+struct pkm_lcs_kunit_signal_race {
+	struct pkm_lcs_source_response_waiter *waiter;
+	struct task_struct *task;
+	struct completion waiting;
+	struct completion waiter_done;
+	bool hook_ran;
+	bool signalled;
+	bool waited;
+	long rc;
+};
+
+static struct pkm_lcs_kunit_signal_race *pkm_lcs_kunit_signal_race_ctx;
+
+static void pkm_lcs_kunit_signal_race_hook(
+	struct pkm_lcs_source_response_waiter *waiter)
+{
+	struct pkm_lcs_kunit_signal_race *race =
+		READ_ONCE(pkm_lcs_kunit_signal_race_ctx);
+
+	if (!race || race->waiter != waiter)
+		return;
+	race->hook_ran = true;
+	send_sig(SIGUSR1, race->task, 1);
+	/*
+	 * Let the caller wake, find ->completed still false, and block in
+	 * detach on the table mutex this completer holds. queue_lock is a
+	 * mutex, so this may sleep.
+	 */
+	msleep(100);
+}
+
+static int pkm_lcs_kunit_signal_race_thread(void *data)
+{
+	struct pkm_lcs_kunit_signal_race *race = data;
+
+	allow_signal(SIGUSR1);
+	complete(&race->waiting);
+	race->rc = pkm_lcs_source_response_waiter_wait_until(
+		race->waiter, jiffies + 10 * HZ, NULL);
+	race->waited = true;
+	race->signalled = signal_pending(current);
+	flush_signals(current);
+	complete(&race->waiter_done);
+	return 0;
+}
+
+static void pkm_lcs_kunit_source_completion_beats_signal(struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0x13, 0x89, 0x13, 0x89, 0x13, 0x89, 0x13, 0x89,
+		0x13, 0x89, 0x13, 0x89, 0x13, 0x89, 0x13, 0x89,
+	};
+	struct pkm_lcs_source_response_result write_result = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_kunit_signal_race *race;
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+	unsigned long done;
+	ssize_t written;
+	u8 out[128];
+
+	race = kunit_kzalloc(test, sizeof(*race), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, race);
+	race->waiter = kunit_kzalloc(test, sizeof(*race->waiter), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, race->waiter);
+	init_completion(&race->waiting);
+	init_completion(&race->waiter_done);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_waitable_request(
+				1, 0, parent_guid, "Child", strlen("Child"),
+				race->waiter, &enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    RSI_NOT_FOUND, &response_len);
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_signal_race_thread,
+					 race, "pkm-lcs-kunit-signal-race");
+	KUNIT_ASSERT_FALSE(test, IS_ERR_OR_NULL(task));
+	race->task = task;
+
+	/* No ASSERT until the thread is stopped: it holds @race. */
+	wait_for_completion_timeout(&race->waiting, 10 * HZ);
+	msleep(20);	/* into the wait */
+	WRITE_ONCE(pkm_lcs_kunit_signal_race_ctx, race);
+	WRITE_ONCE(pkm_lcs_kunit_waiter_completing_hook,
+		   pkm_lcs_kunit_signal_race_hook);
+	written = pkm_lcs_kunit_source_device_write_file(
+		&file, response, response_len, false, &write_result);
+	WRITE_ONCE(pkm_lcs_kunit_waiter_completing_hook, NULL);
+	WRITE_ONCE(pkm_lcs_kunit_signal_race_ctx, NULL);
+
+	done = wait_for_completion_timeout(&race->waiter_done, 20 * HZ);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_kthread_stop(task), 0);
+
+	KUNIT_EXPECT_EQ(test, written, (ssize_t)response_len);
+	KUNIT_EXPECT_NE(test, done, 0UL);
+	KUNIT_EXPECT_TRUE(test, race->hook_ran);
+	KUNIT_EXPECT_TRUE(test, race->waited);
+	/* The signal was there to lose to the response. */
+	KUNIT_EXPECT_TRUE(test, race->signalled);
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(race->waiter->completed));
+	KUNIT_EXPECT_EQ(test, race->rc, (long)-ENOENT);
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+
+/*
  * PEI-1388. The caller's deadline expires after its response has been
  * accepted but before its waiter is completed. The caller gets ETIMEDOUT, so
  * the response is a late one and its retained effects must still be applied
@@ -12250,6 +12379,7 @@ static struct kunit_case pkm_lcs_kunit_source_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_response_timeout_retains_late_record),
 	KUNIT_CASE(pkm_lcs_kunit_source_hide_delete_entry_runtime_limits_layer_frame),
 	KUNIT_CASE(pkm_lcs_kunit_source_waiter_cannot_return_before_wake),
+	KUNIT_CASE(pkm_lcs_kunit_source_completion_beats_signal),
 	KUNIT_CASE(pkm_lcs_kunit_source_timeout_after_accept_applies_late_effects),
 	{}
 };

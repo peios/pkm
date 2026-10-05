@@ -32,6 +32,8 @@
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 void (*pkm_lcs_kunit_response_accepted_hook)(
 	const struct pkm_lcs_source_response_result *result);
+void (*pkm_lcs_kunit_waiter_completing_hook)(
+	struct pkm_lcs_source_response_waiter *waiter);
 #endif
 
 struct pkm_lcs_rsi_read_plan_copy {
@@ -650,6 +652,10 @@ static long pkm_lcs_source_complete_waiter_file(
 	pkm_lcs_source_in_flight_release_locked(source_fd, record);
 	result->in_flight_count = source_fd->in_flight_request_count;
 	if (waiter) {
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+		if (READ_ONCE(pkm_lcs_kunit_waiter_completing_hook))
+			pkm_lcs_kunit_waiter_completing_hook(waiter);
+#endif
 		pkm_lcs_source_response_waiter_complete_with_frame(
 			waiter, caller_errno, result, frame, frame_len);
 	}
