@@ -10,7 +10,7 @@
  * Walked the way /proc/net/tcp and /proc/net/udp walk their tables —
  * the listening hash under each bucket's lock, the UDP hash under each
  * slot's lock — for init_net only, batched and copied to user between
- * buckets, never under a lock. Best-effort against tables that change
+ * passes over a bucket, never under a lock. Best-effort against tables that change
  * under the walk; the caller is told how many it saw.
  */
 
@@ -103,6 +103,12 @@ struct ntfe_listeners_walk {
 	u32 written;
 	u32 total;
 	u32 n;			/* records in the batch */
+	/* Within one bucket: the sockets copied out on its earlier passes,
+	 * where this pass is, whether this is its first pass (the only one
+	 * that counts), and whether the batch filled with more to come.
+	 */
+	u32 taken, skip, idx;
+	bool first, more;
 	long err;
 };
 
@@ -122,10 +128,45 @@ static void ntfe_listeners_flush(struct ntfe_listeners_walk *w)
 static void ntfe_listeners_note(struct ntfe_listeners_walk *w,
 			       const struct sock *sk, u8 protocol)
 {
-	w->total++;
-	if (w->written + w->n >= w->room || w->n == NTFE_LISTENERS_BATCH)
+	if (w->first)
+		w->total++;
+	if (w->idx++ < w->skip)
+		return;		/* taken on an earlier pass */
+	if (w->written + w->n >= w->room)
 		return;		/* count only */
+	if (w->n == NTFE_LISTENERS_BATCH) {
+		w->more = true;
+		return;
+	}
 	ntfe_listener_fill(&w->batch[w->n++], sk, protocol);
+	w->taken++;
+}
+
+/* A bucket with more sockets than the batch holds is walked again from
+ * where the batch filled, rather than counting the rest unwritten
+ * (PEI-1377, as the flows dump since PEI-1308); a socket that came or
+ * went between the passes is the dump's ordinary race.
+ */
+static void ntfe_listeners_bucket(struct ntfe_listeners_walk *w)
+{
+	w->first = true;
+	w->taken = 0;
+}
+
+static void ntfe_listeners_pass(struct ntfe_listeners_walk *w)
+{
+	w->skip = w->taken;
+	w->idx = 0;
+	w->more = false;
+}
+
+/* After a pass's flush: true when the bucket must be walked again. */
+static bool ntfe_listeners_again(struct ntfe_listeners_walk *w)
+{
+	if (!w->more || w->err)
+		return false;
+	w->first = false;
+	return true;
 }
 
 static void ntfe_listeners_tcp(struct ntfe_listeners_walk *w)
@@ -140,16 +181,20 @@ static void ntfe_listeners_tcp(struct ntfe_listeners_walk *w)
 
 		if (hlist_nulls_empty(&ilb2->nulls_head))
 			continue;
-		spin_lock(&ilb2->lock);
-		sk_nulls_for_each(sk, node, &ilb2->nulls_head) {
-			if (!net_eq(sock_net(sk), &init_net))
-				continue;
-			if (sk->sk_state != TCP_LISTEN)
-				continue;
-			ntfe_listeners_note(w, sk, IPPROTO_TCP);
-		}
-		spin_unlock(&ilb2->lock);
-		ntfe_listeners_flush(w);
+		ntfe_listeners_bucket(w);
+		do {
+			ntfe_listeners_pass(w);
+			spin_lock(&ilb2->lock);
+			sk_nulls_for_each(sk, node, &ilb2->nulls_head) {
+				if (!net_eq(sock_net(sk), &init_net))
+					continue;
+				if (sk->sk_state != TCP_LISTEN)
+					continue;
+				ntfe_listeners_note(w, sk, IPPROTO_TCP);
+			}
+			spin_unlock(&ilb2->lock);
+			ntfe_listeners_flush(w);
+		} while (ntfe_listeners_again(w));
 	}
 }
 
@@ -166,16 +211,20 @@ static void ntfe_listeners_udp(struct ntfe_listeners_walk *w,
 
 		if (hlist_empty(&hslot->head))
 			continue;
-		spin_lock_bh(&hslot->lock);
-		sk_for_each(sk, &hslot->head) {
-			if (!net_eq(sock_net(sk), &init_net))
-				continue;
-			if (!inet_sk(sk)->inet_num)
-				continue;	/* not bound: receives nothing */
-			ntfe_listeners_note(w, sk, protocol);
-		}
-		spin_unlock_bh(&hslot->lock);
-		ntfe_listeners_flush(w);
+		ntfe_listeners_bucket(w);
+		do {
+			ntfe_listeners_pass(w);
+			spin_lock_bh(&hslot->lock);
+			sk_for_each(sk, &hslot->head) {
+				if (!net_eq(sock_net(sk), &init_net))
+					continue;
+				if (!inet_sk(sk)->inet_num)
+					continue;	/* not bound: receives nothing */
+				ntfe_listeners_note(w, sk, protocol);
+			}
+			spin_unlock_bh(&hslot->lock);
+			ntfe_listeners_flush(w);
+		} while (ntfe_listeners_again(w));
 	}
 }
 

@@ -13,7 +13,9 @@
 #include <linux/fcntl.h>
 #include <linux/fs.h>
 #include <linux/icmp.h>
+#include <linux/mman.h>
 #include <linux/rtnetlink.h>
+#include <linux/uaccess.h>
 #include <net/ip.h>
 #include <net/ipv6.h>
 #include <net/protocol.h>
@@ -2587,6 +2589,68 @@ static void ntfe_kunit_exit(struct kunit *test)
 	WRITE_ONCE(ntfe_kunit_on_resolved, NULL);
 }
 
+/*
+ * PEI-1377: forty UDP sockets in one SO_REUSEPORT group share one hash
+ * slot, more than one batch of the listeners dump. With room for every
+ * record, every one is written: the slot is walked again from where the
+ * batch filled, as the flows dump does since PEI-1308.
+ */
+#define NTFE_KUNIT_CROWD	40
+#define NTFE_KUNIT_CROWD_PORT	4747
+#define NTFE_KUNIT_CROWD_ROOM	512
+
+static void ntfe_kunit_listeners_crowded_bucket(struct kunit *test)
+{
+	struct sockaddr_in addr = {
+		.sin_family = AF_INET,
+		.sin_port = htons(NTFE_KUNIT_CROWD_PORT),
+	};
+	struct peios_ntfe_listeners_query query = { };
+	struct peios_ntfe_listener_rec *recs;
+	struct socket *socks[NTFE_KUNIT_CROWD] = { };
+	size_t len = NTFE_KUNIT_CROWD_ROOM * sizeof(*recs);
+	unsigned long ubuf;
+	u32 i, crowd = 0;
+
+	for (i = 0; i < NTFE_KUNIT_CROWD; i++) {
+		KUNIT_ASSERT_EQ(test,
+				sock_create_kern(&init_net, AF_INET, SOCK_DGRAM,
+						 IPPROTO_UDP, &socks[i]),
+				0);
+		sock_set_reuseport(socks[i]->sk);
+		KUNIT_ASSERT_EQ(test,
+				kernel_bind(socks[i],
+					    (struct sockaddr_unsized *)&addr,
+					    sizeof(addr)),
+				0);
+	}
+
+	ubuf = kunit_vm_mmap(test, NULL, 0, len, PROT_READ | PROT_WRITE,
+			     MAP_ANONYMOUS | MAP_PRIVATE, 0);
+	KUNIT_ASSERT_NE(test, ubuf, 0UL);
+	recs = kunit_kzalloc(test, len, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, recs);
+
+	query.buf = ubuf;
+	query.buf_len = len;
+	KUNIT_EXPECT_EQ(test, peios_ntfe_listeners_dump(&query), 0L);
+	KUNIT_ASSERT_LE(test, query.total, (u32)NTFE_KUNIT_CROWD_ROOM);
+	KUNIT_EXPECT_EQ(test, query.count, query.total);
+	KUNIT_ASSERT_EQ(test,
+			copy_from_user(recs, (void __user *)ubuf,
+				       query.count * sizeof(*recs)),
+			0UL);
+	for (i = 0; i < query.count; i++)
+		if (recs[i].port == NTFE_KUNIT_CROWD_PORT &&
+		    recs[i].protocol == IPPROTO_UDP)
+			crowd++;
+	KUNIT_EXPECT_EQ(test, crowd, (u32)NTFE_KUNIT_CROWD);
+
+	for (i = 0; i < NTFE_KUNIT_CROWD; i++)
+		if (socks[i])
+			sock_release(socks[i]);
+}
+
 static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_rust_probe),
 	KUNIT_CASE(ntfe_kunit_dispatch_predicate),
@@ -2618,6 +2682,7 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_identity_handler_reads_kernel),
 	KUNIT_CASE(ntfe_kunit_flow_pointer_held_by_skb),
 	KUNIT_CASE(ntfe_kunit_device_allocation_enomem),
+	KUNIT_CASE(ntfe_kunit_listeners_crowded_bucket),
 	{}
 };
 
