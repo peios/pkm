@@ -29,6 +29,11 @@
 #define PKM_LCS_RSI_READ_ACTION_EMSGSIZE 3U
 #define PKM_LCS_RSI_READ_ACTION_WAKE_CLOSE 4U
 
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+void (*pkm_lcs_kunit_response_accepted_hook)(
+	const struct pkm_lcs_source_response_result *result);
+#endif
+
 struct pkm_lcs_rsi_read_plan_copy {
 	u32 action;
 	u32 _pad;
@@ -629,6 +634,19 @@ static long pkm_lcs_source_complete_waiter_file(
 
 	waiter = record->waiter;
 	record->waiter = NULL;
+	if (!waiter) {
+		/*
+		 * Accept saw a caller attached, but its deadline expired and it
+		 * detached before we got the locks back. It has been told
+		 * ETIMEDOUT, so this is a late response after all: decide that
+		 * here, under queue_lock, not from accept's snapshot, and take
+		 * the retained effect before the record (and it) is freed.
+		 */
+		pkm_lcs_source_late_effect_move(&result->late_effect,
+						&record->late_effect);
+		result->caller_waiter_attached = false;
+		result->caller_waiter_detached = record->waiter_was_attached;
+	}
 	pkm_lcs_source_in_flight_release_locked(source_fd, record);
 	result->in_flight_count = source_fd->in_flight_request_count;
 	if (waiter) {
@@ -691,6 +709,10 @@ static ssize_t pkm_lcs_source_device_write_file_with_ops(
 			pkm_lcs_source_device_mark_malformed_protocol_file(file);
 		goto out_free;
 	}
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (READ_ONCE(pkm_lcs_kunit_response_accepted_hook))
+		pkm_lcs_kunit_response_accepted_hook(result);
+#endif
 
 	ret = pkm_lcs_source_validate_accepted_response_payload(
 		frame, count, result, &caller_errno);

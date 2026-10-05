@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "source_internal.h"
 
 
 static void pkm_lcs_kunit_source_device_open_rejects_null_token(
@@ -11749,6 +11750,328 @@ static void pkm_lcs_kunit_source_hide_delete_entry_runtime_limits_layer_frame(
 	kacs_rust_token_drop(token);
 }
 
+
+/*
+ * PEI-1387. A response waiter lives on its caller's stack, and the caller may
+ * return as soon as it sees ->completed. The completer must therefore be
+ * finished with the waiter by the time the caller can return. The seam holds
+ * the completer between publishing ->completed and waking the waiter; a
+ * waiting thread that returns inside that window could have its frame reused
+ * while the completer is still about to lock the wait queue inside it.
+ */
+struct pkm_lcs_kunit_waiter_race {
+	struct pkm_lcs_source_response_waiter *waiter;
+	struct completion published;
+	struct completion waiter_done;
+	atomic_t returned;
+	bool hook_ran;
+	bool returned_in_window;
+	bool waited;
+	long rc;
+};
+
+static struct pkm_lcs_kunit_waiter_race *pkm_lcs_kunit_waiter_race_ctx;
+
+static void pkm_lcs_kunit_waiter_race_hook(
+	struct pkm_lcs_source_response_waiter *waiter)
+{
+	struct pkm_lcs_kunit_waiter_race *race =
+		READ_ONCE(pkm_lcs_kunit_waiter_race_ctx);
+	unsigned int i;
+
+	if (!race || race->waiter != waiter)
+		return;
+	race->hook_ran = true;
+	complete(&race->published);
+	/*
+	 * Give the waiter up to ~30 ms to return. This runs with the waiter's
+	 * wait.lock held and interrupts off, so it spins rather than sleeps.
+	 */
+	for (i = 0; i < 6000 && !atomic_read(&race->returned); i++)
+		udelay(5);
+	race->returned_in_window = atomic_read(&race->returned) != 0;
+}
+
+static int pkm_lcs_kunit_waiter_race_thread(void *data)
+{
+	struct pkm_lcs_kunit_waiter_race *race = data;
+
+	if (wait_for_completion_timeout(&race->published, 10 * HZ)) {
+		/* ->completed is already true, so this takes the fast exit. */
+		race->rc = pkm_lcs_source_response_waiter_wait_until(
+			race->waiter, jiffies + 10 * HZ, NULL);
+		race->waited = true;
+		atomic_set(&race->returned, 1);
+	}
+	complete(&race->waiter_done);
+	return 0;
+}
+
+static void pkm_lcs_kunit_source_waiter_cannot_return_before_wake(
+	struct kunit *test)
+{
+	static const u8 parent_guid[RSI_GUID_SIZE] = {
+		0x13, 0x87, 0x13, 0x87, 0x13, 0x87, 0x13, 0x87,
+		0x13, 0x87, 0x13, 0x87, 0x13, 0x87, 0x13, 0x87,
+	};
+	struct pkm_lcs_source_response_result write_result = { };
+	struct pkm_lcs_source_enqueue_result enqueue = { };
+	struct pkm_lcs_kunit_waiter_race *race;
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	size_t response_len;
+	unsigned long done;
+	ssize_t written;
+	u8 out[128];
+
+	if (num_online_cpus() < 2)
+		kunit_skip(test, "needs two online CPUs");
+
+	race = kunit_kzalloc(test, sizeof(*race), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, race);
+	/* On the heap, so KASAN also sees a touch after the case frees it. */
+	race->waiter = kunit_kzalloc(test, sizeof(*race->waiter), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, race->waiter);
+	init_completion(&race->published);
+	init_completion(&race->waiter_done);
+	atomic_set(&race->returned, 0);
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_source_dispatch_lookup_waitable_request(
+				1, 0, parent_guid, "Child", strlen("Child"),
+				race->waiter, &enqueue),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_device_read_file(&file, out,
+							      sizeof(out),
+							      true),
+			(ssize_t)enqueue.len);
+	pkm_lcs_kunit_build_status_response(test, response, sizeof(response),
+					    enqueue.request_id, enqueue.op_code,
+					    RSI_NOT_FOUND, &response_len);
+
+	task = pkm_lcs_kunit_kthread_run(pkm_lcs_kunit_waiter_race_thread,
+					 race, "pkm-lcs-kunit-waiter-race");
+	KUNIT_ASSERT_FALSE(test, IS_ERR_OR_NULL(task));
+
+	/* No ASSERT until the thread is stopped: it holds @race. */
+	WRITE_ONCE(pkm_lcs_kunit_waiter_race_ctx, race);
+	WRITE_ONCE(pkm_lcs_kunit_waiter_publish_hook,
+		   pkm_lcs_kunit_waiter_race_hook);
+	written = pkm_lcs_kunit_source_device_write_file(
+		&file, response, response_len, false, &write_result);
+	WRITE_ONCE(pkm_lcs_kunit_waiter_publish_hook, NULL);
+	WRITE_ONCE(pkm_lcs_kunit_waiter_race_ctx, NULL);
+
+	done = wait_for_completion_timeout(&race->waiter_done, 20 * HZ);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_kthread_stop(task), 0);
+
+	KUNIT_EXPECT_EQ(test, written, (ssize_t)response_len);
+	KUNIT_EXPECT_NE(test, done, 0UL);
+	KUNIT_EXPECT_TRUE(test, race->hook_ran);
+	KUNIT_EXPECT_TRUE(test, race->waited);
+	KUNIT_EXPECT_EQ(test, race->rc, (long)-ENOENT);
+	/* The waiter returned while the completer could still touch it. */
+	KUNIT_EXPECT_FALSE(test, race->returned_in_window);
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(race->waiter->completed));
+
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
+
+/*
+ * PEI-1388. The caller's deadline expires after its response has been
+ * accepted but before its waiter is completed. The caller gets ETIMEDOUT, so
+ * the response is a late one and its retained effects must still be applied
+ * ([*source.late.mutation-applies-retained-effects]).
+ */
+struct pkm_lcs_kunit_late_window {
+	const struct pkm_lcs_source_key_mutation_late_effect_input *late;
+	const u8 *key_guid;
+	struct pkm_lcs_runtime_limits limits;
+	struct pkm_lcs_source_response_result response;
+	struct pkm_lcs_source_enqueue_result enqueue;
+	struct completion caller_done;
+	u32 timeout_ms;
+	long rc;
+	bool hook_ran;
+	bool attached_at_accept;
+	bool caller_returned_in_window;
+};
+
+static struct pkm_lcs_kunit_late_window *pkm_lcs_kunit_late_window_ctx;
+
+static void pkm_lcs_kunit_late_window_hook(
+	const struct pkm_lcs_source_response_result *result)
+{
+	struct pkm_lcs_kunit_late_window *window =
+		READ_ONCE(pkm_lcs_kunit_late_window_ctx);
+
+	if (!window || window->hook_ran)
+		return;
+	window->hook_ran = true;
+	window->attached_at_accept = result->caller_waiter_attached;
+	/* Hold the response here until the caller's deadline has passed. */
+	window->caller_returned_in_window =
+		wait_for_completion_timeout(&window->caller_done, 10 * HZ) != 0;
+}
+
+static int pkm_lcs_kunit_late_window_caller_thread(void *data)
+{
+	static const char value_name[] = "Late";
+	static const char layer_name[] = "Base";
+	static const u8 value_data[] = { 1, 2, 3, 4 };
+	struct pkm_lcs_kunit_late_window *window = data;
+
+	window->rc =
+		pkm_lcs_source_set_value_round_trip_timeout_late_effect_with_limits(
+			1, 0, window->key_guid, value_name,
+			sizeof(value_name) - 1, layer_name,
+			sizeof(layer_name) - 1, REG_DWORD, value_data,
+			sizeof(value_data), 10, 0, &window->limits,
+			window->timeout_ms, window->late, &window->response,
+			&window->enqueue);
+	/* All: the hook and the case both wait on it. */
+	complete_all(&window->caller_done);
+	return 0;
+}
+
+static void pkm_lcs_kunit_source_timeout_after_accept_applies_late_effects(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Software" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
+		{ 1 },
+		{ 0x88, 0x13 },
+	};
+	static const char value_name[] = "Late";
+	struct pkm_lcs_source_key_mutation_late_effect_input late = {
+		.key_guid = ancestors[1],
+		.ancestor_guids = ancestors,
+		.resolved_path = path,
+		.name = value_name,
+		.path_component_count = ARRAY_SIZE(path),
+		.name_len = sizeof(value_name) - 1,
+		.event_type = REG_WATCH_VALUE_SET,
+		.flags = PKM_LCS_SOURCE_LATE_EFFECT_RECORD_GENERATION |
+			 PKM_LCS_SOURCE_LATE_EFFECT_DISPATCH_WATCH,
+	};
+	struct reg_notify_args notify = {
+		.filter = REG_NOTIFY_VALUE,
+	};
+	struct pkm_lcs_source_response_result write_result = { };
+	struct pkm_lcs_kunit_late_window *window;
+	u8 response[RSI_MIN_RESPONSE_SIZE];
+	struct task_struct *task;
+	u8 request[256];
+	u8 event[32] = { };
+	struct file file = { };
+	const void *token;
+	u64 generation_before = 0;
+	u64 generation_after = 0;
+	size_t response_len = 0;
+	ssize_t count = -EAGAIN;
+	ssize_t written = 0;
+	unsigned long done;
+	long watch_fd;
+	u32 i;
+
+	window = kunit_kzalloc(test, sizeof(*window), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, window);
+	init_completion(&window->caller_done);
+	window->late = &late;
+	window->key_guid = ancestors[1];
+	window->timeout_ms = 500;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_defaults(&window->limits),
+			0L);
+	window->limits.request_timeout_ms = window->timeout_ms;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	watch_fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, KEY_NOTIFY, path, ancestors, ARRAY_SIZE(ancestors));
+	KUNIT_ASSERT_TRUE(test, watch_fd >= 0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_key_fd_notify((int)watch_fd, &notify),
+			0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_before),
+			0L);
+
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_late_window_caller_thread, window,
+		"pkm-lcs-kunit-late-window");
+	KUNIT_ASSERT_FALSE(test, IS_ERR_OR_NULL(task));
+
+	/* No ASSERT until the thread is stopped: it holds @window. */
+	for (i = 0; i < 2000 && count == -EAGAIN; i++) {
+		count = pkm_lcs_kunit_source_device_read_file(
+			&file, request, sizeof(request), true);
+		if (count == -EAGAIN)
+			msleep(1);
+	}
+	KUNIT_EXPECT_GE(test, count, (ssize_t)RSI_REQUEST_HEADER_SIZE);
+	if (count >= (ssize_t)RSI_REQUEST_HEADER_SIZE) {
+		pkm_lcs_kunit_build_status_response(
+			test, response, sizeof(response),
+			get_unaligned_le64(request + RSI_REQUEST_ID_OFFSET),
+			get_unaligned_le16(request + RSI_REQUEST_OP_CODE_OFFSET),
+			RSI_OK, &response_len);
+		WRITE_ONCE(pkm_lcs_kunit_late_window_ctx, window);
+		WRITE_ONCE(pkm_lcs_kunit_response_accepted_hook,
+			   pkm_lcs_kunit_late_window_hook);
+		written = pkm_lcs_kunit_source_device_write_file(
+			&file, response, response_len, false, &write_result);
+		WRITE_ONCE(pkm_lcs_kunit_response_accepted_hook, NULL);
+		WRITE_ONCE(pkm_lcs_kunit_late_window_ctx, NULL);
+	}
+
+	done = wait_for_completion_timeout(&window->caller_done, 20 * HZ);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_kthread_stop(task), 0);
+	KUNIT_ASSERT_NE(test, done, 0UL);
+
+	KUNIT_EXPECT_EQ(test, window->enqueue.op_code, (u16)RSI_SET_VALUE);
+	KUNIT_EXPECT_TRUE(test, window->hook_ran);
+	/*
+	 * The case only means something if the caller was still attached when
+	 * the response was accepted and timed out before it was completed.
+	 */
+	KUNIT_ASSERT_TRUE(test, window->attached_at_accept);
+	KUNIT_ASSERT_TRUE(test, window->caller_returned_in_window);
+	KUNIT_EXPECT_EQ(test, window->rc, (long)-ETIMEDOUT);
+
+	KUNIT_EXPECT_EQ(test, written, (ssize_t)response_len);
+	KUNIT_EXPECT_FALSE(test, write_result.caller_waiter_attached);
+	KUNIT_EXPECT_TRUE(test, write_result.caller_waiter_detached);
+	KUNIT_EXPECT_EQ(test, write_result.status, (u32)RSI_OK);
+	KUNIT_EXPECT_EQ(test, write_result.in_flight_count, 0U);
+
+	KUNIT_ASSERT_EQ(test,
+			pkm_lcs_kunit_source_hive_generation_snapshot(
+				1, ancestors[0], &generation_after),
+			0L);
+	KUNIT_EXPECT_EQ(test, generation_after, generation_before + 1);
+	KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_read((int)watch_fd, event,
+						  sizeof(event), true),
+			(ssize_t)(8 + sizeof(value_name) - 1));
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(event + 4),
+			REG_WATCH_VALUE_SET);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(event + 8, value_name, sizeof(value_name) - 1),
+			0);
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)watch_fd), 0);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static struct kunit_case pkm_lcs_kunit_source_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_rejects_null_token),
 	KUNIT_CASE(pkm_lcs_kunit_source_device_open_requires_tcb),
@@ -11926,6 +12249,8 @@ static struct kunit_case pkm_lcs_kunit_source_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_source_slot_timeout_sends_no_request),
 	KUNIT_CASE(pkm_lcs_kunit_source_response_timeout_retains_late_record),
 	KUNIT_CASE(pkm_lcs_kunit_source_hide_delete_entry_runtime_limits_layer_frame),
+	KUNIT_CASE(pkm_lcs_kunit_source_waiter_cannot_return_before_wake),
+	KUNIT_CASE(pkm_lcs_kunit_source_timeout_after_accept_applies_late_effects),
 	{}
 };
 

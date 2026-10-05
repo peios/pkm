@@ -1757,6 +1757,17 @@ long pkm_lcs_kunit_source_register_file_for_token_with_bootstrap(
 long pkm_lcs_kunit_source_device_raw_ioctl(struct file *file, unsigned int cmd,
 					   unsigned long arg);
 void pkm_lcs_kunit_flush_source_bootstrap_work(void);
+/*
+ * Test seams in the response path. Each runs only while a test has set it:
+ * the first after a waiter's completion is published and before its wake,
+ * with the waiter's wait.lock held and interrupts off, so it must not sleep;
+ * the second after a response is accepted and before its waiter is
+ * completed, with no lock held.
+ */
+extern void (*pkm_lcs_kunit_waiter_publish_hook)(
+	struct pkm_lcs_source_response_waiter *waiter);
+extern void (*pkm_lcs_kunit_response_accepted_hook)(
+	const struct pkm_lcs_source_response_result *result);
 #endif
 
 #endif /* _SECURITY_PKM_LCS_SOURCE_DEVICE_H */
