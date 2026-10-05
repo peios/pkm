@@ -46,6 +46,7 @@
 #include <linux/workqueue.h>
 #include <net/ip.h>
 #include <net/ip6_checksum.h>
+#include <net/ip6_route.h>
 #include <net/ipv6.h>
 #include <net/route.h>
 #include <net/tcp.h>
@@ -339,6 +340,54 @@ static bool ntfe_refusal_must_wait(const struct sk_buff *nskb,
 	return proto == IPPROTO_ICMP || proto == IPPROTO_ICMPV6;
 }
 
+/*
+ * An inbound answer to a link-local address. ip6_route_me_harder scopes a
+ * link-local lookup to the old route's device, and an inbound packet's
+ * old route is the local delivery route, whose device is the loopback —
+ * so the refusal to a link-local peer found no route and degraded to
+ * DROP (PEI-1383). A link-local address means something only on its
+ * link, and the link is the one the packet arrived on: route there.
+ */
+static int ntfe_route6_on_ingress(struct net *net, struct sk_buff *nskb,
+				  int iif)
+{
+	const struct ipv6hdr *ip6h = ipv6_hdr(nskb);
+	struct flowi6 fl6 = {
+		.flowi6_oif = iif,
+		.flowi6_mark = nskb->mark,
+		.daddr = ip6h->daddr,
+		.saddr = ip6h->saddr,
+		.flowlabel = ip6_flowinfo(ip6h),
+	};
+	struct dst_entry *dst;
+	unsigned int hh_len;
+
+	dst = ip6_route_output(net, NULL, &fl6);
+	if (dst->error) {
+		int err = dst->error;
+
+		dst_release(dst);
+		return err;
+	}
+	skb_dst_drop(nskb);
+	skb_dst_set(nskb, dst);
+
+	hh_len = dst->dev->hard_header_len;
+	if (skb_headroom(nskb) < hh_len &&
+	    pskb_expand_head(nskb, HH_DATA_ALIGN(hh_len - skb_headroom(nskb)),
+			     0, GFP_ATOMIC))
+		return -ENOMEM;
+	return 0;
+}
+
+static bool ntfe_answer6_on_ingress(const struct sk_buff *nskb,
+				    const struct sk_buff *skb,
+				    const struct peios_ntfe_snapshot *snap)
+{
+	return snap->direction == PEIOS_NTFE_DIR_IN && skb->skb_iif &&
+	       (ipv6_addr_type(&ipv6_hdr(nskb)->daddr) & IPV6_ADDR_LINKLOCAL);
+}
+
 /* Route the packet by its own destination and hand it to the output
  * path: a refusal to ourselves lands on the loopback device, a teardown
  * toward the peer goes out to the wire.
@@ -358,6 +407,9 @@ static bool ntfe_refuse_send_self(struct sk_buff *nskb, struct sk_buff *skb,
 		if (ip_route_me_harder(net, NULL, nskb, RTN_UNSPEC))
 			goto drop;
 		if (nskb->len > dst4_mtu(skb_dst(nskb)))
+			goto drop;
+	} else if (ntfe_answer6_on_ingress(nskb, skb, snap)) {
+		if (ntfe_route6_on_ingress(net, nskb, skb->skb_iif))
 			goto drop;
 	} else {
 		if (ip6_route_me_harder(net, NULL, nskb))
