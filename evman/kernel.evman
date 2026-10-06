@@ -314,7 +314,7 @@ resolved at exec with symbolic links followed.
 
 --- field object.kind
 type: str.enum
-values: file | process | token | key | socket | ipc | mount-namespace | event-namespace | metric-namespace | log-namespace | eventd-admin | service | job | peinit-system
+values: file | process | token | key | socket | ipc | mount-namespace | event-namespace | metric-namespace | log-namespace | eventd-admin | service | job | peinit-system | authd-session-end
 closed: false
 
 What sort of thing the operation acted on. Load-bearing rather than
@@ -334,6 +334,10 @@ administer it, the `administer()` check in eventd's `query/security.rs`.
 `service`, `job` and `peinit-system` come from peinit's audit context, on
 the access checks peinit makes against its own descriptors: a service's, a
 job's, and the descriptor guarding peinit's system-wide operations.
+
+`authd-session-end` comes from authd's audit context, on its check against
+the `SessionEndSecurity` descriptor of whether a caller may end another
+principal's logon session.
 
 `mount-namespace` is a mount table, checked when a process changes it. A
 namespace has no name or identifier a record could carry, so a record names
@@ -1484,6 +1488,20 @@ type: bin.guid
 
 The durable GUID of the token an operation derived a new one from, by
 duplicating or filtering it. The new token is `destination.token.guid`.
+
+--- field source.token.sid
+type: bin.sid
+
+The user SID of the token of the process that asked for an operation on
+someone else's behalf: the program that originated a logon, such as
+`login`, sshd or a graphical greeter, as against the principal being signed
+in. The emitter reads it from the connected peer's token, never from
+anything the peer sent.
+
+Not `subject.token.sid`, which is the principal the record is about.
+Several originators run as SYSTEM, so this field says which principal
+asked, not which program; the kernel-stamped header names the emitter, not
+the originator, so nothing else in the record does.
 
 --- field destination.file.path
 type: str.path
