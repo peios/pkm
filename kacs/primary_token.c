@@ -13,6 +13,7 @@
 #include <linux/task_work.h>
 #include <linux/types.h>
 
+#include "access_check.h"
 #include "capability.h"
 #include "cred_lifecycle.h"
 #include "lsm_internal.h"
@@ -155,9 +156,50 @@ static long pkm_kacs_apply_current_primary_install(
 	return 0;
 }
 
+/*
+ * Why an impersonation ended, for kacs.impersonation.reverted's
+ * operation.name. SILENT is the primary-token install, which takes the
+ * impersonation down only to put it straight back over the new real cred
+ * (impersonation survives it), so nothing has ended and nothing is written.
+ */
+#define PKM_KACS_REVERT_SILENT 0U
+#define PKM_KACS_REVERT_SYSCALL 1U
+#define PKM_KACS_REVERT_EXEC 2U
+#define PKM_KACS_REVERT_REPLACED 3U
+
+static long pkm_kacs_revert_current_impersonation_for(u32 cause);
+
 static long pkm_kacs_revert_current_impersonation(void)
 {
+	return pkm_kacs_revert_current_impersonation_for(PKM_KACS_REVERT_SILENT);
+}
+
+/*
+ * kacs.impersonation.reverted (PKM §3.5): the thread acts as `subject` again
+ * and gave up `dropped`. Best effort.
+ */
+static void pkm_kacs_audit_impersonation_reverted(const void *dropped,
+						  u32 cause, long err)
+{
+	const void *subject = pkm_kacs_current_effective_token_ptr();
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+
+	if (!subject || !dropped)
+		return;
+	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
+		pip_type = 0;
+		pip_trust = 0;
+	}
+	(void)kacs_rust_emit_impersonation_reverted(
+		subject, dropped, cause, (s32)err, (u64)task_pid_nr(current),
+		pip_type, pip_trust);
+}
+
+static long pkm_kacs_revert_current_impersonation_for(u32 cause)
+{
 	struct pkm_kacs_task_security *task_sec;
+	const void *dropped = NULL;
 
 	if (!current || !current->security)
 		return -EACCES;
@@ -165,6 +207,14 @@ static long pkm_kacs_revert_current_impersonation(void)
 	task_sec = pkm_kacs_task(current);
 	if (!task_sec->impersonation_saved_cred)
 		return 0;
+
+	/*
+	 * Hold the impersonation token across the revert: dropping the
+	 * override cred below can free it, and the record names it.
+	 */
+	if (cause != PKM_KACS_REVERT_SILENT)
+		dropped = kacs_rust_token_clone(
+			pkm_kacs_current_effective_token_ptr());
 
 	trace_kacs_primary_install(
 		(u64)(uintptr_t)pkm_kacs_cred(task_sec->impersonation_saved_cred)
@@ -180,6 +230,10 @@ static long pkm_kacs_revert_current_impersonation(void)
 	 */
 	put_cred(revert_creds(task_sec->impersonation_saved_cred));
 	task_sec->impersonation_saved_cred = NULL;
+	if (dropped) {
+		pkm_kacs_audit_impersonation_reverted(dropped, cause, 0);
+		kacs_rust_token_drop(dropped);
+	}
 	return 0;
 }
 
@@ -440,7 +494,7 @@ int pkm_kacs_install_impersonation_token(const void *token)
 		return -EACCES;
 
 	task_sec = pkm_kacs_task(current);
-	ret = pkm_kacs_revert_current_impersonation();
+	ret = pkm_kacs_revert_current_impersonation_for(PKM_KACS_REVERT_REPLACED);
 	if (ret)
 		return ret;
 
@@ -474,7 +528,13 @@ int pkm_kacs_install_impersonation_token(const void *token)
 
 int pkm_kacs_revert_impersonation(void)
 {
-	return pkm_kacs_revert_current_impersonation();
+	return pkm_kacs_revert_current_impersonation_for(PKM_KACS_REVERT_SYSCALL);
+}
+
+/* The revert exec performs before it commits the new image's creds. */
+int pkm_kacs_revert_impersonation_for_exec(void)
+{
+	return pkm_kacs_revert_current_impersonation_for(PKM_KACS_REVERT_EXEC);
 }
 
 SYSCALL_DEFINE0(kacs_revert)

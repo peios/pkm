@@ -18,6 +18,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 
+#include "access_check.h"
 #include "token_fd.h"
 #include "token_runtime.h"
 
@@ -432,6 +433,41 @@ static long pkm_kacs_token_install_core(
 static long pkm_kacs_impersonate_token_core(const void *client_token,
 					    const void *server_primary_token);
 
+/* kacs.impersonation.started outcome.reason codes, as Rust names them. */
+#define PKM_KACS_IMP_REASON_NONE 0U
+#define PKM_KACS_IMP_REASON_PRIMARY_TOKEN 1U
+#define PKM_KACS_IMP_REASON_RESTRICTION_ESCAPE 2U
+#define PKM_KACS_IMP_REASON_NO_IMPERSONATE_ACCESS 3U
+#define PKM_KACS_IMP_REASON_PROJECTION_FAILED 4U
+/* The gate did not answer, so no permitted level is known. */
+#define PKM_KACS_IMP_LEVEL_UNKNOWN U32_MAX
+
+/*
+ * kacs.impersonation.started (PKM §3.5): one record per impersonation
+ * attempt that names a client token, successful or refused. The subject is
+ * the server, the token that acted. Best effort: a record that cannot be
+ * written does not change the impersonation's outcome.
+ */
+static void pkm_kacs_audit_impersonation_started(
+	const void *server_token, const void *client_token,
+	const void *installed_token, u32 permitted_level,
+	bool used_impersonate, long ret, u32 reason)
+{
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+
+	if (!server_token || !client_token)
+		return;
+	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
+		pip_type = 0;
+		pip_trust = 0;
+	}
+	(void)kacs_rust_emit_impersonation_started(
+		server_token, client_token, installed_token, permitted_level,
+		used_impersonate, (s32)ret, reason, (u64)task_pid_nr(current),
+		pip_type, pip_trust);
+}
+
 static long pkm_kacs_token_impersonate_core(
 	struct pkm_kacs_token_file *tf,
 	const void *server_primary_token)
@@ -444,6 +480,10 @@ static long pkm_kacs_token_impersonate_core(
 		trace_kacs_token_ioctl((u64)(uintptr_t)tf->token,
 				       KACS_TOK_IMPERSONATE, tf->access_mask,
 				       KACS_TOKEN_IMPERSONATE, -1, 0, -EACCES);
+		pkm_kacs_audit_impersonation_started(
+			server_primary_token, tf->token, NULL,
+			PKM_KACS_IMP_LEVEL_UNKNOWN, false, -EACCES,
+			PKM_KACS_IMP_REASON_NO_IMPERSONATE_ACCESS);
 		return -EACCES;
 	}
 
@@ -469,24 +509,60 @@ static long pkm_kacs_impersonate_token_core(const void *client_token,
 	ret = kacs_rust_token_impersonation_gate(server_primary_token, client_token,
 						 &effective_level,
 						 &used_impersonate_privilege);
-	if (ret)
+	if (ret) {
+		/* The gate refuses a primary token with EINVAL, and a restricted
+		 * server's same-user escape to an unrestricted client with EPERM. */
+		pkm_kacs_audit_impersonation_started(
+			server_primary_token, client_token, NULL,
+			PKM_KACS_IMP_LEVEL_UNKNOWN, false, ret,
+			ret == -EINVAL ? PKM_KACS_IMP_REASON_PRIMARY_TOKEN :
+			ret == -EPERM  ? PKM_KACS_IMP_REASON_RESTRICTION_ESCAPE :
+					 PKM_KACS_IMP_REASON_NONE);
 		return ret;
+	}
 
 	if (used_impersonate_privilege &&
 	    !kacs_rust_token_mark_privileges_used(
-		    server_primary_token, KACS_SE_IMPERSONATE_PRIVILEGE))
-		return -EACCES;
+		    server_primary_token, KACS_SE_IMPERSONATE_PRIVILEGE)) {
+		ret = -EACCES;
+		goto refused;
+	}
 
 	ret = kacs_rust_token_clone_with_impersonation_level(
 		client_token, effective_level, &effective_token);
 	if (ret)
-		return ret;
-	if (!effective_token)
-		return -EACCES;
+		goto refused;
+	if (!effective_token) {
+		ret = -EACCES;
+		goto refused;
+	}
 
 	ret = pkm_kacs_install_impersonation_token(effective_token);
-	if (ret)
+	if (ret) {
 		kacs_rust_token_drop(effective_token);
+		pkm_kacs_audit_impersonation_started(
+			server_primary_token, client_token, NULL,
+			effective_level, used_impersonate_privilege != 0, ret,
+			ret == -ENOMEM ? PKM_KACS_IMP_REASON_NONE :
+					 PKM_KACS_IMP_REASON_PROJECTION_FAILED);
+		return ret;
+	}
+
+	/*
+	 * The installed token is the thread's now, so it outlives this call;
+	 * it is the clone, whose GUID differs from the client's when the level
+	 * was clamped, and the record names it.
+	 */
+	pkm_kacs_audit_impersonation_started(
+		server_primary_token, client_token, effective_token,
+		effective_level, used_impersonate_privilege != 0, 0,
+		PKM_KACS_IMP_REASON_NONE);
+	return 0;
+
+refused:
+	pkm_kacs_audit_impersonation_started(
+		server_primary_token, client_token, NULL, effective_level,
+		used_impersonate_privilege != 0, ret, PKM_KACS_IMP_REASON_NONE);
 	return ret;
 }
 

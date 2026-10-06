@@ -630,6 +630,8 @@ enum pkm_kunit_msgpack_kind {
 	PKM_KUNIT_MSGPACK_BIN,
 	PKM_KUNIT_MSGPACK_ARRAY,
 	PKM_KUNIT_MSGPACK_MAP,
+	/* A negative integer: negative fixint or int 8/16/32/64. */
+	PKM_KUNIT_MSGPACK_INT,
 };
 
 
@@ -640,6 +642,7 @@ struct pkm_kunit_msgpack_view {
 	size_t total_len;
 	u32 count;
 	u64 uint_value;
+	s64 int_value;
 	bool bool_value;
 };
 
@@ -1211,6 +1214,10 @@ bool pkm_kunit_msgpack_require_key(
 bool pkm_kunit_msgpack_expect_uint_key(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
 	const char *key, u64 expected);
+
+bool pkm_kunit_msgpack_expect_int_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key, s64 expected);
 
 bool pkm_kunit_msgpack_expect_bool_key(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,

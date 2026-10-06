@@ -1295,6 +1295,13 @@ bool pkm_kunit_msgpack_parse_one(const u8 *bytes, size_t len,
 	memset(out, 0, sizeof(*out));
 	tag = bytes[0];
 
+	if (tag >= 0xe0) {
+		/* Negative fixint, -32 to -1. */
+		out->kind = PKM_KUNIT_MSGPACK_INT;
+		out->int_value = (s64)(s8)tag;
+		out->total_len = 1;
+		return true;
+	}
 	if (tag <= 0x7f) {
 		out->kind = PKM_KUNIT_MSGPACK_UINT;
 		out->uint_value = tag;
@@ -1379,6 +1386,22 @@ bool pkm_kunit_msgpack_parse_one(const u8 *bytes, size_t len,
 			out->uint_value = value;
 			out->total_len = 9;
 			return true;
+		case 0xd0:
+		case 0xd1:
+		case 0xd2:
+		case 0xd3: {
+			size_t width = (size_t)1 << (tag - 0xd0);
+
+			if (!pkm_kunit_msgpack_read_be(bytes + 1, len - 1, width,
+						       &value))
+				return false;
+			out->kind = PKM_KUNIT_MSGPACK_INT;
+			/* Sign-extend the big-endian two's complement value. */
+			out->int_value = width == 8 ? (s64)value :
+				(s64)(value << (64 - 8 * width)) >> (64 - 8 * width);
+			out->total_len = 1 + width;
+			return true;
+		}
 		case 0xd9:
 			if (!pkm_kunit_msgpack_read_be(bytes + 1, len - 1, 1,
 						       &value))
@@ -1563,6 +1586,21 @@ bool pkm_kunit_msgpack_expect_uint_key(
 		return false;
 	KUNIT_EXPECT_EQ(test, value.uint_value, expected);
 	return value.uint_value == expected;
+}
+
+
+/* A negative integer, such as outcome.errno. */
+bool pkm_kunit_msgpack_expect_int_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key, s64 expected)
+{
+	struct pkm_kunit_msgpack_view value = { };
+
+	if (!pkm_kunit_msgpack_require_key(test, map, key,
+					   PKM_KUNIT_MSGPACK_INT, &value))
+		return false;
+	KUNIT_EXPECT_EQ(test, value.int_value, expected);
+	return value.int_value == expected;
 }
 
 

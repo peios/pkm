@@ -1,12 +1,13 @@
 --- field privilege.name
 type: str.enum
-values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege
+values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege | SeImpersonatePrivilege
 closed: false
 
-The privilege that contributed access. Only these five can influence an
-access check today, so only these five appear. The set is open because a
-privilege used to satisfy a Linux capability gate is a privilege use too,
-and will be recorded with `linux.cap` as its context.
+The privilege a record is about. On an access check it is the privilege
+that contributed access, and only the first five can influence an access
+check. `SeImpersonatePrivilege` appears on an impersonation that needed it.
+The set is open because a privilege used to satisfy a Linux capability gate
+is a privilege use too, and will be recorded with `linux.cap` as its context.
 
 --- field privilege.contributed
 type: uint.mask
@@ -643,6 +644,13 @@ and the same record is written.
 no record.** KACS cannot encode the name and skips the event rather than
 write it, and the session is destroyed regardless.
 
+**The record follows the teardown, written by a kernel worker.** A session
+usually ends when a freed credential drops its last token, at a point where
+the record cannot be built, so KACS queues it and a kernel work item writes
+it moments later. Its header therefore names that kernel worker rather than
+the process whose exit or revert ended the session, and it can arrive after
+records that process wrote later.
+
 field: object.session.id           required
 field: object.session.user.sid     required
 field: object.session.logon-type   required
@@ -650,3 +658,105 @@ field: object.session.auth-package required
 field: object.session.logon-time   required
   When the session was created. KACS keeps it to the second, so the
   nanosecond value is always a whole number of seconds.
+
+--- event kacs.impersonation.started
+tier: standard
+gating: none — every impersonation attempt that names a client token is recorded
+cardinality: once per attempt
+
+The record that a thread took on, or tried to take on, a client's identity
+by impersonating its token. The subject is the server — the token that
+acted, as it stood before the switch — and the object is the client token.
+Successes and refusals are both recorded.
+
+Impersonation is per thread, so `emitter.thread.tid` names the thread that
+changed identity, not `emitter.process.pid`. Records the thread writes
+afterwards carry the client's token in their header, until a
+`kacs.impersonation.reverted` record ends it.
+
+**The level can be lowered without the attempt failing.**
+`object.token.impersonation` is the level the client token offered, and
+`object.token.impersonation-permitted` the level KACS let the server have.
+Where the second is lower — the server lacked SeImpersonatePrivilege for a
+different user, or the client's integrity was above the server's — the
+impersonation succeeded at Identification, which can query the client's
+identity but not act as it.
+
+**The GUID is the installed token's.** A lowered level installs a new token,
+so `object.token.guid` and `object.token.id` on a success are that token's,
+and they match the `emitter.token.guid` of the thread's later records.
+Exactly when the level was lowered they differ from the GUID of the token
+the client handed over.
+
+include: subject
+field: emitter.thread.tid               required
+field: object.kind                      required
+  Always `token`.
+field: object.token.guid                required
+field: object.token.id                  required
+field: object.token.sid                 required
+  The client: whose identity the server took on or asked for.
+field: object.token.type                required
+  `primary` only on a refusal: a primary token cannot be impersonated.
+field: object.token.integrity           required
+field: object.token.auth-id             optional
+  Absent only for a token with no logon session.
+field: object.token.restricted          required
+field: object.token.impersonation       required
+  The level the client token offered: the level asked for.
+field: object.token.impersonation-permitted  optional
+  The level the gate allowed. Absent when the attempt was refused before
+  the gate answered.
+field: privilege.name                   optional
+  `SeImpersonatePrivilege`, present when the server impersonated a different
+  user, or across a restriction difference, and needed the privilege to do
+  it at the level asked. The privilege is then marked used.
+field: privilege.held                   when privilege.name == SeImpersonatePrivilege
+  Always true where present: a server without the privilege is not refused
+  but lowered to Identification, which `impersonation-permitted` shows.
+field: outcome.success                  required
+field: outcome.errno                    when outcome.success == false
+field: outcome.reason                   optional
+  values: primary-token | restriction-escape | no-impersonate-access | projection-failed
+  closed: false
+  On a refusal, where KACS knows why: the token handed over was a primary
+  token (`EINVAL`); a restricted server tried to impersonate an unrestricted
+  token of its own user, which would escape its restriction (`EPERM`); the
+  token handle lacked `TOKEN_IMPERSONATE` (`EACCES`); or the identity could
+  not be projected onto the thread's Linux credentials. Absent on a refusal
+  for want of memory.
+
+--- event kacs.impersonation.reverted
+tier: verbose
+gating: none — every impersonation that ends is recorded
+cardinality: once per impersonation ended
+
+The record that a thread stopped impersonating and acts as its own token
+again. The subject is the thread's token after the revert; the object is
+the impersonation token it gave up, which a `kacs.impersonation.started`
+record named.
+
+**Verbose, because it is bookkeeping.** An API that impersonates per
+request reverts once per request too, and the start already carries the
+security decision.
+
+**Not every end is recorded.** A thread that exits while impersonating
+writes nothing: its credentials are released where no record can be built.
+And installing a new primary token does not end an impersonation — the
+impersonation is put back over the new token — so it writes nothing either.
+
+include: subject
+field: emitter.thread.tid               required
+field: object.kind                      required
+  Always `token`.
+field: object.token.guid                required
+  The impersonation token given up.
+field: object.token.sid                 required
+field: operation.name                   required
+  values: revert | exec | replaced
+  closed: false
+  `revert` is an explicit `kacs_revert`; `exec` the revert every exec
+  performs before the new image runs; `replaced` the implicit end of one
+  impersonation when the thread starts another.
+field: outcome.success                  required
+field: outcome.errno                    when outcome.success == false

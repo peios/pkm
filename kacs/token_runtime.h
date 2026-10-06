@@ -616,6 +616,7 @@ int pkm_kacs_resolve_current_effective_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_install_impersonation_token(const void *token);
 int pkm_kacs_revert_impersonation(void);
+int pkm_kacs_revert_impersonation_for_exec(void);
 int pkm_kacs_install_current_primary_token(const void *token);
 int pkm_kmes_current_process_rate_reserve(u32 count);
 void pkm_kmes_current_process_rate_refund(u32 count);
@@ -631,6 +632,17 @@ int kacs_rust_create_logon_session(const void *creator_token, const u8 *spec,
 			     u64 *logon_session_id_out);
 int kacs_rust_destroy_empty_logon_session(u64 auth_id);
 void kacs_rust_session_audit_drain(void);
+int kacs_rust_emit_impersonation_started(const void *server_token,
+					 const void *client_token,
+					 const void *installed_token,
+					 u32 permitted_level,
+					 bool used_impersonate, s32 err,
+					 u32 reason, u64 tid, u32 pip_type,
+					 u32 pip_trust);
+int kacs_rust_emit_impersonation_reverted(const void *subject_token,
+					  const void *dropped_token, u32 cause,
+					  s32 err, u64 tid, u32 pip_type,
+					  u32 pip_trust);
 void pkm_kacs_session_audit_schedule(void);
 void pkm_kacs_session_audit_flush(void);
 const void *kacs_rust_token_clone(const void *token);

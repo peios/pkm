@@ -49,8 +49,9 @@ use crate::lcs_core::casefold_eq;
 use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
 use crate::kmes_payload::{
     emit_access_check_events_to_kmes, emit_handle_used_to_kmes,
+    emit_impersonation_reverted_to_kmes, emit_impersonation_started_to_kmes,
     encode_logon_session_destroyed_payload, emit_logon_session_destroyed_to_kmes, AuditObject,
-    AuditSubjectIds, AuditTarget, HandleUse,
+    AuditSubjectIds, AuditTarget, HandleUse, ImpersonationClient,
 };
 use crate::mic::{
     IntegrityLevel, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
@@ -9657,6 +9658,125 @@ pub extern "C" fn kacs_rust_token_impersonation_gate(
         }
         Err(err) => err,
     }
+}
+
+/// `outcome.reason` values of `kacs.impersonation.started`, by the code the
+/// C caller passes (`PKM_KACS_IMP_REASON_*` in token_fd.c).
+fn impersonation_reason(reason: u32) -> Option<&'static [u8]> {
+    match reason {
+        1 => Some(b"primary-token"),
+        2 => Some(b"restriction-escape"),
+        3 => Some(b"no-impersonate-access"),
+        4 => Some(b"projection-failed"),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+/// Writes `kacs.impersonation.started` for one impersonation attempt by
+/// `server_token` with `client_token`. `installed_token` is the token put on
+/// the thread, or null when the attempt failed; on success its GUID and LUID
+/// are the record's, since a clamped level mints a new token.
+/// `permitted_level` is the gate's answer, or `u32::MAX` when the gate did
+/// not answer. Best effort: the result does not change the impersonation.
+pub extern "C" fn kacs_rust_emit_impersonation_started(
+    server_token: *const c_void,
+    client_token: *const c_void,
+    installed_token: *const c_void,
+    permitted_level: u32,
+    used_impersonate: bool,
+    errno: i32,
+    reason: u32,
+    tid: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(server) = (unsafe { PkmKacsBootToken::from_ptr(server_token) }) else {
+        return -EINVAL;
+    };
+    let Some(client) = (unsafe { PkmKacsBootToken::from_ptr(client_token) }) else {
+        return -EINVAL;
+    };
+    let installed = unsafe { PkmKacsBootToken::from_ptr(installed_token) }.unwrap_or(client);
+    let record = ImpersonationClient {
+        guid: installed.token_guid,
+        id: installed.token_id,
+        sid: client.user_sid.as_bytes(),
+        token_type: client.token_type,
+        integrity: client.integrity_level.0,
+        auth_id: client.audit_subject_ids().auth_id,
+        restricted: client.restricted,
+        requested: client.impersonation_level,
+        permitted: (permitted_level != u32::MAX).then_some(permitted_level),
+        used_impersonate,
+    };
+    let ids = server.audit_subject_ids();
+
+    server.with_access_token(|access_token| {
+        match emit_impersonation_started_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            tid,
+            &record,
+            errno,
+            impersonation_reason(reason),
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+/// `operation.name` values of `kacs.impersonation.reverted`, by the code the
+/// C caller passes (`PKM_KACS_REVERT_*` in primary_token.c).
+fn impersonation_revert_operation(cause: u32) -> Option<&'static [u8]> {
+    match cause {
+        1 => Some(b"revert"),
+        2 => Some(b"exec"),
+        3 => Some(b"replaced"),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+/// Writes `kacs.impersonation.reverted`: the thread now acts as
+/// `subject_token` and gave up `dropped_token` for `cause`. Best effort.
+pub extern "C" fn kacs_rust_emit_impersonation_reverted(
+    subject_token: *const c_void,
+    dropped_token: *const c_void,
+    cause: u32,
+    errno: i32,
+    tid: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return -EINVAL;
+    };
+    let Some(dropped) = (unsafe { PkmKacsBootToken::from_ptr(dropped_token) }) else {
+        return -EINVAL;
+    };
+    let Some(operation) = impersonation_revert_operation(cause) else {
+        return -EINVAL;
+    };
+    let ids = subject.audit_subject_ids();
+
+    subject.with_access_token(|access_token| {
+        match emit_impersonation_reverted_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            tid,
+            &dropped.token_guid,
+            dropped.user_sid.as_bytes(),
+            operation,
+            errno,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
 }
 
 #[no_mangle]

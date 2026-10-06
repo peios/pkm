@@ -33,6 +33,8 @@ const PRIVILEGE_USED_TYPE: &[u8] = b"kacs.audit.privilege.used";
 const CAAP_SACL_SKIPPED_TYPE: &[u8] = b"kacs.caap.sacl.skipped";
 const CAAP_STAGING_DIVERGED_TYPE: &[u8] = b"kacs.caap.staging.diverged";
 const SESSION_DESTROYED_TYPE: &[u8] = b"kacs.session.destroyed";
+const IMPERSONATION_STARTED_TYPE: &[u8] = b"kacs.impersonation.started";
+const IMPERSONATION_REVERTED_TYPE: &[u8] = b"kacs.impersonation.reverted";
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -771,6 +773,230 @@ fn encode_handle_used_payload(
     }
 
     Ok(writer.into_vec())
+}
+
+/// The `emitter` map with the thread as well as the process:
+/// `emitter.process.*` and `emitter.thread.tid`, for a record about
+/// something scoped to one thread, such as impersonation.
+fn encode_emitter_thread_map(process: &ProcessInfo, tid: u64) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(112 + process.executable_path.len())?;
+
+    writer.write_map_len(2)?;
+    writer.write_key(b"process")?;
+    writer.write_map_len(3)?;
+    writer.write_key(b"pid")?;
+    writer.write_u64(process.pid)?;
+    writer.write_key(b"name")?;
+    writer.write_str(process.name.as_slice())?;
+    writer.write_key(b"executable")?;
+    writer.write_str(process.executable_path.as_slice())?;
+    writer.write_key(b"thread")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"tid")?;
+    writer.write_u64(tid)?;
+
+    Ok(writer.into_vec())
+}
+
+/// The `outcome` map of a record whose action can fail: `success`, and on
+/// failure the negative `errno` and, where one is known, the `reason`.
+fn write_outcome(
+    writer: &mut MsgpackWriter,
+    errno: i32,
+    reason: Option<&[u8]>,
+) -> Result<(), c_long> {
+    let failed = errno != 0;
+    let reason = if failed { reason } else { None };
+
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1 + usize::from(failed) + usize::from(reason.is_some()))?;
+    writer.write_key(b"success")?;
+    writer.write_bool(!failed)?;
+    if failed {
+        writer.write_key(b"errno")?;
+        write_i64(writer, i64::from(errno))?;
+    }
+    if let Some(reason) = reason {
+        writer.write_key(b"reason")?;
+        writer.write_str(reason)?;
+    }
+    Ok(())
+}
+
+/// A msgpack signed integer, smallest encoding.
+fn write_i64(writer: &mut MsgpackWriter, value: i64) -> Result<(), c_long> {
+    if value >= 0 {
+        return writer.write_u64(value as u64);
+    }
+    if value >= -32 {
+        writer.push_byte(value as i8 as u8)
+    } else if value >= i64::from(i8::MIN) {
+        writer.push_byte(0xd0)?;
+        writer.push_byte(value as i8 as u8)
+    } else if value >= i64::from(i16::MIN) {
+        writer.push_byte(0xd1)?;
+        writer.extend(&(value as i16).to_be_bytes())
+    } else if value >= i64::from(i32::MIN) {
+        writer.push_byte(0xd2)?;
+        writer.extend(&(value as i32).to_be_bytes())
+    } else {
+        writer.push_byte(0xd3)?;
+        writer.extend(&value.to_be_bytes())
+    }
+}
+
+/// The client token of an impersonation, as `kacs.impersonation.started`
+/// describes it under `object.token`.
+pub(crate) struct ImpersonationClient<'a> {
+    /// The installed token's GUID on success, the client token's otherwise.
+    pub(crate) guid: [u8; 16],
+    /// The installed token's LUID on success, the client token's otherwise.
+    pub(crate) id: u64,
+    pub(crate) sid: &'a [u8],
+    pub(crate) token_type: TokenType,
+    pub(crate) integrity: u32,
+    pub(crate) auth_id: Option<u64>,
+    pub(crate) restricted: bool,
+    /// The client token's own impersonation level: the level asked for.
+    pub(crate) requested: ImpersonationLevel,
+    /// The level the gate permitted, as its ABI value, when the gate ran.
+    pub(crate) permitted: Option<u32>,
+    /// Whether the gate needed SeImpersonatePrivilege and used it.
+    pub(crate) used_impersonate: bool,
+}
+
+fn encode_impersonation_started_payload(
+    subject_map: &[u8],
+    emitter_map: &[u8],
+    client: &ImpersonationClient<'_>,
+    errno: i32,
+    reason: Option<&[u8]>,
+) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(384 + client.sid.len())?;
+    let impersonation = match client.token_type {
+        TokenType::Primary => 0,
+        TokenType::Impersonation => impersonation_level_value(client.requested),
+    };
+
+    writer.write_map_len(4 + usize::from(client.used_impersonate))?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map)?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map)?;
+    writer.write_key(b"object")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"kind")?;
+    writer.write_str(b"token")?;
+    writer.write_key(b"token")?;
+    writer.write_map_len(
+        7 + usize::from(client.auth_id.is_some()) + usize::from(client.permitted.is_some()),
+    )?;
+    writer.write_key(b"guid")?;
+    writer.write_bin(&client.guid)?;
+    writer.write_key(b"id")?;
+    writer.write_u64(client.id)?;
+    writer.write_key(b"sid")?;
+    writer.write_bin(client.sid)?;
+    writer.write_key(b"type")?;
+    writer.write_str(match client.token_type {
+        TokenType::Primary => b"primary",
+        TokenType::Impersonation => b"impersonation",
+    })?;
+    writer.write_key(b"integrity")?;
+    writer.write_u64(u64::from(client.integrity))?;
+    if let Some(auth_id) = client.auth_id {
+        writer.write_key(b"auth-id")?;
+        writer.write_u64(auth_id)?;
+    }
+    writer.write_key(b"restricted")?;
+    writer.write_bool(client.restricted)?;
+    writer.write_key(b"impersonation")?;
+    writer.write_u64(impersonation)?;
+    if let Some(permitted) = client.permitted {
+        writer.write_key(b"impersonation-permitted")?;
+        writer.write_u64(u64::from(permitted))?;
+    }
+    if client.used_impersonate {
+        writer.write_key(b"privilege")?;
+        writer.write_map_len(2)?;
+        writer.write_key(b"name")?;
+        writer.write_str(b"SeImpersonatePrivilege")?;
+        writer.write_key(b"held")?;
+        writer.write_bool(true)?;
+    }
+    write_outcome(&mut writer, errno, reason)?;
+
+    Ok(writer.into_vec())
+}
+
+/// `kacs.impersonation.started`, for an impersonation attempt that reached
+/// the kernel's gate. `token` is the server's token, the one that acted.
+pub(crate) fn emit_impersonation_started_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    tid: u64,
+    client: &ImpersonationClient<'_>,
+    errno: i32,
+    reason: Option<&[u8]>,
+) -> Result<(), c_long> {
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_thread_map(&process_info, tid)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let payload = encode_impersonation_started_payload(
+        subject_map.as_slice(),
+        emitter_map.as_slice(),
+        client,
+        errno,
+        reason,
+    )?;
+
+    emit(IMPERSONATION_STARTED_TYPE, payload.as_slice());
+    Ok(())
+}
+
+/// `kacs.impersonation.reverted`. `token` is the thread's token after the
+/// revert; `dropped_guid` and `dropped_sid` identify the token it gave up.
+pub(crate) fn emit_impersonation_reverted_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    tid: u64,
+    dropped_guid: &[u8; 16],
+    dropped_sid: &[u8],
+    operation: &[u8],
+    errno: i32,
+) -> Result<(), c_long> {
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_thread_map(&process_info, tid)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let mut writer = MsgpackWriter::with_capacity(
+        256 + subject_map.len() + emitter_map.len() + dropped_sid.len(),
+    )?;
+
+    writer.write_map_len(5)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map.as_slice())?;
+    writer.write_key(b"object")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"kind")?;
+    writer.write_str(b"token")?;
+    writer.write_key(b"token")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"guid")?;
+    writer.write_bin(dropped_guid)?;
+    writer.write_key(b"sid")?;
+    writer.write_bin(dropped_sid)?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(operation)?;
+    write_outcome(&mut writer, errno, None)?;
+
+    emit(IMPERSONATION_REVERTED_TYPE, writer.into_vec().as_slice());
+    Ok(())
 }
 
 pub(crate) fn encode_logon_session_destroyed_payload(
