@@ -8064,6 +8064,10 @@ fn emit_internal_access_check_events(
         object,
         asserted: false,
         sacl_audit_suppressed: false,
+        denials: crate::kmes_payload::AccessDenials {
+            integrity: state.denied_integrity,
+            trust: state.denied_trust,
+        },
     };
 
     emit_access_check_events_to_kmes(
@@ -8814,6 +8818,8 @@ fn emit_file_set_sd_audit_events(
             object: AuditObject::Kind(b"file"),
             asserted: false,
             sacl_audit_suppressed: false,
+            // Only the new SACL is walked here: no check, so no denial.
+            denials: crate::kmes_payload::AccessDenials::default(),
         };
 
         emit_access_check_events_to_kmes(audit_events.as_slice(), &[], &[], resolved, pip, &target)
@@ -8972,15 +8978,15 @@ fn mnt_ns_sd_access_check_errno(
     desired: u32,
     pip: PipContext,
 ) -> Result<u32, i32> {
-    // `object.kind` has no value for a mount namespace, so its records name
-    // no object rather than a wrong one.
+    // The namespace has no identity a record could carry, so its records
+    // name the kind alone.
     object_sd_access_check_errno(
         subject_token,
         sd_bytes,
         desired,
         &MNTNS_GENERIC_MAPPING,
         pip,
-        AuditObject::Unknown,
+        AuditObject::Kind(b"mount-namespace"),
     )
 }
 

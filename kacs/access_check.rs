@@ -11,7 +11,7 @@ use crate::access_check_abi::{
     KACS_ACCESS_CHECK_ARGS_SIZE,
 };
 use crate::error::KacsError;
-use crate::kmes_payload::{AuditObject, AuditTarget};
+use crate::kmes_payload::{AccessDenials, AuditObject, AuditTarget};
 use crate::mic::{IntegrityLevel, TOKEN_MANDATORY_POLICY_NO_WRITE_UP};
 use crate::pip::PipContext;
 use crate::pkm_alloc::Vec;
@@ -211,9 +211,10 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
         validate_audit_context_encoding(&request)?;
-        let target = audit_target(&request, live_token, suppressed)?;
+        let mut target = audit_target(&request, live_token, suppressed)?;
         let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_abi(&request, &resolved).map_err(map_kacs_error)?;
+        target.denials = denials_of(&execution);
         finalize_execution(
             ops,
             event_sinks,
@@ -250,10 +251,11 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
         validate_audit_context_encoding(&request)?;
-        let target = audit_target(&request, live_token, suppressed)?;
+        let mut target = audit_target(&request, live_token, suppressed)?;
         let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_list_abi(&request, results_count, &resolved)
             .map_err(map_kacs_error)?;
+        target.denials = denials_of(&execution);
         finalize_execution(
             ops,
             event_sinks,
@@ -295,6 +297,15 @@ fn validate_audit_context_encoding(request: &AccessCheckAbiRequest) -> Result<()
     Ok(())
 }
 
+/// What the mandatory checks withheld from the request, for the access
+/// records (`access.denied-integrity`, `access.denied-trust`).
+fn denials_of(execution: &AccessCheckAbiExecution) -> AccessDenials {
+    AccessDenials {
+        integrity: execution.denied_integrity,
+        trust: execution.denied_trust,
+    }
+}
+
 /// Whether the caller of the AccessCheck syscall was found not to hold
 /// SeAuditPrivilege, so the records its SACL generates are not written.
 fn sacl_audit_suppressed(resolved_ctx: *const PkmKacsResolvedCtx) -> bool {
@@ -317,6 +328,8 @@ fn audit_target<'a>(
         object: AuditObject::from_audit_context(request.audit_context.as_deref())?,
         asserted: true,
         sacl_audit_suppressed,
+        // Filled in once the check has run.
+        denials: AccessDenials::default(),
     })
 }
 

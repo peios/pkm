@@ -256,6 +256,7 @@ fn caap_base<'a>(policy_sid: Sid<'a>, granted: u32) -> EvaluateSecurityDescripto
         resource_attributes: Vec::new().into(),
         policy_sids: vec![policy_sid].into(),
         pip_decided: 0,
+        mic_decided: 0,
         provenance: PrivilegeProvenance::default(),
         object_granted_list: None,
     }

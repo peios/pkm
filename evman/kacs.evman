@@ -397,6 +397,14 @@ field: object.token.guid        when object.kind == token
 field: access.requested         required
 field: access.granted           required
   The mask this check granted.
+field: access.denied-integrity  optional
+  The requested bits the object's mandatory label withheld — every bit it
+  withheld, for `MAXIMUM_ALLOWED`. Absent when it withheld none. With
+  `access.denied-trust`, often the whole explanation of a denial the DACL
+  alone would have allowed.
+field: access.denied-trust      optional
+  The requested bits the object's process-trust label withheld, read the
+  same way.
 field: outcome.success          required
   True when every requested bit is in `access.granted`. A `MAXIMUM_ALLOWED`
   request always reports true, because such a request returns whatever is

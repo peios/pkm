@@ -314,7 +314,7 @@ resolved at exec with symbolic links followed.
 
 --- field object.kind
 type: str.enum
-values: file | process | token | key | socket | ipc | event-namespace | metric-namespace | log-namespace | eventd-admin
+values: file | process | token | key | socket | ipc | mount-namespace | event-namespace | metric-namespace | log-namespace | eventd-admin | service | job | peinit-system
 closed: false
 
 What sort of thing the operation acted on. Load-bearing rather than
@@ -331,9 +331,18 @@ against its own descriptors. The first three are checks against a
 namespace pattern; `eventd-admin` is eventd's check of whether a caller may
 administer it, the `administer()` check in eventd's `query/security.rs`.
 
-`socket` and `ipc` have no identity fields yet. A record carrying either
-kind names the object only by its kind, until those enforcement points are
-plumbed to supply one.
+`service`, `job` and `peinit-system` come from peinit's audit context, on
+the access checks peinit makes against its own descriptors: a service's, a
+job's, and the descriptor guarding peinit's system-wide operations.
+
+`mount-namespace` is a mount table, checked when a process changes it. A
+namespace has no name or identifier a record could carry, so a record names
+it by its kind alone.
+
+`socket` has no identity fields yet, and neither has `ipc` on an access
+check: such a record names the object only by its kind, until those
+enforcement points are plumbed to supply one. A change to an IPC object's
+descriptor does name it, by `object.ipc.type` and `object.ipc.id`.
 
 --- field object.file.path
 type: str.path
@@ -1516,19 +1525,18 @@ refusal of an operation on an already-open handle: the handle's
 --- field access.denied-integrity
 type: uint.mask
 
-The bits mandatory integrity control denied.
-
-**Not emitted today.** The evaluator computes this mask and discards it
-before it leaves the access check.
+The bits mandatory integrity control denied: the rights the object's
+mandatory label withholds from a caller of lower integrity, whatever its
+DACL says. On an access-check record these are the requested bits, or every
+bit for a `MAXIMUM_ALLOWED` request, and the field is absent when there were
+none.
 
 --- field access.denied-trust
 type: uint.mask
 
-The bits the process-trust label denied. Can be non-zero in the same
-evaluation as `access.denied-integrity`.
-
-**Not emitted today.** The evaluator computes this mask and, except for
-the process object class, discards it before it leaves the access check.
+The bits the process-trust label denied: the rights the object's trust
+label withholds from a caller whose PIP does not dominate it. Read as
+`access.denied-integrity` is, and can be non-zero in the same evaluation.
 
 --- field access.granted-staged
 type: uint.mask

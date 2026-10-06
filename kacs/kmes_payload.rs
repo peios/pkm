@@ -236,6 +236,17 @@ pub(crate) struct AuditTarget<'a> {
     /// AccessCheck syscall's caller lacks SeAuditPrivilege. Records the
     /// checked token's audit policy forces are written regardless.
     pub(crate) sacl_audit_suppressed: bool,
+    /// What the mandatory checks withheld, for `kacs.audit.access.checked`.
+    pub(crate) denials: AccessDenials,
+}
+
+/// The requested bits the mandatory checks denied in one access check:
+/// `access.denied-integrity` and `access.denied-trust`, each written only
+/// when non-zero.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AccessDenials {
+    pub(crate) integrity: u32,
+    pub(crate) trust: u32,
 }
 
 fn allocate_zeroed(len: usize) -> Result<Vec<u8>, c_long> {
@@ -659,6 +670,7 @@ struct CheckMaps {
     emitter: Vec<u8>,
     object: Option<Vec<u8>>,
     asserted: bool,
+    denials: AccessDenials,
 }
 
 impl CheckMaps {
@@ -705,11 +717,21 @@ fn encode_access_checked_payload(
     writer.write_map_len(maps.common_len() + 3)?;
     maps.write_head(&mut writer)?;
     writer.write_key(b"access")?;
-    writer.write_map_len(2)?;
+    writer.write_map_len(
+        2 + usize::from(maps.denials.integrity != 0) + usize::from(maps.denials.trust != 0),
+    )?;
     writer.write_key(b"requested")?;
     writer.write_u64(u64::from(event.requested))?;
     writer.write_key(b"granted")?;
     writer.write_u64(u64::from(event.granted))?;
+    if maps.denials.integrity != 0 {
+        writer.write_key(b"denied-integrity")?;
+        writer.write_u64(u64::from(maps.denials.integrity))?;
+    }
+    if maps.denials.trust != 0 {
+        writer.write_key(b"denied-trust")?;
+        writer.write_u64(u64::from(maps.denials.trust))?;
+    }
     writer.write_key(b"outcome")?;
     writer.write_map_len(1)?;
     writer.write_key(b"success")?;
@@ -1396,6 +1418,7 @@ pub(crate) fn emit_access_check_events_to_kmes(
         emitter: encode_emitter_map(&process_info)?,
         object: encode_object_map(&target.object)?,
         asserted: target.asserted,
+        denials: target.denials,
     };
 
     for event in privilege_use_events {
