@@ -49,6 +49,7 @@ USERSPACE_FRAGMENTS = [
     ROOT / "timed" / "timed.evman",
     ROOT / "netd" / "netd.evman",
     ROOT / "trustd" / "trustd.evman",
+    ROOT / "gxwi" / "gxwid.evman",
 ]
 BOOK = (ROOT / "learn/peios.product/2--using-peios.antho/600--reference.shelf"
         / "100--events.book")
@@ -78,6 +79,7 @@ CHAPTERS = [
     ("timed", "13--timed", "Time Events"),
     ("netd", "14--netd", "Network Configuration Events"),
     ("trustd", "15--trustd", "Trust Events"),
+    ("gxwid", "16--gxwid", "Desktop Server Events"),
 ]
 GROUPS_DIR = "2--groups"
 FIELD_INDEX_DIR = "a2--field-index"
