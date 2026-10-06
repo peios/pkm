@@ -3,6 +3,8 @@
  * LCS audit event emitters.
  */
 
+#include <crypto/sha2.h>
+#include <linux/build_bug.h>
 #include <linux/errno.h>
 #include <linux/jhash.h>
 #include <linux/limits.h>
@@ -101,6 +103,32 @@ extern int lcs_rust_self_config_invalid_audit_payload(
 	u32 received_kind, u32 received_type, u32 received_u32,
 	u32 retained_value, u8 *output, size_t output_len,
 	size_t *written_out);
+extern int lcs_rust_key_audit_payload(
+	const struct pkm_lcs_audit_caller_summary *caller,
+	const struct pkm_lcs_key_audit_record *record, u8 *output,
+	size_t output_len, size_t *written_out);
+extern int lcs_rust_transaction_committed_audit_payload(
+	const struct pkm_lcs_audit_caller_summary *caller, u64 transaction_id,
+	u32 state, u32 result_errno, u32 reason, s32 commit_outstanding,
+	u8 *output, size_t output_len, size_t *written_out);
+extern int lcs_rust_registry_set_security_required_access(u32 security_info,
+							  u32 *required_out);
+
+static_assert(sizeof(struct pkm_lcs_key_audit_record) ==
+	      PKM_LCS_KEY_AUDIT_RECORD_SIZE);
+
+static const char * const pkm_lcs_key_audit_event_types[] = {
+	[PKM_LCS_KEY_AUDIT_VALUE_SET] = "lcs.audit.value.set",
+	[PKM_LCS_KEY_AUDIT_VALUE_DELETED] = "lcs.audit.value.deleted",
+	[PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED] = "lcs.audit.key.tombstoned",
+	[PKM_LCS_KEY_AUDIT_KEY_DELETED] = "lcs.audit.key.deleted",
+	[PKM_LCS_KEY_AUDIT_KEY_HIDDEN] = "lcs.audit.key.hidden",
+	[PKM_LCS_KEY_AUDIT_KEY_CREATED] = "lcs.audit.key.created",
+	[PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED] =
+		"lcs.audit.key.descriptor.changed",
+};
+static const char pkm_lcs_transaction_committed_event_type[] =
+	"lcs.audit.transaction.committed";
 
 static long pkm_lcs_build_audit_caller_summary(
 	const void *token, struct pkm_lcs_audit_caller_summary *caller)
@@ -528,4 +556,234 @@ long pkm_lcs_emit_self_config_invalid_audit(
 			     received_kind, 0, 0);
 	kfree(payload);
 	return 0;
+}
+
+/*
+ * The digest every LCS record carries in place of data or a descriptor:
+ * SHA-256 (PEI-617 A5), so a digest compares only with another digest.
+ */
+void pkm_lcs_audit_digest(const void *data, size_t len,
+			  u8 out[PKM_LCS_AUDIT_DIGEST_BYTES])
+{
+	static const u8 empty;
+
+	BUILD_BUG_ON(PKM_LCS_AUDIT_DIGEST_BYTES != SHA256_DIGEST_SIZE);
+	sha256(data && len ? data : &empty, data ? len : 0, out);
+}
+
+/*
+ * Joins resolved path components, and an optional final child, with `\`
+ * into one kmalloc'd buffer for object.key.path. Not NUL-terminated.
+ */
+long pkm_lcs_audit_join_path(const char * const *components, u32 count,
+			     const char *child, u32 child_len, char **out,
+			     u32 *out_len)
+{
+	size_t total = 0;
+	size_t pos = 0;
+	char *buf;
+	u32 i;
+
+	if (!out || !out_len)
+		return -EINVAL;
+	*out = NULL;
+	*out_len = 0;
+	if (!components && count)
+		return -EINVAL;
+	if (child && !child_len)
+		return -EINVAL;
+	if (!count && !child)
+		return -EINVAL;
+
+	for (i = 0; i < count; i++) {
+		if (!components[i])
+			return -EINVAL;
+		total += strlen(components[i]) + 1U;
+	}
+	if (child)
+		total += child_len + 1U;
+	/* One separator fewer than there are parts. */
+	total--;
+	if (!total || total > U32_MAX)
+		return -EINVAL;
+
+	buf = kmalloc(total, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	for (i = 0; i < count; i++) {
+		size_t len = strlen(components[i]);
+
+		if (pos)
+			buf[pos++] = '\\';
+		memcpy(buf + pos, components[i], len);
+		pos += len;
+	}
+	if (child) {
+		if (pos)
+			buf[pos++] = '\\';
+		memcpy(buf + pos, child, child_len);
+		pos += child_len;
+	}
+
+	*out = buf;
+	*out_len = (u32)pos;
+	return 0;
+}
+
+/*
+ * Emits one registry write record. A record that cannot be built is
+ * dropped and reported as -EIO, but every caller has already settled the
+ * operation's result and keeps it: the write has landed or failed by the
+ * time it is recorded (lcs_audit_emission_failure_policy).
+ */
+long pkm_lcs_emit_key_audit_for_token(
+	const void *token, const struct pkm_lcs_key_audit_record *record)
+{
+	struct pkm_lcs_audit_caller_summary caller = { };
+	const char *event_type;
+	size_t payload_len = 0;
+	size_t written = 0;
+	u8 *payload;
+	long ret;
+
+	if (!token || !record)
+		return -EINVAL;
+	if (record->event < PKM_LCS_KEY_AUDIT_VALUE_SET ||
+	    record->event >= ARRAY_SIZE(pkm_lcs_key_audit_event_types))
+		return -EINVAL;
+	event_type = pkm_lcs_key_audit_event_types[record->event];
+
+	ret = pkm_lcs_build_audit_caller_summary(token, &caller);
+	if (ret)
+		return ret;
+
+	ret = lcs_rust_key_audit_payload(&caller, record, NULL, 0,
+					 &payload_len);
+	if (ret)
+		return -EIO;
+	if (!payload_len || payload_len > U32_MAX)
+		return -EIO;
+
+	payload = kmalloc(payload_len, GFP_KERNEL);
+	if (!payload)
+		return -EIO;
+
+	ret = lcs_rust_key_audit_payload(&caller, record, payload, payload_len,
+					 &written);
+	if (ret || written != payload_len) {
+		kfree(payload);
+		return -EIO;
+	}
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, event_type, strlen(event_type),
+			     payload, written);
+	kfree(payload);
+	return 0;
+}
+
+long pkm_lcs_audit_caller_snapshot_take(
+	const void *token, struct pkm_lcs_audit_caller_snapshot *out)
+{
+	struct pkm_lcs_audit_caller_summary caller = { };
+	long ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	if (!token)
+		return -EINVAL;
+
+	ret = pkm_lcs_build_audit_caller_summary(token, &caller);
+	if (ret)
+		return ret;
+	if (!caller.user_sid || !caller.user_sid_len)
+		return -EIO;
+
+	out->user_sid = kmemdup(caller.user_sid, caller.user_sid_len,
+				GFP_KERNEL);
+	if (!out->user_sid)
+		return -ENOMEM;
+	out->user_sid_len = caller.user_sid_len;
+	out->authentication_id = caller.authentication_id;
+	out->token_id = caller.token_id;
+	out->token_type = caller.token_type;
+	out->impersonation_level = caller.impersonation_level;
+	out->integrity_level = caller.integrity_level;
+	return 0;
+}
+
+void pkm_lcs_audit_caller_snapshot_destroy(
+	struct pkm_lcs_audit_caller_snapshot *snapshot)
+{
+	if (!snapshot)
+		return;
+	kfree(snapshot->user_sid);
+	memset(snapshot, 0, sizeof(*snapshot));
+}
+
+/*
+ * Emits lcs.audit.transaction.committed for a transaction that staged an
+ * audited write. `state` is the REG_TXN_* state it ended in, `result_errno`
+ * a positive errno when a commit call failed (0 otherwise), `reason` a
+ * PKM_LCS_TXN_AUDIT_REASON_* code (0 on success), and `commit_outstanding`
+ * negative when the field is absent. Runs in task context: the timer path
+ * emits from its work item, never from the timer.
+ */
+long pkm_lcs_emit_transaction_committed_audit(
+	const struct pkm_lcs_audit_caller_snapshot *snapshot,
+	u64 transaction_id, u32 state, u32 result_errno, u32 reason,
+	int commit_outstanding)
+{
+	struct pkm_lcs_audit_caller_summary caller = { };
+	size_t payload_len = 0;
+	size_t written = 0;
+	u8 *payload;
+	int ret;
+
+	if (!snapshot || !snapshot->user_sid || !snapshot->user_sid_len)
+		return -EINVAL;
+
+	caller.user_sid = snapshot->user_sid;
+	caller.user_sid_len = snapshot->user_sid_len;
+	caller.authentication_id = snapshot->authentication_id;
+	caller.token_id = snapshot->token_id;
+	caller.token_type = snapshot->token_type;
+	caller.impersonation_level = snapshot->impersonation_level;
+	caller.integrity_level = snapshot->integrity_level;
+
+	ret = lcs_rust_transaction_committed_audit_payload(
+		&caller, transaction_id, state, result_errno, reason,
+		commit_outstanding, NULL, 0, &payload_len);
+	if (ret)
+		return -EIO;
+	if (!payload_len || payload_len > U32_MAX)
+		return -EIO;
+
+	payload = kmalloc(payload_len, GFP_KERNEL);
+	if (!payload)
+		return -EIO;
+
+	ret = lcs_rust_transaction_committed_audit_payload(
+		&caller, transaction_id, state, result_errno, reason,
+		commit_outstanding, payload, payload_len, &written);
+	if (ret || written != payload_len) {
+		kfree(payload);
+		return -EIO;
+	}
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
+			     pkm_lcs_transaction_committed_event_type,
+			     sizeof(pkm_lcs_transaction_committed_event_type) - 1,
+			     payload, written);
+	kfree(payload);
+	return 0;
+}
+
+long pkm_lcs_registry_set_security_required_access(u32 security_info,
+						   u32 *required)
+{
+	if (!required)
+		return -EINVAL;
+	return lcs_rust_registry_set_security_required_access(security_info,
+							      required);
 }

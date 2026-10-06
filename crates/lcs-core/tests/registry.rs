@@ -67,3 +67,5 @@ mod unknown_layer_policy;
 mod visible_child_delete_gate;
 #[path = "registry/volatile_child_creation_gate.rs"]
 mod volatile_child_creation_gate;
+#[path = "registry/write_audit_msgpack.rs"]
+mod write_audit_msgpack;

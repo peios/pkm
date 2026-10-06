@@ -32,7 +32,7 @@ extern int lcs_rust_select_layer_metadata_sd(
 extern int lcs_rust_key_open_access_plan(
 	const void *subject_token, const u8 *sd_ptr, size_t sd_len,
 	u32 desired_access, u32 pip_type, u32 pip_trust,
-	const void *caap_cache,
+	const void *caap_cache, u8 record_privilege_use,
 	struct pkm_lcs_key_open_access_plan *plan);
 
 long pkm_lcs_open_preflight(u32 desired_access, u32 flags,
@@ -66,9 +66,9 @@ long pkm_lcs_create_preflight(u32 desired_access, u32 flags,
 	return ret;
 }
 
-long pkm_lcs_key_open_access_check_for_token(
+static long pkm_lcs_key_open_access_check(
 	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
-	struct pkm_lcs_key_open_access_plan *plan)
+	bool record_privilege_use, struct pkm_lcs_key_open_access_plan *plan)
 {
 	const void *caap_cache = NULL;
 	u32 pip_type = 0;
@@ -93,11 +93,28 @@ long pkm_lcs_key_open_access_check_for_token(
 		return ret;
 	ret = lcs_rust_key_open_access_plan(token, sd, sd_len, desired_access,
 					    pip_type, pip_trust, caap_cache,
+					    record_privilege_use ? 1U : 0U,
 					    plan);
 	pkm_kacs_caap_cache_unlock();
 	trace_lcs_access_check(0, NULL, desired_access, plan->fd_granted_access,
 			       plan->allowed, ret);
 	return ret;
+}
+
+long pkm_lcs_key_open_access_check_for_token(
+	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
+	struct pkm_lcs_key_open_access_plan *plan)
+{
+	return pkm_lcs_key_open_access_check(token, sd, sd_len, desired_access,
+					     false, plan);
+}
+
+long pkm_lcs_key_open_access_check_recording_privilege_use(
+	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
+	struct pkm_lcs_key_open_access_plan *plan)
+{
+	return pkm_lcs_key_open_access_check(token, sd, sd_len, desired_access,
+					     true, plan);
 }
 
 long pkm_lcs_layer_write_access_check_for_token(

@@ -176,6 +176,13 @@ struct pkm_lcs_key_fd {
 	u32 source_id;
 	u8 key_guid[PKM_LCS_GUID_BYTES];
 	u32 granted_access;
+	/*
+	 * The continuous-audit mask from the key's SYSTEM_ALARM ACEs, evaluated
+	 * against the opener at open and fixed for the handle's life: a write
+	 * whose right overlaps it is recorded. Because it is fixed, a later
+	 * SACL change does not hide the operation that makes it.
+	 */
+	u32 audit_mask;
 	u64 source_restart_generation_seen;
 	u32 path_component_count;
 	char **resolved_path;
@@ -1219,6 +1226,7 @@ static long pkm_lcs_key_fd_copy_input(
 	if (ret)
 		goto out_nomem;
 	key_fd->granted_access = input->granted_access;
+	key_fd->audit_mask = input->audit_mask;
 	key_fd->path_component_count = input->path_component_count;
 	key_fd->orphaned = false;
 	key_fd->watch_armed = false;
@@ -4575,9 +4583,236 @@ out_frame:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_set_security_from_args(
+/*
+ * A registry write record in the making (PEI-617 gap 1). An operation arms
+ * it when its right overlaps the handle's continuous-audit mask, fills it
+ * as the operation learns things, and emits it once at its end with the
+ * operation's result. It owns copies of everything the record points at,
+ * so it outlives the operation's own buffers. Unarmed, every setter is a
+ * no-op, and the only cost an unaudited write pays is the mask test.
+ */
+struct pkm_lcs_key_audit_ctx {
+	struct pkm_lcs_key_audit_record record;
+	char *path;
+	char *key_layer_name;
+	char *layer_name;
+	char *value_name;
+	u8 *sd;
+	u8 *previous_sd;
+	bool armed;
+};
+
+/*
+ * Starts a record of `event` for an operation needing `requested`, armed
+ * when `armed` says the operation is recorded.
+ */
+static void pkm_lcs_key_audit_ctx_begin(struct pkm_lcs_key_audit_ctx *audit,
+					const struct pkm_lcs_key_fd *key_fd,
+					u32 event, u32 requested, bool armed)
+{
+	memset(audit, 0, sizeof(*audit));
+	if (!key_fd || !armed)
+		return;
+
+	audit->armed = true;
+	audit->record.event = event;
+	memcpy(audit->record.key_guid, key_fd->key_guid,
+	       sizeof(audit->record.key_guid));
+	audit->record.requested_access = requested;
+	audit->record.granted_access = key_fd->granted_access;
+	audit->record.audit_mask = key_fd->audit_mask;
+	audit->record.audit_mask_present = 1;
+}
+
+/* Starts a record armed when `right` overlaps the handle's audit mask. */
+static void pkm_lcs_key_audit_ctx_begin_for_right(
+	struct pkm_lcs_key_audit_ctx *audit,
+	const struct pkm_lcs_key_fd *key_fd, u32 event, u32 right)
+{
+	pkm_lcs_key_audit_ctx_begin(
+		audit, key_fd, event, right,
+		key_fd && pkm_lcs_key_audit_armed(key_fd->audit_mask, right));
+}
+
+static void pkm_lcs_key_audit_ctx_destroy(struct pkm_lcs_key_audit_ctx *audit)
+{
+	kfree(audit->path);
+	kfree(audit->key_layer_name);
+	kfree(audit->layer_name);
+	kfree(audit->value_name);
+	kfree(audit->sd);
+	kfree(audit->previous_sd);
+	memset(audit, 0, sizeof(*audit));
+}
+
+/*
+ * Copies `len` bytes for the record. An allocation failure leaves the
+ * optional field out rather than dropping the record.
+ */
+static char *pkm_lcs_key_audit_dup(const char *bytes, u32 len)
+{
+	if (!bytes || !len)
+		return NULL;
+	return kmemdup(bytes, len, GFP_KERNEL);
+}
+
+static void pkm_lcs_key_audit_set_key_layer(struct pkm_lcs_key_audit_ctx *audit,
+					    const char *name, u32 len)
+{
+	if (!audit->armed || audit->key_layer_name)
+		return;
+	audit->key_layer_name = pkm_lcs_key_audit_dup(name, len);
+	if (!audit->key_layer_name)
+		return;
+	audit->record.key_layer_name = audit->key_layer_name;
+	audit->record.key_layer_name_len = len;
+}
+
+static void pkm_lcs_key_audit_set_value_name(
+	struct pkm_lcs_key_audit_ctx *audit, const char *name, u32 len)
+{
+	if (!audit->armed || audit->record.value_name_present)
+		return;
+	if (len) {
+		audit->value_name = pkm_lcs_key_audit_dup(name, len);
+		if (!audit->value_name)
+			return;
+	}
+	/* The empty name is the key's default value, and is recorded. */
+	audit->record.value_name = audit->value_name;
+	audit->record.value_name_len = len;
+	audit->record.value_name_present = 1;
+}
+
+static void pkm_lcs_key_audit_set_value(struct pkm_lcs_key_audit_ctx *audit,
+					u32 type, const u8 *data, u32 len)
+{
+	if (!audit->armed)
+		return;
+	audit->record.value_type = type;
+	audit->record.value_length = len;
+	pkm_lcs_audit_digest(data, len, audit->record.value_digest);
+	audit->record.value_present = 1;
+}
+
+/* The effective value a write replaced or a delete removed, if any. */
+static void pkm_lcs_key_audit_set_previous(
+	struct pkm_lcs_key_audit_ctx *audit,
+	const struct pkm_lcs_effective_value_snapshot *before)
+{
+	const struct pkm_lcs_rsi_query_value_result *result;
+
+	if (!audit->armed || !before || !before->result.found)
+		return;
+	result = &before->result;
+	if (result->data_len &&
+	    (!before->frame.data ||
+	     (size_t)result->data_offset > before->frame.len ||
+	     (size_t)result->data_len >
+		     before->frame.len - (size_t)result->data_offset))
+		return;
+
+	audit->record.previous_type = result->value_type;
+	audit->record.previous_length = result->data_len;
+	pkm_lcs_audit_digest(result->data_len ?
+				     before->frame.data + result->data_offset :
+				     NULL,
+			     result->data_len, audit->record.previous_digest);
+	audit->record.previous_present = 1;
+}
+
+static void pkm_lcs_key_audit_set_sequence(struct pkm_lcs_key_audit_ctx *audit,
+					   u64 sequence)
+{
+	if (!audit->armed || !sequence)
+		return;
+	audit->record.sequence = sequence;
+	audit->record.sequence_present = 1;
+}
+
+static void pkm_lcs_key_audit_set_transaction(
+	struct pkm_lcs_key_audit_ctx *audit, u64 transaction_id)
+{
+	if (!audit->armed || !transaction_id)
+		return;
+	audit->record.transaction_id = transaction_id;
+	audit->record.transaction_present = 1;
+}
+
+/*
+ * The source did not answer in time. The request is not cancelled at the
+ * source, so the change may still land (and, for a value or descriptor
+ * write, its kernel-side effects are replayed when it does).
+ */
+static void pkm_lcs_key_audit_note_round_trip(
+	struct pkm_lcs_key_audit_ctx *audit, long ret)
+{
+	if (audit->armed && ret == -ETIMEDOUT)
+		audit->record.timed_out = 1;
+}
+
+/*
+ * Emits the record with the operation's result and frees the context. The
+ * result is never changed: the record follows a write the source has
+ * already applied or refused (lcs_audit_emission_failure_policy).
+ */
+static void pkm_lcs_key_audit_finish(struct pkm_lcs_key_audit_ctx *audit,
+				     const struct pkm_lcs_key_fd *key_fd,
+				     const void *token, long ret)
+{
+	u32 path_len = 0;
+
+	if (!audit->armed || !key_fd || !token)
+		goto out;
+	if (pkm_lcs_audit_join_path(
+		    (const char * const *)key_fd->resolved_path,
+		    key_fd->path_component_count, NULL, 0, &audit->path,
+		    &path_len))
+		goto out;
+
+	audit->record.key_path = audit->path;
+	audit->record.key_path_len = path_len;
+	audit->record.result_errno = ret < 0 ? (u32)-ret : 0U;
+	if (!audit->record.result_errno)
+		audit->record.timed_out = 0;
+	(void)pkm_lcs_emit_key_audit_for_token(token, &audit->record);
+out:
+	pkm_lcs_key_audit_ctx_destroy(audit);
+}
+
+/* Records one side of a descriptor change: a private copy and its digest. */
+static void pkm_lcs_key_audit_set_sd(struct pkm_lcs_key_audit_ctx *audit,
+				     const u8 *sd, size_t sd_len, bool previous)
+{
+	u8 *copy;
+
+	if (!audit->armed || !sd || !sd_len || sd_len > U32_MAX)
+		return;
+	copy = kmemdup(sd, sd_len, GFP_KERNEL);
+	if (!copy)
+		return;
+	if (previous) {
+		kfree(audit->previous_sd);
+		audit->previous_sd = copy;
+		audit->record.previous_sd = copy;
+		audit->record.previous_sd_len = (u32)sd_len;
+		pkm_lcs_audit_digest(copy, sd_len,
+				     audit->record.previous_sd_digest);
+		audit->record.previous_sd_present = 1;
+	} else {
+		kfree(audit->sd);
+		audit->sd = copy;
+		audit->record.sd = copy;
+		audit->record.sd_len = (u32)sd_len;
+		pkm_lcs_audit_digest(copy, sd_len, audit->record.sd_digest);
+		audit->record.sd_present = 1;
+	}
+}
+
+static long pkm_lcs_key_fd_set_security_core(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
-	const struct reg_set_security_args *args)
+	const struct reg_set_security_args *args,
+	struct pkm_lcs_key_audit_ctx *audit)
 {
 	struct pkm_lcs_set_security_merge_result merge = { };
 	struct pkm_lcs_source_response_frame existing_frame = { };
@@ -4607,6 +4842,24 @@ static long pkm_lcs_key_fd_set_security_from_args(
 	if (ret)
 		return ret;
 
+	/*
+	 * A change to the SACL is recorded whatever the handle's mask says
+	 * (PEI-617 A4). It is armed only once the handle's own gate has passed,
+	 * so a caller without ACCESS_SYSTEM_SECURITY cannot write records by
+	 * asking for one.
+	 */
+	if (!audit->armed &&
+	    (args->security_info & SACL_SECURITY_INFORMATION)) {
+		u32 requested = 0;
+
+		(void)pkm_lcs_registry_set_security_required_access(
+			args->security_info, &requested);
+		pkm_lcs_key_audit_ctx_begin(audit, key_fd,
+					    PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED,
+					    requested, true);
+		audit->record.sd_components = args->security_info;
+	}
+
 	ret = pkm_lcs_key_fd_copy_set_security_sd(ops, args, &input_sd,
 						  &input_sd_len);
 	if (ret)
@@ -4629,6 +4882,7 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		if (ret)
 			goto out_input;
 		txn_id = binding.transaction_id;
+		pkm_lcs_key_audit_set_transaction(audit, txn_id);
 	} else if (args->txn_fd != -1) {
 		ret = -EINVAL;
 		goto out_input;
@@ -4645,6 +4899,9 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		args->security_info, &merge);
 	if (ret)
 		goto out_cancel_mutation;
+	pkm_lcs_key_audit_set_sd(audit, merge.merged_sd, merge.merged_sd_len,
+				 false);
+	pkm_lcs_key_audit_set_sd(audit, existing_sd, existing_sd_len, true);
 
 	last_write_time = (u64)ktime_get_real_ns();
 	if (args->txn_fd < 0) {
@@ -4666,10 +4923,13 @@ static long pkm_lcs_key_fd_set_security_from_args(
 		key_fd->source_id, txn_id, key_fd->key_guid, merge.merged_sd,
 		merge.merged_sd_len, last_write_time, &limits,
 		limits.request_timeout_ms, late_effect_ptr, NULL, NULL);
+	pkm_lcs_key_audit_note_round_trip(audit, ret);
 	if (ret)
 		goto out_cancel_merge;
 
 	if (args->txn_fd >= 0) {
+		/* The staging caller is the current task's token. */
+		mutation.audited = audit->armed;
 		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
 		goto out_merge;
 	}
@@ -4704,10 +4964,51 @@ out_input:
 	return ret;
 }
 
-static long pkm_lcs_key_fd_set_value_from_args_for_token(
+/*
+ * REG_IOC_SET_SECURITY, recorded as lcs.audit.key.descriptor.changed when
+ * WRITE_DAC or WRITE_OWNER (whichever the change needs) overlaps the
+ * handle's audit mask, or always once the handle's gate admits a change
+ * that includes the SACL.
+ */
+static long pkm_lcs_key_fd_set_security_from_args_for_token(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_usercopy_ops *ops,
-	const struct reg_set_value_args *args)
+	const struct reg_set_security_args *args)
+{
+	struct pkm_lcs_key_audit_ctx audit;
+	u32 requested = 0;
+	long ret;
+
+	if (!key_fd || !args)
+		return -EINVAL;
+
+	(void)pkm_lcs_registry_set_security_required_access(args->security_info,
+							    &requested);
+	pkm_lcs_key_audit_ctx_begin(
+		&audit, key_fd, PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED, requested,
+		pkm_lcs_key_audit_armed(key_fd->audit_mask,
+					requested & (WRITE_DAC | WRITE_OWNER)));
+	if (audit.armed)
+		audit.record.sd_components = args->security_info;
+
+	ret = pkm_lcs_key_fd_set_security_core(key_fd, ops, args, &audit);
+	pkm_lcs_key_audit_finish(&audit, key_fd, token, ret);
+	return ret;
+}
+
+static long pkm_lcs_key_fd_set_security_from_args(
+	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_security_args *args)
+{
+	return pkm_lcs_key_fd_set_security_from_args_for_token(
+		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
+}
+
+static long pkm_lcs_key_fd_set_value_core(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_value_args *args,
+	struct pkm_lcs_key_audit_ctx *audit)
 {
 	struct pkm_lcs_set_value_input input = { };
 	struct pkm_lcs_source_response_result response = { };
@@ -4750,6 +5051,10 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	ret = pkm_lcs_key_fd_copy_set_value_input(ops, args, key_fd, &input);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_value_name(audit, input.value_name,
+					 args->name_len);
+	pkm_lcs_key_audit_set_key_layer(audit, input.target.name,
+					input.target.name_len);
 
 	ret = pkm_lcs_key_fd_set_value_authorize_layer(&input, token);
 	if (ret)
@@ -4758,6 +5063,8 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	ret = pkm_lcs_key_fd_copy_set_value_data(ops, args, &input);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_value(audit, args->type, input.data,
+				    args->data_len);
 
 	ret = pkm_lcs_key_fd_set_value_precedence_tcb_gate(key_fd, token,
 							   &input, args);
@@ -4789,6 +5096,12 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	ret = pkm_lcs_allocate_sequence(&sequence);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_sequence(audit, sequence);
+	/* A zero expected sequence is an unconditional write. */
+	if (audit->armed && args->expected_seq) {
+		audit->record.expected_sequence = args->expected_seq;
+		audit->record.expected_sequence_present = 1;
+	}
 
 	if (args->txn_fd >= 0) {
 		log_input.key_guid = key_fd->key_guid;
@@ -4809,6 +5122,7 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		if (ret)
 			goto out_input;
 		txn_id = binding.transaction_id;
+		pkm_lcs_key_audit_set_transaction(audit, txn_id);
 	}
 
 	if (args->txn_fd < 0) {
@@ -4825,6 +5139,8 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 			&input.limits, &before);
 		if (ret)
 			goto out_input;
+		/* The effective value this write may replace. */
+		pkm_lcs_key_audit_set_previous(audit, &before);
 
 		late_effect.key_guid = key_fd->key_guid;
 		late_effect.ancestor_guids =
@@ -4849,6 +5165,7 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 		args->expected_seq, &input.limits,
 		input.limits.request_timeout_ms, late_effect_ptr, &response,
 		NULL);
+	pkm_lcs_key_audit_note_round_trip(audit, ret);
 	if (ret)
 		goto out_before;
 
@@ -4876,6 +5193,8 @@ static long pkm_lcs_key_fd_set_value_from_args_for_token(
 	}
 
 	if (args->txn_fd >= 0) {
+		mutation.audited = audit->armed;
+		mutation.audit_token = token;
 		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
 		goto out_after;
 	}
@@ -4927,6 +5246,23 @@ out_input:
 	return ret;
 }
 
+/* REG_IOC_SET_VALUE, recorded as lcs.audit.value.set (PEI-617 gap 1). */
+static long pkm_lcs_key_fd_set_value_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_value_args *args)
+{
+	struct pkm_lcs_key_audit_ctx audit;
+	long ret;
+
+	pkm_lcs_key_audit_ctx_begin_for_right(&audit, key_fd,
+					      PKM_LCS_KEY_AUDIT_VALUE_SET,
+					      KEY_SET_VALUE);
+	ret = pkm_lcs_key_fd_set_value_core(key_fd, token, ops, args, &audit);
+	pkm_lcs_key_audit_finish(&audit, key_fd, token, ret);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_set_value_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args)
@@ -4935,10 +5271,11 @@ static long pkm_lcs_key_fd_set_value_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
-static long pkm_lcs_key_fd_delete_value_from_args_for_token(
+static long pkm_lcs_key_fd_delete_value_core(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_usercopy_ops *ops,
-	const struct reg_delete_value_args *args)
+	const struct reg_delete_value_args *args,
+	struct pkm_lcs_key_audit_ctx *audit)
 {
 	struct pkm_lcs_delete_value_input input = { };
 	struct pkm_lcs_effective_value_snapshot before = { };
@@ -4976,6 +5313,10 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 						     &input);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_value_name(audit, input.value_name,
+					 args->name_len);
+	pkm_lcs_key_audit_set_key_layer(audit, input.target.name,
+					input.target.name_len);
 
 	ret = pkm_lcs_key_fd_delete_value_authorize_layer(&input, token);
 	if (ret)
@@ -5003,6 +5344,7 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 		if (ret)
 			goto out_input;
 		txn_id = binding.transaction_id;
+		pkm_lcs_key_audit_set_transaction(audit, txn_id);
 	}
 
 	ret = pkm_lcs_key_fd_query_effective_value_snapshot_with_limits(
@@ -5010,11 +5352,13 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 		&input.limits, &before);
 	if (ret)
 		goto out_cancel_mutation;
+	pkm_lcs_key_audit_set_previous(audit, &before);
 
 	ret = pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, key_fd->key_guid, input.value_name,
 		args->name_len, input.target.name, input.target.name_len,
 		&input.limits, input.limits.request_timeout_ms, &response, NULL);
+	pkm_lcs_key_audit_note_round_trip(audit, ret);
 	if (ret)
 		goto out_before;
 
@@ -5048,6 +5392,8 @@ static long pkm_lcs_key_fd_delete_value_from_args_for_token(
 			&mutation, event_type);
 		if (ret)
 			goto out_after;
+		mutation.audited = audit->armed;
+		mutation.audit_token = token;
 		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
 		if (ret)
 			goto out_after;
@@ -5079,6 +5425,24 @@ out_input:
 	return ret;
 }
 
+/* REG_IOC_DELETE_VALUE, recorded as lcs.audit.value.deleted. */
+static long pkm_lcs_key_fd_delete_value_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_value_args *args)
+{
+	struct pkm_lcs_key_audit_ctx audit;
+	long ret;
+
+	pkm_lcs_key_audit_ctx_begin_for_right(&audit, key_fd,
+					      PKM_LCS_KEY_AUDIT_VALUE_DELETED,
+					      KEY_SET_VALUE);
+	ret = pkm_lcs_key_fd_delete_value_core(key_fd, token, ops, args,
+					       &audit);
+	pkm_lcs_key_audit_finish(&audit, key_fd, token, ret);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_delete_value_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_delete_value_args *args)
@@ -5087,10 +5451,11 @@ static long pkm_lcs_key_fd_delete_value_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
-static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
+static long pkm_lcs_key_fd_blanket_tombstone_core(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_usercopy_ops *ops,
-	const struct reg_blanket_tombstone_args *args)
+	const struct reg_blanket_tombstone_args *args,
+	struct pkm_lcs_key_audit_ctx *audit)
 {
 	struct pkm_lcs_blanket_tombstone_input input = { };
 	struct pkm_lcs_source_response_frame before_frame = { };
@@ -5131,6 +5496,12 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 							  &input);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_key_layer(audit, input.target.name,
+					input.target.name_len);
+	if (audit->armed)
+		audit->record.tombstone_set =
+			input.set ? PKM_LCS_KEY_AUDIT_TOMBSTONE_SET :
+				    PKM_LCS_KEY_AUDIT_TOMBSTONE_CLEAR;
 
 	ret = pkm_lcs_key_fd_blanket_tombstone_authorize_layer(&input, token);
 	if (ret)
@@ -5144,6 +5515,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		ret = pkm_lcs_allocate_sequence(&sequence);
 		if (ret)
 			goto out_input;
+		pkm_lcs_key_audit_set_sequence(audit, sequence);
 	}
 
 	if (args->txn_fd >= 0) {
@@ -5164,6 +5536,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		if (ret)
 			goto out_input;
 		txn_id = binding.transaction_id;
+		pkm_lcs_key_audit_set_transaction(audit, txn_id);
 	}
 
 	ret = pkm_lcs_key_fd_query_effective_values_frame(
@@ -5176,6 +5549,7 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 		input.target.name, input.target.name_len, input.set, sequence,
 		&input.limits, input.limits.request_timeout_ms, &mutation_response,
 		NULL);
+	pkm_lcs_key_audit_note_round_trip(audit, ret);
 	if (ret)
 		goto out_before;
 
@@ -5210,6 +5584,8 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
 			&mutation, events.data, events.len, events.count);
 		if (ret)
 			goto out_events;
+		mutation.audited = audit->armed;
+		mutation.audit_token = token;
 		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
 		goto out_events;
 	}
@@ -5238,6 +5614,28 @@ out_input:
 	return ret;
 }
 
+/*
+ * REG_IOC_BLANKET_TOMBSTONE, recorded as lcs.audit.key.tombstoned. Setting
+ * or clearing a blanket hides or restores every lower-layer value of the
+ * key at once, so it is a value write and is gated on KEY_SET_VALUE.
+ */
+static long pkm_lcs_key_fd_blanket_tombstone_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_blanket_tombstone_args *args)
+{
+	struct pkm_lcs_key_audit_ctx audit;
+	long ret;
+
+	pkm_lcs_key_audit_ctx_begin_for_right(&audit, key_fd,
+					      PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED,
+					      KEY_SET_VALUE);
+	ret = pkm_lcs_key_fd_blanket_tombstone_core(key_fd, token, ops, args,
+						    &audit);
+	pkm_lcs_key_audit_finish(&audit, key_fd, token, ret);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_blanket_tombstone_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_blanket_tombstone_args *args)
@@ -5246,10 +5644,11 @@ static long pkm_lcs_key_fd_blanket_tombstone_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
-static long pkm_lcs_key_fd_delete_key_from_args_for_token(
+static long pkm_lcs_key_fd_delete_key_core(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_usercopy_ops *ops,
-	const struct reg_delete_key_args *args)
+	const struct reg_delete_key_args *args,
+	struct pkm_lcs_key_audit_ctx *audit)
 {
 	struct pkm_lcs_delete_key_input input = { };
 	struct pkm_lcs_source_response_result response = { };
@@ -5292,6 +5691,8 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	ret = pkm_lcs_key_fd_copy_delete_key_input(ops, args, &input);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_key_layer(audit, input.target.name,
+					input.target.name_len);
 
 	ret = pkm_lcs_key_fd_path_entry_target(key_fd, &parent_guid,
 					       &child_name, &child_name_len);
@@ -5332,6 +5733,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		if (ret)
 			goto out_input;
 		txn_id = binding.transaction_id;
+		pkm_lcs_key_audit_set_transaction(audit, txn_id);
 	}
 
 	ret = pkm_lcs_key_fd_delete_key_visible_child_gate(key_fd, txn_id,
@@ -5351,6 +5753,7 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 		key_fd->source_id, txn_id, parent_guid, child_name,
 		child_name_len, input.target.name, input.target.name_len,
 		&input.limits, input.limits.request_timeout_ms, &response, NULL);
+	pkm_lcs_key_audit_note_round_trip(audit, ret);
 	if (ret)
 		goto out_cancel_mutation;
 
@@ -5394,6 +5797,8 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	}
 
 	if (args->txn_fd >= 0) {
+		mutation.audited = audit->armed;
+		mutation.audit_token = token;
 		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
 		if (ret)
 			goto out_cancel_mutation;
@@ -5423,8 +5828,24 @@ static long pkm_lcs_key_fd_delete_key_from_args_for_token(
 	}
 	if (layer_delete_orchestrated ||
 	    (internal_watch_effects &
-	     PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE))
+	     PKM_LCS_INTERNAL_WATCH_EFFECT_LAYER_DELETE)) {
+		/*
+		 * The key was a layer's metadata key
+		 * (Machine\System\Registry\Layers\<Name>), so the delete
+		 * removed the layer: name it as object.layer.name.
+		 */
+		if (audit->armed && !audit->layer_name) {
+			const char *layer = child_name;
+			u32 len = child_name_len;
+
+			audit->layer_name = pkm_lcs_key_audit_dup(layer, len);
+			if (audit->layer_name) {
+				audit->record.layer_name = audit->layer_name;
+				audit->record.layer_name_len = len;
+			}
+		}
 		goto out_cancel_mutation;
+	}
 
 	ret = pkm_lcs_source_record_transaction_generation(
 		key_fd->source_id, key_fd->ancestor_guids[0], &generation);
@@ -5442,6 +5863,27 @@ out_input:
 	return ret;
 }
 
+/*
+ * REG_IOC_DELETE_KEY, recorded as lcs.audit.key.deleted. The key deleted
+ * is the handle's own key, so the record names it by the handle's GUID and
+ * path.
+ */
+static long pkm_lcs_key_fd_delete_key_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_delete_key_args *args)
+{
+	struct pkm_lcs_key_audit_ctx audit;
+	long ret;
+
+	pkm_lcs_key_audit_ctx_begin_for_right(&audit, key_fd,
+					      PKM_LCS_KEY_AUDIT_KEY_DELETED,
+					      DELETE);
+	ret = pkm_lcs_key_fd_delete_key_core(key_fd, token, ops, args, &audit);
+	pkm_lcs_key_audit_finish(&audit, key_fd, token, ret);
+	return ret;
+}
+
 static long pkm_lcs_key_fd_delete_key_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_delete_key_args *args)
@@ -5450,10 +5892,11 @@ static long pkm_lcs_key_fd_delete_key_from_args(
 		key_fd, pkm_kacs_current_effective_token_ptr(), ops, args);
 }
 
-static long pkm_lcs_key_fd_hide_key_from_args_for_token(
+static long pkm_lcs_key_fd_hide_key_core(
 	struct pkm_lcs_key_fd *key_fd, const void *token,
 	const struct pkm_lcs_usercopy_ops *ops,
-	const struct reg_hide_key_args *args)
+	const struct reg_hide_key_args *args,
+	struct pkm_lcs_key_audit_ctx *audit)
 {
 	struct pkm_lcs_hide_key_input input = { };
 	struct pkm_lcs_source_response_result response = { };
@@ -5493,6 +5936,8 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	ret = pkm_lcs_key_fd_copy_hide_key_input(ops, args, &input);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_key_layer(audit, input.target.name,
+					input.target.name_len);
 
 	ret = pkm_lcs_key_fd_path_entry_target(key_fd, &parent_guid,
 					       &child_name, &child_name_len);
@@ -5523,6 +5968,7 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 	ret = pkm_lcs_allocate_sequence(&sequence);
 	if (ret)
 		goto out_input;
+	pkm_lcs_key_audit_set_sequence(audit, sequence);
 
 	if (args->txn_fd >= 0) {
 		log_input.key_guid = key_fd->key_guid;
@@ -5545,16 +5991,20 @@ static long pkm_lcs_key_fd_hide_key_from_args_for_token(
 		if (ret)
 			goto out_input;
 		txn_id = binding.transaction_id;
+		pkm_lcs_key_audit_set_transaction(audit, txn_id);
 	}
 
 	ret = pkm_lcs_source_hide_entry_round_trip_timeout_with_limits(
 		key_fd->source_id, txn_id, parent_guid, child_name, child_name_len,
 		input.target.name, input.target.name_len, sequence,
 		&input.limits, input.limits.request_timeout_ms, &response, NULL);
+	pkm_lcs_key_audit_note_round_trip(audit, ret);
 	if (ret)
 		goto out_cancel_mutation;
 
 	if (args->txn_fd >= 0) {
+		mutation.audited = audit->armed;
+		mutation.audit_token = token;
 		ret = pkm_lcs_transaction_fd_commit_mutation(&mutation);
 		if (ret)
 			goto out_cancel_mutation;
@@ -5607,6 +6057,22 @@ out_cancel_mutation:
 		pkm_lcs_transaction_fd_cancel_mutation(&mutation);
 out_input:
 	pkm_lcs_hide_key_input_destroy(&input);
+	return ret;
+}
+
+/* REG_IOC_HIDE_KEY, recorded as lcs.audit.key.hidden. */
+static long pkm_lcs_key_fd_hide_key_from_args_for_token(
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_hide_key_args *args)
+{
+	struct pkm_lcs_key_audit_ctx audit;
+	long ret;
+
+	pkm_lcs_key_audit_ctx_begin_for_right(&audit, key_fd,
+					      PKM_LCS_KEY_AUDIT_KEY_HIDDEN, DELETE);
+	ret = pkm_lcs_key_fd_hide_key_core(key_fd, token, ops, args, &audit);
+	pkm_lcs_key_audit_finish(&audit, key_fd, token, ret);
 	return ret;
 }
 
@@ -13009,6 +13475,24 @@ long pkm_lcs_kunit_key_fd_set_security(
 	return ret;
 }
 
+long pkm_lcs_kunit_key_fd_set_security_for_token(
+	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_security_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_set_security_from_args_for_token(key_fd, token,
+							       ops, args);
+	fdput(held);
+	return ret;
+}
+
 long pkm_lcs_kunit_key_fd_set_value_for_token(
 	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args)
@@ -13718,6 +14202,7 @@ long pkm_lcs_key_fd_snapshot(int fd, struct pkm_lcs_key_fd_snapshot *out)
 	last = key_fd->path_component_count - 1U;
 	out->source_id = key_fd->source_id;
 	out->granted_access = key_fd->granted_access;
+	out->audit_mask = key_fd->audit_mask;
 	out->path_component_count = key_fd->path_component_count;
 	memcpy(out->key_guid, key_fd->key_guid, sizeof(out->key_guid));
 	memcpy(out->first_ancestor_guid, key_fd->ancestor_guids[0],

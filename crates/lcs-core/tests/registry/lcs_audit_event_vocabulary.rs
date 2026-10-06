@@ -34,6 +34,48 @@ fn lcs_audit_event_names_match_the_event_catalogue() {
         LcsAuditEventKind::SelfConfigInvalid.event_type(),
         "lcs.config.value.rejected"
     );
+    let writes = [
+        (LcsAuditEventKind::ValueSet, "lcs.audit.value.set"),
+        (LcsAuditEventKind::ValueDeleted, "lcs.audit.value.deleted"),
+        (LcsAuditEventKind::KeyTombstoned, "lcs.audit.key.tombstoned"),
+        (LcsAuditEventKind::KeyDeleted, "lcs.audit.key.deleted"),
+        (LcsAuditEventKind::KeyHidden, "lcs.audit.key.hidden"),
+        (LcsAuditEventKind::KeyCreated, "lcs.audit.key.created"),
+        (
+            LcsAuditEventKind::TransactionCommitted,
+            "lcs.audit.transaction.committed",
+        ),
+        (
+            LcsAuditEventKind::KeyDescriptorChanged,
+            "lcs.audit.key.descriptor.changed",
+        ),
+    ];
+    for (kind, name) in writes {
+        assert_eq!(kind.event_type(), name);
+    }
+}
+
+/// Every registry write record follows a result the source has already
+/// decided, so none of them can fail the operation it describes.
+#[test]
+fn lcs_write_audit_failure_policy_preserves_the_result() {
+    for kind in [
+        LcsAuditEventKind::ValueSet,
+        LcsAuditEventKind::ValueDeleted,
+        LcsAuditEventKind::KeyTombstoned,
+        LcsAuditEventKind::KeyDeleted,
+        LcsAuditEventKind::KeyHidden,
+        LcsAuditEventKind::KeyCreated,
+        LcsAuditEventKind::TransactionCommitted,
+        LcsAuditEventKind::KeyDescriptorChanged,
+    ] {
+        assert_eq!(
+            lcs_audit_emission_failure_policy(kind),
+            LcsAuditEmissionFailurePolicy::PreserveAlreadyDeterminedResult,
+            "{}",
+            kind.event_type()
+        );
+    }
 }
 
 #[test]

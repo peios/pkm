@@ -34,6 +34,7 @@
 
 #include <trace/events/lcs.h>
 
+#include "../kacs/token_runtime.h"
 #include "key_fd.h"
 #include "rsi.h"
 #include "transaction_fd.h"
@@ -63,6 +64,16 @@ struct pkm_lcs_transaction_fd {
 	bool timeout_abort_pending;
 	bool registry_linked;
 	bool fd_released;
+	/*
+	 * The transaction staged a recorded write and owes one
+	 * lcs.audit.transaction.committed when it ends: at a commit that
+	 * leaves it terminal, at its timeout, or when its fd is closed.
+	 * Cleared when that record is written, so there is exactly one.
+	 * Written under bind_lock.
+	 */
+	bool audit_pending;
+	/* Who staged the first recorded write, for an end with no caller. */
+	struct pkm_lcs_audit_caller_snapshot audit_caller;
 };
 
 struct pkm_lcs_transaction_key_create_log {
@@ -732,7 +743,52 @@ static void pkm_lcs_transaction_fd_destroy(
 		return;
 
 	pkm_lcs_transaction_log_clear(txn);
+	pkm_lcs_audit_caller_snapshot_destroy(&txn->audit_caller);
 	kfree(txn);
+}
+
+/*
+ * outcome.reason for a transaction that ended in `state` without its
+ * changes taking effect, or NONE for a state that is not an end.
+ */
+static u32 pkm_lcs_transaction_audit_reason(u32 state)
+{
+	switch (state) {
+	case REG_TXN_ABORTED:
+		return PKM_LCS_TXN_AUDIT_REASON_ABORTED;
+	case REG_TXN_TIMED_OUT:
+		return PKM_LCS_TXN_AUDIT_REASON_TIMED_OUT;
+	case REG_TXN_SOURCE_DOWN:
+		return PKM_LCS_TXN_AUDIT_REASON_SOURCE_ERROR;
+	default:
+		return PKM_LCS_TXN_AUDIT_REASON_NONE;
+	}
+}
+
+/*
+ * Writes the transaction's lcs.audit.transaction.committed. `caller` is the
+ * committer on REG_IOC_COMMIT, or the stored stager for an end by close or
+ * timeout. The transaction's state is already final: a record that cannot
+ * be written changes nothing.
+ */
+static void pkm_lcs_transaction_emit_audit(
+	const struct pkm_lcs_audit_caller_snapshot *caller, u64 transaction_id,
+	u32 state, long ret, bool commit_outstanding)
+{
+	u32 reason = PKM_LCS_TXN_AUDIT_REASON_NONE;
+	u32 result_errno = 0;
+	int outstanding = -1;
+
+	if (state != REG_TXN_COMMITTED) {
+		reason = pkm_lcs_transaction_audit_reason(state);
+		if (reason == PKM_LCS_TXN_AUDIT_REASON_NONE)
+			return;
+		result_errno = ret < 0 ? (u32)-ret : 0U;
+		outstanding = commit_outstanding ? 1 : 0;
+	}
+	(void)pkm_lcs_emit_transaction_committed_audit(
+		caller, transaction_id, state, result_errno, reason,
+		outstanding);
 }
 
 static long pkm_lcs_transaction_dup_path_components(
@@ -1457,6 +1513,7 @@ static void pkm_lcs_transaction_fd_timeout_work(struct work_struct *work)
 	u32 source_id = 0;
 	u32 count = 0;
 	bool cleanup = false;
+	bool audit = false;
 
 	mutex_lock(&txn->bind_lock);
 	spin_lock(&txn->lock);
@@ -1474,8 +1531,21 @@ static void pkm_lcs_transaction_fd_timeout_work(struct work_struct *work)
 		(void)pkm_lcs_source_bound_transaction_release(source_id,
 							       &count);
 		pkm_lcs_transaction_log_clear(txn);
+		audit = txn->audit_pending;
+		txn->audit_pending = false;
 	}
 	mutex_unlock(&txn->bind_lock);
+
+	/*
+	 * The timer runs in softirq and cannot build a record; this work item
+	 * is where a timed-out transaction's record is written. Nobody is
+	 * acting, so the subject is the stager kept with the transaction. The
+	 * fd's release cancels this work before freeing the transaction.
+	 */
+	if (audit)
+		pkm_lcs_transaction_emit_audit(&txn->audit_caller,
+					       transaction_id,
+					       REG_TXN_TIMED_OUT, 0, false);
 }
 
 static int pkm_lcs_transaction_fd_release(struct inode *inode,
@@ -1491,6 +1561,7 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 	bool wake = false;
 	bool aborted = false;
 	u32 old_state;
+	u32 final_state;
 	u64 trace_txn_id;
 
 	file->private_data = NULL;
@@ -1527,11 +1598,24 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 		   txn->commit_in_flight) {
 		retain_detached_commit = true;
 	}
+	final_state = txn->state;
 	spin_unlock(&txn->lock);
 
 	if (aborted)
 		trace_lcs_txn_abort(trace_txn_id, source_id, old_state,
 				    REG_TXN_ABORTED, 0, false);
+
+	/*
+	 * A transaction that staged a recorded write and is ending with its fd
+	 * unclosed by a commit: closed while active (aborted), or already
+	 * timed out, aborted or cut off by its source without a record yet.
+	 * No other user of the fd remains, so the flag needs no lock here.
+	 */
+	if (!retain_detached_commit && txn->audit_pending) {
+		txn->audit_pending = false;
+		pkm_lcs_transaction_emit_audit(&txn->audit_caller, trace_txn_id,
+					       final_state, 0, false);
+	}
 
 	if (retain_detached_commit)
 		return 0;
@@ -2801,6 +2885,46 @@ static long pkm_lcs_transaction_fd_commit_from_state_timeout_with_limits(
 	struct pkm_lcs_transaction_fd *txn,
 	const struct pkm_lcs_runtime_limits *limits, u32 timeout_ms);
 
+/*
+ * After REG_IOC_COMMIT: a transaction that staged a recorded write and is
+ * now in a final state writes its one lcs.audit.transaction.committed,
+ * naming the committer. A commit that failed and left the transaction
+ * active owes nothing yet; a later commit or the close settles it.
+ */
+static void pkm_lcs_transaction_commit_audit(
+	struct pkm_lcs_transaction_fd *txn, u64 transaction_id, long ret)
+{
+	struct pkm_lcs_audit_caller_snapshot committer = { };
+	bool outstanding;
+	bool audit = false;
+	u32 state;
+
+	mutex_lock(&txn->bind_lock);
+	spin_lock(&txn->lock);
+	state = txn->state;
+	outstanding = txn->commit_in_flight;
+	spin_unlock(&txn->lock);
+	if (txn->audit_pending && !pkm_lcs_transaction_state_active(state)) {
+		txn->audit_pending = false;
+		audit = true;
+	}
+	mutex_unlock(&txn->bind_lock);
+
+	if (!audit)
+		return;
+	if (pkm_lcs_audit_caller_snapshot_take(
+		    pkm_kacs_current_effective_token_ptr(), &committer)) {
+		/* No committer to name: fall back to the stager. */
+		pkm_lcs_transaction_emit_audit(&txn->audit_caller,
+					       transaction_id, state, ret,
+					       outstanding);
+		return;
+	}
+	pkm_lcs_transaction_emit_audit(&committer, transaction_id, state, ret,
+				       outstanding);
+	pkm_lcs_audit_caller_snapshot_destroy(&committer);
+}
+
 static __maybe_unused long pkm_lcs_transaction_fd_commit_from_state_timeout(
 	struct pkm_lcs_transaction_fd *txn, u32 timeout_ms)
 {
@@ -2974,6 +3098,7 @@ out_unlock:
 	trace_lcs_txn_commit(transaction_id, source_id, state,
 			     final_state ? final_state : state, (s32)ret,
 			     ret == -ETIMEDOUT);
+	pkm_lcs_transaction_commit_audit(txn, transaction_id, ret);
 	return ret;
 }
 
@@ -4495,6 +4620,22 @@ long pkm_lcs_transaction_fd_commit_mutation(
 	entry->operation_index = txn->next_operation_index++;
 	list_add_tail(&entry->link, &txn->mutation_log);
 	txn->mutation_log_entries++;
+	if (handle->audited) {
+		const void *token = handle->audit_token ?
+			handle->audit_token :
+			pkm_kacs_current_effective_token_ptr();
+
+		/*
+		 * Kept from the first recorded write. Without it the end
+		 * record has no subject to name, so a failed snapshot leaves
+		 * the flag clear rather than owing a record it cannot write.
+		 */
+		if (!txn->audit_caller.user_sid)
+			(void)pkm_lcs_audit_caller_snapshot_take(
+				token, &txn->audit_caller);
+		if (txn->audit_caller.user_sid)
+			txn->audit_pending = true;
+	}
 	spin_lock(&txn->lock);
 	txn_id = txn->transaction_id;
 	source_id = txn->bound_source_id;
@@ -4758,6 +4899,51 @@ long pkm_lcs_kunit_transaction_fd_flush_timeout_work(int fd)
 		return ret;
 
 	flush_work(&txn->timeout_work);
+	fdput(held);
+	return 0;
+}
+
+/*
+ * Marks the transaction as having staged a recorded write by `token`, as
+ * commit_mutation does for an audited handle, without a source round trip.
+ */
+long pkm_lcs_kunit_transaction_fd_mark_audited(int fd, const void *token)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+	if (!txn->audit_caller.user_sid)
+		ret = pkm_lcs_audit_caller_snapshot_take(token,
+							 &txn->audit_caller);
+	if (!ret)
+		txn->audit_pending = true;
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return ret;
+}
+
+/* Whether the transaction still owes its lcs.audit.transaction.committed. */
+long pkm_lcs_kunit_transaction_fd_audit_pending(int fd, bool *pending)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	if (!pending)
+		return -EINVAL;
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+	*pending = txn->audit_pending;
+	mutex_unlock(&txn->bind_lock);
 	fdput(held);
 	return 0;
 }

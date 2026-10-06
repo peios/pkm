@@ -688,11 +688,38 @@ large and can hold secrets.
 --- field object.key.value.digest
 type: bin
 
-A digest of a registry value's data, so that two records can be compared
-to see whether a value changed without either carrying the data.
+The SHA-256 digest of a registry value's data, so that two records can be
+compared to see whether a value changed without either carrying the data.
 Recorded in place of the raw bytes, which an event never carries by
-default. Compare digests only with digests: the algorithm is not yet
-fixed.
+default. Equal digests mean equal data; the type is a separate field, so
+compare `object.key.value.type` too.
+
+A digest is not a secret-keeping device. A value drawn from a small set,
+such as a flag or a short PIN, can be recovered by hashing each candidate
+and comparing.
+
+--- field object.key.value.type-previous
+type: uint.enum
+values: 0 REG_NONE | 1 REG_SZ | 2 REG_EXPAND_SZ | 3 REG_BINARY | 4 REG_DWORD | 5 REG_DWORD_BIG_ENDIAN | 6 REG_LINK | 7 REG_MULTI_SZ | 8 REG_RESOURCE_LIST | 9 REG_FULL_RESOURCE_DESCRIPTOR | 10 REG_RESOURCE_REQUIREMENTS_LIST | 11 REG_QWORD | 65535 REG_TOMBSTONE
+closed: true
+
+The type of the value a write replaced or a delete removed, in the terms
+of `object.key.value.type`. It is the value readers resolved before the
+operation, across every layer, so it can come from a different layer from
+the one written.
+
+--- field object.key.value.length-previous
+type: uint.bytes
+
+The byte length of the value a write replaced or a delete removed. Read
+with `object.key.value.length`.
+
+--- field object.key.value.digest-previous
+type: bin
+
+The SHA-256 digest of the data of the value a write replaced or a delete
+removed. Equal to `object.key.value.digest` on a write that stored what
+was already there.
 
 --- field object.process.pid
 type: uint
@@ -1235,9 +1262,9 @@ The byte length of the descriptor a change replaced.
 --- field object.sd.digest
 type: bin
 
-A digest of the object's security descriptor in its binary form, so that
-two records can be compared for "same descriptor" without either carrying
-the descriptor itself.
+The SHA-256 digest of the object's security descriptor in its binary
+form, so that two records can be compared for "same descriptor" without
+either carrying the descriptor itself.
 
 --- field object.sd.digest-previous
 type: bin

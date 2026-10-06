@@ -1,13 +1,14 @@
 use kacs_core::{
     ACCESS_ALLOWED_ACE_TYPE, AccessCheckToken, ConditionalContext, ImpersonationLevel,
-    IntegrityLevel, PipContext, SE_DACL_PRESENT, SE_SELF_RELATIVE, SYSTEM_AUDIT_ACE_TYPE, Sid,
-    TOKEN_MANDATORY_POLICY_NO_WRITE_UP, TokenPrivileges, TokenType, TokenView,
+    IntegrityLevel, PipContext, SE_DACL_PRESENT, SE_SELF_RELATIVE, SYSTEM_ALARM_ACE_TYPE,
+    SYSTEM_AUDIT_ACE_TYPE, Sid, TOKEN_MANDATORY_POLICY_NO_WRITE_UP, TokenPrivileges, TokenType,
+    TokenView,
 };
 use lcs_core::{
-    KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE, LcsError, MAXIMUM_ALLOWED, READ_CONTROL,
+    DELETE, KEY_QUERY_VALUE, KEY_READ, KEY_SET_VALUE, LcsError, MAXIMUM_ALLOWED, READ_CONTROL,
     REG_OPEN_LINK, RegistryKeyOpenAccessInput, RegistryOpenAccessDecision,
     RegistryOpenAccessTarget, SYNCHRONIZE, plan_registry_key_open_access,
-    select_registry_open_access_target,
+    plan_registry_key_open_access_with_privilege_use, select_registry_open_access_target,
 };
 
 const SUCCESSFUL_ACCESS_ACE_FLAG: u8 = 0x40;
@@ -223,6 +224,45 @@ fn key_open_sacl_audit_blocks_completion_on_payload_failure_only() {
     assert_eq!(plan.fd_granted_access, Some(KEY_READ));
     assert!(plan.key_open_sacl_audit_required);
     assert!(plan.audit_payload_failure_blocks_completion);
+}
+
+/// A `SYSTEM_ALARM` ACE matching the caller sets the continuous-audit mask
+/// the handle caches; one naming someone else, or a denied open, leaves it
+/// zero. Alarm ACEs never make the open itself audited.
+#[test]
+fn key_open_plan_carries_the_alarm_ace_continuous_audit_mask() {
+    let owner = sid(5, &[18]);
+    let group = sid(5, &[32, 544]);
+    let user = sid(5, &[21, 1000]);
+    let other = sid(5, &[21, 2000]);
+    let dacl = acl(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        KEY_READ | KEY_SET_VALUE,
+        &user,
+    )]);
+    let sacl = acl(&[
+        basic_ace(SYSTEM_ALARM_ACE_TYPE, 0, KEY_SET_VALUE, &user),
+        basic_ace(SYSTEM_ALARM_ACE_TYPE, 0, DELETE, &other),
+    ]);
+    let alarmed = sd(&owner, &group, Some(&sacl), &dacl);
+    let plain = sd(&owner, &group, None, &dacl);
+    let token = primary_token(Sid::parse(&user).unwrap());
+
+    let outcome =
+        plan_registry_key_open_access_with_privilege_use(input(&alarmed, &token, KEY_READ))
+            .unwrap();
+    assert_eq!(outcome.plan.decision, RegistryOpenAccessDecision::Allowed);
+    assert_eq!(outcome.plan.continuous_audit_mask, KEY_SET_VALUE);
+    assert!(!outcome.plan.key_open_sacl_audit_required);
+    assert!(outcome.privilege_use_events.is_empty());
+
+    let plan = plan_registry_key_open_access(input(&plain, &token, KEY_READ)).unwrap();
+    assert_eq!(plan.continuous_audit_mask, 0);
+
+    let denied = plan_registry_key_open_access(input(&alarmed, &token, DELETE)).unwrap();
+    assert_eq!(denied.decision, RegistryOpenAccessDecision::Denied);
+    assert_eq!(denied.continuous_audit_mask, 0);
 }
 
 #[test]
