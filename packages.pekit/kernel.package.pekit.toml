@@ -46,3 +46,15 @@ description = "Peios Kernel - bootable image (based on Linux 7.0.9)"
 "@source:regman/kmes.regman"  = "usr/share/regman/kmes.regman"
 "@source:regman/net.regman"   = "usr/share/regman/net.regman"
 "@source:regman/pnp.regman"   = "usr/share/regman/pnp.regman"
+# evman documentation for every event the kernel writes and every field it
+# defines (PGSS §6.10). kernel.evman is the platform fragment, defining the
+# header fields and the generic roots every other fragment builds on; the
+# rest are one per subsystem, named for the root they own. The catalogue is
+# the definition of what may be emitted, not only its manual. See
+# evman/README.md.
+"@source:evman/kernel.evman"   = "usr/share/evman/kernel.evman"
+"@source:evman/kacs.evman"     = "usr/share/evman/kacs.evman"
+"@source:evman/kmes.evman"     = "usr/share/evman/kmes.evman"
+"@source:evman/lcs.evman"      = "usr/share/evman/lcs.evman"
+"@source:evman/ntfe.evman"     = "usr/share/evman/ntfe.evman"
+"@source:evman/stratafs.evman" = "usr/share/evman/stratafs.evman"
