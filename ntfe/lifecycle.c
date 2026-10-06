@@ -27,7 +27,8 @@
 /* kacs/ntfe_runtime.rs holds NtfeBuildWhyC to the same size. */
 static_assert(sizeof(struct peios_ntfe_build_why) == 320);
 
-#define NTFE_PUBLISHED_MAX_PAYLOAD	128
+/* The published payload at its widest is 134 bytes: three 9-byte uints. */
+#define NTFE_PUBLISHED_MAX_PAYLOAD	192
 #define NTFE_REJECTED_MAX_PAYLOAD	512
 
 struct ntfe_lc_mp {
