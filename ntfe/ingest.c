@@ -64,12 +64,126 @@ struct peios_ntfe_walk {
 	u32 rules_seen;
 	/* FNV-1a over everything the rules walk fed the builder. */
 	u64 digest;
+	/*
+	 * The rules walk only (NULL elsewhere): why it was refused, for
+	 * ntfe.policy.rejected, and the path of the rule it is in, relative
+	 * to the layer key. path_len is the path's whole length, which may
+	 * run past what path holds.
+	 */
+	struct peios_ntfe_build_why *why;
+	char *path;
+	u32 path_len;
+	u8 layer;
 };
 
 /* The digest of the last rules walk that published; 0 = never. */
 static u64 ntfe_published_digest;
 /* One refresh at a time: bootstrap and the deferred re-walk may overlap. */
 static DEFINE_MUTEX(ntfe_refresh_lock);
+
+/*
+ * The rules walk's refusal and rule path, under ntfe_refresh_lock: too big
+ * for the stack of a walk that recurses. The path holds one byte past
+ * what a refusal carries, so a cut can see the character it falls in.
+ */
+static struct peios_ntfe_build_why ntfe_walk_why;
+static char ntfe_walk_path[PEIOS_NTFE_WHY_RULE_LEN + 1];
+
+/*
+ * The last refusal recorded as ntfe.policy.rejected, under
+ * ntfe_refresh_lock. netd's inventory writes fire the walk too, and a
+ * refused policy is refused again by every walk until someone fixes it:
+ * the same refusal of the same input — digest, errno and reason — is one
+ * record, not one per walk. A walk the rules stage accepts clears it.
+ */
+static struct {
+	bool valid;
+	u64 digest;
+	long err;
+	char reason[PEIOS_NTFE_WHY_REASON_LEN];
+} ntfe_last_refusal;
+
+static void ntfe_path_put(struct peios_ntfe_walk *walk, const char *s, u32 n)
+{
+	u32 at = walk->path_len;
+
+	if (at < sizeof(ntfe_walk_path))
+		memcpy(walk->path + at, s,
+		       min_t(u32, n, sizeof(ntfe_walk_path) - at));
+	walk->path_len = at + n;
+}
+
+/* Enters a rule; returns the length to restore on leaving it. */
+static u32 ntfe_path_push(struct peios_ntfe_walk *walk, const char *name,
+			  u32 name_len)
+{
+	u32 saved = walk->path_len;
+
+	if (!walk->path)
+		return saved;
+	if (saved)
+		ntfe_path_put(walk, "/", 1);
+	ntfe_path_put(walk, name, name_len);
+	return saved;
+}
+
+/*
+ * Records why the rules walk is refused, unless something deeper already
+ * did (the first refusal is the one that stopped the walk); with @in_rule,
+ * the rule it was in, by path. Returns @err, so a site can return it.
+ */
+static long ntfe_refuse(struct peios_ntfe_walk *walk, long err,
+			const char *reason, bool in_rule)
+{
+	struct peios_ntfe_build_why *why = walk->why;
+	u32 n;
+
+	if (!why || why->reason[0])
+		return err;
+	strscpy(why->reason, reason, sizeof(why->reason));
+	why->layer = walk->layer;
+	if (!in_rule || !walk->path_len)
+		return err;
+	n = min_t(u32, walk->path_len, sizeof(why->rule));
+	if (n < walk->path_len) {
+		/* Cut at a character boundary, and say so. */
+		while (n && ((u8)walk->path[n] & 0xc0) == 0x80)
+			n--;
+		why->rule_truncated = 1;
+	}
+	memcpy(why->rule, walk->path, n);
+	why->rule_len = n;
+	return err;
+}
+
+/*
+ * Writes ntfe.policy.rejected for a refusal, unless it is the last one
+ * recorded over again. Process context, under ntfe_refresh_lock.
+ */
+static void ntfe_note_refusal(u64 digest, long err,
+			      const struct peios_ntfe_build_why *why)
+{
+	if (ntfe_last_refusal.valid && ntfe_last_refusal.digest == digest &&
+	    ntfe_last_refusal.err == err &&
+	    !strcmp(ntfe_last_refusal.reason, why->reason))
+		return;
+	if (peios_ntfe_policy_rejected_emit(why, err) < 0)
+		return;
+	ntfe_last_refusal.valid = true;
+	ntfe_last_refusal.digest = digest;
+	ntfe_last_refusal.err = err;
+	strscpy(ntfe_last_refusal.reason, why->reason,
+		sizeof(ntfe_last_refusal.reason));
+}
+
+/* A builder call failed: out of memory, or text that is not UTF-8. */
+static long ntfe_refuse_feed(struct peios_ntfe_walk *walk, long err)
+{
+	if (!err)
+		return 0;
+	return ntfe_refuse(walk, err,
+			   err == -ENOMEM ? "out-of-memory" : "not-utf8", true);
+}
 
 #define NTFE_FNV_OFFSET	0xcbf29ce484222325ULL
 #define NTFE_FNV_PRIME	0x100000001b3ULL
@@ -161,27 +275,30 @@ static long ntfe_feed_value(struct peios_ntfe_walk *walk, const char *name,
 	switch (type) {
 	case NTFE_REG_SZ:
 	case NTFE_REG_EXPAND_SZ:
-		return ntfe_rust_builder_value_str(walk->builder, name,
-						  name_len, data,
-						  ntfe_str_trim(data, len));
+		return ntfe_refuse_feed(walk, ntfe_rust_builder_value_str(
+			walk->builder, name, name_len, data,
+			ntfe_str_trim(data, len)));
 	case NTFE_REG_DWORD:
 		if (len != 4)
-			return -EINVAL;
-		return ntfe_rust_builder_value_int(walk->builder, name,
-						  name_len,
-						  get_unaligned_le32(data));
+			return ntfe_refuse(walk, -EINVAL, "bad-value-length",
+					   true);
+		return ntfe_refuse_feed(walk, ntfe_rust_builder_value_int(
+			walk->builder, name, name_len,
+			get_unaligned_le32(data)));
 	case NTFE_REG_DWORD_BIG_ENDIAN:
 		if (len != 4)
-			return -EINVAL;
-		return ntfe_rust_builder_value_int(walk->builder, name,
-						  name_len,
-						  get_unaligned_be32(data));
+			return ntfe_refuse(walk, -EINVAL, "bad-value-length",
+					   true);
+		return ntfe_refuse_feed(walk, ntfe_rust_builder_value_int(
+			walk->builder, name, name_len,
+			get_unaligned_be32(data)));
 	case NTFE_REG_QWORD:
 		if (len != 8)
-			return -EINVAL;
-		return ntfe_rust_builder_value_int(
+			return ntfe_refuse(walk, -EINVAL, "bad-value-length",
+					   true);
+		return ntfe_refuse_feed(walk, ntfe_rust_builder_value_int(
 			walk->builder, name, name_len,
-			(s64)get_unaligned_le64(data));
+			(s64)get_unaligned_le64(data)));
 	case NTFE_REG_MULTI_SZ: {
 		u32 start = 0, i;
 		long ret;
@@ -189,7 +306,7 @@ static long ntfe_feed_value(struct peios_ntfe_walk *walk, const char *name,
 		ret = ntfe_rust_builder_value_list_begin(walk->builder, name,
 							name_len);
 		if (ret)
-			return ret;
+			return ntfe_refuse_feed(walk, ret);
 		len = ntfe_str_trim(data, len);
 		for (i = 0; i <= len; i++) {
 			if (i == len || data[i] == '\0') {
@@ -199,12 +316,14 @@ static long ntfe_feed_value(struct peios_ntfe_walk *walk, const char *name,
 						(const char *)data + start,
 						i - start);
 					if (ret)
-						return ret;
+						return ntfe_refuse_feed(walk,
+									ret);
 				}
 				start = i + 1;
 			}
 		}
-		return ntfe_rust_builder_value_list_end(walk->builder);
+		return ntfe_refuse_feed(walk,
+			ntfe_rust_builder_value_list_end(walk->builder));
 	}
 	default:
 		/*
@@ -212,7 +331,7 @@ static long ntfe_feed_value(struct peios_ntfe_walk *walk, const char *name,
 		 * atomic transitions prefer a loud rejection (and the old
 		 * generation) over a silently half-read rule.
 		 */
-		return -EINVAL;
+		return ntfe_refuse(walk, -EINVAL, "bad-value-type", true);
 	}
 }
 
@@ -341,26 +460,28 @@ static long ntfe_reporting_level_cb(struct peios_ntfe_walk *walk, void *ctx,
 	switch (type) {
 	case NTFE_REG_DWORD:
 		if (len != 4)
-			return -EINVAL;
+			goto bad;
 		v = get_unaligned_le32(data);
 		break;
 	case NTFE_REG_DWORD_BIG_ENDIAN:
 		if (len != 4)
-			return -EINVAL;
+			goto bad;
 		v = get_unaligned_be32(data);
 		break;
 	case NTFE_REG_QWORD:
 		if (len != 8)
-			return -EINVAL;
+			goto bad;
 		v = (s64)get_unaligned_le64(data);
 		break;
 	default:
-		return -EINVAL;
+		goto bad;
 	}
 	if (v < 1 || v > 6)
-		return -EINVAL;
+		goto bad;
 	*level = (u8)v;
 	return 0;
+bad:
+	return ntfe_refuse(walk, -EINVAL, "bad-reporting-level", false);
 }
 
 /* Walk one rule key: values, then children as exceptions, recursively. */
@@ -370,22 +491,28 @@ static long ntfe_walk_rule(struct peios_ntfe_walk *walk, const u8 guid[16],
 	struct pkm_lcs_rsi_enum_children_info_summary summary = { };
 	struct pkm_lcs_source_response_frame frame = { };
 	struct pkm_lcs_source_response_result response = { };
-	u32 i;
+	u32 i, saved_path;
 	long ret;
 
-	if (depth > PEIOS_NTFE_MAX_RULE_DEPTH)
-		return -E2BIG;
-	if (++walk->rules_seen > PEIOS_NTFE_MAX_RULES)
-		return -E2BIG;
+	saved_path = ntfe_path_push(walk, name, name_len);
+	if (depth > PEIOS_NTFE_MAX_RULE_DEPTH) {
+		ret = ntfe_refuse(walk, -E2BIG, "rule-too-deep", true);
+		goto out_path;
+	}
+	if (++walk->rules_seen > PEIOS_NTFE_MAX_RULES) {
+		ret = ntfe_refuse(walk, -E2BIG, "too-many-rules", true);
+		goto out_path;
+	}
 
 	ntfe_digest_u32(walk, depth);
 	ntfe_digest_bytes(walk, name, name_len);
-	ret = ntfe_rust_builder_rule_begin(walk->builder, name, name_len);
+	ret = ntfe_refuse_feed(walk, ntfe_rust_builder_rule_begin(
+		walk->builder, name, name_len));
 	if (ret)
-		return ret;
+		goto out_path;
 	ret = ntfe_walk_values(walk, guid);
 	if (ret)
-		return ret;
+		goto out_path;
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
@@ -435,6 +562,15 @@ static long ntfe_walk_rule(struct peios_ntfe_walk *walk, const u8 guid[16],
 	ret = ntfe_rust_builder_rule_end(walk->builder);
 out:
 	pkm_lcs_source_response_frame_destroy(&frame);
+out_path:
+	/* Anything this rule's walk did not name is a registry read that
+	 * failed in it, or memory.
+	 */
+	if (ret)
+		ntfe_refuse(walk, ret,
+			    ret == -ENOMEM ? "out-of-memory" :
+					     "registry-read-failed", true);
+	walk->path_len = saved_path;
 	return ret;
 }
 
@@ -454,9 +590,11 @@ static long ntfe_build_layer(struct peios_ntfe_walk *walk, bool present,
 	if (!present)
 		return 0;
 
+	walk->layer = layer;
+	walk->path_len = 0;
 	walk->builder = ntfe_rust_builder_new();
 	if (!walk->builder)
-		return -ENOMEM;
+		return ntfe_refuse(walk, -ENOMEM, "out-of-memory", false);
 
 	pkm_lcs_source_response_frame_init(&frame);
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
@@ -505,8 +643,11 @@ static long ntfe_build_layer(struct peios_ntfe_walk *walk, bool present,
 	}
 
 	pkm_lcs_source_response_frame_destroy(&frame);
-	/* build consumes the builder on every path. */
-	ret = ntfe_rust_builder_build(walk->builder, layer, forest_out);
+	/* build consumes the builder on every path; a refusal names its
+	 * reason, rule and layer in walk->why.
+	 */
+	ret = ntfe_rust_builder_build_why(walk->builder, layer, forest_out,
+					  walk->why);
 	walk->builder = NULL;
 	return ret;
 
@@ -624,6 +765,11 @@ static long ntfe_refresh_rules(struct peios_ntfe_walk *walk,
 
 	walk->digest = NTFE_FNV_OFFSET;
 	walk->rules_seen = 0;
+	peios_ntfe_build_why_reset(&ntfe_walk_why);
+	walk->why = &ntfe_walk_why;
+	walk->path = ntfe_walk_path;
+	walk->path_len = 0;
+	walk->layer = PEIOS_NTFE_WHY_NO_LAYER;
 
 	ret = ntfe_for_each_value(walk, rules_guid, ntfe_reporting_level_cb,
 				 &reporting_level);
@@ -650,6 +796,7 @@ static long ntfe_refresh_rules(struct peios_ntfe_walk *walk,
 			      PEIOS_NTFE_LAYER_FLOW, &flow_forest);
 	if (ret)
 		goto out;
+	walk->layer = PEIOS_NTFE_WHY_NO_LAYER;
 
 	if (walk->digest == ntfe_published_digest) {
 		/* The same policy, byte for byte: the active generation
@@ -663,8 +810,9 @@ static long ntfe_refresh_rules(struct peios_ntfe_walk *walk,
 		goto out;
 	}
 
-	ret = peios_ntfe_policy_publish(packet_forest, raw_forest, flow_forest,
-				       reporting_level);
+	ret = peios_ntfe_policy_publish_why(packet_forest, raw_forest,
+					    flow_forest, reporting_level,
+					    walk->why);
 	if (!ret) {
 		ntfe_published_digest = walk->digest;
 		packet_forest = NULL;
@@ -672,9 +820,22 @@ static long ntfe_refresh_rules(struct peios_ntfe_walk *walk,
 		flow_forest = NULL;
 	}
 out:
-	if (ret)
-		pr_warn("ntfe: rules refresh failed (%ld); keeping the previous generation\n",
-			ret);
+	if (ret) {
+		/* What no site named is a registry read that failed outside
+		 * any rule (the Rules key's values, a layer key's children),
+		 * or memory.
+		 */
+		ntfe_refuse(walk, ret,
+			    ret == -ENOMEM ? "out-of-memory" :
+					     "registry-read-failed", false);
+		pr_warn("ntfe: rules refresh failed (%ld, %s); keeping the previous generation\n",
+			ret, ntfe_walk_why.reason);
+		ntfe_note_refusal(walk->digest, ret, &ntfe_walk_why);
+	} else {
+		ntfe_last_refusal.valid = false;
+	}
+	walk->why = NULL;
+	walk->path = NULL;
 	ntfe_rust_forest_free(packet_forest);
 	ntfe_rust_forest_free(raw_forest);
 	ntfe_rust_forest_free(flow_forest);
@@ -959,10 +1120,18 @@ long peios_ntfe_network_refresh_from_key(u32 source_id,
 	/* The rules: no key is no policy, and the previous generation
 	 * stands, exactly as a walk that refused would leave it.
 	 */
-	if (c.rules_present)
+	if (c.rules_present) {
 		ret = ntfe_refresh_rules(&walk, c.rules_guid);
-	else
+	} else {
 		pr_info_once("ntfe: no Rules key; keeping the previous generation\n");
+		/* Recorded once per absence, not once per walk: an inventory
+		 * write walks again, and finds the same nothing.
+		 */
+		peios_ntfe_build_why_reset(&ntfe_walk_why);
+		strscpy(ntfe_walk_why.reason, "no-rules-key",
+			sizeof(ntfe_walk_why.reason));
+		ntfe_note_refusal(NTFE_FNV_OFFSET, 0, &ntfe_walk_why);
+	}
 
 	/* The context, whatever the rules did: the two are independent. */
 	context_ret = ntfe_refresh_context(&walk, c.interfaces_present,

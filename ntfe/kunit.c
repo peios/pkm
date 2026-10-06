@@ -25,6 +25,7 @@
 #include <linux/netfilter.h>
 #include <linux/peios_ntfe.h>
 #include <linux/string.h>
+#include <linux/unaligned.h>
 #include <net/netfilter/nf_conntrack_extend.h>
 
 #include <pkm/ntfe.h>
@@ -918,6 +919,363 @@ static void ntfe_kunit_report_lands_in_kmes(struct kunit *test)
 			len);
 	KUNIT_EXPECT_EQ(test, memcmp(name + cut, name_cut,
 				     sizeof(name_cut) - 1), 0);
+}
+
+/*
+ * NTFE's lifecycle events (lifecycle.c): ntfe.policy.published from every
+ * publication, ntfe.policy.rejected from a refused walk, and the reasons
+ * the bridge now carries out of pnp-core instead of a bare -EINVAL.
+ */
+
+/* The latest NTFE event of @type in @buf; returns its payload, sets @len. */
+static const u8 *ntfe_test_latest_event(struct kunit *test, const char *type,
+					u8 *buf, size_t *len)
+{
+	const size_t head = KMES_EVENT_HEADER_BASE_SIZE + strlen(type);
+	struct pkm_kmes_kunit_snapshot ring;
+	size_t written = 0;
+	int ret;
+
+	ret = pkm_kmes_kunit_copy_latest_matching_event(
+		KMES_ORIGIN_NTFE, type, strlen(type), buf, 4096, &written,
+		&ring);
+	if (ret == -ENODEV || ret == -ENOENT)
+		kunit_skip(test, "KMES ring not available in this run (%d)",
+			   ret);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	KUNIT_ASSERT_GT(test, written, head);
+	*len = written - head;
+	return buf + head;
+}
+
+/* Appends @lit, a string literal of exact msgpack bytes, at @at. */
+#define NTFE_TEST_PUT(out, at, lit) \
+	((at) += (memcpy((out) + (at), lit, sizeof(lit) - 1), sizeof(lit) - 1))
+
+/* Appends a msgpack uint as the kernel's encoders write it. */
+static size_t ntfe_test_put_uint(u8 *out, size_t at, u64 v)
+{
+	if (v < 128) {
+		out[at++] = (u8)v;
+	} else if (v <= U8_MAX) {
+		out[at++] = 0xcc;
+		out[at++] = (u8)v;
+	} else if (v <= U16_MAX) {
+		out[at++] = 0xcd;
+		put_unaligned_be16((u16)v, out + at);
+		at += 2;
+	} else if (v <= U32_MAX) {
+		out[at++] = 0xce;
+		put_unaligned_be32((u32)v, out + at);
+		at += 4;
+	} else {
+		out[at++] = 0xcf;
+		put_unaligned_be64(v, out + at);
+		at += 8;
+	}
+	return at;
+}
+
+/* A forest of one rule passing everything, in @layer. */
+static void *ntfe_test_pass_forest(struct kunit *test, u8 layer)
+{
+	void *b, *forest = NULL;
+
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "all", 3), 0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_build(b, layer, &forest), 0);
+	KUNIT_ASSERT_NOT_NULL(test, forest);
+	return forest;
+}
+
+/* The whole published payload: { policy: { ... } }, every key in order. */
+static size_t ntfe_test_published(u8 *out, u64 generation, u64 previous,
+				  const char *layers_lit, size_t layers_len,
+				  u8 threshold, u8 threshold_previous)
+{
+	size_t at = 0;
+
+	NTFE_TEST_PUT(out, at, "\x81" "\xa6" "policy" "\x85"
+			       "\xaa" "generation");
+	at = ntfe_test_put_uint(out, at, generation);
+	NTFE_TEST_PUT(out, at, "\xb3" "generation-previous");
+	at = ntfe_test_put_uint(out, at, previous);
+	NTFE_TEST_PUT(out, at, "\xa6" "layers");
+	memcpy(out + at, layers_lit, layers_len);
+	at += layers_len;
+	NTFE_TEST_PUT(out, at, "\xb0" "report-threshold");
+	at = ntfe_test_put_uint(out, at, threshold);
+	NTFE_TEST_PUT(out, at, "\xb9" "report-threshold-previous");
+	at = ntfe_test_put_uint(out, at, threshold_previous);
+	return at;
+}
+
+static void ntfe_kunit_policy_published_lands_in_kmes(struct kunit *test)
+{
+	static const char packet_only[] = "\x91" "\xa6" "packet";
+	static const char none[] = "\x90";
+	static const char all_three[] = "\x93" "\xaa" "raw-packet"
+					"\xa6" "packet" "\xa4" "flow";
+	u64 before, gen;
+	size_t len, want_len;
+	const u8 *p;
+	u8 *buf, *want;
+
+	buf = kunit_kzalloc(test, 4096, GFP_KERNEL);
+	want = kunit_kzalloc(test, 256, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	KUNIT_ASSERT_NOT_NULL(test, want);
+
+	/* A known predecessor: no forests, threshold 3. */
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 3), 0);
+	before = ntfe_rust_generation();
+
+	/* One layer: the generation, its predecessor's, the layer, both
+	 * thresholds.
+	 */
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_policy_publish(
+				ntfe_test_pass_forest(test, PEIOS_NTFE_LAYER_PACKET),
+				NULL, NULL, 4),
+			0);
+	gen = ntfe_rust_generation();
+	KUNIT_EXPECT_EQ(test, gen, before + 1);
+	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_PUBLISHED, buf,
+				   &len);
+	want_len = ntfe_test_published(want, gen, before, packet_only,
+				       sizeof(packet_only) - 1, 4, 3);
+	KUNIT_ASSERT_EQ(test, len, want_len);
+	KUNIT_EXPECT_EQ(test, memcmp(p, want, want_len), 0);
+
+	/* Every layer, listed raw-packet, packet, flow whatever the order of
+	 * the arguments.
+	 */
+	KUNIT_ASSERT_EQ(test,
+			peios_ntfe_policy_publish(
+				ntfe_test_pass_forest(test, PEIOS_NTFE_LAYER_PACKET),
+				ntfe_test_pass_forest(test,
+						      PEIOS_NTFE_LAYER_RAWPACKET),
+				ntfe_test_pass_forest(test, PEIOS_NTFE_LAYER_FLOW),
+				2),
+			0);
+	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_PUBLISHED, buf,
+				   &len);
+	want_len = ntfe_test_published(want, gen + 1, gen, all_three,
+				       sizeof(all_three) - 1, 2, 4);
+	KUNIT_ASSERT_EQ(test, len, want_len);
+	KUNIT_EXPECT_EQ(test, memcmp(p, want, want_len), 0);
+
+	/* No forests at all is a generation too, with an empty list; and it
+	 * restores permissiveness for whatever runs next.
+	 */
+	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1), 0);
+	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_PUBLISHED, buf,
+				   &len);
+	want_len = ntfe_test_published(want, gen + 2, gen + 1, none,
+				       sizeof(none) - 1, 1, 2);
+	KUNIT_ASSERT_EQ(test, len, want_len);
+	KUNIT_EXPECT_EQ(test, memcmp(p, want, want_len), 0);
+}
+
+static void ntfe_kunit_build_why_names_the_refusal(struct kunit *test)
+{
+	struct peios_ntfe_build_why why;
+	void *b, *forest = NULL, *packet = NULL, *flow = NULL;
+	u64 gen = ntfe_rust_generation();
+
+	/* A bad action two levels down: the reason, the rule's path, why
+	 * the action did not parse, and the layer. The errno is unchanged.
+	 */
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "guard", 5), 0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "ssh", 3), 0);
+	ntfe_test_actions(test, b, "ALLOW");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	peios_ntfe_build_why_reset(&why);
+	KUNIT_EXPECT_EQ(test,
+			ntfe_rust_builder_build_why(b, PEIOS_NTFE_LAYER_PACKET,
+						    &forest, &why),
+			-EINVAL);
+	KUNIT_EXPECT_NULL(test, forest);
+	KUNIT_EXPECT_STREQ(test, why.reason, "bad-action");
+	KUNIT_EXPECT_STREQ(test, why.action_error, "unknown-action");
+	KUNIT_EXPECT_EQ(test, why.layer, (u8)PEIOS_NTFE_LAYER_PACKET);
+	KUNIT_ASSERT_EQ(test, why.rule_len, 9U);
+	KUNIT_EXPECT_EQ(test, memcmp(why.rule, "guard/ssh", 9), 0);
+	KUNIT_EXPECT_EQ(test, why.rule_truncated, 0);
+
+	/* An unknown fact: a reason and a rule, and no action error. */
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "r", 1), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_value_int(b, "Dport.Equal", 11, 22),
+			0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	peios_ntfe_build_why_reset(&why);
+	KUNIT_EXPECT_EQ(test,
+			ntfe_rust_builder_build_why(b, PEIOS_NTFE_LAYER_FLOW,
+						    &forest, &why),
+			-EINVAL);
+	KUNIT_EXPECT_STREQ(test, why.reason, "unknown-fact");
+	KUNIT_EXPECT_STREQ(test, why.action_error, "");
+	KUNIT_EXPECT_EQ(test, why.layer, (u8)PEIOS_NTFE_LAYER_FLOW);
+	KUNIT_ASSERT_EQ(test, why.rule_len, 1U);
+	KUNIT_EXPECT_EQ(test, why.rule[0], 'r');
+
+	/* The cross-forest checks name the reading rule and no layer: a
+	 * downward tag read, as ntfe_kunit_downward_tag_read_refused builds.
+	 */
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "reader", 6), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_value_int(b, "Tag.admitted.Equal", 18,
+						   1),
+			0);
+	ntfe_test_actions(test, b, "PASS");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_PACKET,
+					       &packet),
+			0);
+	b = ntfe_rust_builder_new();
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_begin(b, "w", 1), 0);
+	ntfe_test_actions(test, b, "TAG(admitted, Set)");
+	KUNIT_ASSERT_EQ(test, ntfe_rust_builder_rule_end(b), 0);
+	KUNIT_ASSERT_EQ(test,
+			ntfe_rust_builder_build(b, PEIOS_NTFE_LAYER_FLOW, &flow),
+			0);
+	peios_ntfe_build_why_reset(&why);
+	KUNIT_EXPECT_EQ(test,
+			ntfe_rust_forests_check_why(packet, NULL, flow, &why),
+			-EINVAL);
+	KUNIT_EXPECT_STREQ(test, why.reason, "tag-downward-read");
+	KUNIT_EXPECT_EQ(test, why.layer, (u8)PEIOS_NTFE_WHY_NO_LAYER);
+	KUNIT_ASSERT_EQ(test, why.rule_len, 6U);
+	KUNIT_EXPECT_EQ(test, memcmp(why.rule, "reader", 6), 0);
+
+	/* Publication carries the bridge's reason out unchanged, publishes
+	 * nothing, and so writes no ntfe.policy.published.
+	 */
+	peios_ntfe_build_why_reset(&why);
+	KUNIT_EXPECT_EQ(test,
+			peios_ntfe_policy_publish_why(packet, NULL, flow, 1,
+						      &why),
+			-EINVAL);
+	KUNIT_EXPECT_STREQ(test, why.reason, "tag-downward-read");
+	KUNIT_EXPECT_EQ(test, ntfe_rust_generation(), gen);
+	ntfe_rust_forest_free(packet);
+	ntfe_rust_forest_free(flow);
+}
+
+static void ntfe_kunit_policy_rejected_lands_in_kmes(struct kunit *test)
+{
+	struct peios_ntfe_build_why why;
+	size_t len, at, cut;
+	const u8 *p, *name;
+	u8 *buf, *want;
+	u64 gen = ntfe_rust_generation();
+	int i;
+
+	buf = kunit_kzalloc(test, 4096, GFP_KERNEL);
+	want = kunit_kzalloc(test, 512, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	KUNIT_ASSERT_NOT_NULL(test, want);
+
+	/* A bad action: policy, outcome and rule, every key in order. */
+	peios_ntfe_build_why_reset(&why);
+	strscpy(why.reason, "bad-action", sizeof(why.reason));
+	strscpy(why.action_error, "unknown-action", sizeof(why.action_error));
+	why.layer = PEIOS_NTFE_LAYER_PACKET;
+	memcpy(why.rule, "guard/ssh", 9);
+	why.rule_len = 9;
+	KUNIT_EXPECT_GT(test, peios_ntfe_policy_rejected_emit(&why, -EINVAL),
+			0);
+	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+				   &len);
+	at = 0;
+	NTFE_TEST_PUT(want, at, "\x83" "\xa6" "policy" "\x82"
+				"\xaa" "generation");
+	at = ntfe_test_put_uint(want, at, gen);
+	NTFE_TEST_PUT(want, at, "\xb1" "previous-retained" "\xc3"
+				"\xa7" "outcome" "\x82"
+				"\xa5" "errno" "\xea"	/* -22 */
+				"\xa6" "reason" "\xaa" "bad-action"
+				"\xa4" "rule" "\x83"
+				"\xa5" "layer" "\xa6" "packet"
+				"\xac" "action-error" "\xae" "unknown-action"
+				"\xa4" "name" "\xa9" "guard/ssh");
+	KUNIT_ASSERT_EQ(test, len, at);
+	KUNIT_EXPECT_EQ(test, memcmp(p, want, at), 0);
+
+	/* A refusal naming no rule has no rule map; an errno past -32 is an
+	 * int8.
+	 */
+	peios_ntfe_build_why_reset(&why);
+	strscpy(why.reason, "registry-read-failed", sizeof(why.reason));
+	KUNIT_EXPECT_GT(test,
+			peios_ntfe_policy_rejected_emit(&why, -ETIMEDOUT), 0);
+	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+				   &len);
+	at = 0;
+	NTFE_TEST_PUT(want, at, "\x82" "\xa6" "policy" "\x82"
+				"\xaa" "generation");
+	at = ntfe_test_put_uint(want, at, gen);
+	NTFE_TEST_PUT(want, at, "\xb1" "previous-retained" "\xc3"
+				"\xa7" "outcome" "\x82"
+				"\xa5" "errno" "\xd0" "\x92"	/* -110 */
+				"\xa6" "reason" "\xb4" "registry-read-failed");
+	KUNIT_ASSERT_EQ(test, len, at);
+	KUNIT_EXPECT_EQ(test, memcmp(p, want, at), 0);
+
+	/* No Rules key is no error: the outcome is its reason alone. */
+	peios_ntfe_build_why_reset(&why);
+	strscpy(why.reason, "no-rules-key", sizeof(why.reason));
+	KUNIT_EXPECT_GT(test, peios_ntfe_policy_rejected_emit(&why, 0), 0);
+	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+				   &len);
+	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
+		"\xa7" "outcome" "\x81" "\xa6" "reason" "\xac" "no-rules-key"));
+	KUNIT_EXPECT_FALSE(test, NTFE_TEST_HAS(p, len, "\xa5" "errno"));
+	KUNIT_EXPECT_FALSE(test, NTFE_TEST_HAS(p, len, "\xa4" "rule"));
+
+	/* A path the bridge already cut, of two-byte characters: a str8
+	 * holds 255 bytes, so the name is cut again to a character boundary
+	 * and the cut said, after the name, closing the payload.
+	 */
+	peios_ntfe_build_why_reset(&why);
+	strscpy(why.reason, "bad-priority", sizeof(why.reason));
+	for (i = 0; i < PEIOS_NTFE_WHY_RULE_LEN; i += 2) {
+		why.rule[i] = (char)0xc3;
+		why.rule[i + 1] = (char)0xa9;
+	}
+	why.rule_len = PEIOS_NTFE_WHY_RULE_LEN;
+	why.rule_truncated = 1;
+	KUNIT_EXPECT_GT(test, peios_ntfe_policy_rejected_emit(&why, -EINVAL),
+			0);
+	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+				   &len);
+	KUNIT_EXPECT_LE(test, len, (size_t)512);
+	/* No layer: the rule map is the name and the cut. */
+	name = ntfe_test_find(p, len, "\xa4" "rule" "\x82" "\xa4" "name" "\xd9",
+			      12);
+	KUNIT_ASSERT_NOT_NULL(test, name);
+	name += 12;
+	cut = *name++;
+	KUNIT_EXPECT_EQ(test, cut, (size_t)254);
+	KUNIT_EXPECT_EQ(test, memcmp(name, why.rule, cut), 0);
+	KUNIT_ASSERT_EQ(test, (size_t)(name - p) + cut + 16, len);
+	KUNIT_EXPECT_EQ(test, memcmp(name + cut, "\xae" "name-truncated" "\xc3",
+				     16), 0);
 }
 
 /*
@@ -2802,6 +3160,9 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_tag_store),
 	KUNIT_CASE(ntfe_kunit_counter_store),
 	KUNIT_CASE(ntfe_kunit_report_lands_in_kmes),
+	KUNIT_CASE(ntfe_kunit_policy_published_lands_in_kmes),
+	KUNIT_CASE(ntfe_kunit_build_why_names_the_refusal),
+	KUNIT_CASE(ntfe_kunit_policy_rejected_lands_in_kmes),
 	KUNIT_CASE(ntfe_kunit_snapshot_local_out),
 	KUNIT_CASE(ntfe_kunit_flow_sentence),
 	KUNIT_CASE(ntfe_kunit_refusal_is_built_and_marked),

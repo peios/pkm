@@ -310,6 +310,64 @@ int peios_ntfe_policy_publish(void *packet_forest, void *raw_forest,
 			     void *flow_forest, u8 reporting_level);
 
 /*
+ * Why a policy was refused, for ntfe.policy.rejected (lifecycle.c). The
+ * Rust bridge fills it from pnp-core's BuildError (reason, rule path,
+ * action error, layer); the walk fills it for the refusals it makes
+ * itself. Mirrors NtfeBuildWhyC in kacs/ntfe_runtime.rs field for field —
+ * keep them in lockstep.
+ */
+#define PEIOS_NTFE_WHY_REASON_LEN	32
+#define PEIOS_NTFE_WHY_ACTION_LEN	24
+#define PEIOS_NTFE_WHY_RULE_LEN		256
+#define PEIOS_NTFE_WHY_NO_LAYER		0xff
+
+struct peios_ntfe_build_why {
+	char reason[PEIOS_NTFE_WHY_REASON_LEN];	/* NUL-terminated; "" = none */
+	char action_error[PEIOS_NTFE_WHY_ACTION_LEN]; /* "" = not a bad action */
+	u32 rule_len;		/* bytes of rule; 0 = names no rule */
+	u8 rule_truncated;	/* the path was longer than rule holds */
+	u8 layer;		/* PEIOS_NTFE_LAYER_*, or PEIOS_NTFE_WHY_NO_LAYER */
+	u8 _pad[2];
+	char rule[PEIOS_NTFE_WHY_RULE_LEN];	/* not NUL-terminated; cut at a
+						 * character boundary */
+};
+
+void peios_ntfe_build_why_reset(struct peios_ntfe_build_why *why);
+
+/* As peios_ntfe_policy_publish; a refusal also fills @why (may be NULL). */
+int peios_ntfe_policy_publish_why(void *packet_forest, void *raw_forest,
+				  void *flow_forest, u8 reporting_level,
+				  struct peios_ntfe_build_why *why);
+
+/*
+ * NTFE's lifecycle events (lifecycle.c), both written in process context
+ * and never from the packet path. The type strings are here, together, so
+ * the kernel's event table can find them.
+ */
+#define PEIOS_NTFE_EV_POLICY_PUBLISHED	"ntfe.policy.published"
+#define PEIOS_NTFE_EV_POLICY_REJECTED	"ntfe.policy.rejected"
+
+/*
+ * ntfe.policy.published: a generation of rules went into force.
+ * @layers is a mask of BIT(PEIOS_NTFE_LAYER_*) for the layers that have a
+ * forest. @generation_previous is the generation of the rule set this one
+ * replaced (0: none since boot), and @threshold_previous its reporting
+ * level (1, the default, when there was none).
+ */
+void peios_ntfe_policy_published_emit(u64 generation, u64 generation_previous,
+				      u8 layers, u8 threshold,
+				      u8 threshold_previous);
+
+/*
+ * ntfe.policy.rejected: a policy walk was refused and the previous
+ * generation stays in force. @err is the walk's negative errno, or 0 when
+ * there is none (no Rules key). Returns the bytes emitted, or a negative
+ * errno when the record could not be built.
+ */
+int peios_ntfe_policy_rejected_emit(const struct peios_ntfe_build_why *why,
+				    long err);
+
+/*
  * Evaluates one snapshot against one layer's active forest.
  * 0 = outcome filled; -ENOENT = no forest for the layer (permissive);
  * -ENOMEM = evaluation failed mid-flight (caller fails closed).
@@ -535,10 +593,18 @@ int ntfe_rust_builder_list_str(void *builder, const char *value,
 int ntfe_rust_builder_list_int(void *builder, s64 value);
 int ntfe_rust_builder_value_list_end(void *builder);
 int ntfe_rust_builder_build(void *builder, u8 layer, void **forest_out);
+/* As ntfe_rust_builder_build; a refusal also fills @why (may be NULL). */
+int ntfe_rust_builder_build_why(void *builder, u8 layer, void **forest_out,
+				struct peios_ntfe_build_why *why);
 void ntfe_rust_forest_free(void *forest);
 /* Cross-forest checks for forests published together (-EINVAL refuses). */
 int ntfe_rust_forests_check(const void *packet_forest, const void *raw_forest,
 			   const void *flow_forest);
+/* As ntfe_rust_forests_check; a refusal also fills @why (may be NULL). */
+int ntfe_rust_forests_check_why(const void *packet_forest,
+				const void *raw_forest,
+				const void *flow_forest,
+				struct peios_ntfe_build_why *why);
 /* The views a forest materializes. */
 u32 ntfe_rust_forest_view_count(const void *forest);
 int ntfe_rust_forest_view(const void *forest, u32 index,

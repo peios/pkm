@@ -772,6 +772,68 @@ pub extern "C" fn ntfe_rust_builder_value_list_end(b: *mut c_void) -> c_int {
     0
 }
 
+// --- why a forest was refused --------------------------------------------
+
+const WHY_NO_LAYER: u8 = 0xff;
+
+/// Why the bridge refused a forest, for `ntfe.policy.rejected`. Mirrors
+/// `struct peios_ntfe_build_why` in `net/ntfe/ntfe.h` field for field.
+#[repr(C)]
+pub struct NtfeBuildWhyC {
+    reason: [c_char; 32],
+    action_error: [c_char; 24],
+    rule_len: u32,
+    rule_truncated: u8,
+    layer: u8,
+    _pad: [u8; 2],
+    rule: [c_char; 256],
+}
+
+// lifecycle.c holds the C side to the same size.
+const _: () = assert!(core::mem::size_of::<NtfeBuildWhyC>() == 320);
+
+/// Copies `s` into `dst` NUL-terminated, cut at a character boundary.
+fn put_cstr(dst: &mut [c_char], s: &str) {
+    let mut n = s.len().min(dst.len() - 1);
+    while !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    for (d, &b) in dst.iter_mut().zip(s.as_bytes()[..n].iter()) {
+        *d = b as c_char;
+    }
+    dst[n] = 0;
+}
+
+/// Fills `why` (when non-NULL) from a pnp-core refusal: its reason, the
+/// rule it names (cut at a character boundary, the cut said), the action
+/// error for a bad action, and `layer` (`WHY_NO_LAYER` when the refusal
+/// spans forests).
+fn fill_why(why: *mut NtfeBuildWhyC, e: &crate::pnp_core::BuildError, layer: u8) {
+    if why.is_null() {
+        return;
+    }
+    let why = unsafe { &mut *why };
+    put_cstr(&mut why.reason, e.reason());
+    put_cstr(
+        &mut why.action_error,
+        e.action_error().map(|a| a.name()).unwrap_or(""),
+    );
+    why.layer = layer;
+    why.rule_len = 0;
+    why.rule_truncated = 0;
+    if let Some(rule) = e.rule() {
+        let mut n = rule.len().min(why.rule.len());
+        while !rule.is_char_boundary(n) {
+            n -= 1;
+        }
+        for (d, &b) in why.rule.iter_mut().zip(rule.as_bytes()[..n].iter()) {
+            *d = b as c_char;
+        }
+        why.rule_len = n as u32;
+        why.rule_truncated = (n < rule.len()) as u8;
+    }
+}
+
 #[no_mangle]
 /// Validates and builds the forest, consuming the builder. layer: 0 =
 /// Packet, 1 = RawPacket, 2 = Flow. On success writes the opaque forest pointer to
@@ -782,6 +844,19 @@ pub extern "C" fn ntfe_rust_builder_build(
     layer: u8,
     out: *mut *mut c_void,
 ) -> c_int {
+    ntfe_rust_builder_build_why(b, layer, out, core::ptr::null_mut())
+}
+
+#[no_mangle]
+/// As `ntfe_rust_builder_build`; a pnp-core refusal also fills `why`
+/// (may be NULL). The return codes are the same: the reason travels in
+/// `why`, never in the errno.
+pub extern "C" fn ntfe_rust_builder_build_why(
+    b: *mut c_void,
+    layer: u8,
+    out: *mut *mut c_void,
+    why: *mut NtfeBuildWhyC,
+) -> c_int {
     if b.is_null() || out.is_null() {
         return -EINVAL;
     }
@@ -789,13 +864,18 @@ pub extern "C" fn ntfe_rust_builder_build(
     if !builder.stack.is_empty() || builder.pending_list.is_some() {
         return -EINVAL;
     }
+    let layer_id = layer;
     let layer = match layer {
         0 => Layer::Packet,
         1 => Layer::RawPacket,
         2 => Layer::Flow,
         _ => return -EINVAL,
     };
-    match build_forest(layer, builder.roots.as_slice()) {
+    let built = build_forest(layer, builder.roots.as_slice());
+    if let Err(e) = &built {
+        fill_why(why, e, layer_id);
+    }
+    match built {
         Ok(output) => {
             // In-kernel ingestion drops lints: the authoring surface
             // (pnpd) runs the same lint userspace-side, loudly.
@@ -830,6 +910,19 @@ pub extern "C" fn ntfe_rust_forests_check(
     raw: *const c_void,
     flow: *const c_void,
 ) -> c_int {
+    ntfe_rust_forests_check_why(packet, raw, flow, core::ptr::null_mut())
+}
+
+#[no_mangle]
+/// As `ntfe_rust_forests_check`; a refusal also fills `why` (may be NULL),
+/// with no layer: these checks span forests, and a rule path is relative
+/// to a layer key the refusal does not carry.
+pub extern "C" fn ntfe_rust_forests_check_why(
+    packet: *const c_void,
+    raw: *const c_void,
+    flow: *const c_void,
+    why: *mut NtfeBuildWhyC,
+) -> c_int {
     let mut forests: [Option<&Forest>; 3] = [None, None, None];
     if !packet.is_null() {
         forests[0] = Some(unsafe { &*packet.cast::<Forest>() });
@@ -848,8 +941,14 @@ pub extern "C" fn ntfe_rust_forests_check(
     }
     match check_forests(list.as_slice()) {
         Ok(()) => 0,
-        Err(crate::pnp_core::BuildError::Alloc) => -ENOMEM,
-        Err(_) => -EINVAL,
+        Err(e) => {
+            fill_why(why, &e, WHY_NO_LAYER);
+            if matches!(e, crate::pnp_core::BuildError::Alloc) {
+                -ENOMEM
+            } else {
+                -EINVAL
+            }
+        }
     }
 }
 
