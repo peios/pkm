@@ -1,19 +1,354 @@
---- field buffer.capacity.requested
+--- field buffer.capacity
+type: uint.bytes
+
+The per-CPU ring buffer capacity in force. After a failed swap, the
+capacity that was kept.
+
+--- field buffer.capacity-requested
 type: uint.bytes
 
 The per-CPU ring buffer capacity that was asked for.
 
---- field buffer.capacity.retained
+--- field buffer.capacity-expected
 type: uint.bytes
 
-The per-CPU ring buffer capacity still in effect after a failed swap.
+The ring capacity a record expected to find, where the ring it found has
+another. Every per-CPU ring is meant to share one capacity, because KMES
+sizes an incoming event against one ring's capacity before writing it to
+another. A ring whose `buffer.capacity` differs from this has broken that
+check: an event judged to fit may not fit the ring it lands in.
 
---- event kmes.config-invalid
-origin: kmes
+--- field buffer.capacity-previous
+type: uint.bytes
+
+The per-CPU ring capacity before a capacity swap: what `buffer.capacity`
+was until the swap committed. A swap to a smaller capacity copies the
+surviving events into the new rings and skips any that no longer fit, so a
+record where this exceeds `buffer.capacity` is one where the swap itself
+can have lost events.
+
+--- field buffer.cpu
+type: uint
+
+The logical CPU whose ring buffer a record concerns. KMES keeps one ring
+per CPU and writes each event to the ring of the CPU it was emitted on, so
+this is the numbering `event.cpu` uses on records read from that ring. It
+identifies a ring, not a security subject, and it is the only thing that
+does.
+
+--- field buffer.cpu-claimed
+type: uint
+
+The CPU a ring's own metadata says it belongs to, carried when that
+disagrees with `buffer.cpu`, the CPU it is installed for. A disagreement
+means the ring topology is internally inconsistent, and KMES drops the
+event rather than trust the ring. **It consumes no sequence number and
+counts no loss**, so no gap appears in `event.sequence`, and a record
+carrying this field is the only evidence that the event existed.
+
+--- field buffer.fill
+type: uint.bytes
+
+How full a ring was, as the bytes of events it held: `buffer.head` minus
+`buffer.tail`. Compare it with `buffer.capacity` for a proportion. A full
+ring loses its oldest events to every new one, so a fill near capacity is
+the warning that comes before loss rather than loss itself.
+
+--- field buffer.generation
+type: uint
+
+The generation of the ring in force. It starts at 1 and goes up by one
+with each capacity swap, which replaces every ring with a new one. The old
+ring is stamped with the new generation as it is retired, so a consumer
+still mapping it can tell that its view is stale; it is the only
+staleness signal a mapped ring has.
+
+--- field buffer.generation-previous
+type: uint
+
+The ring generation before a capacity swap, normally one less than
+`buffer.generation`.
+
+--- field buffer.head
+type: uint
+
+The ring's write position, as a running byte count. It only increases and
+never wraps: it is not an offset into the buffer, which is this value
+modulo `buffer.capacity`. With `buffer.tail` it gives the ring's fill
+directly.
+
+--- field buffer.slots
+type: uint
+
+The number of per-CPU ring slots the kernel exposes: one for every CPU
+the system could have, numbered as `buffer.cpu` is. A consumer that means
+to see every event attaches to every slot. A slot for a CPU that is not
+present holds no ring.
+
+--- field buffer.tail
+type: uint
+
+The ring's tail position: where its oldest retained event begins, as a
+running byte count in the same terms as `buffer.head`. It moves forward
+when the ring is full and new events overwrite the oldest, so a tail that
+has passed the point a consumer was reading from means that consumer lost
+events.
+
+--- field buffer.threshold-direction
+type: str.enum
+values: rising | falling
+closed: true
+
+Whether a ring's fill crossed a watermark on the way up or on the way
+down. `rising` is the warning that a consumer is falling behind; `falling`
+is its recovery. Without it, a record of recovery cannot be told from a
+record of onset.
+
+--- field emission.batch-index
+type: uint
+
+The zero-based position, in a batch emit, of the entry that failed. **A
+batch is emitted up to this entry and not from it**: every earlier entry
+reached the ring, and this entry and every later one did not.
+
+--- field emission.buckets-clamped
+type: uint
+
+The number of per-process rate buckets a reconfiguration cut down.
+Lowering `emission.rate-limit` clamps the remaining budget of every live
+process to the new ceiling at once; this counts the processes whose budget
+was above it.
+
+--- field emission.budget
+type: uint
+
+The number of events a process could still emit before its rate limit
+stopped it: the tokens left in its bucket when the record was made. The
+bucket refills at `emission.rate-limit` events a second and holds no more
+than that, so a process's burst is one second's worth. On a throttled
+emit this is below `emission.requested`, which is why the emit was
+refused.
+
+--- field emission.emitted
+type: uint
+
+The number of events an emit operation actually wrote to the ring. Where
+it falls short of `emission.requested`, the difference is events the
+caller meant to record that are not in the stream.
+
+--- field emission.length
+type: uint.bytes
+
+The total size of one event as written to the ring: the fixed header, the
+event type and the payload together. It is the figure checked against the
+configured maximum event size, and against half the ring's capacity, the
+largest event a ring accepts.
+
+--- field emission.length-claimed
+type: uint.bytes
+
+An event length read from a ring that failed KMES's sanity check: zero,
+larger than the ring, or larger than the bytes between the tail and the
+write position. It is not the size of any real event. It means the ring's
+framing is corrupt, and KMES recovered by discarding everything pending in
+that ring at once — a loss that is never added to the ring's dropped
+count and is bounded only by the ring's size.
+
+--- field emission.payload-length
+type: uint.bytes
+
+The byte length of an event's MessagePack payload, without the header or
+the event type.
+
+--- field emission.rate-limit
+type: uint
+
+The per-process emission ceiling KMES is running on, in events a second:
+the `MaxEmitRatePerProcess` registry value, 10 000 by default and accepted
+from 100 to 1 000 000. It applies to emission from userspace; kernel
+emitters are not limited, and a process holding SeTcbPrivilege is exempt.
+
+--- field emission.rate-limit-previous
+type: uint
+
+The per-process emission ceiling before a reconfiguration, in events a
+second. Lowering the ceiling is a way to thin out the event stream, so a
+record where this exceeds `emission.rate-limit` deserves a look at who
+changed it.
+
+--- field emission.requested
+type: uint
+
+The number of events an emit operation asked to write: 1 for a single
+emit, or the entry count of a batch, which is at most 256.
+
+--- field emission.throttled
+type: uint.duration
+
+How long a producer was held back by its rate limit, from the first emit
+refused for want of budget to the first accepted again. A duration, not a
+flag. Every emit refused in that span was an event the producer meant to
+record that is not in the stream.
+
+--- field emission.type
+type: str
+
+The event type an emitter was trying to emit, as it supplied it. It names
+what was attempted, not what was recorded: a record carrying it is about
+an emission that failed or was cut short, and no event of this type need
+exist. Absent where the type itself was the fault — empty, or not valid
+UTF-8 — in which case `emission.type-length` still gives its length.
+
+--- field emission.type-length
+type: uint.bytes
+
+The byte length of the event type an emitter supplied, at most 65 535.
+
+--- field kernel.build.disabled
+type: str[]
+
+The security-relevant kernel build options this kernel was built without,
+by `CONFIG_` name. They matter as much as those enabled: an option that
+should be off — a second packet-filtering framework, a mandatory access
+control module Peios does not use — would be a second, unratified policy
+surface, and a kernel built with it on is otherwise indistinguishable
+from one built correctly.
+
+--- field kernel.build.enabled
+type: str[]
+
+The security-relevant kernel build options this kernel was built with,
+by `CONFIG_` name, such as `CONFIG_MODULE_SIG_FORCE` and
+`CONFIG_STRICT_DEVMEM`. Only the options that bear on security are
+listed, not the whole configuration.
+
+--- field kernel.divergence.checks
+type: str[]
+
+The checks stock Linux makes that this kernel does not, one name per
+check. Peios removes or replaces several upstream checks — the
+capability-based ptrace gate, the credential tests in signal delivery,
+the switch to real credentials in `faccessat` — because KACS makes those
+decisions instead. An investigator reasoning from Linux semantics will be
+wrong about each one, and this is where to find out which. Nothing emits
+the field yet, so the names it will carry are not yet fixed.
+
+--- field kernel.divergence.reports
+type: str[]
+
+The values this kernel reports differently from stock Linux, one name per
+divergence. Where `kernel.divergence.checks` lists checks not made, this
+lists answers that differ: `getuid` and `getgid` reading the task's real
+credentials, `SO_PEERCRED` and the filesystem identity carrying the IDs
+KACS projects, the capability sets in `/proc` and from `capget`
+rewritten. **Correlating Linux uids across sources fails silently without
+it**, because a peer credential and a `/proc` entry can disagree in ways
+stock Linux never produces. Nothing emits the field yet, so the names it
+will carry are not yet fixed.
+
+--- field kernel.lockdown
+type: str.enum
+values: none | integrity | confidentiality
+closed: true
+
+The kernel lockdown level in force. A Peios kernel is built to force
+`integrity`, which refuses the paths that write to the running kernel —
+`/dev/mem`, `kexec`, hibernation, raw MSR writes, unsigned BPF — to every
+principal however privileged; KACS has no say in it and no privilege lifts
+it. Any other value means the machine is not running a kernel built as
+Peios builds it.
+
+--- field kernel.lsms
+type: str[]
+
+The Linux security modules active, in the order the kernel calls them; a
+Peios kernel runs `landlock`, `lockdown`, `integrity` and `pkm`. The list
+is fixed and checked when the kernel is built but stated nowhere at
+runtime, so without this field a machine booted on a kernel built some
+other way cannot be told apart from one that was not.
+
+--- field kernel.securityfs-node
+type: str
+
+The securityfs node an initialisation concerned, as its path beneath the
+securityfs root (`/sys/kernel/security`), such as `kacs/sessions`. A node
+that fails to be created makes every tool that reads it fail with
+`ENOENT`, and this is where the cause is recorded. KACS creates its nodes
+all or nothing, so one failure leaves the whole `kacs` directory absent.
+
+--- field kernel.version
+type: str
+
+The Linux kernel release actually running, as `uname -r` reports it.
+Peios pins the upstream version it builds on and checks it at build time,
+but nothing else states it at runtime.
+
+--- field loss.bytes
+type: uint.bytes
+
+The bytes of events a loss discarded. Reported in bytes where KMES cannot
+count events: when a ring's framing is found corrupt, everything pending
+is dropped at once without being parsed, and when a capacity swap skips
+an event too large for the smaller ring, only its size is known.
+
+--- field loss.class
+type: uint.enum
+values: 0 userspace | 1 kmes | 2 kacs | 3 lcs | 4 ntfe
+closed: false
+
+The emission path of the events that were lost, numbered as `emitter.class`
+numbers it: the kernel subsystem, or userspace, that was writing them. A
+loss record is written by KMES, so its own `emitter.class` is always
+`kmes`; this is the field that says whose events went missing.
+
+--- field loss.count
+type: uint
+
+The number of events lost in one occurrence. For a gap found in the
+sequence numbers, the size of that gap: `loss.sequence-last` minus
+`loss.sequence`, plus one.
+
+--- field loss.preceding-time
+type: uint.time
+
+The time of the last record received before a gap, in nanoseconds since
+the Unix epoch. With the time of the record that revealed the gap, it
+bounds when the lost events were written. Absent when no record preceded
+the gap on that ring, as at the start of a boot.
+
+--- field loss.sequence
+type: uint
+
+The first sequence number a loss covers. Sequence numbers are contiguous
+per CPU ring, so with `buffer.cpu` this locates the gap exactly, and it is
+the field that reconciles a loss KMES reports with a gap a consumer infers
+from `event.sequence`.
+
+**Not every loss has one.** An event dropped because its CPU had no usable
+ring, an event emitted before KMES started, and an emit refused at the
+system call consume no sequence number and leave no gap to point at.
+
+--- field loss.sequence-last
+type: uint
+
+The last sequence number of a gap, where `loss.sequence` is the first.
+Both ends are included in the loss.
+
+--- field loss.total
+type: uint
+
+The cumulative count of events a ring has dropped. **Not emitted today.**
+KMES keeps the counter, but it is not in the ring's metadata page and
+nothing outside the kernel's own tests reads it, so no emitter has it to
+report. It also under-reports: a corrupt-ring discard, an event skipped by
+a capacity swap and an event lost for want of a usable ring are never
+added to it, so even once it is emitted it is a lower bound rather than a
+total.
+
+--- event kmes.config.value.rejected
 tier: standard
 gating: none — every rejected configuration value is recorded
 cardinality: once per rejected value
-emitters: kmes/kmes.c — pkm_kmes_emit_self_config_invalid
 
 The record that KMES read a configuration value, rejected it, and carried
 on with what it had. Emitted when the stored value is missing, of the wrong
@@ -30,7 +365,7 @@ These records are emitted before the configuration commit and are
 deliberately not part of the commit decision: a failure to construct one
 must never roll back a hot-swap that otherwise succeeded.
 
-field: config.key                 required
+field: config.key.path            required
 field: config.name                required
 field: config.expected.type       required
 field: config.expected.min        required
@@ -38,14 +373,13 @@ field: config.expected.max        required
 field: config.received.kind       required
 field: config.received.type       when config.received.kind == wrong-type
 field: config.received.value      when config.received.kind == out-of-range
-field: config.retained.value      required
+field: config.value               required
+  The value retained.
 
---- event kmes.buffer-swap-failed
-origin: kmes
+--- event kmes.buffer.swap.failed
 tier: standard
 gating: only when the swap failed with ENOMEM
 cardinality: once per failed swap
-emitters: kmes/kmes.c — pkm_kmes_emit_buffer_swap_failed
 
 The record that KMES could not resize its per-CPU ring buffers and kept the
 capacity it had. A capacity change is a swap — new buffers at the new size,
@@ -63,6 +397,7 @@ The swap is system-wide rather than per-ring, so no CPU or ring is named.
 retains the old capacity and emits nothing, so absence of this event is not
 evidence that a capacity change took effect.
 
-field: buffer.capacity.requested  required
-field: buffer.capacity.retained   required
+field: buffer.capacity-requested  required
+field: buffer.capacity            required
+  The capacity kept.
 field: outcome.errno              required

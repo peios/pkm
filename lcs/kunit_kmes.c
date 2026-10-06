@@ -2,6 +2,50 @@
 
 #include "kunit_common.h"
 
+#define PKM_LCS_KUNIT_KMES_CONFIG_REJECTED "kmes.config.value.rejected"
+#define PKM_LCS_KUNIT_KMES_SWAP_FAILED "kmes.buffer.swap.failed"
+
+/*
+ * The msgpack every kmes.config.value.rejected payload opens with:
+ * {config: {key: {path: "Machine\System\KMES"}, ...}} -- one top-level key,
+ * five under config. Literal pieces are split so no hex escape runs on into
+ * the text after it.
+ */
+#define PKM_LCS_KUNIT_KMES_CONFIG_PREFIX \
+	"\x81" "\xa6" "config" "\x85" \
+	"\xa3" "key" "\x81" "\xa4" "path" "\xb3" "Machine\\System\\KMES"
+
+/*
+ * Match the latest KMES-origin event of @event_type against @expected, the
+ * whole payload byte for byte. Its fields are nested maps, one per path
+ * segment, so an exact payload is what pins every map's size and every
+ * field's path; a substring search could not.
+ */
+static void pkm_lcs_kunit_kmes_expect_latest_payload(
+	struct kunit *test, const char *event_type, const u8 *expected,
+	size_t expected_len)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	size_t written = 0;
+	u32 header_size;
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, 1024, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_KMES, event_type, strlen(event_type),
+				buffer, 1024, &written, &snapshot),
+			0);
+	KUNIT_ASSERT_GT(test, written, (size_t)KMES_EVENT_HEADER_BASE_SIZE);
+	KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
+			(u8)KMES_ORIGIN_KMES);
+	header_size = get_unaligned_le32(buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_LE(test, (size_t)header_size, written);
+	KUNIT_ASSERT_EQ(test, written - header_size, expected_len);
+	KUNIT_EXPECT_MEMEQ(test, buffer + header_size, expected, expected_len);
+}
+
 
 static void pkm_lcs_kunit_kmes_config_apply_ignores_unknown_and_retains_invalid(
 	struct kunit *test)
@@ -63,6 +107,21 @@ static void pkm_lcs_kunit_kmes_config_invalid_emits_kmes_event(
 	static const char max_event_name[] = "MaxEventSize";
 	static const char nesting_name[] = "MaxNestingDepth";
 	static const char rate_name[] = "MaxEmitRatePerProcess";
+	/*
+	 * 65537 is in range but not a power of two: out-of-range, with what
+	 * was received and the 4 MiB default retained.
+	 */
+	static const u8 expected[] =
+		PKM_LCS_KUNIT_KMES_CONFIG_PREFIX
+		"\xa4" "name" "\xae" "BufferCapacity"
+		"\xa8" "expected" "\x83"
+		"\xa4" "type" "\x0b"
+		"\xa3" "min" "\xce\x00\x01\x00\x00"
+		"\xa3" "max" "\xce\x10\x00\x00\x00"
+		"\xa8" "received" "\x82"
+		"\xa4" "kind" "\xac" "out-of-range"
+		"\xa5" "value" "\xce\x00\x01\x00\x01"
+		"\xa5" "value" "\xce\x00\x40\x00\x00";
 	struct pkm_kmes_self_config_entry entries[] = {
 		{
 			.name = buffer_capacity_name,
@@ -111,12 +170,9 @@ static void pkm_lcs_kunit_kmes_config_invalid_emits_kmes_event(
 	KUNIT_EXPECT_EQ(test, snapshot.buffer_capacity,
 			4ULL * 1024ULL * 1024ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.max_event_size, 2048U);
-	pkm_lcs_kunit_expect_latest_kmes_origin_event(
-		test, "KMES_SELF_CONFIG_INVALID", 0x89,
-		"Machine\\System\\KMES", "u64_out_of_range");
-	pkm_lcs_kunit_expect_latest_kmes_origin_event(
-		test, "KMES_SELF_CONFIG_INVALID", 0x89, "BufferCapacity",
-		"retained_value");
+	pkm_lcs_kunit_kmes_expect_latest_payload(
+		test, PKM_LCS_KUNIT_KMES_CONFIG_REJECTED, expected,
+		sizeof(expected) - 1);
 
 	pkm_kmes_kunit_reset_all();
 }
@@ -131,6 +187,12 @@ static void pkm_lcs_kunit_kmes_config_swap_failure_emits_kmes_event(
 		.max_nesting_depth = 32U,
 		.max_emit_rate_per_process = 10000U,
 	};
+	/* 64 KiB asked for, the 4 MiB default kept, and -ENOMEM signed. */
+	static const u8 expected[] =
+		"\x82" "\xa6" "buffer" "\x82"
+		"\xb2" "capacity-requested" "\xce\x00\x01\x00\x00"
+		"\xa8" "capacity" "\xce\x00\x40\x00\x00"
+		"\xa7" "outcome" "\x81" "\xa5" "errno" "\xf4";
 	struct pkm_kmes_runtime_config snapshot = { };
 
 	pkm_kmes_kunit_reset_all();
@@ -142,9 +204,9 @@ static void pkm_lcs_kunit_kmes_config_swap_failure_emits_kmes_event(
 			0);
 	KUNIT_EXPECT_EQ(test, snapshot.buffer_capacity,
 			4ULL * 1024ULL * 1024ULL);
-	pkm_lcs_kunit_expect_latest_kmes_origin_event(
-		test, "KMES_BUFFER_SWAP_FAILED", 0x83, "requested_capacity",
-		"retained_capacity");
+	pkm_lcs_kunit_kmes_expect_latest_payload(
+		test, PKM_LCS_KUNIT_KMES_SWAP_FAILED, expected,
+		sizeof(expected) - 1);
 
 	pkm_kmes_kunit_reset_all();
 }
@@ -440,13 +502,24 @@ static u32 pkm_lcs_kunit_kmes_count_origin_events(struct kunit *test,
 /*
  * PKM *config.at-most-four-reports and the four-events half of
  * *config.empty-key-emits-four. One read reports at most four
- * KMES_SELF_CONFIG_INVALID events -- the number of keys. A plan needing
+ * kmes.config.value.rejected events -- the number of keys. A plan needing
  * a fifth is refused before anything is applied or emitted; a plan with
  * exactly four emits all four and applies.
  */
 static void pkm_lcs_kunit_kmes_publish_caps_reports_at_four(struct kunit *test)
 {
-	static const char invalid_type[] = "KMES_SELF_CONFIG_INVALID";
+	static const char invalid_type[] = PKM_LCS_KUNIT_KMES_CONFIG_REJECTED;
+	/* The last of the four: missing, so received carries the kind alone. */
+	static const u8 expected[] =
+		PKM_LCS_KUNIT_KMES_CONFIG_PREFIX
+		"\xa4" "name" "\xb5" "MaxEmitRatePerProcess"
+		"\xa8" "expected" "\x83"
+		"\xa4" "type" "\x04"
+		"\xa3" "min" "\x64"
+		"\xa3" "max" "\xce\x00\x0f\x42\x40"
+		"\xa8" "received" "\x81"
+		"\xa4" "kind" "\xa7" "missing"
+		"\xa5" "value" "\x01";
 	static const char * const names[] = {
 		"BufferCapacity", "MaxEventSize", "MaxNestingDepth",
 		"MaxEmitRatePerProcess",
@@ -495,8 +568,8 @@ static void pkm_lcs_kunit_kmes_publish_caps_reports_at_four(struct kunit *test)
 			(u32)PKM_KMES_SELF_CONFIG_MAX_AUDITS);
 	KUNIT_EXPECT_EQ(test, result.audit_count,
 			(u32)PKM_KMES_SELF_CONFIG_MAX_AUDITS);
-	pkm_lcs_kunit_expect_latest_kmes_origin_event(
-		test, invalid_type, 0x89, "MaxEmitRatePerProcess", "missing");
+	pkm_lcs_kunit_kmes_expect_latest_payload(test, invalid_type, expected,
+						 sizeof(expected) - 1);
 
 	pkm_kmes_kunit_reset_all();
 }
@@ -543,7 +616,17 @@ static void pkm_lcs_kunit_kmes_publish_second_gate_rejects_out_of_range(
 static void pkm_lcs_kunit_kmes_publish_self_events_are_best_effort(
 	struct kunit *test)
 {
-	static const char invalid_type[] = "KMES_SELF_CONFIG_INVALID";
+	static const char invalid_type[] = PKM_LCS_KUNIT_KMES_CONFIG_REJECTED;
+	static const u8 expected[] =
+		PKM_LCS_KUNIT_KMES_CONFIG_PREFIX
+		"\xa4" "name" "\xac" "MaxEventSize"
+		"\xa8" "expected" "\x83"
+		"\xa4" "type" "\x04"
+		"\xa3" "min" "\xcd\x04\x00"
+		"\xa3" "max" "\xce\x00\x40\x00\x00"
+		"\xa8" "received" "\x81"
+		"\xa4" "kind" "\xa7" "missing"
+		"\xa5" "value" "\xce\x00\x01\x00\x00";
 	struct pkm_kmes_self_config_apply_plan plan = { };
 	struct pkm_kmes_runtime_config snapshot = { };
 
@@ -584,8 +667,8 @@ static void pkm_lcs_kunit_kmes_publish_self_events_are_best_effort(
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_kmes_count_origin_events(test, invalid_type),
 			1U);
-	pkm_lcs_kunit_expect_latest_kmes_origin_event(
-		test, invalid_type, 0x89, "MaxEventSize", "missing");
+	pkm_lcs_kunit_kmes_expect_latest_payload(test, invalid_type, expected,
+						 sizeof(expected) - 1);
 
 	pkm_kmes_kunit_reset_all();
 }

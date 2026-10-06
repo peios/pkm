@@ -1720,12 +1720,12 @@ static void pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size(
  * PKM *ring.swap.abort-emits-no-event. A corrupt size field met inside the
  * quiesced migration abandons the swap like an allocation failure -- old
  * rings live, generation unchanged, capacity retained -- but the failure is
- * not -ENOMEM, so no KMES_BUFFER_SWAP_FAILED event is emitted.
+ * not -ENOMEM, so no kmes.buffer.swap.failed event is emitted.
  */
 static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_stays_silent(
 	struct kunit *test)
 {
-	static const char swap_failed_type[] = "KMES_BUFFER_SWAP_FAILED";
+	static const char swap_failed_type[] = "kmes.buffer.swap.failed";
 	static const u8 payload[] = { 0xc0 };
 	struct pkm_kmes_runtime_config config;
 	struct pkm_kmes_runtime_config snapshot = { };

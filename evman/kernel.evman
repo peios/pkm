@@ -1,28 +1,143 @@
---- field subject.token.guid
+--- field event.type
+type: str
+carried: header
+
+The event type, such as `kacs.audit.access.checked`. Stamped from the
+emitter's argument, so it names what the emitter claims happened; the
+`emitter.*` header fields are the evidence of who wrote it.
+
+--- field event.time
+type: uint.time
+carried: header
+
+When the record was made, in nanoseconds since the Unix epoch. Stamped by
+the kernel at emission, so a payload never repeats it: an event carrying
+its own timestamp is carrying a second, forgeable one.
+
+--- field event.sequence
+type: uint
+carried: header
+
+The record's sequence number within its CPU's ring for this boot.
+Sequence numbers on one ring are contiguous, so a gap between two records
+read from it is a count of records lost.
+
+--- field event.cpu
+type: uint
+carried: header
+
+The CPU whose ring carried the record. Sequence numbers are per CPU, so
+`event.cpu` and `event.sequence` together identify a record within a boot.
+
+--- field event.boot.guid
 type: bin.guid
-carried: envelope
+carried: header
 
-The effective token the operation ran under, as a durable GUID. Carried in
-the KMES event header rather than the payload, so it is present on every
-event from every subsystem. Under impersonation this is the client's token;
-`subject.true_token.guid` is the thread's underlying one.
+The boot the record belongs to. Not in the record itself: the consumer
+supplies the boot it read the record in, which is what makes
+`event.sequence` unique across reboots.
 
---- field subject.true_token.guid
+--- field emitter.class
+type: uint.enum
+values: 0 userspace | 1 kmes | 2 kacs | 3 lcs | 4 ntfe
+closed: false
+carried: header
+
+The emission path that wrote the record: a kernel subsystem, or userspace
+through the emit system call. Set by the kernel, never by the emitter, so
+a record claiming a kernel event type with class `userspace` was written
+by a program, whatever its type says.
+
+The class is the path, not the event type's root. StrataFS records are
+written through KACS and carry class `kacs`.
+
+--- field emitter.token.guid
 type: bin.guid
-carried: envelope
+carried: header
 
-The thread's underlying token, where impersonation is in play. Equal to
-`subject.token.guid` when the thread is not impersonating, so a query for
-events where the two differ is a query for impersonated work.
+The effective token the emitting thread ran under, as a durable GUID.
+Under impersonation this is the client's token; `emitter.true-token.guid`
+is the thread's underlying one.
 
---- field subject.process.guid
+--- field emitter.true-token.guid
 type: bin.guid
-carried: envelope
+carried: header
 
-The process the event came from, as a durable GUID. A random v4 minted when
-the process's KACS state is allocated, so unlike a PID it is never reused and
-outlives the process. Zero on events emitted outside task context, where
-`current` names whatever task was interrupted rather than a real actor.
+The emitting thread's own token, before any impersonation. Equal to
+`emitter.token.guid` when the thread is not impersonating, so a query for
+records where the two differ is a query for impersonated work.
+
+--- field emitter.process.guid
+type: bin.guid
+carried: header
+
+The process the record was written from, as a durable GUID. A random v4
+minted when the process's KACS state is allocated, so unlike a PID it is
+never reused and outlives the process. Zero on records written outside
+task context, where `current` names whatever task was interrupted rather
+than a real actor.
+
+--- field emitter.process.pid
+type: uint
+
+The process ID the record was written from. Reliable only in the short
+term: PIDs are reused, so a PID in a week-old record may name something
+unrelated. Correlate durably on `emitter.process.guid`.
+
+--- field emitter.process.name
+type: str
+
+The kernel's name for the emitting process, typically the executable's
+basename. Not `argv[0]` — a process that rewrote its argv is unaffected
+here. Lossy: two processes can share a name.
+
+--- field emitter.process.executable
+type: str.path
+
+The path the emitting process was executed from, resolved at exec with
+symbolic links already followed.
+
+--- field emitter.process.init-ns-admin
+type: bool
+
+Whether the acting credential held `CAP_SYS_ADMIN` in the initial user
+namespace at the time of the check. A Linux capability, so context for a
+decision and never the decision itself: it says whether the caller could
+have done the same thing from outside any user namespace, which is how an
+operator tells a container-local actor from a host-wide one.
+
+--- field emitter.process.userns-depth
+type: uint
+
+How deeply nested the acting credential's user namespace is. 0 is the
+initial namespace; each level of `unshare(CLONE_NEWUSER)` adds one. Read
+beside `emitter.process.init-ns-admin`: a capability held at depth 3 is
+held only over that namespace's own objects.
+
+--- field emitter.thread.tid
+type: uint
+
+The thread that wrote the record, where the operation is scoped to a thread
+rather than to its process. Impersonation is per thread, so on an
+impersonation record this, not `emitter.process.pid`, names what took on
+the client's identity. Reused like a PID, so correlate durably on the
+header GUIDs.
+
+--- field emitter.stamp-failure
+type: str.enum
+values: no-task-context | effective-token-guid-read-failed | true-token-guid-read-failed | process-no-process-state
+closed: false
+
+Which header identity stamp could not be filled, and why. A header GUID of
+zero is otherwise ambiguous: a kernel-originated record that correctly has
+no actor and one whose actor was lost read the same, and this field is what
+tells them apart. Absent when every stamp was filled.
+
+`no-task-context` covers all three stamps at once: the record was written
+outside task context, where `current` is whatever task was interrupted, so
+the kernel deliberately writes no identity rather than a wrong one. The
+other values name one stamp each — the effective or true token's GUID
+could not be read, or the process had no KACS process state.
 
 --- field subject.token.sid
 type: bin.sid
@@ -33,7 +148,6 @@ work.
 
 --- field subject.token.groups
 type: bin.sid[]
-values: see subject.token.group_attributes
 
 The group SIDs carried by the effective token. Access is frequently granted
 through one of these rather than to the user SID directly, so a search by
@@ -41,18 +155,21 @@ principal that ignores them misses most of what that principal actually did.
 
 Reconstructing membership as the access check sees it means applying the
 check's own rule: `SE_GROUP_ENABLED` set and `SE_GROUP_USE_FOR_DENY_ONLY`
-clear, for allow-side matching.
+clear, for allow-side matching, read from `subject.token.group-attributes`.
 
---- field subject.token.group_attributes
+--- field subject.token.group-attributes
 type: uint.flags[]
 values: SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_OWNER | SE_GROUP_USE_FOR_DENY_ONLY | SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED | SE_GROUP_RESOURCE | SE_GROUP_LOGON_ID
 
 Per-group attribute bitmasks, positionally parallel to
 `subject.token.groups`. The two arrays are always the same length, and
-`groups[i]` is described by `group_attributes[i]`.
+`groups[i]` is described by `group-attributes[i]`.
 
 `SE_GROUP_INTEGRITY` is present for ABI parity only — mandatory integrity
 control reads `subject.token.integrity`, never this flag.
+
+The attributes are the token's as held, not as requested when the token was
+made: creation derives `SE_GROUP_ENABLED` from `SE_GROUP_ENABLED_BY_DEFAULT`.
 
 --- field subject.token.integrity
 type: uint.integrity
@@ -68,20 +185,31 @@ type: uint.luid
 The token's own LUID, identifying this specific token rather than the logon
 session it belongs to. Correlates every event produced under one token.
 
---- field subject.token.auth_id
+--- field subject.token.auth-id
 type: uint.luid
 
 The LUID of the logon session the effective token belongs to. The join key to
 `kacs.session.destroyed` and to `/sys/kernel/security/kacs/sessions`, and the
 way to gather every event from one sign-on.
 
+--- field subject.token.type
+type: str.enum
+values: primary | impersonation
+closed: true
+
+Whether the effective token is a primary token or an impersonation token.
+Needed beside `subject.token.impersonation`, because a primary token and
+an Anonymous impersonation token both report level 0 there.
+
 --- field subject.token.impersonation
 type: uint.enum
 values: 0 Anonymous | 1 Identification | 2 Impersonation | 3 Delegation
+closed: true
 
-The impersonation level of the effective token. A primary token reports 0.
-Any other value means `subject.token` and `subject.process` describe
-different principals.
+The impersonation level of the effective token. A primary token also
+reports 0, so read `subject.token.type` before reading 0 as Anonymous.
+An impersonation token means `subject.token` and `emitter.process`
+describe different principals.
 
 --- field subject.token.uid
 type: uint
@@ -90,28 +218,11 @@ The Linux UID this token projects onto, for correlating a Peios event with
 Linux-side audit data. A projection for interoperability, never the identity
 KACS decides on.
 
---- field subject.process.pid
-type: uint
-
-The process ID the event came from. Reliable only in the short term: PIDs are
-reused, so a PID in a week-old record may name something unrelated. Correlate
-durably on `subject.process.guid`.
-
---- field subject.process.name
-type: str
-
-The kernel's name for the process, typically the executable's basename. Not
-`argv[0]` — a process that rewrote its argv is unaffected here.
-
---- field subject.process.executable
-type: str.path
-
-The path the process was executed from, resolved at exec with symbolic links
-already followed.
-
 --- field subject.pip.type
 type: uint.enum
 values: 0 None | 512 Protected | 1024 Isolated
+closed: true
+asserted: true
 
 The Protected Isolated Process type in force for the access check. Held in
 process state rather than on the token, and a caller of the access-check
@@ -120,15 +231,91 @@ caller-influenced, and kernel-observed everywhere else.
 
 --- field subject.pip.trust
 type: uint
+asserted: true
 
 The PIP trust level in force for the access check. Compared for dominance:
 a caller whose trust does not dominate the target's is denied before the
 DACL is reached. Caller-influenced on ioctl-originated events, as
 `subject.pip.type` is.
 
+--- field subject.token.capabilities
+type: bin.sid[]
+
+The confinement capability SIDs (`S-1-15-3-…`) the effective token carries.
+Access to an object from a confined token turns on these: a confined token
+reaches only what its capabilities, as well as its user and groups, are
+granted. Unrelated to Linux capabilities, which are `linux.cap`. Absent on
+an unconfined token.
+
+--- field subject.token.gid
+type: uint
+
+The Linux GID the effective token projects onto, for correlating with
+Linux-side data such as file ownership and `/proc`. A projection for
+interoperability, never the identity KACS decides on.
+
+--- field subject.token.privileges
+type: uint.flags
+values: 0x4 KACS_SE_CREATE_TOKEN_PRIVILEGE | 0x8 KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE | 0x10 KACS_SE_LOCK_MEMORY_PRIVILEGE | 0x20 KACS_SE_INCREASE_QUOTA_PRIVILEGE | 0x80 KACS_SE_TCB_PRIVILEGE | 0x100 KACS_SE_SECURITY_PRIVILEGE | 0x200 KACS_SE_TAKE_OWNERSHIP_PRIVILEGE | 0x400 KACS_SE_LOAD_DRIVER_PRIVILEGE | 0x800 KACS_SE_SYSTEM_PROFILE_PRIVILEGE | 0x1000 KACS_SE_SYSTEMTIME_PRIVILEGE | 0x2000 KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE | 0x4000 KACS_SE_INCREASE_BASE_PRIORITY_PRIVILEGE | 0x20000 KACS_SE_BACKUP_PRIVILEGE | 0x40000 KACS_SE_RESTORE_PRIVILEGE | 0x80000 KACS_SE_SHUTDOWN_PRIVILEGE | 0x100000 KACS_SE_DEBUG_PRIVILEGE | 0x200000 KACS_SE_AUDIT_PRIVILEGE | 0x800000 KACS_SE_CHANGE_NOTIFY_PRIVILEGE | 0x1000000 KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE | 0x10000000 KACS_SE_MANAGE_VOLUME_PRIVILEGE | 0x20000000 KACS_SE_IMPERSONATE_PRIVILEGE | 0x100000000 KACS_SE_RELABEL_PRIVILEGE | 0x800000000 KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE
+
+The privileges the effective token holds, as the flags of its 64-bit
+privilege word from `uapi/pkm/token.h`: bit n is the privilege whose LUID
+is n, so `SeDebugPrivilege` is bit 20. Holding a privilege is not the same
+as using it; which are switched on is `subject.token.privileges-enabled`.
+
+Userspace emitters that report a caller's privileges by name today will
+carry this set instead.
+
+--- field subject.token.privileges-enabled
+type: uint.flags
+values: 0x4 KACS_SE_CREATE_TOKEN_PRIVILEGE | 0x8 KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE | 0x10 KACS_SE_LOCK_MEMORY_PRIVILEGE | 0x20 KACS_SE_INCREASE_QUOTA_PRIVILEGE | 0x80 KACS_SE_TCB_PRIVILEGE | 0x100 KACS_SE_SECURITY_PRIVILEGE | 0x200 KACS_SE_TAKE_OWNERSHIP_PRIVILEGE | 0x400 KACS_SE_LOAD_DRIVER_PRIVILEGE | 0x800 KACS_SE_SYSTEM_PROFILE_PRIVILEGE | 0x1000 KACS_SE_SYSTEMTIME_PRIVILEGE | 0x2000 KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE | 0x4000 KACS_SE_INCREASE_BASE_PRIORITY_PRIVILEGE | 0x20000 KACS_SE_BACKUP_PRIVILEGE | 0x40000 KACS_SE_RESTORE_PRIVILEGE | 0x80000 KACS_SE_SHUTDOWN_PRIVILEGE | 0x100000 KACS_SE_DEBUG_PRIVILEGE | 0x200000 KACS_SE_AUDIT_PRIVILEGE | 0x800000 KACS_SE_CHANGE_NOTIFY_PRIVILEGE | 0x1000000 KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE | 0x10000000 KACS_SE_MANAGE_VOLUME_PRIVILEGE | 0x20000000 KACS_SE_IMPERSONATE_PRIVILEGE | 0x100000000 KACS_SE_RELABEL_PRIVILEGE | 0x800000000 KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE
+
+Which of the privileges in `subject.token.privileges` are enabled, as flags
+in the same bit layout. A privilege takes part in a decision only while enabled,
+so a privilege that is held but disabled here could not have been what
+allowed the operation.
+
+--- field subject.true-token.sid
+type: bin.sid
+
+The user SID of the acting thread's own token, before any impersonation.
+Carried on records about impersonation, where `subject.token.sid` is the
+client being impersonated and this is the server doing the impersonating.
+Equal to `subject.token.sid` when the thread is not impersonating.
+
+--- field subject.process.pid
+type: uint
+
+The process ID of the process that acted, where that is not the emitter: a
+daemon reporting what a client did names the client here and itself in
+`emitter.process.pid`. Same meaning and same caveat as
+`emitter.process.pid` — PIDs are reused, so correlate on
+`subject.process.guid`.
+
+--- field subject.process.guid
+type: bin.guid
+
+The durable GUID of the process that acted, where that is not the emitter.
+Never reused, so it identifies the actor across PID reuse and after the
+process has exited.
+
+--- field subject.process.name
+type: str
+
+The kernel's name (`comm`) for the process that acted, where that is not
+the emitter. Lossy and truncated to 15 bytes; two processes can share a
+name.
+
+--- field subject.process.executable
+type: str.path
+
+The executable of the process that acted, where that is not the emitter,
+resolved at exec with symbolic links followed.
+
 --- field object.kind
 type: str.enum
-values: file | process | token | socket | ipc
+values: file | process | token | key | socket | ipc | event-namespace | metric-namespace | log-namespace | eventd-admin
+closed: false
 
 What sort of thing the operation acted on. Load-bearing rather than
 descriptive: it names the table an access mask in the same record decodes
@@ -138,6 +325,12 @@ The mask spaces genuinely collide. `0x0001` is `FILE_READ_DATA` on a file
 and `PROCESS_TERMINATE` on a process; the socket mapping reuses
 `FILE_WRITE_DATA` as a socket's write right.
 
+`event-namespace`, `metric-namespace`, `log-namespace` and `eventd-admin`
+come from eventd's audit context, on access checks eventd asks KACS to make
+against its own descriptors. The first three are checks against a
+namespace pattern; `eventd-admin` is eventd's check of whether a caller may
+administer it, the `administer()` check in eventd's `query/security.rs`.
+
 `socket` and `ipc` have no identity fields yet. A record carrying either
 kind names the object only by its kind, until those enforcement points are
 plumbed to supply one.
@@ -145,10 +338,10 @@ plumbed to supply one.
 --- field object.file.path
 type: str.path
 
-The path of the file the operation acted on, resolved at the enforcement
-point.
+The absolute path of the file the operation acted on, resolved at the
+enforcement point.
 
---- field object.file.relative_path
+--- field object.file.path-relative
 type: str.path
 
 The path of the object within its mount, `/`-prefixed. **Not an absolute
@@ -159,12 +352,202 @@ and silently miss these.
 StrataFS events fire from inside the filesystem, below the layer where a
 mount is known, so there is no absolute path for them to resolve against.
 The KACS events covering the same operation do carry the caller's absolute
-path, joined by the envelope's `subject.process.guid` and timestamp.
+path, joined by the header's `emitter.process.guid` and time.
 
 An absolute path to the **backing** object is derivable from this record
 alone: join this onto `destination.stratum.path` for a copy-up, or onto
 `source.stratum.path` for a refusal. That join is unavailable on a refusal
-raised before any provider was determined, where the stratum path is null.
+raised before any provider was determined, where the stratum path is
+absent.
+
+--- field object.file.parent.path
+type: str.path
+
+The path of the directory that holds the file the operation acted on.
+Carried where the parent is what was decided on — creating or removing an
+entry is authorised against the directory, not the entry.
+
+--- field object.file.parent.inode
+type: uint
+
+The inode number of the directory that holds the file. Subject to the same
+caveats as `object.file.inode`: neither stable nor unique.
+
+--- field object.file.type
+type: str.enum
+values: directory | regular | symlink | device | fifo | socket
+closed: true
+
+What kind of filesystem object the file is. Some operations are refused by
+type alone — StrataFS will not copy a socket, FIFO or device up into a
+writable stratum — and a copy-up of a directory moves no contents, so the
+type is needed to read the rest of the record.
+
+`device` covers both character and block devices.
+
+--- field object.file.type-previous
+type: str.enum
+values: directory | regular | symlink | device | fifo | socket
+closed: true
+
+The type the object had before it changed, beside `object.file.type`. The
+pair records an object replaced by one of a different kind under the same
+name, such as a stratum root that was a directory and is now a file.
+
+--- field object.file.mode
+type: uint.flags
+
+The object's POSIX permission bits, as `stat` reports them in the low
+twelve bits of `st_mode`: the read, write and execute triples, set-user-ID,
+set-group-ID and sticky. A projection for Linux compatibility; access is
+decided by the security descriptor, never by these bits. The object's type
+is `object.file.type`, not the high bits of this field.
+
+--- field object.file.uid
+type: uint
+
+The Linux UID that owns the file, as `stat` reports it. A copy-up preserves
+the provider's owner, so this is the UID a disk quota is charged to,
+whoever caused the copy. Ownership for access control is the descriptor's
+owner SID, `object.sd.owner`.
+
+--- field object.file.gid
+type: uint
+
+The Linux GID that owns the file, as `stat` reports it. Like
+`object.file.uid`, a projection rather than anything KACS decides on.
+
+--- field object.file.size
+type: uint.bytes
+
+The size of the object in bytes or, on a copy, how many bytes the copy
+moved. Distinguishes a copy-up of a large file from one of a symlink, which
+otherwise produce the same record.
+
+--- field object.file.size-previous
+type: uint.bytes
+
+The size first observed, where the record compares it against a later one.
+On a signature check this is the size when probing began and
+`object.file.size` the size when it ended: a difference means the file was
+written to while its signature was being read.
+
+--- field object.file.inode
+type: uint
+
+The inode number the object presents. The best object identifier a
+filesystem record has, and **neither stable nor unique**: StrataFS builds a
+private inode for every open that shares the number of the outer one, a
+mount root's number follows whichever stratum provides it, and numbers are
+re-derived at mount time. Expect both false joins and false splits when
+correlating on it.
+
+--- field object.file.inode-lower
+type: uint
+
+The inode number of the real object in the underlying filesystem, beneath
+a stacking filesystem's own. Stable, but unique only within that
+filesystem. Carried beside `object.file.inode`; the two differing is how a
+record shows that the object a caller holds has been rebound to a different
+backing object.
+
+--- field object.file.inode-replacement
+type: uint
+
+The inode number of the object that took this one's place: the new object
+in a supersede, or the object found where the expected one should have
+been. A record carrying both this and `object.file.inode` names the
+object that was meant and the object that was there.
+
+--- field object.file.fs-type
+type: str
+
+The type of filesystem the file lives on, by name, such as `ext4`. Mount
+policy is derived from the filesystem type, so this explains why a file on
+`proc` was never checked at all.
+
+--- field object.file.mount.cookie
+type: uint
+
+The mount instance the file lives on, as the 64-bit random cookie StrataFS
+assigns each mount. Two mounts sharing a stratum produce otherwise
+indistinguishable records, which only this separates.
+
+**Not emitted today.** Only the StrataFS ftrace tracepoints carry the
+cookie; no event does yet.
+
+--- field object.file.mount-owner.cookie
+type: uint
+
+The mount that owns an on-disk staging object, where that is not the mount
+inspecting it. Two mounts can share a create stratum, so a mount recovering
+orphans can meet another mount's staging; this, against
+`object.file.mount.cookie`, is the ownership check that decides whether the
+object is left alone.
+
+--- field object.file.code-kind
+type: str.enum
+values: exec-image | mapped-library | firmware-blob
+closed: true
+
+What kind of code load the record concerns: an image being executed, a
+library being mapped executable, or a firmware blob being loaded for a
+device. A search on `object.file.path` returns all three; this tells them
+apart.
+
+--- field object.file.digest
+type: bin
+
+The SHA-256 digest of a file whose signature was checked. The strongest
+identifier of "this exact binary" a record can carry: unlike a path or an
+inode it survives a rename and changes when the content does.
+
+--- field object.file.elf-type
+type: str.enum
+values: none | rel | exec | dyn | core
+closed: false
+
+The ELF type of an executable, from `e_type`, with the `ET_` prefix removed
+and the name folded to lower case. `exec` is a fixed-address executable,
+`dyn` a position-independent one or a shared object. The PIE mitigation
+refuses `exec`. Open because the ELF standard reserves ranges for
+operating-system and processor-specific types.
+
+--- field object.file.tcb-signed
+type: bool
+
+Whether the executed binary was signed by a key trusted at the TCB tier,
+the floor for code that runs with full system trust. A usermodehelper exec
+below the floor is refused; an ordinary exec below it is allowed, at the
+lower trust its signature earns.
+
+--- field object.file.integrity
+type: uint.integrity
+values: 0 Untrusted | 4096 Low | 8192 Medium | 12288 High | 16384 System
+
+The mandatory integrity label on the file, as an integrity RID. Distinct
+from any principal's integrity: a record about lowering a file's label
+carries both, and `subject.token.integrity` is the caller's.
+
+--- field object.file.integrity-capped
+type: bool
+
+Whether the label an exec would have taken from the file's signature was
+capped at the process's current label instead of applied. The kernel does
+this when a traced process, or one running with `no_new_privs`, execs a
+binary whose signature would raise its PIP label: the exec goes ahead, but
+a tracer that no longer dominated the process must not keep control of it.
+True means the binary ran with less trust than its signing key grants.
+
+The label capped is the PIP label, `object.process.pip.type` and
+`object.process.pip.trust`, despite the field's name.
+
+--- field object.file.delete-on-close-count
+type: uint
+
+How many delete-on-close requests are armed on the file's inode. The file
+is removed when the last handle carrying one is closed, so a count above
+zero on an open says the file is already scheduled to disappear.
 
 --- field object.key.guid
 type: bin.guid
@@ -174,21 +557,309 @@ than by path, so a record names the key durably but not legibly — nothing
 in the event stream currently binds a key GUID to the path an administrator
 would recognise.
 
-`object.key.*` is the configuration store's key. A cryptographic key is a
-different thing and takes an explicit qualifier rather than this namespace.
+`key` means a registry key and nothing else. A cryptographic key is a
+`signing-key`.
+
+--- field object.key.path
+type: str
+
+The resolved absolute path of the registry key, in canonical form, such as
+`Machine\System\KMES`. Carried beside `object.key.guid` so a record is
+legible as well as durable. Resolved: a `%CURRENT_USER%` substitution has
+already been made, and the path as the caller wrote it is
+`object.key.path-requested`.
+
+--- field object.key.path-requested
+type: str
+
+The registry path as the caller wrote it, before LCS rewrote it. A path
+whose first component is the alias `CurrentUser` is rewritten to the
+caller's own key under `Users`, named by the caller's SID; this field keeps
+the original, and `object.key.path` holds the rewritten path.
+
+The same requested path therefore names different keys for different
+callers. Search on `object.key.path` to find which key was actually
+reached.
+
+--- field object.key.created
+type: bool
+
+Whether a create-key request made a new key. False means the key already
+existed and the request opened it instead, so the security descriptor and
+volatility the caller asked for were **not** applied: the key keeps the
+ones it already had.
+
+--- field object.key.volatile
+type: bool
+
+Whether a registry key is volatile, meaning it lives only in memory and
+does not survive a reboot.
+
+--- field object.key.volatile-requested
+type: bool
+
+The volatility a create-key caller asked for. It can differ from
+`object.key.volatile` when the request opened an existing key, whose
+volatility a create request does not change.
+
+--- field object.key.parent.volatile
+type: bool
+
+Whether the parent of a key being created is volatile. A volatile key may
+not have a non-volatile child, so a create that asks for a non-volatile key
+beneath a volatile parent is refused.
+
+--- field object.key.layer.name
+type: str
+
+The name of the registry layer a key operation resolved in: the layer
+whose entry the operation read or wrote. Distinct from `object.layer.name`,
+which names a layer the operation acted on as a whole.
+
+--- field object.key.symlink
+type: bool
+
+Whether a registry key is a symbolic link to another key. A lookup that
+passes through a link key is redirected to its target, named by
+`object.key.target.guid`.
+
+--- field object.key.symlink-depth
+type: uint
+
+How many registry symbolic links a lookup followed before stopping. The
+walk is bounded by the configured symlink depth limit, so a value at that
+limit means the lookup was refused for following too many links.
+
+--- field object.key.target.guid
+type: bin.guid
+
+The key a registry symbolic link redirects to, by GUID. Necessarily
+separate from `object.key.guid`: a record of a link being followed names
+the link and its target at once.
+
+--- field object.key.target.rsi.slot
+type: uint
+
+The registry source slot that owns the target of a symbolic link, present
+when it differs from the source that owns the link itself. A link that
+leads into another source's hive is the registry's equivalent of a
+filesystem symlink crossing a trust boundary; see `object.key.cross-source`.
+
+--- field object.key.cross-source
+type: bool
+
+Whether a registry lookup crossed from one source's hive into another's by
+following a symbolic link. When true, the key reached is served by a
+different backend from the one the path began in.
+
+--- field object.key.reference-count
+type: uint
+
+The number of references held on a key's entry in the kernel's key cache,
+at the moment of the record. Each open handle holds one, so a count that
+reaches zero is the point at which LCS tells the source it may drop the
+key.
+
+--- field object.key.value.name
+type: str
+
+The name of the registry value an operation acted on. The empty string is
+a legal name, identifying the key's default value, so an empty field and
+an absent one mean different things: absent means the record concerns no
+value at all.
+
+--- field object.key.value.type
+type: uint.enum
+values: 0 REG_NONE | 1 REG_SZ | 2 REG_EXPAND_SZ | 3 REG_BINARY | 4 REG_DWORD | 5 REG_DWORD_BIG_ENDIAN | 6 REG_LINK | 7 REG_MULTI_SZ | 8 REG_RESOURCE_LIST | 9 REG_FULL_RESOURCE_DESCRIPTOR | 10 REG_RESOURCE_REQUIREMENTS_LIST | 11 REG_QWORD | 65535 REG_TOMBSTONE
+closed: true
+
+The type of a registry value, as the number of its `REG_*` constant.
+`REG_TOMBSTONE` is LCS's own marker for a value deleted within one layer:
+it hides the value from lower layers rather than holding data, and appears
+only on a write that deletes.
+
+--- field object.key.value.length
+type: uint.bytes
+
+The byte length of a registry value's data. Recorded in place of the data
+itself, which an event never carries by default because values can be
+large and can hold secrets.
+
+--- field object.key.value.digest
+type: bin
+
+A digest of a registry value's data, so that two records can be compared
+to see whether a value changed without either carrying the data.
+Recorded in place of the raw bytes, which an event never carries by
+default. Compare digests only with digests: the algorithm is not yet
+fixed.
 
 --- field object.process.pid
 type: uint
 
 The process ID of the process the operation acted on. As with
-`subject.process.pid`, correlate durably on the GUID instead.
+`emitter.process.pid`, correlate durably on the GUID instead.
 
 --- field object.process.guid
 type: bin.guid
 
 The durable GUID of the process the operation acted on. Distinct from
-`subject.process.guid` — one record carries both when a process opens
+`emitter.process.guid` — one record carries both when a process opens
 another process.
+
+--- field object.process.name
+type: str
+
+The kernel's name (`comm`) for the process the operation acted on. Lossy
+and truncated to 15 bytes; two processes can share a name.
+
+--- field object.process.executable
+type: str.path
+
+The executable of the process the operation acted on, resolved at exec with
+symbolic links followed.
+
+--- field object.process.parent.pid
+type: uint
+
+The process ID of the parent of a newly created process. A fork record is
+written by the process that called `fork` or `clone`, so this usually
+equals `emitter.process.pid`; it differs under `CLONE_PARENT`, which makes
+the child a sibling of its creator.
+
+--- field object.process.parent.guid
+type: bin.guid
+
+The durable GUID of the parent of a newly created process. Correlate on
+this rather than `object.process.parent.pid`.
+
+--- field object.process.pip.type
+type: uint.enum
+values: 0 None | 512 Protected | 1024 Isolated
+closed: true
+
+The Protected Isolated Process type of the process the operation acted on.
+Compared against the caller's `subject.pip.type` for dominance, so a record
+carrying both shows which side of the boundary each stood on.
+
+--- field object.process.pip.trust
+type: uint
+
+The PIP trust level of the process the operation acted on. Compared against
+the caller's `subject.pip.trust` for dominance: a caller whose trust does
+not dominate this is denied before the DACL is reached.
+
+--- field object.process.token.guid
+type: bin.guid
+
+The durable GUID of the primary token the process holds after the
+operation. Carried on a token install, where it names the token the process
+now runs as; the token it replaced is `object.process.token-previous.guid`.
+
+--- field object.process.token-previous.guid
+type: bin.guid
+
+The durable GUID of the primary token a token install displaced. With
+`object.process.token.guid`, the before and after of the process's identity.
+
+--- field object.process.token-previous.sid
+type: bin.sid
+
+The user SID of the token a token install displaced. Comparing it against
+the new token's SID is how a record shows a process changing which
+principal it runs as, rather than only replacing its token.
+
+--- field object.process.shares-security
+type: bool
+
+Whether a newly created task shares its creator's security state rather
+than receiving its own copy. True for a new thread (`CLONE_THREAD`), which
+shares one process state and therefore one process GUID; false for a fork,
+which gets a new process state and a new GUID.
+
+--- field object.process.threads
+type: uint
+
+How many threads the process had when the operation ran. Read with
+`object.process.threads-switched`.
+
+--- field object.process.threads-switched
+type: uint
+
+How many of the process's threads took on a new identity in the operation.
+A primary token install applies to every thread; a value below
+`object.process.threads` means some threads still run under the old token,
+a process split between two identities.
+
+--- field object.process.core-dump
+type: str.enum
+values: disable | user | root
+closed: true
+
+Whether the process may dump core, as Linux's dumpable setting: `disable`
+forbids a dump, `user` dumps as the process's user, and `root` dumps
+readable only by root. The kernel forces `disable` on a PIP-protected
+process at exec, because a core file is a copy of the memory the protection
+exists to keep private.
+
+--- field object.process.core-dump-previous
+type: str.enum
+values: disable | user | root
+closed: true
+
+The core-dump setting before the operation changed it. The pair is the
+whole content of a record that hardens a process at exec.
+
+--- field object.process.mitigations
+type: uint.flags
+values: 0x1 WXP | 0x2 TLP | 0x4 LSV | 0x8 CFI | 0x10 UI_ACCESS | 0x20 NO_CHILD | 0x40 CFIF | 0x80 CFIB | 0x100 PIE | 0x200 SML
+
+The process mitigations in force after the operation, from
+`uapi/pkm/psb.h`. Applying mitigations only ever adds bits to the set.
+`CFI` is a legacy alias for `CFIF` and `CFIB` together and is never set in
+this field, and `UI_ACCESS` is reserved.
+
+--- field object.process.mitigations-requested
+type: uint.flags
+values: 0x1 WXP | 0x2 TLP | 0x4 LSV | 0x8 CFI | 0x10 UI_ACCESS | 0x20 NO_CHILD | 0x40 CFIF | 0x80 CFIB | 0x100 PIE | 0x200 SML
+
+The mitigations the caller asked for, as written. Compare against
+`object.process.mitigations-normalised` to see how the kernel read the
+request.
+
+--- field object.process.mitigations-normalised
+type: uint.flags
+values: 0x1 WXP | 0x2 TLP | 0x4 LSV | 0x8 CFI | 0x10 UI_ACCESS | 0x20 NO_CHILD | 0x40 CFIF | 0x80 CFIB | 0x100 PIE | 0x200 SML
+
+The request after the kernel normalised it: the `CFI` alias replaced by
+`CFIF` and `CFIB`. A request naming an unknown bit, or a CFI half the CPU
+does not support, fails normalisation and is refused outright.
+
+--- field object.process.mitigations-added
+type: uint.flags
+values: 0x1 WXP | 0x2 TLP | 0x4 LSV | 0x8 CFI | 0x10 UI_ACCESS | 0x20 NO_CHILD | 0x40 CFIF | 0x80 CFIB | 0x100 PIE | 0x200 SML
+
+The bits this operation newly turned on. Requesting a mitigation already
+in force is not an error, so this can be empty on a successful request.
+
+--- field object.process.exit-code
+type: int
+
+The exit code of the job's process, as it passed it to `exit`. Present
+only when the process exited of its own accord; a process ended by a
+signal has `object.process.exit-signal` instead, and never both.
+
+A non-zero code is not necessarily a failure, because a definition may
+name other codes as success. Whether the job failed is
+`object.job.state`.
+
+--- field object.process.exit-signal
+type: int
+
+The number of the signal that ended the job's process. Present only when
+a signal ended it; a process that exited has `object.process.exit-code`
+instead, and never both. A signal peinit sent to stop the job, such as
+SIGTERM or SIGKILL, appears here like any other.
 
 --- field object.token.id
 type: uint.luid
@@ -200,16 +871,582 @@ token-adjust checks.
 type: bin.guid
 
 The durable GUID of the token the operation acted on. Distinct from
-`subject.token.guid` — one record carries both when a token is used to
+`emitter.token.guid` — one record carries both when a token is used to
 open or adjust another token.
 
---- field object.context
+--- field object.token.sid
+type: bin.sid
+
+The user SID of the token the operation acted on. On a record where one
+principal handles another's token — duplicating, filtering or installing
+it — this is the principal the token speaks for, and `subject.token.sid`
+the one who handled it.
+
+--- field object.token.groups
+type: bin.sid[]
+
+The group SIDs of the token the operation acted on. Read with
+`object.token.group-attributes`, which says which of them are enabled.
+
+--- field object.token.group-attributes
+type: uint.flags[]
+values: SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED | SE_GROUP_OWNER | SE_GROUP_USE_FOR_DENY_ONLY | SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED | SE_GROUP_RESOURCE | SE_GROUP_LOGON_ID
+
+Per-group attribute bitmasks of the token the operation acted on,
+positionally parallel to `object.token.groups`: `groups[i]` is described by
+`group-attributes[i]`. A group adjustment changes these and not the SIDs,
+so a record of one is read here.
+
+--- field object.token.restricting-sids
+type: bin.sid[]
+
+The restricting SIDs on a filtered token: the second list an access check
+must also satisfy before a restricted token is granted anything. Carried
+where a token is filtered, or where a filtered token is acted on.
+
+--- field object.token.capabilities
+type: bin.sid[]
+
+The confinement capability SIDs (`S-1-15-3-…`) of the token the operation
+acted on. Unrelated to Linux capabilities.
+
+--- field object.token.default-owner
+type: bin.sid
+
+The owner SID the token stamps on objects it creates. Changing it changes
+who owns everything the token makes from then on, which is why a default
+adjustment is worth a record.
+
+--- field object.token.primary-group
+type: bin.sid
+
+The primary-group SID the token stamps on objects it creates, beside
+`object.token.default-owner`.
+
+--- field object.token.privileges
+type: uint.flags
+values: 0x4 KACS_SE_CREATE_TOKEN_PRIVILEGE | 0x8 KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE | 0x10 KACS_SE_LOCK_MEMORY_PRIVILEGE | 0x20 KACS_SE_INCREASE_QUOTA_PRIVILEGE | 0x80 KACS_SE_TCB_PRIVILEGE | 0x100 KACS_SE_SECURITY_PRIVILEGE | 0x200 KACS_SE_TAKE_OWNERSHIP_PRIVILEGE | 0x400 KACS_SE_LOAD_DRIVER_PRIVILEGE | 0x800 KACS_SE_SYSTEM_PROFILE_PRIVILEGE | 0x1000 KACS_SE_SYSTEMTIME_PRIVILEGE | 0x2000 KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE | 0x4000 KACS_SE_INCREASE_BASE_PRIORITY_PRIVILEGE | 0x20000 KACS_SE_BACKUP_PRIVILEGE | 0x40000 KACS_SE_RESTORE_PRIVILEGE | 0x80000 KACS_SE_SHUTDOWN_PRIVILEGE | 0x100000 KACS_SE_DEBUG_PRIVILEGE | 0x200000 KACS_SE_AUDIT_PRIVILEGE | 0x800000 KACS_SE_CHANGE_NOTIFY_PRIVILEGE | 0x1000000 KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE | 0x10000000 KACS_SE_MANAGE_VOLUME_PRIVILEGE | 0x20000000 KACS_SE_IMPERSONATE_PRIVILEGE | 0x100000000 KACS_SE_RELABEL_PRIVILEGE | 0x800000000 KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE
+
+The privileges the token the operation acted on holds, as the flags of its
+64-bit privilege word: bit n is the privilege whose LUID is n.
+
+--- field object.token.privileges-enabled
+type: uint.flags
+values: 0x4 KACS_SE_CREATE_TOKEN_PRIVILEGE | 0x8 KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE | 0x10 KACS_SE_LOCK_MEMORY_PRIVILEGE | 0x20 KACS_SE_INCREASE_QUOTA_PRIVILEGE | 0x80 KACS_SE_TCB_PRIVILEGE | 0x100 KACS_SE_SECURITY_PRIVILEGE | 0x200 KACS_SE_TAKE_OWNERSHIP_PRIVILEGE | 0x400 KACS_SE_LOAD_DRIVER_PRIVILEGE | 0x800 KACS_SE_SYSTEM_PROFILE_PRIVILEGE | 0x1000 KACS_SE_SYSTEMTIME_PRIVILEGE | 0x2000 KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE | 0x4000 KACS_SE_INCREASE_BASE_PRIORITY_PRIVILEGE | 0x20000 KACS_SE_BACKUP_PRIVILEGE | 0x40000 KACS_SE_RESTORE_PRIVILEGE | 0x80000 KACS_SE_SHUTDOWN_PRIVILEGE | 0x100000 KACS_SE_DEBUG_PRIVILEGE | 0x200000 KACS_SE_AUDIT_PRIVILEGE | 0x800000 KACS_SE_CHANGE_NOTIFY_PRIVILEGE | 0x1000000 KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE | 0x10000000 KACS_SE_MANAGE_VOLUME_PRIVILEGE | 0x20000000 KACS_SE_IMPERSONATE_PRIVILEGE | 0x100000000 KACS_SE_RELABEL_PRIVILEGE | 0x800000000 KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE
+
+Which of the privileges in `object.token.privileges` are enabled, as flags
+in the same bit layout. A privilege adjustment changes this, not the held set.
+
+--- field object.token.integrity
+type: uint.integrity
+values: 0 Untrusted | 4096 Low | 8192 Medium | 12288 High | 16384 System
+
+The integrity level of the token the operation acted on, as an integrity
+RID.
+
+--- field object.token.type
+type: str.enum
+values: primary | impersonation
+closed: true
+
+Whether the token the operation acted on is a primary token or an
+impersonation token. As with `subject.token.type`, needed to read
+`object.token.impersonation`: a primary token also reports 0 there.
+
+--- field object.token.impersonation
+type: uint.enum
+values: 0 Anonymous | 1 Identification | 2 Impersonation | 3 Delegation
+closed: true
+
+The impersonation level of the token the operation acted on. A primary
+token reports 0, so read `object.token.type` before reading 0 as
+Anonymous.
+
+--- field object.token.impersonation-permitted
+type: uint.enum
+values: 0 Anonymous | 1 Identification | 2 Impersonation | 3 Delegation
+closed: true
+
+The impersonation level a gate computed as permitted. Where it is below
+`object.token.impersonation`, the level was silently reduced: the caller
+lacked the privilege to impersonate at the full level, or the client's
+integrity was higher than the caller's. The operation still succeeds, at
+the lower level.
+
+--- field object.token.elevation
+type: str.enum
+values: default | full | limited
+closed: true
+
+The token's role in a split elevation pair. `full` is the elevated half
+and `limited` the filtered one; `default` is a token that belongs to no
+pair. The other half of a pair is `object.token.linked.guid`.
+
+--- field object.token.linked.guid
+type: bin.guid
+
+The durable GUID of the other token in a linked elevation pair. Carried
+where two tokens are linked, so the record names both halves.
+
+--- field object.token.restricted
+type: bool
+
+Whether the token is restricted: whether it carries restricting SIDs that
+every access check must also satisfy.
+
+--- field object.token.write-restricted
+type: bool
+
+Whether the token is write-restricted: its restricting SIDs apply only to
+write access, and reads are decided as for an unrestricted token.
+
+--- field object.token.user-deny-only
+type: bool
+
+Whether the token's user SID is deny-only: it matches deny ACEs but never
+allow ACEs, so the token gets nothing through its own user identity.
+
+--- field object.token.auth-id
+type: uint.luid
+
+The LUID of the logon session the token the operation acted on belongs to.
+The same value as `object.session.id` on that session's own records.
+
+--- field object.token.interactive-session
+type: uint
+
+The interactive-session scope the token is bound to, which separates the
+interactive sessions of one machine from each other. 0 means the token is
+bound to no interactive session.
+
+--- field object.token.uid
+type: uint
+
+The Linux UID the token the operation acted on projects onto. A projection
+for interoperability, never the identity KACS decides on.
+
+--- field object.token.gid
+type: uint
+
+The Linux GID the token the operation acted on projects onto.
+
+--- field object.token.supplementary-gid-count
+type: uint
+
+How many supplementary GIDs the token's Linux projection carries. A token
+naming more groups than Linux can hold fails projection with `-E2BIG`, and
+this is the count that was too many.
+
+--- field object.thread.tid
+type: uint
+
+A thread the operation acted on, where it is not the emitting thread:
+the target of a per-thread impersonation or of a thread-token open.
+
+--- field object.session.id
+type: uint.luid
+
+The LUID of the logon session the operation acted on. The same value as
+`subject.token.auth-id` and `object.token.auth-id` on records about tokens
+in that session, which is how a session's records are joined to everything
+done under it.
+
+--- field object.session.sid
+type: bin.sid
+
+The logon SID the kernel synthesised for the session. Derived from
+`object.session.id`, but it appears in descriptors as a principal in its own
+right, so a search by SID has to find it here.
+
+--- field object.session.user.sid
+type: bin.sid
+
+The user SID of the principal the logon session belongs to: whose session
+it is. Not `object.session.sid`, which is the logon SID synthesised for the
+session itself; a search for what one user's sessions did matches this
+field, and a search for one session matches that one.
+
+--- field object.session.logon-type
+type: str.enum
+values: interactive | network | batch | service | network-cleartext | new-credentials | remote-interactive
+closed: true
+
+What kind of logon the session represents, from the `KACS_LOGON_TYPE_*`
+values in `uapi/pkm/token.h`. The kernel refuses to create a session of any
+other type.
+
+--- field object.session.auth-package
+type: str
+
+The name of the authentication package that established the session, as
+the creator supplied it. Not interpreted by the kernel.
+
+--- field object.session.logon-time
+type: uint.time
+
+When the session was established.
+
+--- field object.session.reference-count
+type: uint
+
+How many live tokens or other references the session still holds. A
+session is destroyed when this reaches zero; on a refused destroy, a
+non-zero count is why.
+
+--- field object.handle.mode
+type: uint.flags
+values: 0x1 FMODE_READ | 0x2 FMODE_WRITE | 0x4 FMODE_LSEEK | 0x8 FMODE_PREAD | 0x10 FMODE_PWRITE | 0x20 FMODE_EXEC
+
+The kernel's open-mode bits on the file handle (`f_mode`). Only the bits
+listed are stable meanings; the kernel sets others for its own
+bookkeeping, and a consumer should ignore them. Distinct from
+`access.granted`, which is what KACS allowed the handle; this is what the
+handle was opened for.
+
+--- field object.handle.enforced
+type: bool
+
+Whether the handle, or the object behind it, is under KACS enforcement.
+False on a handle to an object on an unmanaged mount, where no descriptor
+is checked and every later operation through the handle is allowed.
+
+--- field object.handle.origin-readable
+type: bool
+
+Whether reading the StrataFS layer-origin attribute through the handle was
+permitted when its view of the directory was settled. Decided once, at
+open, and enforced at a much later call, so a refusal names a decision
+made earlier than the record that reports it.
+
+--- field object.xattr.name
+type: str
+
+The name of an extended attribute the operation acted on, in full with its
+namespace prefix, such as `security.capability`. The names Peios reserves
+for its own descriptors and markers are refused or hidden whatever the
+caller's access.
+
+--- field object.ipc.type
+type: str.enum
+values: sem | shm | msg
+closed: true
+
+Which kind of System V IPC object the operation acted on: a semaphore set,
+a shared-memory segment or a message queue.
+
+--- field object.ipc.id
+type: int
+
+The System V IPC identifier of the object, as `semget`, `shmget` or
+`msgget` returned it. Small, reused once the object is removed, and scoped
+to an IPC namespace, so it identifies an object only briefly and only
+within one namespace.
+
+--- field object.device.name
+type: str
+
+The device a firmware blob was being loaded for.
+
+**Not emitted today.** The firmware check runs in the hook on the file
+read, which sees the file and not the device that requested it, so the
+kernel has no device to report.
+
+--- field object.mount.path
+type: str.path
+
+The directory the mount was attached at, as an absolute path.
+
+--- field object.mount.root
+type: str.path
+
+The filesystem root that was captured when the mount was made, and against
+which every later layer path is resolved. Fixed for the life of the mount,
+so a mounter in a chroot binds the mount to that chroot's view of the
+filesystem for good.
+
+--- field object.mount.cookie
+type: uint
+
+The mount instance the operation acted on, as the 64-bit random cookie
+StrataFS assigns each mount.
+
+**Not emitted today.** Only the StrataFS ftrace tracepoints carry the
+cookie, and no superblock identifier exists for other filesystems: their
+tracepoints carry the superblock's magic number, which names a filesystem
+type rather than an instance.
+
+--- field object.mount.cookie-epoch
+type: uint
+
+The boot a mount cookie belongs to. A cookie read back from an on-disk
+marker can name a live mount only if it was written in this boot, and this
+is what decides that.
+
+--- field object.mount.fs-type
+type: str
+
+The type of filesystem mounted, by name, such as `ext4` or `tmpfs`. Mount
+policy is derived from it: the kernel decides from the type alone that a
+`proc` or `sysfs` mount is unmanaged.
+
+--- field object.mount.policy
+type: str.enum
+values: unmanaged | deny-missing | synthesize-ephemeral | synthesize-persistent
+closed: true
+
+The KACS mount policy in force, which decides what happens to an object
+with no stored descriptor. `unmanaged` means **no access control at all**:
+every check on the mount is skipped. `deny-missing` refuses access to an
+object without a descriptor. The two `synthesize` policies build one from
+the parent and the mount's template, and differ in whether it is written
+back to disk.
+
+Changing a mount from `deny-missing` to a `synthesize` policy with a chosen
+template makes the template's author the author of every unlabelled
+object's access control on that volume.
+
+--- field object.mount.policy-requested
+type: str.enum
+values: unmanaged | deny-missing | synthesize-ephemeral | synthesize-persistent
+closed: true
+
+The mount policy a caller asked for, beside `object.mount.policy`. On a
+refused change, the policy that stayed in force and the one that was
+wanted.
+
+--- field object.mount.policy-generation
+type: uint
+
+The mount-policy generation in force. Every policy change increments it,
+and every descriptor cached under an older generation is then stale, so a
+change invalidates the cached descriptors of a whole volume at once.
+
+--- field object.sd.length
+type: uint.bytes
+
+The byte length of the object's security descriptor. Where a record names
+two descriptors, this is the object's own.
+
+--- field object.sd.length-previous
+type: uint.bytes
+
+The byte length of the descriptor a change replaced.
+
+--- field object.sd.digest
 type: bin
 
-A caller-supplied opaque identifier for the object, passed through the
-access-check ioctl and never interpreted by the kernel. Present only on
-ioctl-originated checks; kernel-internal enforcement points identify the
-object with the typed `object.*` fields instead.
+A digest of the object's security descriptor in its binary form, so that
+two records can be compared for "same descriptor" without either carrying
+the descriptor itself.
+
+--- field object.sd.digest-previous
+type: bin
+
+The digest of the descriptor a change replaced. Equal to `object.sd.digest`
+on a change that rewrote the descriptor without altering it.
+
+--- field object.sd.owner
+type: bin.sid
+
+The owner SID on the object's security descriptor. Not the token's default
+owner, `object.token.default-owner`, which is the owner a token gives the
+objects it creates.
+
+--- field object.sd.owner-previous
+type: bin.sid
+
+The owner SID a change replaced. Taking ownership is how a principal gains
+the right to rewrite an object's DACL, so the pair is the record of who
+lost control of the object to whom.
+
+--- field object.sd.components
+type: uint.flags
+values: 0x1 OWNER | 0x2 GROUP | 0x4 DACL | 0x8 SACL | 0x10 LABEL
+
+Which parts of the descriptor the operation addressed, as the
+`KACS_SECINFO_*` bits of `uapi/pkm/sd.h`. Each part is guarded by a
+different right — `WRITE_OWNER` for the owner, `WRITE_DAC` for the DACL,
+`ACCESS_SYSTEM_SECURITY` for the SACL — so a record about a descriptor
+change is read with this.
+
+--- field object.sd.cache-state
+type: str.enum
+values: valid | missing | corrupt
+closed: true
+
+The state of the descriptor KACS holds cached for the inode. Anything but
+`valid` means the normal check could not run against the object's own
+descriptor; what happened instead depends on the mount policy, and a
+caller with `SeRestorePrivilege` can replace a missing or corrupt one
+outright.
+
+--- field object.sd.provenance
+type: str.enum
+values: xattr | missing | synthetic | synthetic-pending | corrupt | stratafs-root
+closed: false
+
+Where the cached descriptor came from. `xattr` was read from the object's
+stored descriptor; `synthetic` was built from the parent and the mount's
+template; `synthetic-pending` was synthesised on a persistent mount and has
+not yet been written back; `stratafs-root` is a StrataFS root's descriptor,
+read through the outer inode and re-read on every check. A different
+vocabulary from `object.sd.cache-state`, held beside it on the same entry.
+
+--- field object.sd.mount-generation
+type: uint
+
+The mount-policy generation stamped on the cached descriptor when it was
+cached. Compared with `object.mount.policy-generation`: a descriptor from an
+older generation is stale and is discarded on next use.
+
+--- field object.sd.synthesis-depth
+type: uint
+
+How many ancestor directories a descriptor synthesis walked. An object
+with no stored descriptor inherits from its parent, which may itself need
+synthesising, so the walk climbs until it finds a labelled ancestor.
+
+--- field object.sd.synthesis-depth-limit
+type: uint
+
+The ceiling on `object.sd.synthesis-depth`, 32 levels in this kernel. A
+synthesis that reaches it fails closed: no descriptor is built and the
+access is refused, however the object's ancestors are labelled.
+
+--- field object.socket.type
+type: str.enum
+values: stream | dgram | raw | rdm | seqpacket
+closed: false
+
+The socket's type, from the Linux `SOCK_*` value with its prefix removed
+and folded to lower case.
+
+--- field object.socket.state
+type: str.enum
+values: free | unconnected | connecting | connected | disconnecting
+closed: true
+
+The socket's connection state, from the Linux `SS_*` value with its prefix
+removed and folded to lower case. A listening socket reads `unconnected`
+here: listening is a transport state, not a connection state.
+
+--- field object.socket.address
+type: str.ip
+
+The address a listening socket is bound to. A wildcard address (`0.0.0.0`
+or `::`) is a legitimate value: it means every address on the machine.
+
+--- field object.socket.port
+type: uint
+
+The port a listening socket is bound to. A listener has one port, which is
+neither a source nor a destination, so it is not `source.port` or
+`destination.port`; a search for a port number should cover all three.
+
+--- field object.socket.options
+type: uint.flags
+
+The options of a listening socket: whether it is one of an `SO_REUSEPORT`
+group, whether an IPv6 socket refuses IPv4-mapped traffic, and whether a
+bound UDP socket is also connected to one peer. The kernel reports these
+today as three separate booleans, and no bit assignment for them is
+defined yet.
+
+--- field object.socket.principal-kind
+type: str.enum
+values: unstamped | program | kernel
+closed: false
+
+What kind of principal governs the socket for network policy. `program` is
+a process, whose token and process facts were stamped on the socket;
+`kernel` is a kernel socket, with no token. `unstamped` is a socket that
+was never stamped, so network policy has nobody to attribute its traffic
+to.
+
+--- field object.socket.reservation
+type: str
+
+The port-reservation selector a bind matched, naming the reservation whose
+descriptor decided whether the caller could bind the port. Peios replaces
+the privileged-port floor with these reservations entirely, so this is the
+rule that let a process listen on its port.
+
+--- field object.socket.impersonation-limit
+type: uint.enum
+values: 0 Anonymous | 1 Identification | 2 Impersonation | 3 Delegation
+closed: true
+
+The highest impersonation level the socket will convey to a peer.
+Raising it to `Impersonation` or `Delegation` lets a receiver act as the
+sender, not merely identify it.
+
+--- field object.socket.token-passing
+type: bool
+
+Whether automatic per-send token passing is on for the socket: whether
+every send carries the sender's identity to the receiver without being
+asked.
+
+--- field object.socket.token-derived
+type: bool
+
+Whether the token conveyed on a send was derived from the sender's token
+rather than passed as is, so the receiver did not get the sender's token
+itself.
+
+--- field object.socket.token-delivered
+type: bool
+
+Whether the conveyed token actually reached the receiver. False means the
+message arrived and the identity did not.
+
+--- field object.socket.identity-dropped
+type: bool
+
+Whether a conveyed identity was dropped because the receiver's control
+buffer was too small to hold it. The message is delivered either way, so
+true means the receiver got data with no identity attached and could not
+tell.
+
+--- field object.socket.id
+type: uint
+
+The identity of the socket the operation acted on.
+
+**Not emitted today.** Peios publishes no stable socket identifier; the
+kernel's inode number and pointer are both unsuitable, so records name a
+socket only by its kind and, for a listener, its address and port.
+
+--- field source.file.path
+type: str.path
+
+The path an object came from, in an operation on two objects such as a
+rename or a link. The object is at `destination.file.path` afterwards.
+Neither is the record's `object.file.path`: the operation acted on both.
+
+--- field source.token.guid
+type: bin.guid
+
+The durable GUID of the token an operation derived a new one from, by
+duplicating or filtering it. The new token is `destination.token.guid`.
+
+--- field destination.file.path
+type: str.path
+
+The path an object went to, in an operation on two objects such as a
+rename or a link. Where it came from is `source.file.path`.
+
+--- field destination.file.parent.inode
+type: uint
+
+The inode number of the directory a rename moves an object into. Subject
+to the same caveats as `object.file.inode`.
+
+--- field destination.token.guid
+type: bin.guid
+
+The durable GUID of a token the operation created, which did not exist
+before it: the result of a duplicate, a filter or a token creation.
 
 --- field access.requested
 type: uint.mask
@@ -231,13 +1468,129 @@ The subset of the requested access that overlapped an audit mask and
 therefore caused the record to exist. The bits that triggered the audit,
 not the bits that were used.
 
---- field access.audit_mask
+--- field access.audit-mask
 type: uint.mask
 
 The full continuous-audit mask cached on a handle, of which
 `access.matched` is the part this operation touched. Present so an operator
 can see what else on that handle would fire, which cannot be derived from
 the intersection alone.
+
+--- field access.requested-minimum
+type: uint.mask
+
+The smallest access a POSIX open genuinely needed, before the kernel
+widened the request for compatibility. Carried beside `access.requested`:
+the difference is access the caller was given without asking for it.
+
+--- field access.maximum-allowed
+type: bool
+
+Whether the request was made in `MAXIMUM_ALLOWED` mode, asking for
+whatever the descriptor would grant rather than for named rights. Changes
+how SACL audit ACEs match, and such a request cannot fail, so it is needed
+to read both `access.granted` and `outcome.success`.
+
+--- field access.decided
+type: uint.mask
+
+The bits the DACL evaluation reached a conclusion on, granted or denied
+by an ACE. A requested bit outside this set was never mentioned by any ACE
+and was denied because nothing granted it — a different finding from an
+explicit deny, and one `access.granted` alone cannot show.
+
+--- field access.disallowed
+type: uint.mask
+
+The requested bits that fall outside the set the operation permits at
+all, whatever the descriptor says. Such a request is refused before any
+access check.
+
+--- field access.missing
+type: uint.mask
+
+The rights an operation needed that the handle did not have. Carried on a
+refusal of an operation on an already-open handle: the handle's
+`access.granted`, and what it lacked.
+
+--- field access.denied-integrity
+type: uint.mask
+
+The bits mandatory integrity control denied.
+
+**Not emitted today.** The evaluator computes this mask and discards it
+before it leaves the access check.
+
+--- field access.denied-trust
+type: uint.mask
+
+The bits the process-trust label denied. Can be non-zero in the same
+evaluation as `access.denied-integrity`.
+
+**Not emitted today.** The evaluator computes this mask and, except for
+the process object class, discards it before it leaves the access check.
+
+--- field access.granted-staged
+type: uint.mask
+
+What a staged central access policy, not yet in force, would have granted.
+Carried beside `access.granted`, the grant the policy in force produced;
+the two differing is the record of what a policy change will alter before
+it is made.
+
+--- field access.privileged
+type: bool
+
+Whether the check was satisfied by a privilege rather than by the
+descriptor. True on a descriptor written with `SeRestorePrivilege` over a
+missing or corrupt one, which is a complete bypass of the object's access
+control and not a decision the descriptor made.
+
+--- field access.self
+type: bool
+
+Whether the operation targeted the caller itself. Several cross-process
+checks exempt a process acting on itself structurally — `raise()` must work
+even when a restricted token would fail its own process's descriptor — so
+true means no descriptor was consulted.
+
+--- field access.bypass
+type: str.enum
+values: priv | si-fromkernel
+closed: true
+
+Why a signal was delivered with no access check at all. `priv` is a signal
+the kernel sent as itself (`SEND_SIG_PRIV`); `si-fromkernel` is one whose
+`si_code` marks it as kernel-originated. Either is a total bypass of the
+process-access model, keyed off the signal's origin, so a spoofed origin
+would be silent; absent when the signal was checked.
+
+--- field access.ptrace-mode
+type: uint.flags
+values: 0x1 PTRACE_MODE_READ | 0x2 PTRACE_MODE_ATTACH | 0x4 PTRACE_MODE_NOAUDIT | 0x8 PTRACE_MODE_FSCREDS | 0x10 PTRACE_MODE_REALCREDS | 0x20 PTRACE_MODE_GETFD | 0x40 PTRACE_MODE_PIDFD_OPEN | 0x80 PTRACE_MODE_PROC_QUERY_LIMITED | 0x100 PTRACE_MODE_PROC_QUERY_INFORMATION
+
+The ptrace access mode of a cross-process check. The last four bits are
+Peios additions that let KACS tell a pidfd open, a descriptor theft and a
+`/proc` read apart from a generic ptrace check. The mode decides the
+process right required: `PTRACE_MODE_GETFD`, taking another process's file
+descriptor, needs `PROCESS_DUP_HANDLE`.
+
+--- field access.vfs-mask
+type: uint.flags
+values: 0x1 MAY_EXEC | 0x2 MAY_WRITE | 0x4 MAY_READ | 0x8 MAY_APPEND | 0x10 MAY_ACCESS | 0x20 MAY_OPEN | 0x40 MAY_CHDIR | 0x80 MAY_NOT_BLOCK
+
+The VFS permission mask the kernel passed to the check. A different
+vocabulary from `access.requested`, which is the KACS rights the mask was
+mapped to; a record carrying both shows the mapping.
+
+--- field access.default-descriptor
+type: bool
+
+Whether an authorisation decision used the compiled-in default security
+descriptor rather than one an administrator configured. When true, the
+policy that decided was built into the kernel and is not visible anywhere
+in the registry. The case that produces it today is a write to the base
+layer when the base layer has no metadata row of its own.
 
 --- field outcome.success
 type: bool
@@ -248,27 +1601,37 @@ read the event's own note before computing a rate over it.
 --- field outcome.reason
 type: str.enum
 
-Why the operation resolved the way it did. Values are drawn from the
-relevant `uapi/pkm/trace.h` family, cited per event as a curated subset —
-the family carries codes that are never event reasons. Rendered with the
-family prefix stripped and case folded, so `KACS_FSR_GRANT_DENY` presents
-as `grant-deny` while the stored identity stays the trace code, and an
-investigation escalating from the event stream to a live trace sees the
-same decision described in the same terms.
+Why the operation resolved the way it did. Each event declares its own
+values: a list, or a curated subset of a `uapi/pkm/trace.h` family, which
+carries codes that are never event reasons. A trace code is rendered with
+the family prefix stripped and case folded, so `KACS_FSR_GRANT_DENY`
+presents as `grant-deny`, and an investigation escalating from the event
+stream to a live trace sees the same decision described in the same terms.
 
 --- field outcome.verdict
 type: str.enum
 values: pass | reject | drop
+closed: true
 
 The decision a policy engine reached, where the decision has more than two
 states and `outcome.success` cannot express it. `reject` and `drop` both
 refuse, and differ in whether the refusal is signalled back to the sender
 or the traffic is discarded silently.
 
+--- field outcome.verdict-previous
+type: str.enum
+values: pass | reject | drop
+closed: true
+
+The verdict a flow's cached judgment held before it was judged again. Set
+beside `outcome.verdict`, the pair is what tells a reload that changed a
+live connection's fate, such as `pass` to `drop`, from the far commoner
+re-judgment that changed nothing.
+
 --- field outcome.errno
 type: int.errno
 
-The error the operation failed with, as a negative errno, or zero on
+The error the operation failed with, as a negative errno. Absent on
 success. Present where an event records an outcome that has a specific
 failure rather than only a boolean.
 
@@ -280,9 +1643,103 @@ operation succeeded. A deferred refusal has nobody left to receive an
 error, which is why it is recorded unconditionally rather than only for
 the arrangement errors.
 
+--- field outcome.detail
+type: str
+
+Free text about the outcome, for a person to read. Optional, and never
+parsed: anything a consumer would filter on belongs in `outcome.reason` or
+a field of its own. Never the output of a language's debug formatter.
+
+--- field outcome.reverted
+type: bool
+
+Whether a credential change the kernel had prepared was silently undone,
+so that the call returned success having changed nothing. The caller is
+told it worked; this is the only record that it did not.
+
+--- field outcome.fallback
+type: bool
+
+Whether the operation took a fallback path because the mechanism it
+prefers was unavailable. The operation still completed, by a slower or
+coarser route.
+
+--- field outcome.offset
+type: uint
+
+The byte offset within the input at which parsing failed. Read with
+`outcome.field` where the input is a structure.
+
+--- field outcome.field
+type: str
+
+The name of the structure field an error was attributed to, such as the
+member of an argument structure that was out of range.
+
+--- field outcome.address
+type: uint
+
+The user-space address that faulted when the kernel tried to copy from or
+to it. Meaningful only within the faulting process's address space, and
+only until that address space changes.
+
+--- field outcome.cleanup
+type: str.enum
+values: succeeded | failed | declined
+closed: true
+
+The outcome of the compensating action StrataFS took to undo part of a
+failed operation, such as removing an object it had just created.
+`declined` means StrataFS deliberately did not undo it, because the name
+no longer referred to the object it had created and removing it could
+have removed someone else's.
+
+Both `failed` and `declined` leave an object behind in the stratum that
+nothing in the merged view accounts for.
+
+--- field outcome.errno-cleanup
+type: int.errno
+
+The error a compensating action failed with, when an operation failed and
+its undo failed too. Read with `outcome.errno`, the error of the operation
+itself: the pair is how orphaned objects come to exist. Absent when the
+undo succeeded or was not attempted.
+
+--- field outcome.errno-masked
+type: int.errno
+
+The error an underlying step actually failed with, where StrataFS
+returned a different one to the caller. `outcome.errno` holds the error
+the caller saw; this field holds the one it replaced, which is usually the
+one that explains the failure.
+
+--- field outcome.result-raw
+type: int
+
+A raw result from an internal step that was neither zero nor a valid
+negative errno, recorded instead of being passed on. Deliberately not
+`outcome.errno`: a value outside the errno range returned from an open
+could reach the caller as a pointer to a file, so StrataFS converts it to
+`EIO`, and this field holds what it caught.
+
+--- field outcome.invariant-violated
+type: bool
+
+Whether an internal invariant was found broken and execution continued
+anyway. A record with this set describes a state the code assumes cannot
+happen, so treat whatever follows it on the same mount as suspect.
+
+--- field outcome.data-lost
+type: bool
+
+Whether the outcome a record describes destroyed data, rather than only
+failing to do what was asked. Set this aside from ordinary failures: a
+data-losing outcome is not recovered by retrying.
+
 --- field trigger.kind
 type: str.enum
 values: sacl | policy
+closed: true
 
 Why an audit record exists at all. `sacl` means an audit ACE on the object,
 or in a central access policy, matched this access. `policy` means nothing
@@ -296,9 +1753,9 @@ a property of the object and is fixed on its SACL.
 type: bin.ace
 
 The exact ACE that caused this record, so a consumer can identify which rule
-fired. Null when `trigger.kind` is `policy`, because no ACE was involved.
+fired. Absent when `trigger.kind` is `policy`, because no ACE was involved.
 
---- field trigger.sacl_match
+--- field trigger.sacl-match
 type: uint.flags
 values: 0x1 success-audit matched | 0x2 failure-audit matched
 
@@ -306,12 +1763,58 @@ Which flavour of audit ACE matched. No other bits are ever set. Distinct
 from `trigger.kind`, which says whether a SACL was involved at all — this
 says which side of one fired, and both bits can be set at once.
 
+--- field trigger.open-audit
+type: bool
+
+Whether the object's SACL required the open itself to be audited. The
+registry writes its key-open audit record only when this is true, so it is
+the reason such a record exists.
+
+--- field trigger.privilege-audit
+type: bool
+
+Whether the use of a privilege required its own audit record.
+
+**Not emitted today.** The registry computes it during the open check and
+carries it across to the kernel's C side, where nothing reads it, so no
+privilege-use record is produced for a registry open.
+
+--- field trigger.fail-closed
+type: bool
+
+Whether a failure to write this audit record may fail the operation it
+describes. True where the record is mandatory and the operation is refused
+rather than left unrecorded; false where emission is best effort.
+
+--- field trigger.file.path
+type: str.path
+
+The path of the file that caused the record, where that is not the object
+the record is about. Two cases: an operation on one object that had a side
+effect elsewhere, such as the ancestor directories a copy-up materialised;
+and an ancestor whose type masked the subtree the object sits in.
+
+--- field trigger.stratum.path
+type: str.path
+
+The filesystem path of the stratum whose contents blocked an operation:
+the layer holding the entry that made a creation collide, a directory
+non-empty, or a name the wrong type. Without it a refusal names the error
+but not which layer an administrator must look in to clear it.
+
+--- field trigger.stratum.index
+type: uint
+
+The position, within the mount's stack, of the stratum whose contents
+blocked an operation. Present exactly when `trigger.stratum.path` is.
+
 --- field operation.name
 type: str.enum
-values: file.access | file.mmap | file.mprotect | file.permission | file.write | file.ioctl | file.lock | file.fcntl | file.truncate | file.fallocate
 
-Which operation was attempted on an already-open handle. The enforcement
-point names it; FACS uses a `file.` prefix for file handles.
+Which operation was attempted. Each event declares the names its
+enforcement point uses, and the sets are disjoint where two points could
+be confused: FACS names operations on an already-open handle with a
+`file.` prefix, and StrataFS names its own without one.
 
 --- field operation.fd
 type: uint
@@ -320,36 +1823,391 @@ The file descriptor a bulk operation transferred through — the sink a
 backup was written to, or the source a restore was read from. Direction is
 given by the event, not by this field.
 
---- field config.key
+--- field operation.code
+type: uint
+
+The command or opcode within the operation, such as an `ioctl` command or a
+`prctl` option. Its vocabulary depends on `operation.name`, so the two are
+read together.
+
+--- field operation.arguments
+type: uint[]
+
+The numeric arguments of the command in `operation.code`, in order, such as
+the `prctl` arguments after the option.
+
+--- field operation.site
+type: str.enum
+
+Which system call or kernel gate the record came from. Peios adds about
+thirty access checks to Linux call sites — many of them re-checks on an
+already-open file descriptor, added because an open descriptor used to be a
+way round the check — and a refusal is only useful if it says which one
+fired. Each event declares the sites it can come from.
+
+--- field operation.stage
+type: str.enum
+
+Which internal stage of a multi-step operation the record concerns.
+Several unrelated operations have stages, with nothing in common between
+their vocabularies, so each event declares its own.
+
+--- field operation.stage-requested
+type: str.enum
+
+The stage that was asked for while another, `operation.stage`, was still
+active. Drawn from the same vocabulary as `operation.stage` on the same
+event, which declares it.
+
+--- field operation.decision
+type: str.enum
+values: primary | parent-fallback | source | dest | delete-existing
+closed: false
+
+Which sub-decision of a namespace operation the record concerns, from the
+`KACS_NS_*` codes. A single-decision operation reports `primary`; a delete
+refused on the object can still be allowed by `DELETE_CHILD` on the
+parent, `parent-fallback`; a rename produces up to three records, for the
+source, the destination parent, and an existing destination it replaces.
+
+--- field operation.create-disposition
+type: str.enum
+values: supersede | open | create | open-if | overwrite | overwrite-if
+closed: true
+
+What a native open was told to do about an existing or missing file, from
+the `KACS_DISPOSITION_*` values. `supersede` and `overwrite` destroy an
+existing file's content; `open` fails if the file is missing and `create`
+fails if it exists.
+
+--- field operation.create-options
+type: uint.flags
+values: 0x1 DIRECTORY | 0x2 DELETE_ON_CLOSE
+
+The create options of a native open, from the `KACS_CREATE_OPT_*` bits.
+`DELETE_ON_CLOSE` schedules the file's removal when the last handle that
+requested it is closed.
+
+--- field operation.open-flags
+type: uint.flags
+
+The `open` flags the caller asked for, as the Linux `O_*` bits of the
+`flags` argument. The rights these imply are what KACS checks;
+`access.requested-minimum` records the least of them.
+
+--- field operation.clone-flags
+type: uint.flags
+
+The Linux `CLONE_*` flags a new task was created with. `CLONE_THREAD`
+decides whether the new task shares its creator's security state, which
+`object.process.shares-security` records.
+
+--- field operation.exec-unsafe
+type: uint.flags
+values: 0x1 LSM_UNSAFE_SHARE | 0x2 LSM_UNSAFE_PTRACE | 0x4 LSM_UNSAFE_NO_NEW_PRIVS
+
+The kernel's unsafe-exec flags (`bprm->unsafe`) at an exec. Under
+`PTRACE` or `NO_NEW_PRIVS`, an exec may not raise the process's trust, and
+a signature-derived label is capped instead.
+
+--- field operation.lsm-flags
+type: uint.flags
+values: 0x1 LSM_SETID_ID | 0x2 LSM_SETID_RE | 0x4 LSM_SETID_RES | 0x8 LSM_SETID_FS
+
+Which variant of a legacy set-identity call was made, as the kernel's
+`LSM_SETID_*` flags: `setuid`, `setreuid`, `setresuid` or `setfsuid`, and
+the `gid` equivalents. 0 for `setgroups`.
+
+--- field operation.uid
+type: uint
+
+The UID a `setuid`-family call asked for. Peios does not let such a call
+change identity; the record shows what was attempted.
+
+--- field operation.gid
+type: uint
+
+The GID a `setgid`-family call asked for.
+
+--- field operation.linux-projection
+type: bool
+
+Whether the Linux identity projection — UID, GID and supplementary groups —
+was recomputed as part of a token install. False means the process's Linux
+credentials still reflect the previous token.
+
+--- field operation.signal
+type: uint
+
+The signal number of a signal delivery decision. The signal decides which
+process right is required, so a refusal is read with it.
+
+--- field operation.profiling-scope
+type: str.enum
+values: single-process | system-wide
+closed: true
+
+The scope of a profiling authorisation. `system-wide` samples every
+process, PIP-protected ones included, and needs `SeSystemProfilePrivilege`;
+`single-process` profiles one other process and needs
+`SeProfileSingleProcessPrivilege`.
+
+--- field operation.ptrace-initiator
+type: str.enum
+values: tracer | tracee
+closed: true
+
+Which side began a ptrace relationship. `tracer` is a debugger attaching
+to another process; `tracee` is a process inviting its parent to control
+it, with `PTRACE_TRACEME`.
+
+--- field operation.copy-up-phase
+type: str.enum
+values: none | source-read | create | populate | publish-link | publish-rename | cleanup | orphan-marker
+closed: false
+
+The phase of an in-flight StrataFS copy-up. KACS admits the copy-up's own
+operations without a caller check only while they match the armed phase,
+so a refusal here is a copy-up that tried something its phase does not
+allow.
+
+--- field operation.copy-up-generation
+type: uint
+
+The generation of the current copy-up phase. Incremented each time a phase
+is armed, so a handle carrying an older generation is stale. Unrelated to
+`object.mount.policy-generation`.
+
+--- field operation.reentry-depth
+type: uint
+
+The nesting depth of the kernel's own re-entry into descriptor storage: a
+read or write of a descriptor attribute that passes back through the
+security hooks, as happens through a stacking filesystem. Not the depth of
+a directory walk, which is `object.sd.synthesis-depth`.
+
+--- field operation.replaced
+type: bool
+
+Whether the operation silently replaced something that was already there,
+such as a link between tokens that displaced an existing pair.
+
+--- field operation.compat
+type: bool
+
+Whether the call came in through the 32-bit compatibility entry point.
+
+--- field operation.bytes
+type: uint.bytes
+
+How many bytes the operation moved before it stopped. On a Unix stream
+socket, a read is cut short where the sender's conveyed identity changes,
+and this is the only explanation the reader has for a short read.
+
+--- field operation.attempts
+type: uint
+
+How many attempts the operation made before it gave up.
+
+--- field operation.duration
+type: uint.duration
+
+How long the operation took.
+
+--- field operation.timeout
+type: uint.duration
+
+The timeout that applied to the operation. On an operation that timed
+out, `operation.duration` will have reached it.
+
+--- field operation.available
+type: uint
+
+How many items existed for the operation to return. Read with
+`operation.returned`.
+
+--- field operation.returned
+type: uint
+
+How many items the operation returned. Fewer than `operation.available`
+means the result was truncated.
+
+--- field operation.succeeded-count
+type: uint
+
+How many items in a batch operation succeeded.
+
+--- field operation.failed-count
+type: uint
+
+How many items in a batch operation failed. With
+`operation.succeeded-count`, the whole batch; a non-zero count here on a
+record whose `outcome.success` is true is a partial success.
+
+--- field operation.route
+type: str.enum
+values: in-place | copy-up | read-only
+closed: true
+
+How StrataFS routed a mutation of an existing object. `in-place` wrote the
+object in the stratum that provides it. `copy-up` first copied it into the
+create stratum and wrote the copy. `read-only` refused it with `EROFS`,
+because the object's stratum does not accept writes and no copy-up was
+possible.
+
+`read-only` has several causes, among them a read-only mount, no create
+stratum, and an object that cannot be copied, and this field does not say
+which.
+
+--- field operation.strata
+type: uint.flags
+
+The set of strata taking part in a merged operation, as flags with one bit
+per stratum:
+bit 0 is the stratum at index 0, the highest-precedence one. A merged
+directory's listing, for example, draws on every stratum whose bit is set.
+
+--- field operation.entry-point
+type: str.enum
+values: mount | directory-open | rmdir | staging-lookup | copy-up
+closed: false
+
+The operation that set off recovery of orphaned staging entries, the
+partial copies an interrupted copy-up leaves in the create stratum.
+`mount` sweeps the create stratum's root when the mount is made;
+`directory-open` and `rmdir` sweep the directory concerned; `copy-up`
+sweeps the destination's parent first; `staging-lookup` fires when a path
+lookup names an entry that looks like a staging name.
+
+`staging-lookup` is the one an unprivileged process can trigger at will,
+by looking up such a name.
+
+--- field operation.adopted
+type: bool
+
+Whether an operation took over an object that already existed in the
+target stratum instead of creating a new one. An adopted object keeps
+whatever it already had, so an adoption where a creation was expected is
+worth reading closely.
+
+--- field operation.anonymous
+type: bool
+
+Whether an object was created through the anonymous path, an unnamed
+temporary file (`O_TMPFILE`) that has no name in any stratum until it is
+linked in.
+
+--- field operation.stacked-create
+type: bool
+
+Whether the object's real inode was created by a stacking filesystem
+below StrataFS rather than directly by the stratum's own filesystem. When
+true, a different filesystem's hooks ran on the creation, which changes
+which hook stamped the object's security descriptor.
+
+--- field operation.contents-copied
+type: bool
+
+Whether a copy-up copied an object's contents or only created the node.
+Always false for a directory, whose entries are not copied. Read with the
+object's type before assuming a copy-up moved any data.
+
+--- field operation.attributes-copied
+type: uint.flags
+
+The metadata attributes a copy-up carried across from the original object
+to the copy. Copy-up carries the modification time, the mode (except on a
+symbolic link, whose mode the VFS fixes), the owning UID and GID, and the
+extended attributes other than StrataFS's own. The bit assignments are not
+yet defined, so this field declares no values until they are.
+
+--- field operation.setattr-mask
+type: uint.flags
+values: 0x1 ATTR_MODE | 0x2 ATTR_UID | 0x4 ATTR_GID | 0x8 ATTR_SIZE | 0x10 ATTR_ATIME | 0x20 ATTR_MTIME | 0x40 ATTR_CTIME | 0x80 ATTR_ATIME_SET | 0x100 ATTR_MTIME_SET | 0x200 ATTR_FORCE | 0x400 ATTR_CTIME_SET | 0x800 ATTR_KILL_SUID | 0x1000 ATTR_KILL_SGID | 0x2000 ATTR_FILE | 0x4000 ATTR_KILL_PRIV | 0x8000 ATTR_OPEN | 0x10000 ATTR_TIMES_SET | 0x20000 ATTR_TOUCH | 0x40000 ATTR_DELEG
+
+Which attributes a setattr asked to change, as the kernel's `ATTR_*` bits.
+These bits are internal to the Linux kernel rather than part of its ABI,
+so they are decoded against the kernel version that wrote the record.
+`ATTR_SIZE` with `ATTR_OPEN` is a truncate from `open` with `O_TRUNC`, not
+an explicit `truncate` call.
+
+--- field operation.rename-flags
+type: uint.flags
+values: 0x1 RENAME_NOREPLACE | 0x2 RENAME_EXCHANGE | 0x4 RENAME_WHITEOUT
+
+The flags a caller passed to `renameat2`. StrataFS always refuses
+`RENAME_WHITEOUT` with `EINVAL`, so a record carrying that bit is a
+refusal however the rest of the rename looked.
+
+--- field operation.open-flags-effective
+type: uint.flags
+
+The open flags StrataFS used against the stratum below, after rewriting
+the flags the caller asked for, which `operation.open-flags` holds and
+whose `O_*` values decode this one too. Where the object is not written in
+place, a write open of a regular file is reopened read-only without
+`O_APPEND`, and `O_TRUNC` is dropped, until a write copies the object up.
+
+The difference between the two fields is the finding: a caller that asked
+to truncate a file may hold a descriptor on which nothing has been
+truncated yet.
+
+--- field operation.non-blocking
+type: bool
+
+Whether a path walk was in RCU mode, the kernel's non-blocking lookup.
+StrataFS refuses every RCU-mode step, so the kernel retries the walk in
+blocking mode; a record with this set is the refusal, not a failure the
+caller sees.
+
+--- field operation.settled-view
+type: bool
+
+Whether a record concerns a directory view settled when its descriptor was
+opened, rather than a live resolution of the merged path. A settled view
+keeps the listing and strata it was opened with, and goes on answering
+from them after a rename and when the descriptor is passed to another
+process, so it can disagree with what the path resolves to now.
+
+--- field operation.name-truncated
+type: bool
+
+Whether a name in the record could not be carried in full and was cut
+short. When true, do not search for the name exactly: the full name is
+longer than what the record holds.
+
+--- field config.key.path
 type: str
 
-The registry key the rejected value lives under, in canonical form.
+The registry key the reported value lives under, in canonical form.
 
 --- field config.name
 type: str
 
 The name of the configuration value being reported on, within
-`config.key`.
+`config.key.path`.
 
 --- field config.expected.type
 type: uint.enum
-values: REG_DWORD | REG_QWORD | REG_SZ | REG_BINARY | REG_MULTI_SZ
+values: 0 REG_NONE | 1 REG_SZ | 2 REG_EXPAND_SZ | 3 REG_BINARY | 4 REG_DWORD | 5 REG_DWORD_BIG_ENDIAN | 6 REG_LINK | 7 REG_MULTI_SZ | 8 REG_RESOURCE_LIST | 9 REG_FULL_RESOURCE_DESCRIPTOR | 10 REG_RESOURCE_REQUIREMENTS_LIST | 11 REG_QWORD
+closed: true
 
 The registry type the value is required to have.
 
 --- field config.expected.min
 type: uint
 
-The smallest value accepted for this knob.
+The smallest value accepted for this setting.
 
 --- field config.expected.max
 type: uint
 
-The largest value accepted for this knob.
+The largest value accepted for this setting.
 
 --- field config.received.kind
 type: str.enum
 values: missing | wrong-type | out-of-range
+closed: true
 
 How the stored value failed validation. Three different administrative
 mistakes with three different fixes: a value that was absent, one of the
@@ -363,7 +2221,8 @@ one.
 
 --- field config.received.type
 type: uint.enum
-values: REG_DWORD | REG_QWORD | REG_SZ | REG_BINARY | REG_MULTI_SZ
+values: 0 REG_NONE | 1 REG_SZ | 2 REG_EXPAND_SZ | 3 REG_BINARY | 4 REG_DWORD | 5 REG_DWORD_BIG_ENDIAN | 6 REG_LINK | 7 REG_MULTI_SZ | 8 REG_RESOURCE_LIST | 9 REG_FULL_RESOURCE_DESCRIPTOR | 10 REG_RESOURCE_REQUIREMENTS_LIST | 11 REG_QWORD
+closed: true
 
 The registry type the value actually had. Present only when the failure was
 the type itself.
@@ -375,28 +2234,267 @@ The value that was stored and rejected. Present only when the value was
 well-typed and out of range — there is nothing to report for a value that
 was missing or of the wrong type entirely.
 
---- field config.retained.value
+--- field config.value
 type: uint
 
-The value still in effect after the rejection. Configuration validation is
-reject-or-keep and never clamps, so this is the last known-good value, not
-a corrected version of what was stored.
+The value in force after the event. On a rejection that is the last
+known-good value, not a corrected version of what was stored:
+configuration validation is reject-or-keep and never clamps.
 
 **The registry and this field can legitimately disagree.** The registry
 shows what was written; this shows what the subsystem is actually using.
 
+--- field config.value-previous
+type: uint
+
+The value that was in force before the change. With `config.value`, the
+before and after of a setting that took effect.
+
+--- field config.text
+type: str
+
+A setting's value in force, where the value is not an integer: a string,
+or the textual rendering of a value of another registry type. The registry
+type is `config.type`.
+
+--- field config.text-previous
+type: str
+
+The text value a change replaced, beside `config.text`.
+
+--- field config.type
+type: uint.enum
+values: 0 REG_NONE | 1 REG_SZ | 2 REG_EXPAND_SZ | 3 REG_BINARY | 4 REG_DWORD | 5 REG_DWORD_BIG_ENDIAN | 6 REG_LINK | 7 REG_MULTI_SZ | 8 REG_RESOURCE_LIST | 9 REG_FULL_RESOURCE_DESCRIPTOR | 10 REG_RESOURCE_REQUIREMENTS_LIST | 11 REG_QWORD
+closed: true
+
+The registry type of the value now in force, as the number of its `REG_*`
+constant. Absent when no value is in force. The same registry types, in the
+same numbering, as `config.expected.type`.
+
+--- field config.type-previous
+type: uint.enum
+values: 0 REG_NONE | 1 REG_SZ | 2 REG_EXPAND_SZ | 3 REG_BINARY | 4 REG_DWORD | 5 REG_DWORD_BIG_ENDIAN | 6 REG_LINK | 7 REG_MULTI_SZ | 8 REG_RESOURCE_LIST | 9 REG_FULL_RESOURCE_DESCRIPTOR | 10 REG_RESOURCE_REQUIREMENTS_LIST | 11 REG_QWORD
+closed: true
+
+The registry type of the value a change replaced. Absent when there was no
+value before.
+
+--- field config.received.text
+type: str
+
+A value supplied as text and rejected because it could not be parsed, as
+the caller wrote it. Carried where there is no well-typed value for
+`config.received.value` to hold.
+
+--- field config.limit
+type: str.enum
+values: request-timeout-ms | transaction-timeout-ms | notification-queue-size | symlink-depth-limit | max-value-size | max-key-depth | max-path-component-length | max-total-path-length | max-layers-per-value | max-bound-transactions-per-source | max-read-only-transactions-per-source | max-total-layers | max-registered-sources | max-hives-per-source | max-concurrent-rsi-requests | max-scope-guids-per-token | max-private-layers-per-token | max-subtree-watch-depth | max-transaction-watch-event-burst
+closed: false
+
+The kernel's internal identifier of a runtime limit, from the `LCS_LIM_*`
+codes with the prefix removed and folded to lower case. A different
+vocabulary from `config.name`: that is the name an administrator wrote in
+the registry, and can be anything; this is the limit the kernel validated,
+and a record can carry one without the other.
+
+--- field config.root
+type: str.enum
+values: registry | kmes | layers | port-reservations | network
+closed: false
+
+Which kernel-read configuration root the record concerns:
+`Machine\System\Registry` for the registry's own limits,
+`Machine\System\KMES`, the layer metadata under
+`Machine\System\Registry\Layers`, the port reservations under
+`Machine\System\Network\TcpIp\PortReservations`, and the network policy
+under `Machine\System\Network`. Which subsystem's key, not which setting
+within it.
+
+--- field config.roots-present
+type: str.enum[]
+values: registry | kmes | layers | port-reservations | network
+closed: false
+
+The configuration roots found present when the registry was bootstrapped,
+from the same values as `config.root`. A root missing from the list is
+running on compiled-in defaults, and the kernel watches the whole machine
+hive for it to appear rather than watching the root itself.
+
+--- field config.counts.applied
+type: uint
+
+How many settings in a configuration refresh were applied. One of four
+counters read together, which between them account for every setting the
+refresh saw.
+
+--- field config.counts.retained-missing
+type: uint
+
+How many settings kept their previous value because they were absent from
+the registry.
+
+--- field config.counts.retained-invalid
+type: uint
+
+How many settings kept their previous value because the stored value was
+rejected, of the wrong type or out of range.
+
+--- field config.counts.ignored-unknown
+type: uint
+
+How many registry values were ignored because their names match no
+setting. A misspelt setting name lands here and nowhere else, so a non-zero
+count is usually an administrator's typo.
+
+--- field config.coalesced
+type: bool
+
+Whether change notifications were coalesced before they were acted on.
+Network policy coalesces and the registry and KMES do not, which is why
+one registry edit produces different numbers of records from different
+subsystems.
+
+--- field config.seed-file
+type: str.path
+
+The shipped registry seed file that was applied, from `/usr/share/regim/`.
+Seed files are inert until an image names them, so this records which
+defaults a machine was actually given.
+
+--- field config.self-watch-mode
+type: str.enum
+values: disarmed | targeted | machine-root-fallback | mixed
+closed: true
+
+How precisely the kernel is watching its own configuration in the
+registry. `targeted` means each kernel-read configuration key has its own
+watch. `machine-root-fallback` means none of those keys could be watched,
+so the kernel watches the whole `Machine` hive and re-reads everything on
+any change beneath it. `mixed` means some keys are watched precisely and
+the fallback covers the rest. `disarmed` means no watch is armed, so a
+configuration change will not be noticed until the next bootstrap.
+
+Anything other than `targeted` is a degraded mode, cheaper to tolerate
+than to diagnose: configuration still loads, but from coarse rescans.
+
+--- field fields.attestation.userspace
+type: bool
+
+Set on a kernel-originated record that carries a value userspace
+supplied, and absent otherwise. Such a value is the supplying component's
+claim: it is what the component says it enforced, which the kernel copied
+but did not observe. The fields that can hold one are marked asserted in
+their definitions.
+
+A userspace-originated record never carries this field, because its
+`emitter.class` already says the whole payload is the emitter's word.
+
+--- field policy.generation
+type: uint
+
+The generation counter of the rule set in force when the decision was made.
+Increments on every policy load, so a record can be tied to the exact rule
+set that produced it rather than to whatever is loaded when the record is
+read.
+
+--- field policy.generation-previous
+type: uint
+
+The generation that was in force before a policy load replaced it. On a
+failed load, compare with `policy.previous-retained`.
+
+--- field policy.previous-retained
+type: bool
+
+Whether a failed policy load left the previous rule set in force. True is
+the safe outcome: the old policy still applies. False means the previous
+rule set is not in force either; `policy.fallback` says what is answering
+instead.
+
+--- field policy.fallback
+type: bool
+
+Whether the compiled-in fallback policy was answering rather than a loaded
+rule set. Makes a silent fall-back to built-in security policy visible: the
+system keeps working, on rules no administrator wrote.
+
+--- field policy.layers
+type: str.enum[]
+values: raw-packet | packet | flow
+closed: true
+
+The rules layers the active generation loaded a forest for. A layer missing
+from the list judges nothing and waves every traversal past it. **A missing
+`flow` layer also turns off endpoint attribution for the whole machine**,
+so no flow carries an owner and every identity field is absent.
+
+--- field policy.report-threshold
+type: uint
+
+The machine's reporting threshold, `CurrentReportingLevel`: a rule's report
+fires only when its level is at least this. It runs from 1 to 6 and is 1
+when the registry has no value. Rules may only declare levels 1 to 5, so a
+threshold of 6 silences every report on the machine, and a silent stream
+then means nothing about the traffic.
+
+--- field policy.report-threshold-previous
+type: uint
+
+The machine's reporting threshold before the change a record reports, in
+the terms of `policy.report-threshold`. A move to 6 is a change to the
+audit volume itself and turns every network report off.
+
+--- field transaction.id
+type: uint
+
+The transaction the operation belonged to, registry or package. A pure
+correlation identifier: every record of one transaction carries the same
+value, from begin to commit or abort. The registry and the package manager
+number their transactions independently, so an identifier is unique only
+within one of them; which it belongs to follows from the event type.
+
+--- field transaction.position
+type: uint
+
+The ordinal of a mutation within its registry transaction, counting from
+1 in the order the mutations were made. Correlates one operation with its
+place in a commit that applies many.
+
+--- field transaction.state
+type: str.enum
+values: active-unbound | active-bound | committed | aborted | timed-out | source-down
+closed: false
+
+The state of a registry transaction, from the `REG_TXN_*` states. A
+transaction is `active-unbound` until its first mutation binds it to a
+source and hive, then `active-bound`. The other four are terminal:
+`committed`, `aborted`, `timed-out` when it passed its deadline, and
+`source-down` when the source holding it went away.
+
+`timed-out` and `source-down` do not by themselves say whether the
+transaction's changes landed; see `transaction.commit-outstanding`.
+
+--- field transaction.commit-outstanding
+type: bool
+
+Whether a transaction's commit had been sent to its source and not yet
+answered. When this is true and the transaction then times out or its
+source goes down, nobody can say whether the changes were applied: the
+source may have committed them before the reply was lost.
+
 --- group subject
 include: subject.token.sid
 include: subject.token.groups
-include: subject.token.group_attributes
+include: subject.token.group-attributes
 include: subject.token.integrity
 include: subject.token.id
-include: subject.token.auth_id
+include: subject.token.auth-id
+include: subject.token.type
 include: subject.token.impersonation
 include: subject.token.uid
-include: subject.process.pid
-include: subject.process.name
-include: subject.process.executable
+include: emitter.process.pid
+include: emitter.process.name
+include: emitter.process.executable
 include: subject.pip.type
 include: subject.pip.trust
 
@@ -404,14 +2502,17 @@ The security context an operation ran under, carried by every KACS event
 that has a causing principal. Three components: the effective token, the
 process it ran in, and the PIP state in force.
 
+The process is the emitter's, under `emitter.process`, because a kernel
+access check runs in the caller's own context: the process that acted is
+the process that wrote the record.
+
 **The token and the process are different principals when impersonating.**
 The token is the client's and the process is the server's, so reading the
 pair as one identity will attribute a client's work to a server or the
-reverse. `subject.token.impersonation` is what tells you they have diverged
-— any value other than 0 means they have.
+reverse. `subject.token.type` is what tells you they have diverged.
 
-The token's durable GUIDs are not repeated here. `subject.token.guid`,
-`subject.true_token.guid` and `subject.process.guid` ride in the event
+The durable GUIDs are not repeated here. `emitter.token.guid`,
+`emitter.true-token.guid` and `emitter.process.guid` ride in the event
 header, so they are present on every event whether or not this group is.
 
 Privileges, claims, the restricted-SID list, confinement state and the
@@ -419,4 +2520,3 @@ default DACL are all deliberately absent. Each is unbounded and an event
 embedding them could grow without limit. Code needing full token state
 queries the token directly while it still exists; this group is for
 correlation, not reconstruction.
-

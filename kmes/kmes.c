@@ -72,9 +72,9 @@
 #define PKM_KMES_NO_FD (-1)
 
 static const char pkm_kmes_self_config_invalid_event_type[] =
-	"KMES_SELF_CONFIG_INVALID";
+	"kmes.config.value.rejected";
 static const char pkm_kmes_buffer_swap_failed_event_type[] =
-	"KMES_BUFFER_SWAP_FAILED";
+	"kmes.buffer.swap.failed";
 static const char pkm_kmes_config_parent_path[] = "Machine\\System\\KMES";
 
 struct pkm_kmes_cpu_state {
@@ -334,11 +334,6 @@ static int pkm_kmes_msgpack_write_key(struct pkm_kmes_msgpack_writer *writer,
 	return pkm_kmes_msgpack_write_str(writer, key, strlen(key));
 }
 
-static int pkm_kmes_msgpack_write_nil(struct pkm_kmes_msgpack_writer *writer)
-{
-	return pkm_kmes_msgpack_write_u8(writer, 0xc0);
-}
-
 static int pkm_kmes_msgpack_write_uint(struct pkm_kmes_msgpack_writer *writer,
 				       u64 value)
 {
@@ -375,6 +370,53 @@ static int pkm_kmes_msgpack_write_uint(struct pkm_kmes_msgpack_writer *writer,
 	bytes[6] = (u8)(value >> 16);
 	bytes[7] = (u8)(value >> 8);
 	bytes[8] = (u8)value;
+	return pkm_kmes_msgpack_write_bytes(writer, bytes, sizeof(bytes));
+}
+
+/*
+ * A signed integer in its shortest msgpack form. Non-negative values take
+ * the unsigned encodings, as msgpack's canonical form requires; this exists
+ * for the negative ones, such as an int.errno field.
+ */
+static int pkm_kmes_msgpack_write_int(struct pkm_kmes_msgpack_writer *writer,
+				      s64 value)
+{
+	u64 bits = (u64)value;
+	u8 bytes[9];
+
+	if (value >= 0)
+		return pkm_kmes_msgpack_write_uint(writer, bits);
+	if (value >= -32)
+		return pkm_kmes_msgpack_write_u8(writer, (u8)bits);
+	if (value >= S8_MIN) {
+		bytes[0] = 0xd0;
+		bytes[1] = (u8)bits;
+		return pkm_kmes_msgpack_write_bytes(writer, bytes, 2);
+	}
+	if (value >= S16_MIN) {
+		bytes[0] = 0xd1;
+		bytes[1] = (u8)(bits >> 8);
+		bytes[2] = (u8)bits;
+		return pkm_kmes_msgpack_write_bytes(writer, bytes, 3);
+	}
+	if (value >= S32_MIN) {
+		bytes[0] = 0xd2;
+		bytes[1] = (u8)(bits >> 24);
+		bytes[2] = (u8)(bits >> 16);
+		bytes[3] = (u8)(bits >> 8);
+		bytes[4] = (u8)bits;
+		return pkm_kmes_msgpack_write_bytes(writer, bytes, 5);
+	}
+
+	bytes[0] = 0xd3;
+	bytes[1] = (u8)(bits >> 56);
+	bytes[2] = (u8)(bits >> 48);
+	bytes[3] = (u8)(bits >> 40);
+	bytes[4] = (u8)(bits >> 32);
+	bytes[5] = (u8)(bits >> 24);
+	bytes[6] = (u8)(bits >> 16);
+	bytes[7] = (u8)(bits >> 8);
+	bytes[8] = (u8)bits;
 	return pkm_kmes_msgpack_write_bytes(writer, bytes, sizeof(bytes));
 }
 
@@ -1052,50 +1094,69 @@ static const struct pkm_kmes_config_spec *pkm_kmes_config_spec_for_name(
 	return NULL;
 }
 
-static const char *pkm_kmes_self_config_received_kind_name(u32 kind)
-{
-	switch (kind) {
-	case PKM_KMES_SELF_CONFIG_RECEIVED_MISSING:
-		return "missing";
-	case PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE:
-		return "wrong_type";
-	case PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE:
-		return "u32_out_of_range";
-	case PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE:
-		return "u64_out_of_range";
-	default:
-		return NULL;
-	}
-}
-
-static int pkm_kmes_msgpack_write_received_value(
+/*
+ * The config.received map: the kind, then the one detail that kind has.
+ *
+ * config.received.type exists only for wrong-type and config.received.value
+ * only for out-of-range, so each is left out, not written as nil, where it
+ * does not apply. Both internal range kinds are one wire kind: the width they
+ * distinguish is already in config.expected.type.
+ */
+static int pkm_kmes_msgpack_write_received(
 	struct pkm_kmes_msgpack_writer *writer,
 	const struct pkm_kmes_self_config_audit_intent *audit)
 {
-	switch (audit->received_kind) {
-	case PKM_KMES_SELF_CONFIG_RECEIVED_MISSING:
-	case PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE:
-		return pkm_kmes_msgpack_write_nil(writer);
-	case PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE:
-		return pkm_kmes_msgpack_write_uint(writer, audit->received_u32);
-	case PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE:
-		return pkm_kmes_msgpack_write_uint(writer, audit->received_u64);
-	default:
-		return -EINVAL;
-	}
-}
+	static const char kind_missing[] = "missing";
+	static const char kind_wrong_type[] = "wrong-type";
+	static const char kind_out_of_range[] = "out-of-range";
+	u64 received_value;
+	int ret;
 
-static int pkm_kmes_msgpack_write_received_type(
-	struct pkm_kmes_msgpack_writer *writer,
-	const struct pkm_kmes_self_config_audit_intent *audit)
-{
 	switch (audit->received_kind) {
 	case PKM_KMES_SELF_CONFIG_RECEIVED_MISSING:
-	case PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE:
-	case PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE:
-		return pkm_kmes_msgpack_write_nil(writer);
+		ret = pkm_kmes_msgpack_write_map_len(writer, 1);
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_key(writer, "kind");
+		if (ret)
+			return ret;
+		return pkm_kmes_msgpack_write_str(writer, kind_missing,
+						  sizeof(kind_missing) - 1);
 	case PKM_KMES_SELF_CONFIG_RECEIVED_WRONG_TYPE:
+		ret = pkm_kmes_msgpack_write_map_len(writer, 2);
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_key(writer, "kind");
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_str(writer, kind_wrong_type,
+						 sizeof(kind_wrong_type) - 1);
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_key(writer, "type");
+		if (ret)
+			return ret;
 		return pkm_kmes_msgpack_write_uint(writer, audit->received_type);
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE:
+	case PKM_KMES_SELF_CONFIG_RECEIVED_U64_OUT_OF_RANGE:
+		received_value = audit->received_kind ==
+					 PKM_KMES_SELF_CONFIG_RECEIVED_U32_OUT_OF_RANGE ?
+					 audit->received_u32 :
+					 audit->received_u64;
+		ret = pkm_kmes_msgpack_write_map_len(writer, 2);
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_key(writer, "kind");
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_str(writer, kind_out_of_range,
+						 sizeof(kind_out_of_range) - 1);
+		if (ret)
+			return ret;
+		ret = pkm_kmes_msgpack_write_key(writer, "value");
+		if (ret)
+			return ret;
+		return pkm_kmes_msgpack_write_uint(writer, received_value);
 	default:
 		return -EINVAL;
 	}
@@ -1106,7 +1167,6 @@ static int pkm_kmes_emit_self_config_invalid(
 {
 	const struct pkm_kmes_config_spec *spec;
 	struct pkm_kmes_msgpack_writer writer;
-	const char *received_kind;
 	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
 	int ret;
 
@@ -1117,17 +1177,32 @@ static int pkm_kmes_emit_self_config_invalid(
 
 	spec = pkm_kmes_config_spec_for_name(audit->configuration_name,
 					    audit->configuration_name_len);
-	received_kind =
-		pkm_kmes_self_config_received_kind_name(audit->received_kind);
-	if (!spec || !received_kind)
+	if (!spec)
 		return -EINVAL;
 
+	/*
+	 * {config: {key: {path}, name, expected: {type, min, max},
+	 * received: {kind, ...}, value}} -- every field of
+	 * kmes.config.value.rejected lives under the one config map.
+	 */
 	writer.pos = payload;
 	writer.end = payload + sizeof(payload);
-	ret = pkm_kmes_msgpack_write_map_len(&writer, 9);
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 1);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "configuration_parent_path");
+	ret = pkm_kmes_msgpack_write_key(&writer, "config");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 5);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "key");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 1);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "path");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_str(
@@ -1135,51 +1210,44 @@ static int pkm_kmes_emit_self_config_invalid(
 		sizeof(pkm_kmes_config_parent_path) - 1);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "configuration_name");
+	ret = pkm_kmes_msgpack_write_key(&writer, "name");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_str(&writer, audit->configuration_name,
 					 audit->configuration_name_len);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "expected_type");
+	ret = pkm_kmes_msgpack_write_key(&writer, "expected");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 3);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "type");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_uint(&writer, spec->type);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "expected_min");
+	ret = pkm_kmes_msgpack_write_key(&writer, "min");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_uint(&writer, spec->min);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "expected_max");
+	ret = pkm_kmes_msgpack_write_key(&writer, "max");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_uint(&writer, spec->max);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "received_kind");
+	ret = pkm_kmes_msgpack_write_key(&writer, "received");
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_str(&writer, received_kind,
-					 strlen(received_kind));
+	ret = pkm_kmes_msgpack_write_received(&writer, audit);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "received_type");
-	if (ret)
-		return ret;
-	ret = pkm_kmes_msgpack_write_received_type(&writer, audit);
-	if (ret)
-		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "received_value");
-	if (ret)
-		return ret;
-	ret = pkm_kmes_msgpack_write_received_value(&writer, audit);
-	if (ret)
-		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "retained_value");
+	ret = pkm_kmes_msgpack_write_key(&writer, "value");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_uint(&writer, audit->retained_value);
@@ -1193,8 +1261,12 @@ static int pkm_kmes_emit_self_config_invalid(
 	return 0;
 }
 
+/*
+ * {buffer: {capacity-requested, capacity}, outcome: {errno}}. @error is the
+ * negative errno, written as int.errno is: signed, never its magnitude.
+ */
 static int pkm_kmes_emit_buffer_swap_failed(u64 requested_capacity,
-					    u64 retained_capacity, u32 errno_value)
+					    u64 retained_capacity, int error)
 {
 	struct pkm_kmes_msgpack_writer writer;
 	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
@@ -1202,25 +1274,37 @@ static int pkm_kmes_emit_buffer_swap_failed(u64 requested_capacity,
 
 	writer.pos = payload;
 	writer.end = payload + sizeof(payload);
-	ret = pkm_kmes_msgpack_write_map_len(&writer, 3);
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 2);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "requested_capacity");
+	ret = pkm_kmes_msgpack_write_key(&writer, "buffer");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 2);
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "capacity-requested");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_uint(&writer, requested_capacity);
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_key(&writer, "retained_capacity");
+	ret = pkm_kmes_msgpack_write_key(&writer, "capacity");
 	if (ret)
 		return ret;
 	ret = pkm_kmes_msgpack_write_uint(&writer, retained_capacity);
 	if (ret)
 		return ret;
+	ret = pkm_kmes_msgpack_write_key(&writer, "outcome");
+	if (ret)
+		return ret;
+	ret = pkm_kmes_msgpack_write_map_len(&writer, 1);
+	if (ret)
+		return ret;
 	ret = pkm_kmes_msgpack_write_key(&writer, "errno");
 	if (ret)
 		return ret;
-	ret = pkm_kmes_msgpack_write_uint(&writer, errno_value);
+	ret = pkm_kmes_msgpack_write_int(&writer, error);
 	if (ret)
 		return ret;
 
@@ -1238,7 +1322,7 @@ long pkm_kmes_runtime_config_apply(
 	u64 failed_requested_capacity = 0;
 	u64 failed_retained_capacity = 0;
 	u32 old_rate;
-	u32 failed_errno = 0;
+	int failed_errno = 0;
 	bool swap_failed = false;
 	long ret;
 
@@ -1264,7 +1348,7 @@ long pkm_kmes_runtime_config_apply(
 	 * system is dropping large events, hits an -ENOMEM on the swap -- most
 	 * likely precisely because the system is under memory pressure -- and
 	 * silently loses the MaxEventSize change too, with a
-	 * KMES_BUFFER_SWAP_FAILED event that mentions only capacity.
+	 * kmes.buffer.swap.failed event that mentions only capacity.
 	 */
 	if (config->buffer_capacity != current_capacity) {
 		ret = pkm_kmes_swap_capacity_locked(config->buffer_capacity);
@@ -1273,7 +1357,7 @@ long pkm_kmes_runtime_config_apply(
 				failed_requested_capacity =
 					config->buffer_capacity;
 				failed_retained_capacity = current_capacity;
-				failed_errno = ENOMEM;
+				failed_errno = -ENOMEM;
 			}
 			swap_failed = true;
 		}
