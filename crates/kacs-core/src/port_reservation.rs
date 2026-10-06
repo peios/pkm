@@ -60,6 +60,32 @@ pub const PORT_SELECTOR_MAX_LEN: usize = peios_uapi::KACS_PORT_SELECTOR_MAX_LEN 
 /// empty name; `@` is its conventional spelling and both are accepted.
 pub const PORT_DEFAULT_SELECTOR: &[u8] = b"@";
 
+/// Why a table of reservations was refused, and which value was at fault
+/// when one was.
+#[derive(Debug)]
+pub struct PortTableRejection<'a> {
+    /// The validation error.
+    pub error: KacsError,
+    /// The name of the value at fault; `None` when no single value was (a
+    /// missing default, or a failure to allocate).
+    pub name: Option<&'a [u8]>,
+}
+
+impl PortTableRejection<'_> {
+    /// The rejection as a `kacs.config.value.rejected` `outcome.reason`, or
+    /// `None` when the table was not malformed (an allocation failure).
+    pub fn reason(&self) -> Option<&'static str> {
+        match self.error {
+            KacsError::InvalidPortReservationSd => Some("bad-descriptor"),
+            KacsError::InvalidPortSelector("duplicate default") => Some("duplicate-default"),
+            KacsError::InvalidPortSelector("missing default") => Some("missing-default"),
+            KacsError::InvalidPortSelector(_) => Some("bad-selector"),
+            KacsError::AmbiguousPortReservation => Some("overlap"),
+            _ => None,
+        }
+    }
+}
+
 /// Whether `name` names the default reservation.
 pub fn is_default_selector(name: &[u8]) -> bool {
     name.is_empty() || name == PORT_DEFAULT_SELECTOR
@@ -208,32 +234,47 @@ impl<'a> PortReservationTable<'a> {
     where
         I: IntoIterator<Item = (&'a [u8], &'a [u8])>,
     {
+        Self::from_values_explained(values).map_err(|rejection| rejection.error)
+    }
+
+    /// [`Self::from_values`], saying on failure which value was at fault
+    /// and why, for the record of a rejected table.
+    pub fn from_values_explained<I>(values: I) -> Result<Self, PortTableRejection<'a>>
+    where
+        I: IntoIterator<Item = (&'a [u8], &'a [u8])>,
+    {
         let mut default_sd: Option<&'a [u8]> = None;
         let mut reservations: Vec<PortReservation<'a>> = Vec::new();
+        let reject = |error: KacsError, name: Option<&'a [u8]>| PortTableRejection { error, name };
 
         for (name, sd) in values {
-            SecurityDescriptor::parse(sd).map_err(|_| KacsError::InvalidPortReservationSd)?;
+            SecurityDescriptor::parse(sd)
+                .map_err(|_| reject(KacsError::InvalidPortReservationSd, Some(name)))?;
             if is_default_selector(name) {
                 if default_sd.is_some() {
-                    return Err(KacsError::InvalidPortSelector("duplicate default"));
+                    return Err(reject(
+                        KacsError::InvalidPortSelector("duplicate default"),
+                        Some(name),
+                    ));
                 }
                 default_sd = Some(sd);
                 continue;
             }
-            let selector = PortSelector::parse(name)?;
+            let selector = PortSelector::parse(name).map_err(|err| reject(err, Some(name)))?;
             for existing in reservations.iter() {
                 if existing.selector.overlaps(&selector)
                     && existing.selector.width() == selector.width()
                 {
-                    return Err(KacsError::AmbiguousPortReservation);
+                    return Err(reject(KacsError::AmbiguousPortReservation, Some(name)));
                 }
             }
             reservations
                 .push(PortReservation { selector, sd })
-                .map_err(|_| KacsError::AllocationFailure)?;
+                .map_err(|_| reject(KacsError::AllocationFailure, None))?;
         }
 
-        let default_sd = default_sd.ok_or(KacsError::InvalidPortSelector("missing default"))?;
+        let default_sd = default_sd
+            .ok_or_else(|| reject(KacsError::InvalidPortSelector("missing default"), None))?;
         Ok(Self {
             default_sd,
             reservations,

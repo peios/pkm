@@ -148,7 +148,7 @@ pub use pkm_alloc::{
 };
 pub use port_reservation::{
     is_default_selector, lookup_values, port_fallback_table, PortProtocol, PortReservation,
-    PortReservationTable, PortSelector, PORT_ALL_ACCESS, PORT_BIND, PORT_DEFAULT_SELECTOR,
+    PortReservationTable, PortSelector, PortTableRejection, PORT_ALL_ACCESS, PORT_BIND, PORT_DEFAULT_SELECTOR,
     PORT_FALLBACK_DEFAULT_SD, PORT_GENERIC_MAPPING, PORT_PROTO_ALL, PORT_PROTO_TCP, PORT_PROTO_UDP,
     PORT_SELECTOR_MAX_LEN,
 };

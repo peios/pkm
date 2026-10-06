@@ -12751,19 +12751,51 @@ impl<'a> Iterator for PortTableBlobIter<'a> {
 }
 
 /// Parses and validates a serialised table blob into a table borrowing it.
+/// The registry key the port reservation table is read from, as
+/// `config.key.path` names it.
+const PORT_TABLE_KEY_PATH: &[u8] = b"Machine\\System\\Network\\TcpIp\\PortReservations";
+
+/// `kacs.config.value.rejected` for a port reservation table refused whole.
+/// Best effort: the table in force stays whatever becomes of the record.
+fn emit_port_table_rejected(name: Option<&[u8]>, reason: &[u8], errno: i32) {
+    let _ = crate::kmes_payload::emit_config_value_rejected_to_kmes(
+        PORT_TABLE_KEY_PATH,
+        name,
+        reason,
+        errno,
+        PORT_TABLE_PTR.load(Ordering::Acquire).is_null(),
+    );
+}
+
+/// Validates a serialised table, recording why when it is refused.
 fn port_table_from_blob(blob: &[u8]) -> Result<PortReservationTable<'_>, i32> {
     let mut iter = PortTableBlobIter {
         rest: blob,
         failed: false,
     };
-    let table = PortReservationTable::from_values(&mut iter).map_err(|err| match err {
-        KacsError::AllocationFailure => -ENOMEM,
-        _ => -EINVAL,
-    })?;
+    let result = PortReservationTable::from_values_explained(&mut iter);
     if iter.failed {
+        // The blob's own framing broke: the serialiser's fault, not a value's.
+        emit_port_table_rejected(None, b"malformed", -EINVAL);
         return Err(-EINVAL);
     }
-    Ok(table)
+    match result {
+        Ok(table) => Ok(table),
+        Err(rejection) => match rejection.reason() {
+            Some(reason) => {
+                emit_port_table_rejected(rejection.name, reason.as_bytes(), -EINVAL);
+                Err(-EINVAL)
+            }
+            None => Err(-ENOMEM),
+        },
+    }
+}
+
+#[no_mangle]
+/// Records a port reservation key with no values at all: not a table, so
+/// the one in force stays. Called by the C refresh, which finds the key empty.
+pub extern "C" fn kacs_rust_port_table_reject_empty() {
+    emit_port_table_rejected(None, b"empty", -EINVAL);
 }
 
 fn port_protocol_from_abi(protocol: u32) -> Option<PortProtocol> {
@@ -12921,6 +12953,7 @@ pub extern "C" fn kacs_rust_port_table_replace(blob_ptr: *const u8, blob_len: us
         return err;
     }
     if blob_len > PORT_TABLE_MAX_BLOB_BYTES {
+        emit_port_table_rejected(None, b"too-large", -E2BIG);
         return -E2BIG;
     }
     let new_ptr = unsafe { pkm_kacs_zalloc(blob_len) } as *mut u8;

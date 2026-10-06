@@ -39,6 +39,7 @@ const DESCRIPTOR_CHANGED_TYPE: &[u8] = b"kacs.audit.descriptor.changed";
 const DESCRIPTOR_REJECTED_TYPE: &[u8] = b"kacs.descriptor.rejected";
 const CAAP_POLICY_CHANGED_TYPE: &[u8] = b"kacs.caap.policy.changed";
 const MOUNT_POLICY_CHANGED_TYPE: &[u8] = b"kacs.mount.policy.changed";
+const CONFIG_VALUE_REJECTED_TYPE: &[u8] = b"kacs.config.value.rejected";
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -1110,6 +1111,59 @@ pub(crate) fn emit_impersonation_started_to_kmes(
     )?;
 
     emit(IMPERSONATION_STARTED_TYPE, payload.as_slice());
+    Ok(())
+}
+
+/// `kacs.config.value.rejected`: KACS read one of its registry-held tables,
+/// found it malformed, and kept the one in force. `name` is the value at
+/// fault when one was; `fallback` says the compiled-in table is what is in
+/// force.
+pub(crate) fn emit_config_value_rejected_to_kmes(
+    key_path: &[u8],
+    name: Option<&[u8]>,
+    reason: &[u8],
+    errno: i32,
+    fallback: bool,
+) -> Result<(), c_long> {
+    // A value name is an arbitrary registry string: sanitise, never refuse.
+    let name = match name {
+        Some(name) => {
+            let mut copy = Vec::with_capacity(name.len()).map_err(|_| ENOMEM)?;
+            copy.extend_from_slice(name).map_err(|_| ENOMEM)?;
+            Some(sanitize_utf8_lossy(copy)?)
+        }
+        None => None,
+    };
+    let mut writer = MsgpackWriter::with_capacity(
+        192 + key_path.len() + name.as_ref().map_or(0, |n| n.len()),
+    )?;
+
+    writer.write_map_len(3)?;
+    writer.write_key(b"config")?;
+    writer.write_map_len(1 + usize::from(name.is_some()))?;
+    writer.write_key(b"key")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"path")?;
+    writer.write_str(key_path)?;
+    if let Some(name) = &name {
+        writer.write_key(b"name")?;
+        writer.write_str(name.as_slice())?;
+    }
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"reason")?;
+    writer.write_str(reason)?;
+    writer.write_key(b"errno")?;
+    write_i64(&mut writer, i64::from(errno))?;
+    writer.write_key(b"policy")?;
+    writer.write_map_len(2)?;
+    // Reject-or-keep: whatever was in force before still is.
+    writer.write_key(b"previous-retained")?;
+    writer.write_bool(true)?;
+    writer.write_key(b"fallback")?;
+    writer.write_bool(fallback)?;
+
+    emit(CONFIG_VALUE_REJECTED_TYPE, writer.into_vec().as_slice());
     Ok(())
 }
 

@@ -140,6 +140,42 @@ fn table_requires_exactly_one_default_and_valid_descriptors() {
 }
 
 #[test]
+fn a_rejected_table_says_which_value_and_why() {
+    let sd = port_sd(&SYSTEM, PORT_BIND);
+    let explain = |values: &[(&'static [u8], &[u8])]| {
+        let values: Vec<(&[u8], &[u8])> = values.to_vec();
+        match PortReservationTable::from_values_explained(values) {
+            Ok(_) => panic!("the table should be rejected"),
+            Err(rejection) => (rejection.reason(), rejection.name.map(<[u8]>::to_vec)),
+        }
+    };
+    assert_eq!(
+        explain(&[(b"tcp:80", sd.as_slice())]),
+        (Some("missing-default"), None)
+    );
+    assert_eq!(
+        explain(&[(PORT_DEFAULT_SELECTOR, sd.as_slice()), (PORT_DEFAULT_SELECTOR, sd.as_slice())]),
+        (Some("duplicate-default"), Some(b"@".to_vec()))
+    );
+    assert_eq!(
+        explain(&[(PORT_DEFAULT_SELECTOR, sd.as_slice()), (b"tcp:22", &sd[..10])]),
+        (Some("bad-descriptor"), Some(b"tcp:22".to_vec()))
+    );
+    assert_eq!(
+        explain(&[(PORT_DEFAULT_SELECTOR, sd.as_slice()), (b"tcp:nope", sd.as_slice())]),
+        (Some("bad-selector"), Some(b"tcp:nope".to_vec()))
+    );
+    assert_eq!(
+        explain(&[
+            (PORT_DEFAULT_SELECTOR, sd.as_slice()),
+            (b"tcp:80", sd.as_slice()),
+            (b"*:80", sd.as_slice()),
+        ]),
+        (Some("overlap"), Some(b"*:80".to_vec()))
+    );
+}
+
+#[test]
 fn table_rejects_equal_width_overlap_but_allows_nesting() {
     let sd = port_sd(&SYSTEM, PORT_BIND);
     let dup = PortReservationTable::from_values([

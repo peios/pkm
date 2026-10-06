@@ -680,6 +680,48 @@ field: fields.attestation.userspace  optional
   the descriptor, and with it `trigger.ace`, is always the caller's, as are
   any audit context and PIP state it passes.
 
+--- event kacs.config.value.rejected
+tier: essential
+gating: none — every rejected table is recorded
+cardinality: once per rejected read of the key
+
+The record that KACS read one of its registry-held tables, rejected it, and
+carried on with what it had. Today that is the port reservation table under
+`Machine\System\Network\TcpIp\PortReservations`, read whenever the key
+changes.
+
+The table is validated whole and is **reject-or-keep, never merge**: one bad
+value refuses all of them, and whatever was in force before — the last good
+table from the registry, or the compiled-in fallback — stays in force. That
+makes this the only place the divergence is visible: the registry shows what
+an administrator wrote, and this record shows that KACS is not using it. The
+same reject-or-keep rule as `kmes.config.value.rejected` and
+`lcs.config.value.rejected`, for a table rather than a single value.
+
+field: config.key.path            required
+field: config.name                optional
+  The value at fault, by its registry name: a selector such as `tcp:80`, or
+  `@` for the default reservation. Absent when no single value is at fault.
+field: outcome.reason             required
+  values: empty | too-large | malformed | bad-selector | bad-descriptor | duplicate-default | missing-default | overlap
+  closed: false
+  `empty`: the key has no values. `too-large`: the table exceeds the kernel's
+  bound. `malformed`: the serialised table broke, which is the kernel's fault
+  rather than a value's. `bad-selector`: a value's name does not parse as a
+  selector. `bad-descriptor`: a value's data is not a self-relative security
+  descriptor. `duplicate-default`: the default reservation is given twice.
+  `missing-default`: there is no default reservation. `overlap`: two
+  selectors of the same width cover a port, so the most specific is
+  ambiguous.
+field: outcome.errno              required
+field: policy.previous-retained   required
+  Always true: a rejected table leaves the one in force in place.
+field: policy.fallback            required
+  Whether what stays in force is the compiled-in fallback, because no table
+  from the registry was ever accepted this boot. The fallback lets SYSTEM
+  alone bind a port, so a rejected first table leaves every service that
+  binds a port without one.
+
 --- event kacs.caap.policy.changed
 tier: essential
 gating: none — every change a caller holding SeTcbPrivilege makes is recorded
