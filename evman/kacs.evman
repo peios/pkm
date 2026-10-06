@@ -354,11 +354,20 @@ different key.
 
 --- event kacs.audit.access.checked
 tier: essential
-gating: a matching SACL audit ACE, or the token's audit policy
+gating: a matching SACL audit ACE, or the token's audit policy; on the AccessCheck syscall a SACL record also needs the caller to hold SeAuditPrivilege, enabled
 cardinality: once per matching audit ACE, not once per access
 
 The record that an access check completed, and what it decided. The most
 common event on the system, and the one most investigations start from.
+
+**A daemon's own checks need SeAuditPrivilege.** A userspace component that
+guards its objects with the AccessCheck syscall supplies the descriptor
+itself, SACL included. Its records are written only if the calling process
+holds SeAuditPrivilege, enabled, on its effective token, as Windows asks of
+`AccessCheckAndAuditAlarm`; without it the check is answered and its SACL
+records are silently withheld. The privilege is the caller's, not the
+checked client's. Records the checked token's own audit policy forces are
+written either way.
 
 It fires against every kind of object KACS protects — files, processes,
 tokens, sockets and SysV IPC objects — which is why `object.kind` is
@@ -392,8 +401,9 @@ field: outcome.success          required
 field: trigger.kind             required
 field: trigger.ace              when trigger.kind == sacl
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
 
 --- event kacs.audit.handle.used
 tier: standard
@@ -485,8 +495,9 @@ field: outcome.success          required
   independently decided, and kept so that a single query for failed
   outcomes works across every event type.
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
 
 --- event kacs.caap.sacl.skipped
 tier: standard
@@ -527,8 +538,9 @@ field: access.granted           required
   The effective grant of the check the rule was evaluated in.
 field: access.granted-staged    required
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
 
 --- event kacs.caap.staging.diverged
 tier: standard
@@ -563,8 +575,9 @@ field: access.granted           required
 field: access.granted-staged    required
   What the staged policy would have granted instead.
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
 
 --- event kacs.descriptor.rejected
 tier: standard

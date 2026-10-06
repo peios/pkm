@@ -225,10 +225,14 @@ impl<'a> AuditObject<'a> {
 pub(crate) struct AuditTarget<'a> {
     pub(crate) subject_ids: Option<AuditSubjectIds>,
     pub(crate) object: AuditObject<'a>,
-    /// Whether the record carries values userspace supplied — an audit
-    /// context, or the caller's own PIP state — and so must say
-    /// `fields.attestation.userspace` (PGSS §6.7).
+    /// Whether the record carries values userspace supplied — every record
+    /// of the AccessCheck syscall, whose descriptor is the caller's — and so
+    /// must say `fields.attestation.userspace` (PGSS §6.7).
     pub(crate) asserted: bool,
+    /// Whether the records a SACL generated are withheld because the
+    /// AccessCheck syscall's caller lacks SeAuditPrivilege. Records the
+    /// checked token's audit policy forces are written regardless.
+    pub(crate) sacl_audit_suppressed: bool,
 }
 
 fn allocate_zeroed(len: usize) -> Result<Vec<u8>, c_long> {
@@ -848,6 +852,9 @@ pub(crate) fn emit_access_check_events_to_kmes(
     }
 
     for event in audit_events {
+        if target.sacl_audit_suppressed && !event.policy_forced {
+            continue;
+        }
         let payload = encode_access_checked_payload(event, &maps)?;
         emit(ACCESS_CHECKED_TYPE, payload.as_slice());
     }

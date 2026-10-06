@@ -8056,6 +8056,7 @@ fn emit_internal_access_check_events(
         subject_ids: Some(subject.audit_subject_ids()),
         object,
         asserted: false,
+        sacl_audit_suppressed: false,
     };
 
     emit_access_check_events_to_kmes(
@@ -8805,6 +8806,7 @@ fn emit_file_set_sd_audit_events(
             subject_ids: Some(subject.audit_subject_ids()),
             object: AuditObject::Kind(b"file"),
             asserted: false,
+            sacl_audit_suppressed: false,
         };
 
         emit_access_check_events_to_kmes(audit_events.as_slice(), &[], &[], resolved, pip, &target)

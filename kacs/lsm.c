@@ -205,7 +205,7 @@ int pkm_kacs_resolve_ctx_from_token(const void *token,
 		return ret;
 
 	out->kind = PKM_KACS_RESOLVED_CTX_TOKEN;
-	out->_reserved = 0;
+	out->flags = 0;
 	out->token = token;
 	out->caap_cache = NULL;
 	out->default_pip_type = pip_type;

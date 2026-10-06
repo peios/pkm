@@ -2833,7 +2833,7 @@ static void pkm_kunit_current_token_resolution(struct kunit *test)
 	ret = pkm_kacs_resolve_current_effective_ctx(&effective);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, effective.kind, PKM_KACS_RESOLVED_CTX_TOKEN);
-	KUNIT_EXPECT_EQ(test, effective._reserved, 0U);
+	KUNIT_EXPECT_EQ(test, effective.flags, 0U);
 	KUNIT_EXPECT_PTR_EQ(test, effective.token, effective_token);
 	KUNIT_EXPECT_PTR_EQ(test, effective.caap_cache, NULL);
 	KUNIT_EXPECT_EQ(test, effective.default_pip_type, 0U);
@@ -2842,7 +2842,7 @@ static void pkm_kunit_current_token_resolution(struct kunit *test)
 	ret = pkm_kacs_resolve_current_primary_ctx(&primary);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, primary.kind, PKM_KACS_RESOLVED_CTX_TOKEN);
-	KUNIT_EXPECT_EQ(test, primary._reserved, 0U);
+	KUNIT_EXPECT_EQ(test, primary.flags, 0U);
 	KUNIT_EXPECT_PTR_EQ(test, primary.token, primary_token);
 	KUNIT_EXPECT_PTR_EQ(test, primary.caap_cache, NULL);
 	KUNIT_EXPECT_EQ(test, primary.default_pip_type, 0U);
@@ -12941,7 +12941,7 @@ static void pkm_kunit_privilege_use_msgpack_schema(struct kunit *test)
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
 				  PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT, true,
-				  NULL));
+				  NULL, true));
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	kacs_rust_token_drop(target_token);

@@ -1266,7 +1266,8 @@ bool pkm_kunit_expect_access_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_requested, u32 expected_granted, bool expected_success,
 	const char *expected_trigger_kind, const u8 *expected_ace,
-	size_t expected_ace_len, const char *expected_object_kind);
+	size_t expected_ace_len, const char *expected_object_kind,
+	bool expected_asserted);
 
 bool pkm_kunit_expect_access_audit_subject_group_sids(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
@@ -1293,7 +1294,8 @@ bool pkm_kunit_expect_privilege_use_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_contributed, u32 expected_surviving,
 	u32 expected_check_requested, u32 expected_check_granted,
-	bool expected_success, const char *expected_object_kind);
+	bool expected_success, const char *expected_object_kind,
+	bool expected_asserted);
 
 bool pkm_kunit_expect_caap_diagnostic_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,

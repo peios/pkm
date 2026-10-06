@@ -405,7 +405,7 @@ static void pkm_kunit_resolved_ctx_fails_closed_on_null_token(struct kunit *test
 {
 	struct pkm_kacs_resolved_ctx ctx = {
 		.kind = 99,
-		._reserved = 99,
+		.flags = 99,
 		.token = (void *)0x1,
 		.caap_cache = (void *)0x2,
 		.default_pip_type = 99,
@@ -416,7 +416,7 @@ static void pkm_kunit_resolved_ctx_fails_closed_on_null_token(struct kunit *test
 	ret = pkm_kacs_resolve_ctx_from_token(NULL, &ctx);
 	KUNIT_EXPECT_EQ(test, ret, (long)-EACCES);
 	KUNIT_EXPECT_EQ(test, ctx.kind, 99U);
-	KUNIT_EXPECT_EQ(test, ctx._reserved, 99U);
+	KUNIT_EXPECT_EQ(test, ctx.flags, 99U);
 	KUNIT_EXPECT_PTR_EQ(test, ctx.token, (void *)0x1);
 	KUNIT_EXPECT_PTR_EQ(test, ctx.caap_cache, (void *)0x2);
 	KUNIT_EXPECT_EQ(test, ctx.default_pip_type, 99U);
@@ -1844,7 +1844,7 @@ static void pkm_kunit_access_audit_msgpack_schema(struct kunit *test)
 				  test, &view, KACS_ACCESS_READ_CONTROL,
 				  PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT, true,
 				  "sacl", expected_ace,
-				  sizeof(expected_ace), NULL));
+				  sizeof(expected_ace), NULL, true));
 }
 
 
@@ -1950,7 +1950,123 @@ static void pkm_kunit_access_audit_policy_msgpack_schema(struct kunit *test)
 				  test, &view, KACS_ACCESS_READ_CONTROL,
 				  KACS_ACCESS_READ_CONTROL |
 					  KACS_ACCESS_WRITE_DAC,
-				  true, "policy", NULL, 0, NULL));
+				  true, "policy", NULL, 0, NULL, true));
+
+	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kunit_reset_kmes();
+}
+
+
+/*
+ * PKM §3.8.9: the AccessCheck syscall writes the records a SACL generates
+ * only when its caller holds SeAuditPrivilege, enabled. The caller here is
+ * an impersonated SYSTEM-SID token holding no privileges at all, checked
+ * against a descriptor whose SACL audits SYSTEM's successful reads: the
+ * check answers as usual, the SACL record is withheld, and the record the
+ * token's own OBJECT_ACCESS_SUCCESS policy forces is still written.
+ */
+static void pkm_kunit_access_check_sacl_audit_needs_audit_privilege(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 'd', 'P', 'r', 'v', 0, 0,
+	};
+	static const struct pkm_kunit_sid_attr_spec groups[] = {
+		{
+			.sid = pkm_kunit_everyone_sid,
+			.sid_len = sizeof(pkm_kunit_everyone_sid),
+			.attributes = PKM_KUNIT_SE_GROUP_MANDATORY |
+				      PKM_KUNIT_SE_GROUP_ENABLED_BY_DEFAULT |
+				      PKM_KUNIT_SE_GROUP_ENABLED,
+		},
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_IMPERSONATION,
+		.impersonation_level = KACS_IMLEVEL_IMPERSONATION,
+		.integrity_level = PKM_KUNIT_IL_SYSTEM,
+		.mandatory_policy = 0x00000003U,
+		.audit_policy =
+			PKM_KUNIT_AUDIT_POLICY_OBJECT_ACCESS_SUCCESS,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_system_sid,
+		.user_sid_len = sizeof(pkm_kunit_system_sid),
+		.groups = groups,
+		.group_count = ARRAY_SIZE(groups),
+	};
+	struct pkm_kacs_ingress_summary summary = { };
+	u8 *buffer;
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	const void *primary_token;
+	size_t session_spec_len;
+	size_t token_spec_len;
+	size_t written = 0;
+	u64 logon_session_id = 0;
+	u32 granted = 0;
+	long fd;
+	long ret;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	session_spec_len = pkm_kunit_build_logon_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_logon_session_for_subject(
+				primary_token, session_spec, session_spec_len,
+				&logon_session_id),
+			0L);
+
+	spec_args.logon_session_id = logon_session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+
+	fd = pkm_kacs_kunit_create_token_for_subject(primary_token, token_spec,
+						     token_spec_len);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			0L);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_set_process_override(
+				4105, PKM_KUNIT_KMES_PROCESS_NAME,
+				PKM_KUNIT_KMES_PROCESS_PATH),
+			0);
+
+	ret = pkm_kunit_run_read_control_with_token_fd_summary(
+		-1, pkm_kunit_system_read_audit_sd,
+		sizeof(pkm_kunit_system_read_audit_sd), &granted, &summary);
+	KUNIT_EXPECT_GT(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, granted & KACS_ACCESS_READ_CONTROL,
+			KACS_ACCESS_READ_CONTROL);
+	/* The SACL matched, but only the policy-forced record is written. */
+	KUNIT_EXPECT_EQ(test, summary.audit_event_count, 1U);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_expect_access_audit_schema(
+				  test, &view, KACS_ACCESS_READ_CONTROL, granted,
+				  true, "policy", NULL, 0, NULL, true));
 
 	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
@@ -2314,7 +2430,7 @@ static void pkm_kunit_access_audit_invalid_process_name_is_sanitized(
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
 	KUNIT_ASSERT_TRUE(test,
 			  pkm_kunit_msgpack_parse_payload_root(test, &view,
-							       &root, 5));
+							       &root, 6));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_msgpack_expect_emitter_key(
 				  test, &root, 4105, "kacs\xEF\xBF\xBD",
@@ -3195,6 +3311,7 @@ static struct kunit_case pkm_kunit_access_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_check_privilege_use_precedes_access_audit_kmes),
 	KUNIT_CASE(pkm_kunit_access_audit_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_audit_policy_msgpack_schema),
+	KUNIT_CASE(pkm_kunit_access_check_sacl_audit_needs_audit_privilege),
 	KUNIT_CASE(pkm_kunit_access_audit_subject_group_sids_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_audit_object_context_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_audit_object_context_rejects_malformed),

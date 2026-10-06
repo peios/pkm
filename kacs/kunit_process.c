@@ -7426,7 +7426,7 @@ static void pkm_kunit_set_file_sd_sacl_audit_emits_kmes(struct kunit *test)
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY, true,
 				  "sacl", expected_ace,
-				  sizeof(expected_ace), "file"));
+				  sizeof(expected_ace), "file", false));
 
 	pkm_kacs_free((void *)result_sd);
 }
