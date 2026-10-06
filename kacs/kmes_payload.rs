@@ -36,6 +36,7 @@ const SESSION_DESTROYED_TYPE: &[u8] = b"kacs.session.destroyed";
 const IMPERSONATION_STARTED_TYPE: &[u8] = b"kacs.impersonation.started";
 const IMPERSONATION_REVERTED_TYPE: &[u8] = b"kacs.impersonation.reverted";
 const DESCRIPTOR_CHANGED_TYPE: &[u8] = b"kacs.audit.descriptor.changed";
+const DESCRIPTOR_REJECTED_TYPE: &[u8] = b"kacs.descriptor.rejected";
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -1107,6 +1108,58 @@ pub(crate) fn emit_impersonation_started_to_kmes(
     )?;
 
     emit(IMPERSONATION_STARTED_TYPE, payload.as_slice());
+    Ok(())
+}
+
+/// `kacs.descriptor.rejected`: a file's stored descriptor, `sd_len` bytes
+/// long, failed validation when KACS read it. `actor` is the token whose
+/// access made KACS read it, with its identity and PIP, when there is one.
+pub(crate) fn emit_descriptor_rejected_to_kmes(
+    actor: Option<(&AccessCheckToken<'_>, &AuditSubjectIds, PipContext)>,
+    inode: u64,
+    device: u64,
+    sd_len: u64,
+) -> Result<(), c_long> {
+    let maps = match actor {
+        Some((token, ids, pip)) => {
+            let process_info = load_process_info()?;
+            Some((
+                encode_subject_map(token, Some(ids), pip)?,
+                encode_emitter_map(&process_info)?,
+            ))
+        }
+        None => None,
+    };
+    let maps_len = maps.as_ref().map_or(0, |(s, e)| s.len() + e.len());
+    let mut writer = MsgpackWriter::with_capacity(160 + maps_len)?;
+
+    writer.write_map_len(2 + if maps.is_some() { 2 } else { 0 })?;
+    if let Some((subject, emitter)) = &maps {
+        writer.write_key(b"subject")?;
+        writer.extend(subject.as_slice())?;
+        writer.write_key(b"emitter")?;
+        writer.extend(emitter.as_slice())?;
+    }
+    writer.write_key(b"object")?;
+    writer.write_map_len(3)?;
+    writer.write_key(b"kind")?;
+    writer.write_str(b"file")?;
+    writer.write_key(b"file")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"inode")?;
+    writer.write_u64(inode)?;
+    writer.write_key(b"device")?;
+    writer.write_u64(device)?;
+    writer.write_key(b"sd")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"length")?;
+    writer.write_u64(sd_len)?;
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"reason")?;
+    writer.write_str(b"corrupt")?;
+
+    emit(DESCRIPTOR_REJECTED_TYPE, writer.into_vec().as_slice());
     Ok(())
 }
 

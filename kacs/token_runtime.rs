@@ -9875,6 +9875,38 @@ pub extern "C" fn kacs_rust_emit_descriptor_changed(chg: *const PkmKacsSdChangeV
 }
 
 #[no_mangle]
+/// Writes `kacs.descriptor.rejected` for a file whose stored descriptor,
+/// `sd_len` bytes, failed validation. `token` is the effective token of the
+/// task that read it, or null to write the record without a subject.
+pub extern "C" fn kacs_rust_emit_descriptor_rejected(
+    token: *const c_void,
+    inode: u64,
+    device: u64,
+    sd_len: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let result = match unsafe { PkmKacsBootToken::from_ptr(token) } {
+        Some(token) => {
+            let ids = token.audit_subject_ids();
+            token.with_access_token(|access_token| {
+                crate::kmes_payload::emit_descriptor_rejected_to_kmes(
+                    Some((&access_token, &ids, pip_context_from_abi(pip_type, pip_trust))),
+                    inode,
+                    device,
+                    sd_len,
+                )
+            })
+        }
+        None => crate::kmes_payload::emit_descriptor_rejected_to_kmes(None, inode, device, sd_len),
+    };
+    match result {
+        Ok(()) => 0,
+        Err(err) => err as i32,
+    }
+}
+
+#[no_mangle]
 /// An allocated copy of the token's own descriptor, for the caller to free
 /// with `pkm_kacs_free`. `*out_sd_ptr` is null on failure.
 pub extern "C" fn kacs_rust_token_own_sd_copy(

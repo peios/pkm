@@ -3565,14 +3565,45 @@ static void pkm_kunit_file_sd_cache_population_corrupt_emits_once(
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_expect_kmes_event_type(
 				  test, &view, "kacs.descriptor.rejected"));
-	/* {object: {kind: "file"}, outcome: {reason: "corrupt"}} */
-	if (pkm_kunit_msgpack_parse_payload_root(test, &view, &root, 2)) {
-		if (pkm_kunit_msgpack_require_map_key(test, &root, "object", 1U,
-						      &object))
+	/*
+	 * {subject, emitter, object: {kind: "file", file: {inode, device},
+	 * sd: {length}}, outcome: {reason: "corrupt"}}
+	 */
+	if (pkm_kunit_msgpack_parse_payload_root(test, &view, &root, 4)) {
+		struct pkm_kunit_msgpack_view file = { };
+		struct pkm_kunit_msgpack_view sd = { };
+		struct pkm_kunit_msgpack_view inode = { };
+
+		KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_require_key(
+						test, &root, "subject",
+						PKM_KUNIT_MSGPACK_MAP, &file));
+		if (pkm_kunit_msgpack_require_map_key(test, &root, "object", 3U,
+						      &object)) {
 			KUNIT_EXPECT_TRUE(test,
 					  pkm_kunit_msgpack_expect_str_key(
 						  test, &object, "kind",
 						  "file"));
+			if (pkm_kunit_msgpack_require_map_key(
+				    test, &object, "file", 2U, &file)) {
+				KUNIT_EXPECT_TRUE(
+					test, pkm_kunit_msgpack_require_key(
+						      test, &file, "inode",
+						      PKM_KUNIT_MSGPACK_UINT,
+						      &inode));
+				KUNIT_EXPECT_TRUE(
+					test, pkm_kunit_msgpack_require_key(
+						      test, &file, "device",
+						      PKM_KUNIT_MSGPACK_UINT,
+						      &inode));
+			}
+			/* The stored attribute's own length. */
+			if (pkm_kunit_msgpack_require_map_key(test, &object,
+							      "sd", 1U, &sd))
+				KUNIT_EXPECT_TRUE(
+					test, pkm_kunit_msgpack_expect_uint_key(
+						      test, &sd, "length",
+						      sizeof(invalid_sd)));
+		}
 		if (pkm_kunit_msgpack_require_map_key(test, &root, "outcome",
 						      1U, &outcome))
 			KUNIT_EXPECT_TRUE(test,

@@ -696,14 +696,24 @@ longer parse, whether from disk corruption, a tool writing the extended
 attribute directly, or an interrupted write.
 
 KACS records the event once per descriptor read, when the object's
-descriptor cache is filled, not on every denied access that follows.
+descriptor cache is filled, not on every denied access that follows. The
+subject is whoever's access made KACS read the descriptor: the first to
+touch the file after it was cached, not whoever corrupted it.
 
+include: subject
 field: object.kind              required
   Always `file` today: file descriptors are the only stored descriptors KACS
   reads this way.
 field: object.file.path         optional
   Not carried today. The descriptor is read through an anchor that has no
   mount, so no absolute path can be resolved at that point.
+field: object.file.inode        required
+field: object.file.device       required
+  With `object.file.inode`, what names the file in place of a path: find it
+  with `find <mount> -xdev -inum <inode>` on the filesystem of that device.
+field: object.sd.length         required
+  The length of the stored attribute that failed: 0 when it was empty, and
+  more than 65,535 when it was too long to be a descriptor at all.
 field: outcome.reason           required
   values: corrupt
   closed: false

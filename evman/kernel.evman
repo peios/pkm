@@ -451,6 +451,15 @@ mount root's number follows whichever stratum provides it, and numbers are
 re-derived at mount time. Expect both false joins and false splits when
 correlating on it.
 
+--- field object.file.device
+type: uint
+
+The device number of the filesystem the object lives on, as `stat` reports
+it in `st_dev`. With `object.file.inode` it names a file where no path can
+be resolved. A device number is assigned when a filesystem is mounted, so
+the pair names a file only while that filesystem stays mounted, and not at
+all across a reboot.
+
 --- field object.file.inode-lower
 type: uint
 

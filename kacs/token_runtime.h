@@ -636,6 +636,9 @@ struct pkm_kacs_sd_change_view;
 int kacs_rust_emit_descriptor_changed(const struct pkm_kacs_sd_change_view *chg);
 int kacs_rust_token_own_sd_copy(const void *token, const u8 **out_sd_ptr,
 				size_t *out_sd_len);
+int kacs_rust_emit_descriptor_rejected(const void *token, u64 inode,
+				       u64 device, u64 sd_len, u32 pip_type,
+				       u32 pip_trust);
 u32 kacs_rust_token_audit_policy(const void *token);
 int kacs_rust_emit_privilege_use(const void *token, u32 operation, int cap,
 				 u64 privilege, u32 pip_type, u32 pip_trust);
