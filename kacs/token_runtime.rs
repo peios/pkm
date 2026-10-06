@@ -48,10 +48,10 @@ use crate::error::KacsError;
 use crate::lcs_core::casefold_eq;
 use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
 use crate::kmes_payload::{
-    emit_access_check_events_to_kmes, emit_handle_used_to_kmes,
+    emit_access_check_events_to_kmes, emit_gate_privilege_use_to_kmes, emit_handle_used_to_kmes,
     emit_impersonation_reverted_to_kmes, emit_impersonation_started_to_kmes,
     encode_logon_session_destroyed_payload, emit_logon_session_destroyed_to_kmes, AuditObject,
-    AuditSubjectIds, AuditTarget, HandleUse, ImpersonationClient,
+    AuditSubjectIds, AuditTarget, HandleUse, ImpersonationClient, PrivilegeGate,
 };
 use crate::mic::{
     IntegrityLevel, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
@@ -5205,7 +5205,13 @@ impl PkmKacsBootToken {
             None,
             false,
             true,
-            0,
+            // SYSTEM's services are where SeTcbPrivilege is spent, so the
+            // boot SYSTEM token records successful privilege use: without
+            // it "who used SeTcbPrivilege, and for what" is unanswerable on
+            // a stock machine. Every privilege use is recorded — at a Linux
+            // capability gate once per process and gate, and in an access
+            // check (SeBackup, SeSecurity and the like) once per check.
+            AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
         )
     }
 
@@ -9737,6 +9743,53 @@ fn impersonation_revert_operation(cause: u32) -> Option<&'static [u8]> {
         3 => Some(b"replaced"),
         _ => None,
     }
+}
+
+#[no_mangle]
+/// The token's audit policy (`KACS_AUDIT_POLICY_*`), fixed at creation, or 0
+/// for a null token. Lock-free: the field never changes.
+pub extern "C" fn kacs_rust_token_audit_policy(token: *const c_void) -> u32 {
+    unsafe { PkmKacsBootToken::from_ptr(token) }.map_or(0, |token| token.audit_policy)
+}
+
+#[no_mangle]
+/// Writes `kacs.audit.privilege.used` for `privilege`, one privilege bit,
+/// spent by `token` at a Linux capability gate (`operation` 1, `cap` the
+/// capability) or the volume-management gate (`operation` 2). The caller
+/// has applied the gating; this only builds and writes. Process context.
+pub extern "C" fn kacs_rust_emit_privilege_use(
+    token: *const c_void,
+    operation: u32,
+    cap: i32,
+    privilege: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    let gate = match operation {
+        1 => match u32::try_from(cap) {
+            Ok(cap) => PrivilegeGate::LinuxCap(cap),
+            Err(_) => return -EINVAL,
+        },
+        2 => PrivilegeGate::VolumeMount,
+        _ => return -EINVAL,
+    };
+    let ids = token.audit_subject_ids();
+
+    token.with_access_token(|access_token| {
+        match emit_gate_privilege_use_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            gate,
+            privilege,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
 }
 
 #[no_mangle]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "capability.h"
 #include "lsm_internal.h"
 #include "process_state.h"
 
@@ -377,6 +378,198 @@ static void pkm_kunit_capability_privilege_success_marks_used(
 			before.privileges_used |
 				PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE);
 	kacs_rust_token_drop(token);
+}
+
+
+/*
+ * PKM §3.4: the capability decision reports which privileges it spent,
+ * which is what a kacs.audit.privilege.used record for it names. A
+ * capability every process holds, or none may hold, spends nothing.
+ */
+static void pkm_kunit_capability_reports_spent_privileges(struct kunit *test)
+{
+	const void *token;
+	u64 held = ~0ULL;
+
+	token = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_SYSTEM, 1U, 0U, PKM_KUNIT_IL_SYSTEM, 0U,
+		PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_check_capability_for_token_held(
+				token, CAP_SYS_BOOT, &held),
+			0L);
+	KUNIT_EXPECT_EQ(test, held, (u64)PKM_KUNIT_SE_SHUTDOWN_PRIVILEGE);
+
+	held = ~0ULL;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_check_capability_for_token_held(token, CAP_CHOWN,
+								 &held),
+			0L);
+	KUNIT_EXPECT_EQ(test, held, 0ULL);
+
+	held = ~0ULL;
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_check_capability_for_token_held(
+				token, CAP_SYS_ADMIN, &held),
+			(long)-EPERM);
+	KUNIT_EXPECT_EQ(test, held, 0ULL);
+	kacs_rust_token_drop(token);
+}
+
+
+/*
+ * PKM §3.4: a process records each capability gate's privilege use once
+ * per effective token. The set is the process's, keyed by the token's
+ * GUID, and empties when another token acts.
+ */
+static void pkm_kunit_privilege_use_once_per_process_and_token(
+	struct kunit *test)
+{
+	struct pkm_kacs_process_state *state;
+	u8 guid_a[16];
+	u8 guid_b[16];
+
+	state = kunit_kzalloc(test, sizeof(*state), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, state);
+	spin_lock_init(&state->priv_use_lock);
+	memset(guid_a, 0xa1, sizeof(guid_a));
+	memset(guid_b, 0xb2, sizeof(guid_b));
+
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_priv_use_first(
+					state, guid_a, CAP_SYS_ADMIN));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_priv_use_first(
+					 state, guid_a, CAP_SYS_ADMIN));
+	/* Another gate is its own first use. */
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_priv_use_first(
+					state, guid_a, CAP_NET_ADMIN));
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_priv_use_first(
+					state, guid_a,
+					PKM_KACS_PRIV_USE_VOLUME_BIT));
+	/* Another token starts the set again. */
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_priv_use_first(
+					state, guid_b, CAP_SYS_ADMIN));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_kunit_priv_use_first(
+					 state, guid_b, CAP_SYS_ADMIN));
+	KUNIT_EXPECT_TRUE(test, pkm_kacs_kunit_priv_use_first(
+					state, guid_b, CAP_NET_ADMIN));
+}
+
+
+/*
+ * Only a user process's own capability checks are recorded: KUnit runs in
+ * a kernel thread, which only counts, and a CAP_OPT_NOAUDIT check is a
+ * probe, never a use.
+ */
+static void pkm_kunit_privilege_use_not_noted_for_kthread_or_noaudit(
+	struct kunit *test)
+{
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_note_privilege_use(
+					 current_cred(), CAP_SYS_ADMIN,
+					 PKM_KUNIT_SE_TCB_PRIVILEGE,
+					 CAP_OPT_NONE));
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_note_privilege_use(
+					 current_cred(), CAP_SYS_ADMIN,
+					 PKM_KUNIT_SE_TCB_PRIVILEGE,
+					 CAP_OPT_NOAUDIT));
+	/* Nothing spent, nothing to record. */
+	KUNIT_EXPECT_FALSE(test, pkm_kacs_note_privilege_use(
+					 current_cred(), CAP_SYS_ADMIN, 0,
+					 CAP_OPT_NONE));
+}
+
+
+/*
+ * kacs.audit.privilege.used for a capability gate: operation.name
+ * linux-cap, the privilege and the capability by name, and none of the
+ * access-check fields. For the volume gate: volume-mount, and no linux.cap.
+ */
+static void pkm_kunit_privilege_use_gate_records(struct kunit *test)
+{
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view map = { };
+	const void *token = pkm_kacs_current_primary_token_ptr();
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_emit_privilege_use(
+				token, PKM_KACS_PRIV_USE_OP_LINUX_CAP,
+				CAP_SYS_ADMIN, PKM_KUNIT_SE_TCB_PRIVILEGE, 0, 0),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.audit.privilege.used", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 6));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "operation", 1U, &map));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &map, "name", "linux-cap"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "privilege", 1U, &map));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &map, "name", "SeTcbPrivilege"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "linux", 1U, &map));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &map, "cap", "sys-admin"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "outcome", 1U, &map));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &map, "success", true));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "access"));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "object"));
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			kacs_rust_emit_privilege_use(
+				token, PKM_KACS_PRIV_USE_OP_VOLUME_MOUNT,
+				CAP_SYS_ADMIN,
+				PKM_KUNIT_SE_MANAGE_VOLUME_PRIVILEGE, 0, 0),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.audit.privilege.used", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 5));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "operation", 1U, &map));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &map, "name", "volume-mount"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "privilege", 1U, &map));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &map, "name",
+					"SeManageVolumePrivilege"));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "linux"));
+
+	/* A bit with no privilege name is refused, not written unnamed. */
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_emit_privilege_use(
+				token, PKM_KACS_PRIV_USE_OP_LINUX_CAP,
+				CAP_SYS_ADMIN, 1ULL << 1, 0, 0),
+			-EIO);
+	{
+		struct pkm_kmes_kunit_snapshot snapshot = { };
+
+		KUNIT_EXPECT_EQ(test,
+				pkm_kmes_kunit_snapshot_single_active(&snapshot),
+				-ENOENT);
+	}
+	pkm_kunit_reset_kmes();
 }
 
 
@@ -10538,6 +10731,10 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_proc_status_caps_null_args_fail_closed),
 	KUNIT_CASE(pkm_kunit_capability_allow_succeeds_without_privilege),
 	KUNIT_CASE(pkm_kunit_capability_privilege_success_marks_used),
+	KUNIT_CASE(pkm_kunit_capability_reports_spent_privileges),
+	KUNIT_CASE(pkm_kunit_privilege_use_once_per_process_and_token),
+	KUNIT_CASE(pkm_kunit_privilege_use_not_noted_for_kthread_or_noaudit),
+	KUNIT_CASE(pkm_kunit_privilege_use_gate_records),
 	KUNIT_CASE(pkm_kunit_remote_shutdown_denies_without_remote_privilege),
 	KUNIT_CASE(pkm_kunit_remote_shutdown_denies_without_shutdown_privilege),
 	KUNIT_CASE(pkm_kunit_remote_shutdown_success_requires_both_privileges),

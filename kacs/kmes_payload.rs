@@ -334,15 +334,143 @@ fn sanitize_utf8_lossy(bytes: Vec<u8>) -> Result<Vec<u8>, c_long> {
     Ok(out)
 }
 
+/// `privilege.name` for one privilege bit. A bit with no name is an
+/// internal fault, and the record is refused rather than written unnamed.
 fn privilege_name(privilege: u64) -> Result<&'static [u8], c_long> {
+    use crate::peios_uapi as uapi;
+
     match privilege {
         SE_SECURITY_PRIVILEGE => Ok(b"SeSecurityPrivilege"),
         SE_TAKE_OWNERSHIP_PRIVILEGE => Ok(b"SeTakeOwnershipPrivilege"),
         SE_BACKUP_PRIVILEGE => Ok(b"SeBackupPrivilege"),
         SE_RESTORE_PRIVILEGE => Ok(b"SeRestorePrivilege"),
         SE_RELABEL_PRIVILEGE => Ok(b"SeRelabelPrivilege"),
+        uapi::KACS_SE_CREATE_TOKEN_PRIVILEGE => Ok(b"SeCreateTokenPrivilege"),
+        uapi::KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE => Ok(b"SeAssignPrimaryTokenPrivilege"),
+        uapi::KACS_SE_LOCK_MEMORY_PRIVILEGE => Ok(b"SeLockMemoryPrivilege"),
+        uapi::KACS_SE_INCREASE_QUOTA_PRIVILEGE => Ok(b"SeIncreaseQuotaPrivilege"),
+        uapi::KACS_SE_TCB_PRIVILEGE => Ok(b"SeTcbPrivilege"),
+        uapi::KACS_SE_LOAD_DRIVER_PRIVILEGE => Ok(b"SeLoadDriverPrivilege"),
+        uapi::KACS_SE_SYSTEM_PROFILE_PRIVILEGE => Ok(b"SeSystemProfilePrivilege"),
+        uapi::KACS_SE_SYSTEMTIME_PRIVILEGE => Ok(b"SeSystemtimePrivilege"),
+        uapi::KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE => Ok(b"SeProfileSingleProcessPrivilege"),
+        uapi::KACS_SE_INCREASE_BASE_PRIORITY_PRIVILEGE => Ok(b"SeIncreaseBasePriorityPrivilege"),
+        uapi::KACS_SE_SHUTDOWN_PRIVILEGE => Ok(b"SeShutdownPrivilege"),
+        uapi::KACS_SE_DEBUG_PRIVILEGE => Ok(b"SeDebugPrivilege"),
+        uapi::KACS_SE_AUDIT_PRIVILEGE => Ok(b"SeAuditPrivilege"),
+        uapi::KACS_SE_CHANGE_NOTIFY_PRIVILEGE => Ok(b"SeChangeNotifyPrivilege"),
+        uapi::KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE => Ok(b"SeRemoteShutdownPrivilege"),
+        uapi::KACS_SE_MANAGE_VOLUME_PRIVILEGE => Ok(b"SeManageVolumePrivilege"),
+        uapi::KACS_SE_IMPERSONATE_PRIVILEGE => Ok(b"SeImpersonatePrivilege"),
+        uapi::KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE => Ok(b"SeCreateSymbolicLinkPrivilege"),
         _ => Err(EIO),
     }
+}
+
+/// `linux.cap`: the `CAP_*` name without its prefix, in kebab case.
+fn linux_cap_name(cap: u32) -> Option<&'static [u8]> {
+    const NAMES: [&[u8]; 41] = [
+        b"chown",
+        b"dac-override",
+        b"dac-read-search",
+        b"fowner",
+        b"fsetid",
+        b"kill",
+        b"setgid",
+        b"setuid",
+        b"setpcap",
+        b"linux-immutable",
+        b"net-bind-service",
+        b"net-broadcast",
+        b"net-admin",
+        b"net-raw",
+        b"ipc-lock",
+        b"ipc-owner",
+        b"sys-module",
+        b"sys-rawio",
+        b"sys-chroot",
+        b"sys-ptrace",
+        b"sys-pacct",
+        b"sys-admin",
+        b"sys-boot",
+        b"sys-nice",
+        b"sys-resource",
+        b"sys-time",
+        b"sys-tty-config",
+        b"mknod",
+        b"lease",
+        b"audit-write",
+        b"audit-control",
+        b"setfcap",
+        b"mac-override",
+        b"mac-admin",
+        b"syslog",
+        b"wake-alarm",
+        b"block-suspend",
+        b"audit-read",
+        b"perfmon",
+        b"bpf",
+        b"checkpoint-restore",
+    ];
+    NAMES.get(usize::try_from(cap).ok()?).copied()
+}
+
+/// Where a privilege was spent outside an access check.
+#[derive(Clone, Copy)]
+pub(crate) enum PrivilegeGate {
+    /// A Linux capability check KACS answered with a privilege.
+    LinuxCap(u32),
+    /// The volume-management gate the mount paths ask instead of
+    /// `CAP_SYS_ADMIN`.
+    VolumeMount,
+}
+
+/// `kacs.audit.privilege.used` for a privilege spent at a gate rather than
+/// in an access check: `operation.name` `linux-cap` or `volume-mount`.
+pub(crate) fn emit_gate_privilege_use_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    gate: PrivilegeGate,
+    privilege: u64,
+) -> Result<(), c_long> {
+    let name = privilege_name(privilege)?;
+    let (operation, cap): (&[u8], Option<&[u8]>) = match gate {
+        PrivilegeGate::LinuxCap(cap) => (b"linux-cap", Some(linux_cap_name(cap).ok_or(EIO)?)),
+        PrivilegeGate::VolumeMount => (b"volume-mount", None),
+    };
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_map(&process_info)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let mut writer =
+        MsgpackWriter::with_capacity(160 + subject_map.len() + emitter_map.len())?;
+
+    writer.write_map_len(5 + usize::from(cap.is_some()))?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map.as_slice())?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(operation)?;
+    writer.write_key(b"privilege")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(name)?;
+    if let Some(cap) = cap {
+        writer.write_key(b"linux")?;
+        writer.write_map_len(1)?;
+        writer.write_key(b"cap")?;
+        writer.write_str(cap)?;
+    }
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"success")?;
+    writer.write_bool(true)?;
+
+    emit(PRIVILEGE_USED_TYPE, writer.into_vec().as_slice());
+    Ok(())
 }
 
 fn caap_sacl_phase_name(phase: CaapSaclPhase) -> &'static [u8] {
@@ -611,8 +739,12 @@ fn encode_privilege_used_payload(
 ) -> Result<Vec<u8>, c_long> {
     let mut writer = MsgpackWriter::with_capacity(512)?;
 
-    writer.write_map_len(maps.common_len() + 3)?;
+    writer.write_map_len(maps.common_len() + 4)?;
     maps.write_head(&mut writer)?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(b"access-check")?;
     writer.write_key(b"privilege")?;
     writer.write_map_len(3)?;
     writer.write_key(b"name")?;

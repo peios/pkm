@@ -187,6 +187,7 @@
 
 
 #define PKM_KUNIT_AUDIT_POLICY_OBJECT_ACCESS_SUCCESS 0x00000001U
+#define PKM_KUNIT_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS 0x00000004U
 
 #define PKM_KUNIT_SYSTEM_PRIVILEGES_ALL 0xC000000FFFFFFFFCULL
 
@@ -1268,6 +1269,10 @@ bool pkm_kunit_msgpack_parse_payload_root(
 bool pkm_kunit_expect_kmes_event_type(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	const char *expected);
+
+bool pkm_kunit_latest_kacs_event(struct kunit *test, const char *type,
+				 u8 *buffer,
+				 struct pkm_kunit_kmes_event_view *view);
 
 bool pkm_kunit_expect_access_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,

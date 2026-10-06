@@ -117,7 +117,9 @@ static void pkm_kunit_boot_system_defaults(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snapshot.interactivity_scope, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.projected_uid, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.projected_gid, 0U);
-	KUNIT_EXPECT_EQ(test, snapshot.audit_policy, 0U);
+	/* PRIVILEGE_USE_SUCCESS: SYSTEM's privilege use is recorded. */
+	KUNIT_EXPECT_EQ(test, snapshot.audit_policy,
+			PKM_KUNIT_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS);
 	KUNIT_EXPECT_EQ(test, snapshot.elevation_type, KACS_ELEVATION_DEFAULT);
 	KUNIT_EXPECT_EQ(test, snapshot.restricted, 0U);
 	KUNIT_EXPECT_EQ(test, snapshot.user_deny_only, 0U);

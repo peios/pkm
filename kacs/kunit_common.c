@@ -1893,6 +1893,26 @@ bool pkm_kunit_msgpack_parse_payload_root(
 }
 
 
+/*
+ * The newest KACS-origin record of `type` on any ring, copied into `buffer`
+ * (PKM_KUNIT_KMES_CAPTURE_BYTES long) and parsed into `view`.
+ */
+bool pkm_kunit_latest_kacs_event(struct kunit *test, const char *type,
+				 u8 *buffer,
+				 struct pkm_kunit_kmes_event_view *view)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	size_t written = 0;
+
+	(void)test;
+	if (pkm_kmes_kunit_copy_latest_matching_event(
+		    KMES_ORIGIN_KACS, type, strlen(type), buffer,
+		    PKM_KUNIT_KMES_CAPTURE_BYTES, &written, &snapshot) != 0)
+		return false;
+	return pkm_kunit_parse_kmes_event(buffer, written, view);
+}
+
+
 bool pkm_kunit_expect_kmes_event_type(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	const char *expected)
@@ -2209,16 +2229,24 @@ bool pkm_kunit_expect_privilege_use_schema(
 {
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
+	struct pkm_kunit_msgpack_view operation = { };
 	struct pkm_kunit_msgpack_view privilege = { };
 	bool ok = true;
 
 	ok &= pkm_kunit_expect_kmes_event_type(test, event,
 					       "kacs.audit.privilege.used");
+	/* subject, emitter, [object], operation, privilege, access, outcome. */
 	if (!pkm_kunit_msgpack_parse_payload_root(
 		    test, event, &root,
-		    (expected_object_kind ? 6U : 5U) +
+		    (expected_object_kind ? 7U : 6U) +
 			    (expected_asserted ? 1U : 0U)))
 		return false;
+	if (pkm_kunit_msgpack_require_map_key(test, &root, "operation", 1U,
+					      &operation))
+		ok &= pkm_kunit_msgpack_expect_str_key(test, &operation, "name",
+						       "access-check");
+	else
+		ok = false;
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
 	ok &= pkm_kunit_msgpack_expect_subject_map(

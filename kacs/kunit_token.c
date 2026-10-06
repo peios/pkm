@@ -2500,21 +2500,6 @@ static long pkm_kunit_mint_system_sid_token_fd(struct kunit *test,
 						       token_spec_len);
 }
 
-/* The newest KACS record of `type` on the rings, parsed into `view`. */
-static bool pkm_kunit_latest_kacs_event(struct kunit *test, const char *type,
-					u8 *buffer,
-					struct pkm_kunit_kmes_event_view *view)
-{
-	struct pkm_kmes_kunit_snapshot snapshot = { };
-	size_t written = 0;
-
-	if (pkm_kmes_kunit_copy_latest_matching_event(
-		    KMES_ORIGIN_KACS, type, strlen(type), buffer,
-		    PKM_KUNIT_KMES_CAPTURE_BYTES, &written, &snapshot) != 0)
-		return false;
-	return pkm_kunit_parse_kmes_event(buffer, written, view);
-}
-
 /*
  * PKM §3.5: an impersonation writes kacs.impersonation.started, naming the
  * server as subject and the client token as object, with the level asked

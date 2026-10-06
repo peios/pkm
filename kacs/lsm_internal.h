@@ -296,7 +296,22 @@ struct pkm_kacs_process_state {
 	u32 mitigation_bits;
 	struct pkm_kmes_rate_bucket *kmes_rate_bucket;
 	struct pkm_kacs_process_sd *process_sd;
+	/*
+	 * Which privilege uses through a Linux capability gate this process
+	 * has already recorded as kacs.audit.privilege.used, so each is
+	 * recorded once: bit N is capability N, and
+	 * PKM_KACS_PRIV_USE_VOLUME_BIT the volume-management gate. Scoped to
+	 * one effective token: the set empties when the token GUID it was
+	 * filled under (priv_use_token_guid) is not the one now acting. Not
+	 * the token's own "used" flags, which derived tokens copy and which
+	 * every process sharing a token object shares.
+	 */
+	spinlock_t priv_use_lock;
+	u64 priv_use_seen;
+	u8 priv_use_token_guid[KACS_UUID_BYTES];
 };
+
+#define PKM_KACS_PRIV_USE_VOLUME_BIT 63
 
 struct pkm_kacs_psb_activation_context {
 	struct task_struct *task;
@@ -320,6 +335,17 @@ struct pkm_kacs_task_security {
 	 */
 	bool usermodehelper;
 	struct pkm_kacs_process_state *process_state;
+	/*
+	 * Privilege uses through a Linux capability gate waiting for their
+	 * kacs.audit.privilege.used records. capable() can run under
+	 * spinlocks, where a record cannot be built, so the gate notes the use
+	 * here and the record is written by task work on the way back to user
+	 * space (or at exit). priv_use_token holds a reference to the token
+	 * the uses were made under; while it is set priv_use_work is queued.
+	 */
+	struct callback_head priv_use_work;
+	const void *priv_use_token;
+	u64 priv_use_pending;
 	struct pkm_kacs_stratafs_copy_up *copy_up_context;
 	const struct file *delete_on_close_file;
 	const struct inode *delete_on_close_parent_inode;

@@ -1,13 +1,16 @@
 --- field privilege.name
 type: str.enum
-values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege | SeImpersonatePrivilege
+values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege | SeCreateTokenPrivilege | SeAssignPrimaryTokenPrivilege | SeLockMemoryPrivilege | SeIncreaseQuotaPrivilege | SeTcbPrivilege | SeLoadDriverPrivilege | SeSystemProfilePrivilege | SeSystemtimePrivilege | SeProfileSingleProcessPrivilege | SeIncreaseBasePriorityPrivilege | SeShutdownPrivilege | SeDebugPrivilege | SeAuditPrivilege | SeChangeNotifyPrivilege | SeRemoteShutdownPrivilege | SeManageVolumePrivilege | SeImpersonatePrivilege | SeCreateSymbolicLinkPrivilege
 closed: false
 
-The privilege a record is about. On an access check it is the privilege
-that contributed access, and only the first five can influence an access
-check. `SeImpersonatePrivilege` appears on an impersonation that needed it.
-The set is open because a privilege used to satisfy a Linux capability gate
-is a privilege use too, and will be recorded with `linux.cap` as its context.
+The privilege a record is about, by its Windows name. On an access check
+it is the privilege that contributed access, and only the first five can
+influence an access check. At a Linux capability gate it is the privilege
+the capability maps to — `SeTcbPrivilege` for most, `SeDebugPrivilege` for
+`sys-ptrace`, `SeShutdownPrivilege` for `sys-boot` and so on — and
+`SeManageVolumePrivilege` or `SeTcbPrivilege` at the volume gate.
+`SeImpersonatePrivilege` appears on an impersonation that needed it. The set
+is open because new privileges may be defined.
 
 --- field privilege.contributed
 type: uint.mask
@@ -457,44 +460,67 @@ field: outcome.reason           when outcome.success == false
 
 --- event kacs.audit.privilege.used
 tier: essential
-gating: the token's audit policy, success and failure flavours independently
-cardinality: once per privilege that contributed access
+gating: the token's audit policy, success and failure flavours independently; at a capability or volume gate, also the first use of that gate by the process under its current token, and never a CAP_OPT_NOAUDIT check
+cardinality: once per privilege that contributed access; at a gate, once per process, token and gate
 
-The record that a privilege contributed access to a check, and whether that
-contribution survived. Purely token-policy driven — no SACL is involved, so
-there is no trigger to record.
+The record that a privilege was spent. Purely token-policy driven — no SACL
+is involved, so there is no trigger to record. `operation.name` says where
+it was spent, and the rest of the record follows from it.
 
-**Success here means the privilege worked, not that it fired.** This is the
-field most often misread. A false outcome is not a failed attempt to use a
-privilege; it is a privilege that fired and was then overridden by a
-confinement, a CAAP rule, or PIP non-dominance — usually the more
-interesting of the two records, because it shows a boundary holding.
+`access-check` is a privilege that contributed access to an access check,
+with whether that contribution survived. **Success there means the
+privilege worked, not that it fired.** This is the field most often
+misread. A false outcome is not a failed attempt to use a privilege; it is
+a privilege that fired and was then overridden by a confinement, a CAAP
+rule, or PIP non-dominance — usually the more interesting of the two
+records, because it shows a boundary holding. **`MAXIMUM_ALLOWED` requests
+produce nothing here.** Privilege-use auditing short-circuits on them, even
+though SACL auditing was deliberately changed not to — a probing enumerator
+therefore trips one and slips the other.
+
+`linux-cap` is a privilege that satisfied a Linux capability check: KACS
+answers every capability check with a privilege, and `linux.cap` names the
+check. `volume-mount` is a privilege that satisfied the volume-management
+gate the mount paths ask instead of `CAP_SYS_ADMIN`. **Each is recorded once
+per process, token and gate**, not once per check: a TCB process makes
+thousands of `CAP_SYS_ADMIN` checks a second, and the first answers who used
+the privilege and for what. The set starts again when the process acts under
+another token. Only successful uses are recorded, and only those of a user
+process's own checks: a probe with `CAP_OPT_NOAUDIT`, a kernel thread's
+check and a check against another process's credentials record nothing.
+The record is written as the process returns to user space, so it follows
+the system call that spent the privilege.
 
 A token can carry either audit policy flavour, both, or neither, and each
-governs its own outcome independently.
-
-**`MAXIMUM_ALLOWED` requests produce nothing here.** Privilege-use auditing
-short-circuits on them, even though SACL auditing was deliberately changed
-not to — a probing enumerator therefore trips one and slips the other.
+governs its own outcome independently. **The boot SYSTEM token carries
+`PRIVILEGE_USE_SUCCESS`**, so on a stock machine the records come from
+SYSTEM and the services that inherit its token.
 
 include: subject
-field: object.kind              required
+field: operation.name           required
+  values: access-check | linux-cap | volume-mount
+  closed: false
+field: object.kind              optional
+  On an access check, the object checked. Absent at a gate, and on a check
+  made through the AccessCheck syscall with no audit context: the kernel
+  does not know what was checked.
 field: object.file.path         when object.kind == file
 field: object.process.pid       when object.kind == process
 field: object.process.guid      when object.kind == process
 field: object.token.id          when object.kind == token
 field: object.token.guid        when object.kind == token
 field: privilege.name           required
-field: privilege.contributed    required
-field: privilege.surviving      required
-field: access.requested         required
+field: privilege.contributed    when operation.name == access-check
+field: privilege.surviving      when operation.name == access-check
+field: linux.cap                when operation.name == linux-cap
+field: access.requested         when operation.name == access-check
   The whole check's requested mask, not this privilege's share of it.
-field: access.granted           required
+field: access.granted           when operation.name == access-check
   The whole check's final granted mask.
 field: outcome.success          required
-  True when `privilege.surviving` is non-empty. Derived rather than
-  independently decided, and kept so that a single query for failed
-  outcomes works across every event type.
+  On an access check, true when `privilege.surviving` is non-empty: derived
+  rather than independently decided, and kept so that a single query for
+  failed outcomes works across every event type. At a gate, always true.
 field: fields.attestation.userspace  optional
   Set on every record of the AccessCheck syscall, and on no other. There
   the descriptor, and with it `trigger.ace`, is always the caller's, as are

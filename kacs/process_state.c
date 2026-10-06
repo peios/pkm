@@ -119,6 +119,7 @@ struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
 
 	refcount_set(&state->refs, 1);
 	spin_lock_init(&state->mitigation_lock);
+	spin_lock_init(&state->priv_use_lock);
 	mutex_init(&state->sd_lock);
 	pkm_kacs_fill_uuid_v4(state->process_guid);
 	state->pip_type = pip_type;

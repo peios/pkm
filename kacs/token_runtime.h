@@ -632,6 +632,9 @@ int kacs_rust_create_logon_session(const void *creator_token, const u8 *spec,
 			     u64 *logon_session_id_out);
 int kacs_rust_destroy_empty_logon_session(u64 auth_id);
 void kacs_rust_session_audit_drain(void);
+u32 kacs_rust_token_audit_policy(const void *token);
+int kacs_rust_emit_privilege_use(const void *token, u32 operation, int cap,
+				 u64 privilege, u32 pip_type, u32 pip_trust);
 int kacs_rust_emit_impersonation_started(const void *server_token,
 					 const void *client_token,
 					 const void *installed_token,

@@ -27,9 +27,34 @@ bool pkm_kacs_allow_caps_present(const kernel_cap_t *caps);
 u64 pkm_kacs_kernel_cap_to_u64(const kernel_cap_t *caps);
 kernel_cap_t pkm_kacs_u64_to_kernel_cap(u64 mask);
 long pkm_kacs_check_capability_for_token(const void *subject_token, int cap);
+long pkm_kacs_check_capability_for_token_held(const void *subject_token,
+					      int cap, u64 *held_out);
 long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 				 struct user_namespace *target_ns, int cap,
 				 unsigned int opts);
+long pkm_kacs_capable_in_cred_ns_held(const struct cred *cred,
+				      struct user_namespace *target_ns,
+				      int cap, unsigned int opts,
+				      u64 *held_out);
+
+/*
+ * kacs.audit.privilege.used for a privilege spent at a Linux capability
+ * gate (bit = the capability) or the volume-management gate
+ * (bit = PKM_KACS_PRIV_USE_VOLUME_BIT). See capability.c.
+ */
+#define PKM_KACS_PRIV_USE_OP_LINUX_CAP 1U
+#define PKM_KACS_PRIV_USE_OP_VOLUME_MOUNT 2U
+
+struct pkm_kacs_task_security;
+
+bool pkm_kacs_note_privilege_use(const struct cred *cred, unsigned int bit,
+				 u64 held, unsigned int opts);
+void pkm_kacs_priv_use_task_release(struct pkm_kacs_task_security *tsec);
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+struct pkm_kacs_process_state;
+bool pkm_kacs_kunit_priv_use_first(struct pkm_kacs_process_state *state,
+				   const u8 guid[16], unsigned int bit);
+#endif
 long pkm_kacs_capget_for_task(const struct task_struct *target,
 			      kernel_cap_t *effective,
 			      kernel_cap_t *inheritable,
