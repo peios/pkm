@@ -263,13 +263,28 @@ long pkm_kacs_kunit_fake_setxattr_locked(
 }
 #endif
 
+/*
+ * kacs.descriptor.rejected: {object: {kind: "file"}, outcome: {reason:
+ * "corrupt"}}.
+ *
+ * object.file.path is left out. The descriptor read is reached through
+ * path-anchor files, and the inode_getsecurity route builds its anchor on a
+ * stack vfsmount that is not part of any mount tree, so d_path here could
+ * walk a struct mount that does not exist.
+ */
 static void pkm_kacs_emit_corrupt_sd_event(void)
 {
-	static const char event_type[] = "corrupt-sd";
+	static const char event_type[] = "kacs.descriptor.rejected";
 	static const u8 payload[] = {
+		0x82, /* map(2) */
+		0xa6, 'o', 'b', 'j', 'e', 'c', 't',
+		0x81, /* map(1) */
+		0xa4, 'k', 'i', 'n', 'd',
+		0xa4, 'f', 'i', 'l', 'e',
+		0xa7, 'o', 'u', 't', 'c', 'o', 'm', 'e',
 		0x81, /* map(1) */
 		0xa6, 'r', 'e', 'a', 's', 'o', 'n',
-		0xaa, 'c', 'o', 'r', 'r', 'u', 'p', 't', '-', 's', 'd',
+		0xa7, 'c', 'o', 'r', 'r', 'u', 'p', 't',
 	};
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,

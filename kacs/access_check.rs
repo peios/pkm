@@ -6,10 +6,12 @@
 
 use crate::access_check_abi::{
     execute_access_check_abi, execute_access_check_list_abi, parse_access_check_abi_request,
-    AccessCheckAbiExecution, AccessCheckAbiMemory, AccessCheckAbiResolved, AccessCheckAbiReturn,
-    KacsNodeResultAbi, OwnedAuditEvent, KACS_ABI_EACCES, KACS_ACCESS_CHECK_ARGS_SIZE,
+    AccessCheckAbiExecution, AccessCheckAbiMemory, AccessCheckAbiRequest, AccessCheckAbiResolved,
+    AccessCheckAbiReturn, KacsNodeResultAbi, OwnedAuditEvent, KACS_ABI_EACCES,
+    KACS_ACCESS_CHECK_ARGS_SIZE,
 };
 use crate::error::KacsError;
+use crate::kmes_payload::{AuditObject, AuditTarget};
 use crate::mic::{IntegrityLevel, TOKEN_MANDATORY_POLICY_NO_WRITE_UP};
 use crate::pip::PipContext;
 use crate::pkm_alloc::Vec;
@@ -203,6 +205,8 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
         let args_bytes = read_args_prefix(ops, args_ptr)?;
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
+        validate_audit_context_encoding(&request)?;
+        let target = audit_target(&request, live_token)?;
         let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_abi(&request, &resolved).map_err(map_kacs_error)?;
         finalize_execution(
@@ -214,6 +218,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
             live_token,
             resolved,
             effective_pip,
+            &target,
         )
     }) {
         Ok(ret) => ret,
@@ -238,6 +243,8 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
         let args_bytes = read_args_prefix(ops, args_ptr)?;
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
+        validate_audit_context_encoding(&request)?;
+        let target = audit_target(&request, live_token)?;
         let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_list_abi(&request, results_count, &resolved)
             .map_err(map_kacs_error)?;
@@ -250,11 +257,52 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
             live_token,
             resolved,
             effective_pip,
+            &target,
         )
     }) {
         Ok(ret) => ret,
         Err(errno) => errno,
     }
+}
+
+/// Runs the KMES emit validator over a caller's audit context. The core has
+/// already checked its shape (PGSS §6.7); this is the well-formedness the
+/// core cannot reach, the same check an emitted event's payload gets: valid
+/// UTF-8 strings and bounded nesting. The context becomes the record's
+/// `object` map, one level below the payload root, so it may nest one level
+/// less than a payload may.
+fn validate_audit_context_encoding(request: &AccessCheckAbiRequest) -> Result<(), c_long> {
+    const CONTEXT_LABEL: &[u8] = b"audit-context";
+    let Some(context) = request.audit_context.as_deref() else {
+        return Ok(());
+    };
+    let ret = crate::kmes_validate::kacs_rust_kmes_validate_staged_event(
+        CONTEXT_LABEL.as_ptr(),
+        CONTEXT_LABEL.len(),
+        context.as_ptr(),
+        context.len(),
+        crate::peios_uapi::KMES_CONFIG_MAX_NESTING_DEPTH_DEFAULT - 1,
+    );
+    if ret != 0 {
+        return Err(EINVAL);
+    }
+    Ok(())
+}
+
+/// What the records of an ioctl-originated check say about their subject
+/// and object. A caller-supplied audit context or PIP state is the caller's
+/// claim, so either marks the records `fields.attestation.userspace`.
+fn audit_target<'a>(
+    request: &'a AccessCheckAbiRequest,
+    live_token: Option<*const c_void>,
+) -> Result<AuditTarget<'a>, c_long> {
+    Ok(AuditTarget {
+        subject_ids: live_token.and_then(crate::token_runtime::audit_subject_ids),
+        object: AuditObject::from_audit_context(request.audit_context.as_deref())?,
+        asserted: request.audit_context.is_some()
+            || request.pip.pip_type != 0
+            || request.pip.pip_trust != 0,
+    })
 }
 
 fn with_resolved_context<T>(
@@ -399,6 +447,7 @@ fn finalize_execution(
     live_token: Option<*const c_void>,
     resolved: AccessCheckAbiResolved<'_>,
     effective_pip: PipContext,
+    target: &AuditTarget<'_>,
 ) -> Result<c_long, c_long> {
     persist_live_privilege_state(live_token, &execution)?;
     write_summary(summary_out, &execution);
@@ -412,6 +461,7 @@ fn finalize_execution(
         &execution.caap_diagnostic_events,
         resolved,
         effective_pip,
+        target,
     )?;
 
     if let Some(writeback) = execution.granted_out {
@@ -490,6 +540,7 @@ fn emit_events(
     caap_diagnostic_events: &[crate::CaapDiagnosticEvent],
     resolved: AccessCheckAbiResolved<'_>,
     effective_pip: PipContext,
+    target: &AuditTarget<'_>,
 ) -> Result<(), c_long> {
     if audit_events.is_empty()
         && privilege_use_events.is_empty()
@@ -505,6 +556,7 @@ fn emit_events(
             caap_diagnostic_events,
             resolved,
             effective_pip,
+            target,
         );
     };
 
@@ -517,10 +569,13 @@ fn emit_events(
                 Some(bytes) => (bytes.as_slice().as_ptr(), bytes.len()),
                 None => (core::ptr::null(), 0),
             };
+            // The sink view predates the whole-check masks: its `requested`
+            // and `granted` are both the privilege's contribution, as they
+            // always were.
             let view = PkmKacsPrivilegeUseEventView {
                 privilege: event.privilege,
-                requested: event.requested,
-                granted: event.granted,
+                requested: event.contributed,
+                granted: event.contributed,
                 surviving_bits: event.surviving_bits,
                 success: event.success,
                 object_audit_context_ptr: context_ptr,
@@ -570,6 +625,7 @@ fn emit_events(
             caap_diagnostic_events,
             resolved,
             effective_pip,
+            target,
         )?;
     }
 

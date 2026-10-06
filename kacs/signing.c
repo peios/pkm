@@ -1143,9 +1143,22 @@ int pkm_kacs_signing_crypto_probe(void)
  */
 static int __init pkm_kacs_signing_crypto_announce(void)
 {
-	static const char event_type[] = "KACS_SIGNING_CRYPTO_UNAVAILABLE";
-	/* msgpack map(1): "errno" => int32. */
-	u8 payload[1 + 1 + 5 + 5];
+	static const char event_type[] = "kacs.signature.crypto.failed";
+	/*
+	 * {signature: {crypto-stage: "boot-probe"}, outcome: {errno: int32}}.
+	 * The errno is the probe's own return, already negative.
+	 */
+	static const u8 head[] = {
+		0x82, /* map(2) */
+		0xa9, 's', 'i', 'g', 'n', 'a', 't', 'u', 'r', 'e',
+		0x81, /* map(1) */
+		0xac, 'c', 'r', 'y', 'p', 't', 'o', '-', 's', 't', 'a', 'g', 'e',
+		0xaa, 'b', 'o', 'o', 't', '-', 'p', 'r', 'o', 'b', 'e',
+		0xa7, 'o', 'u', 't', 'c', 'o', 'm', 'e',
+		0x81, /* map(1) */
+		0xa5, 'e', 'r', 'r', 'n', 'o',
+	};
+	u8 payload[sizeof(head) + 5];
 	int ret;
 	u8 *out;
 
@@ -1156,11 +1169,8 @@ static int __init pkm_kacs_signing_crypto_announce(void)
 	pr_err("pkm: ML-DSA signature transform unavailable (%d); every signed exec will be refused\n",
 	       ret);
 
-	out = payload;
-	*out++ = 0x81;
-	*out++ = 0xa5;
-	memcpy(out, "errno", 5);
-	out += 5;
+	memcpy(payload, head, sizeof(head));
+	out = payload + sizeof(head);
 	*out++ = 0xd2;
 	*out++ = (u32)ret >> 24;
 	*out++ = (u32)ret >> 16;

@@ -22,7 +22,8 @@ const FAILED_ACCESS_ACE_FLAG: u8 = 0x80;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 
-/// One audit/alarm event emitted by SACL evaluation or forced policy.
+/// One audit/alarm event emitted by SACL evaluation or forced policy, the
+/// source of a `kacs.audit.access.checked` record.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
 pub struct AuditEvent<'a> {
@@ -39,7 +40,9 @@ pub struct AuditEvent<'a> {
     pub policy_forced: bool,
     /// Optional privilege bit for privilege-use auditing.
     pub privilege: Option<u64>,
-    /// Optional object-audit context blob.
+    /// Optional object-audit context: at the access-check ioctl, the PGSS
+    /// §6.7 map the caller supplied, already validated by
+    /// `parse_audit_context_map`. Opaque to the core.
     pub object_audit_context: Option<Vec<u8>>,
 }
 

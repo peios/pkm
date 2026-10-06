@@ -39,55 +39,121 @@
 #define PKM_KACS_FILE_DATA_RIGHTS                                             \
 	(KACS_FILE_READ_DATA | KACS_FILE_WRITE_DATA | KACS_FILE_APPEND_DATA)
 
-static size_t pkm_kacs_msgpack_string_size(size_t len)
+/*
+ * A msgpack writer that measures when it has no buffer.
+ *
+ * The StrataFS payloads are encoded in two passes over one function: the
+ * first, with out == NULL, counts the bytes; the second writes them into a
+ * buffer of that size. Sizing and writing cannot disagree, because they are
+ * the same code, so a payload can never overrun its kmalloc.
+ */
+struct pkm_kacs_mp {
+	u8 *out;
+	size_t len;
+};
+
+static void pkm_kacs_mp_raw(struct pkm_kacs_mp *mp, const void *src,
+			    size_t n)
 {
-	if (len <= 31)
-		return 1 + len;
-	if (len <= U8_MAX)
-		return 2 + len;
-	return 3 + len;
+	if (mp->out)
+		memcpy(mp->out + mp->len, src, n);
+	mp->len += n;
 }
 
-static u8 *pkm_kacs_msgpack_string_header(u8 *out, size_t len)
+static void pkm_kacs_mp_byte(struct pkm_kacs_mp *mp, u8 value)
+{
+	pkm_kacs_mp_raw(mp, &value, 1);
+}
+
+static void pkm_kacs_mp_map(struct pkm_kacs_mp *mp, u8 entries)
+{
+	pkm_kacs_mp_byte(mp, 0x80 | entries); /* fixmap: callers stay <= 15 */
+}
+
+/* Callers bound len to PATH_MAX, so str16 is the widest form needed. */
+static void pkm_kacs_mp_str_header(struct pkm_kacs_mp *mp, size_t len)
 {
 	if (len <= 31) {
-		*out++ = 0xa0 | len;
+		pkm_kacs_mp_byte(mp, 0xa0 | len);
 	} else if (len <= U8_MAX) {
-		*out++ = 0xd9;
-		*out++ = len;
+		pkm_kacs_mp_byte(mp, 0xd9);
+		pkm_kacs_mp_byte(mp, len);
 	} else {
-		*out++ = 0xda;
-		*out++ = len >> 8;
-		*out++ = len;
+		pkm_kacs_mp_byte(mp, 0xda);
+		pkm_kacs_mp_byte(mp, len >> 8);
+		pkm_kacs_mp_byte(mp, len);
 	}
-	return out;
 }
 
-static u8 *pkm_kacs_msgpack_string(u8 *out, const char *value, size_t len)
+static void pkm_kacs_mp_str(struct pkm_kacs_mp *mp, const char *value,
+			    size_t len)
 {
-	out = pkm_kacs_msgpack_string_header(out, len);
-	memcpy(out, value, len);
-	return out + len;
+	pkm_kacs_mp_str_header(mp, len);
+	pkm_kacs_mp_raw(mp, value, len);
 }
 
-static u8 *pkm_kacs_msgpack_u32(u8 *out, u32 value)
+static void pkm_kacs_mp_key(struct pkm_kacs_mp *mp, const char *key)
 {
-	*out++ = 0xce;
-	*out++ = value >> 24;
-	*out++ = value >> 16;
-	*out++ = value >> 8;
-	*out++ = value;
-	return out;
+	pkm_kacs_mp_str(mp, key, strlen(key));
 }
 
-static u8 *pkm_kacs_msgpack_s32(u8 *out, s32 value)
+static void pkm_kacs_mp_u32(struct pkm_kacs_mp *mp, u32 value)
 {
-	*out++ = 0xd2;
-	*out++ = (u32)value >> 24;
-	*out++ = (u32)value >> 16;
-	*out++ = (u32)value >> 8;
-	*out++ = (u32)value;
-	return out;
+	pkm_kacs_mp_byte(mp, 0xce);
+	pkm_kacs_mp_byte(mp, value >> 24);
+	pkm_kacs_mp_byte(mp, value >> 16);
+	pkm_kacs_mp_byte(mp, value >> 8);
+	pkm_kacs_mp_byte(mp, value);
+}
+
+static void pkm_kacs_mp_s32(struct pkm_kacs_mp *mp, s32 value)
+{
+	pkm_kacs_mp_byte(mp, 0xd2);
+	pkm_kacs_mp_byte(mp, (u32)value >> 24);
+	pkm_kacs_mp_byte(mp, (u32)value >> 16);
+	pkm_kacs_mp_byte(mp, (u32)value >> 8);
+	pkm_kacs_mp_byte(mp, (u32)value);
+}
+
+static void pkm_kacs_mp_bool(struct pkm_kacs_mp *mp, bool value)
+{
+	pkm_kacs_mp_byte(mp, value ? 0xc3 : 0xc2);
+}
+
+/*
+ * object: {file: {path-relative: "/<relative>"}}. StrataFS keeps the path
+ * relative to the mount without its leading slash; the field is
+ * "/"-prefixed.
+ */
+static void pkm_kacs_mp_relative_path_object(struct pkm_kacs_mp *mp,
+					     const char *relative,
+					     size_t relative_len)
+{
+	bool add_slash = !relative_len || relative[0] != '/';
+
+	pkm_kacs_mp_key(mp, "object");
+	pkm_kacs_mp_map(mp, 1);
+	pkm_kacs_mp_key(mp, "file");
+	pkm_kacs_mp_map(mp, 1);
+	pkm_kacs_mp_key(mp, "path-relative");
+	pkm_kacs_mp_str_header(mp, relative_len + add_slash);
+	if (add_slash)
+		pkm_kacs_mp_byte(mp, '/');
+	pkm_kacs_mp_raw(mp, relative, relative_len);
+}
+
+/* <role>: {stratum: {index: <index>, path: <path>}} */
+static void pkm_kacs_mp_stratum(struct pkm_kacs_mp *mp, const char *role,
+				u32 index, const char *path, size_t path_len)
+{
+	pkm_kacs_mp_key(mp, role);
+	pkm_kacs_mp_map(mp, 1);
+	pkm_kacs_mp_key(mp, "stratum");
+	pkm_kacs_mp_map(mp, 2);
+	pkm_kacs_mp_key(mp, "index");
+	pkm_kacs_mp_u32(mp, index);
+	pkm_kacs_mp_key(mp, "path");
+	pkm_kacs_mp_str(mp, path, path_len);
 }
 
 void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
@@ -97,170 +163,133 @@ void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 				     const char *create_stratum,
 				     int result)
 {
-	static const char event_type[] = "STRATAFS_COPY_UP";
-	static const char path_key[] = "path";
-	static const char provider_index_key[] = "provider_index";
-	static const char provider_key[] = "provider_stratum";
-	static const char create_index_key[] = "create_index";
-	static const char create_key[] = "create_stratum";
-	static const char result_key[] = "result_errno";
+	static const char event_type[] = "stratafs.file.copied-up";
 	const char *relative = relative_path ? relative_path : "";
 	size_t relative_len = strnlen(relative, PATH_MAX);
-	bool add_slash;
-	size_t path_len;
 	size_t provider_len;
 	size_t create_len;
-	size_t size;
-	u8 *payload;
-	u8 *out;
+	bool success = result >= 0;
+	struct pkm_kacs_mp mp = { };
+	int pass;
 
 	if (!provider_stratum || !create_stratum || relative_len == PATH_MAX)
 		return;
-	add_slash = !relative_len || relative[0] != '/';
-	path_len = relative_len + add_slash;
 	provider_len = strnlen(provider_stratum, PATH_MAX);
 	create_len = strnlen(create_stratum, PATH_MAX);
 	if (provider_len == PATH_MAX || create_len == PATH_MAX)
 		return;
 
-	size = 1 +
-		pkm_kacs_msgpack_string_size(sizeof(path_key) - 1) +
-		pkm_kacs_msgpack_string_size(path_len) +
-		pkm_kacs_msgpack_string_size(sizeof(provider_index_key) - 1) + 5 +
-		pkm_kacs_msgpack_string_size(sizeof(provider_key) - 1) +
-		pkm_kacs_msgpack_string_size(provider_len) +
-		pkm_kacs_msgpack_string_size(sizeof(create_index_key) - 1) + 5 +
-		pkm_kacs_msgpack_string_size(sizeof(create_key) - 1) +
-		pkm_kacs_msgpack_string_size(create_len) +
-		pkm_kacs_msgpack_string_size(sizeof(result_key) - 1) + 5;
-	payload = kmalloc(size, GFP_KERNEL);
-	if (!payload)
-		return;
-
-	out = payload;
-	*out++ = 0x86; /* map(6) */
-	out = pkm_kacs_msgpack_string(out, path_key, sizeof(path_key) - 1);
-	out = pkm_kacs_msgpack_string_header(out, path_len);
-	if (add_slash)
-		*out++ = '/';
-	memcpy(out, relative, relative_len);
-	out += relative_len;
-	out = pkm_kacs_msgpack_string(out, provider_index_key,
-				      sizeof(provider_index_key) - 1);
-	out = pkm_kacs_msgpack_u32(out, provider_index);
-	out = pkm_kacs_msgpack_string(out, provider_key,
-				      sizeof(provider_key) - 1);
-	out = pkm_kacs_msgpack_string(out, provider_stratum, provider_len);
-	out = pkm_kacs_msgpack_string(out, create_index_key,
-				      sizeof(create_index_key) - 1);
-	out = pkm_kacs_msgpack_u32(out, create_index);
-	out = pkm_kacs_msgpack_string(out, create_key, sizeof(create_key) - 1);
-	out = pkm_kacs_msgpack_string(out, create_stratum, create_len);
-	out = pkm_kacs_msgpack_string(out, result_key, sizeof(result_key) - 1);
-	out = pkm_kacs_msgpack_s32(out, result);
+	/* Pass 0 measures, pass 1 writes: see struct pkm_kacs_mp. */
+	for (pass = 0; pass < 2; pass++) {
+		if (pass) {
+			mp.out = kmalloc(mp.len, GFP_KERNEL);
+			if (!mp.out)
+				return;
+			mp.len = 0;
+		}
+		pkm_kacs_mp_map(&mp, 4);
+		pkm_kacs_mp_relative_path_object(&mp, relative, relative_len);
+		/* The stratum read from, and the one written into. */
+		pkm_kacs_mp_stratum(&mp, "source", provider_index,
+				    provider_stratum, provider_len);
+		pkm_kacs_mp_stratum(&mp, "destination", create_index,
+				    create_stratum, create_len);
+		pkm_kacs_mp_key(&mp, "outcome");
+		pkm_kacs_mp_map(&mp, success ? 1 : 2);
+		pkm_kacs_mp_key(&mp, "success");
+		pkm_kacs_mp_bool(&mp, success);
+		if (!success) {
+			pkm_kacs_mp_key(&mp, "errno");
+			pkm_kacs_mp_s32(&mp, result);
+		}
+	}
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-			     sizeof(event_type) - 1, payload, out - payload);
-	kfree(payload);
+			     sizeof(event_type) - 1, mp.out, mp.len);
+	kfree(mp.out);
+}
+
+static void pkm_kacs_stratafs_refusal_fields(
+	struct pkm_kacs_mp *mp, const char *relative, size_t relative_len,
+	const char *operation, size_t operation_len, s32 provider_index,
+	const char *provider, size_t provider_len, bool provider_known,
+	int result, bool deferred)
+{
+	pkm_kacs_mp_map(mp, provider_known ? 4 : 3);
+	pkm_kacs_mp_relative_path_object(mp, relative, relative_len);
+	pkm_kacs_mp_key(mp, "operation");
+	pkm_kacs_mp_map(mp, 1);
+	pkm_kacs_mp_key(mp, "name");
+	pkm_kacs_mp_str(mp, operation, operation_len);
+	if (provider_known)
+		pkm_kacs_mp_stratum(mp, "source", (u32)provider_index, provider,
+				    provider_len);
+	pkm_kacs_mp_key(mp, "outcome");
+	pkm_kacs_mp_map(mp, 2);
+	pkm_kacs_mp_key(mp, "errno");
+	pkm_kacs_mp_s32(mp, result);
+	pkm_kacs_mp_key(mp, "deferred");
+	pkm_kacs_mp_bool(mp, deferred);
 }
 
 /*
- * Encode a STRATAFS_MUTATION_REFUSED payload, or measure it.
+ * Encode a stratafs.mutation.refused payload, or measure it.
  *
  * With out == NULL this returns the byte count the payload needs; with a
  * buffer it encodes and returns the bytes written. 0 means the inputs cannot
- * be encoded. Sizing and writing share one function deliberately: they are two
- * passes over the same field list, and a payload whose size arithmetic and
- * writer disagree overruns a kmalloc.
+ * be encoded.
  */
 static size_t pkm_kacs_stratafs_refusal_payload(
 	u8 *out, size_t capacity, const char *relative_path,
 	const char *operation, s32 provider_index,
 	const char *provider_stratum, int result, bool deferred)
 {
-	static const char path_key[] = "path";
-	static const char operation_key[] = "operation";
-	static const char provider_index_key[] = "provider_index";
-	static const char provider_key[] = "provider_stratum";
-	static const char result_key[] = "result_errno";
-	static const char deferred_key[] = "deferred";
 	const char *relative = relative_path ? relative_path : "";
-	const char *provider = provider_stratum ? provider_stratum : "";
 	size_t relative_len = strnlen(relative, PATH_MAX);
 	/*
 	 * A refusal raised before any provider is known -- create, tmpfile,
-	 * and the heads of link and rename -- has no stratum to name. That is
-	 * reported as msgpack nil rather than as an empty string, so a reader
-	 * can tell "no provider was involved" from "the provider's path is
-	 * empty". provider_index is already -1 in the same records; the two
-	 * now agree.
+	 * and the heads of link and rename -- has no stratum to name, and the
+	 * caller passes provider_index -1. The whole source map is then left
+	 * out, so its index and path are absent together rather than written
+	 * as -1 and nil.
 	 */
-	bool provider_known = provider_index >= 0;
+	bool provider_known = provider_index >= 0 && provider_stratum;
+	struct pkm_kacs_mp mp = { };
 	size_t operation_len;
 	size_t provider_len;
-	bool add_slash;
-	size_t path_len;
-	size_t size;
-	u8 *o;
 
 	if (!operation || result >= 0 || relative_len == PATH_MAX)
 		return 0;
 	operation_len = strnlen(operation, 64);
 	if (!operation_len || operation_len == 64)
 		return 0;
-	provider_len = provider_known ? strnlen(provider, PATH_MAX) : 0;
+	provider_len = provider_known ? strnlen(provider_stratum, PATH_MAX) : 0;
 	if (provider_len == PATH_MAX)
 		return 0;
-	add_slash = !relative_len || relative[0] != '/';
-	path_len = relative_len + add_slash;
 
-	size = 1 +
-		pkm_kacs_msgpack_string_size(sizeof(path_key) - 1) +
-		pkm_kacs_msgpack_string_size(path_len) +
-		pkm_kacs_msgpack_string_size(sizeof(operation_key) - 1) +
-		pkm_kacs_msgpack_string_size(operation_len) +
-		pkm_kacs_msgpack_string_size(sizeof(provider_index_key) - 1) + 5 +
-		pkm_kacs_msgpack_string_size(sizeof(provider_key) - 1) +
-		(provider_known ? pkm_kacs_msgpack_string_size(provider_len) : 1) +
-		pkm_kacs_msgpack_string_size(sizeof(result_key) - 1) + 5 +
-		pkm_kacs_msgpack_string_size(sizeof(deferred_key) - 1) + 1;
+	pkm_kacs_stratafs_refusal_fields(&mp, relative, relative_len, operation,
+					 operation_len, provider_index,
+					 provider_stratum, provider_len,
+					 provider_known, result, deferred);
 	if (!out)
-		return size;
-	if (capacity < size)
+		return mp.len;
+	if (capacity < mp.len)
 		return 0;
 
-	o = out;
-	*o++ = 0x86; /* map(6) */
-	o = pkm_kacs_msgpack_string(o, path_key, sizeof(path_key) - 1);
-	o = pkm_kacs_msgpack_string_header(o, path_len);
-	if (add_slash)
-		*o++ = '/';
-	memcpy(o, relative, relative_len);
-	o += relative_len;
-	o = pkm_kacs_msgpack_string(o, operation_key,
-				    sizeof(operation_key) - 1);
-	o = pkm_kacs_msgpack_string(o, operation, operation_len);
-	o = pkm_kacs_msgpack_string(o, provider_index_key,
-				    sizeof(provider_index_key) - 1);
-	o = pkm_kacs_msgpack_s32(o, provider_index);
-	o = pkm_kacs_msgpack_string(o, provider_key, sizeof(provider_key) - 1);
-	if (provider_known)
-		o = pkm_kacs_msgpack_string(o, provider, provider_len);
-	else
-		*o++ = 0xc0; /* nil */
-	o = pkm_kacs_msgpack_string(o, result_key, sizeof(result_key) - 1);
-	o = pkm_kacs_msgpack_s32(o, result);
-	o = pkm_kacs_msgpack_string(o, deferred_key, sizeof(deferred_key) - 1);
-	*o++ = deferred ? 0xc3 : 0xc2;
-
-	return (size_t)(o - out);
+	mp.out = out;
+	mp.len = 0;
+	pkm_kacs_stratafs_refusal_fields(&mp, relative, relative_len, operation,
+					 operation_len, provider_index,
+					 provider_stratum, provider_len,
+					 provider_known, result, deferred);
+	return mp.len;
 }
 
 void pkm_kacs_stratafs_audit_mutation_refused(
 	const char *relative_path, const char *operation, s32 provider_index,
 	const char *provider_stratum, int result, bool deferred)
 {
-	static const char event_type[] = "STRATAFS_MUTATION_REFUSED";
+	static const char event_type[] = "stratafs.mutation.refused";
 	size_t size;
 	size_t len;
 	u8 *payload;
@@ -1297,6 +1326,9 @@ static int pkm_kacs_emit_file_continuous_audit(struct file *file, u8 op,
 {
 	struct pkm_kacs_file_security *file_sec;
 	const void *subject_token;
+	const char *path = NULL;
+	char *path_buf = NULL;
+	size_t path_len = 0;
 	u32 matched_access;
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
@@ -1325,10 +1357,34 @@ static int pkm_kacs_emit_file_continuous_audit(struct file *file, u8 op,
 	if (ret)
 		return ret;
 
+	/*
+	 * The record names the handle's file by absolute path. It is resolved
+	 * only here, once the audit mask has matched, so an unaudited
+	 * operation pays nothing for it. A path that cannot be resolved leaves
+	 * object.file out of the record rather than failing the operation.
+	 *
+	 * Only an opened file is known to sit on a real mount: path-anchor
+	 * files and the KUnit fixtures carry a vfsmount that is not embedded
+	 * in a struct mount, which d_path would walk.
+	 */
+	if ((file->f_mode & FMODE_OPENED) && file->f_path.mnt &&
+	    file->f_path.dentry)
+		path_buf = kmalloc(PATH_MAX, GFP_KERNEL);
+	if (path_buf) {
+		char *resolved = d_path(&file->f_path, path_buf, PATH_MAX);
+
+		if (!IS_ERR(resolved)) {
+			path = resolved;
+			path_len = strlen(resolved);
+		}
+	}
+
 	ret = kacs_rust_emit_file_continuous_audit(
 		subject_token, pip_type, pip_trust, (const u8 *)operation,
-		operation_len, required_access, matched_access,
-		file_sec->granted_access, decision == 0 ? 1 : 0);
+		operation_len, (const u8 *)path, path_len, required_access,
+		matched_access, file_sec->granted_access,
+		file_sec->continuous_audit_mask, decision == 0 ? 1 : 0, reason);
+	kfree(path_buf);
 	if (ret) {
 		pkm_kacs_trace_file_snapshot(file, op, required_access,
 					     KACS_FSR_AUDIT_EMIT_FAIL, ret);
@@ -1360,9 +1416,10 @@ static int pkm_kacs_check_file_snapshot_grant_op(struct file *file, u8 op,
 	if ((file_sec->granted_access & required_access) != required_access)
 		ret = -EACCES;
 
+	/* A refusal here is exactly a grant that lacked a required right. */
 	return pkm_kacs_emit_file_continuous_audit(
 		file, op, operation, operation_len, required_access,
-		KACS_FSR_DECISION, ret);
+		ret ? KACS_FSR_GRANT_DENY : KACS_FSR_DECISION, ret);
 }
 
 int pkm_kacs_check_file_snapshot_grant(struct file *file,

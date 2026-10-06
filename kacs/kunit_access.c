@@ -153,8 +153,8 @@ static void pkm_kunit_access_check_emits_to_kmes_without_sink(
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"access-audit",
-				  sizeof("access-audit") - 1);
+				  (const u8 *)"kacs.audit.access.checked",
+				  sizeof("kacs.audit.access.checked") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -448,8 +448,8 @@ static void pkm_kunit_continuous_audit_msgpack_schema(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ret, 0);
 	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_copy_latest_matching_event(
-				KMES_ORIGIN_KACS, "continuous-audit",
-				sizeof("continuous-audit") - 1, buffer,
+				KMES_ORIGIN_KACS, "kacs.audit.handle.used",
+				sizeof("kacs.audit.handle.used") - 1, buffer,
 				PKM_KUNIT_KMES_CAPTURE_BYTES, &written, &snapshot),
 			0);
 	KUNIT_ASSERT_TRUE(test,
@@ -457,6 +457,7 @@ static void pkm_kunit_continuous_audit_msgpack_schema(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_expect_continuous_audit_schema(
 				  test, &view, PKM_KUNIT_FILE_READ_DATA,
+				  PKM_KUNIT_FILE_READ_DATA,
 				  PKM_KUNIT_FILE_READ_DATA,
 				  PKM_KUNIT_FILE_READ_DATA, true));
 }
@@ -499,8 +500,8 @@ static void pkm_kunit_continuous_audit_append_records_matched_subset(
 	 */
 	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_copy_latest_matching_event(
-				KMES_ORIGIN_KACS, "continuous-audit",
-				sizeof("continuous-audit") - 1, buffer,
+				KMES_ORIGIN_KACS, "kacs.audit.handle.used",
+				sizeof("kacs.audit.handle.used") - 1, buffer,
 				PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
 				&snapshot),
 			0);
@@ -511,6 +512,7 @@ static void pkm_kunit_continuous_audit_append_records_matched_subset(
 				  test, &view,
 				  PKM_KUNIT_FILE_WRITE_DATA |
 					  PKM_KUNIT_FILE_APPEND_DATA,
+				  PKM_KUNIT_FILE_APPEND_DATA,
 				  PKM_KUNIT_FILE_APPEND_DATA,
 				  PKM_KUNIT_FILE_APPEND_DATA, true));
 }
@@ -1584,8 +1586,8 @@ static void pkm_kunit_access_check_public_emits_to_kmes(
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"access-audit",
-				  sizeof("access-audit") - 1);
+				  (const u8 *)"kacs.audit.access.checked",
+				  sizeof("kacs.audit.access.checked") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -1663,8 +1665,8 @@ static void pkm_kunit_access_check_privilege_use_emits_to_kmes(
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"privilege-use",
-				  sizeof("privilege-use") - 1);
+				  (const u8 *)"kacs.audit.privilege.used",
+				  sizeof("kacs.audit.privilege.used") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -1770,9 +1772,9 @@ static void pkm_kunit_access_check_privilege_use_precedes_access_audit_kmes(
 				  written - first.event_size, &second));
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 2ULL);
 	KUNIT_EXPECT_TRUE(test, pkm_kunit_expect_kmes_event_type(
-					test, &first, "privilege-use"));
+					test, &first, "kacs.audit.privilege.used"));
 	KUNIT_EXPECT_TRUE(test, pkm_kunit_expect_kmes_event_type(
-					test, &second, "access-audit"));
+					test, &second, "kacs.audit.access.checked"));
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	kacs_rust_token_drop(target_token);
@@ -1842,7 +1844,7 @@ static void pkm_kunit_access_audit_msgpack_schema(struct kunit *test)
 				  test, &view, KACS_ACCESS_READ_CONTROL,
 				  PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT, true,
 				  "sacl", expected_ace,
-				  sizeof(expected_ace)));
+				  sizeof(expected_ace), NULL));
 }
 
 
@@ -1948,7 +1950,7 @@ static void pkm_kunit_access_audit_policy_msgpack_schema(struct kunit *test)
 				  test, &view, KACS_ACCESS_READ_CONTROL,
 				  KACS_ACCESS_READ_CONTROL |
 					  KACS_ACCESS_WRITE_DAC,
-				  true, "policy", NULL, 0));
+				  true, "policy", NULL, 0, NULL));
 
 	KUNIT_EXPECT_EQ(test, pkm_kacs_revert_impersonation(), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
@@ -2024,6 +2026,12 @@ static void pkm_kunit_access_audit_subject_group_sids_msgpack_schema(
 				&logon_session_id),
 			0L);
 	memcpy(expected_groups, groups, sizeof(groups));
+	/*
+	 * Token creation derives SE_GROUP_ENABLED from ENABLED_BY_DEFAULT, so
+	 * Everyone, asked for as enabled but not enabled by default, is held
+	 * disabled. The record reports the token's attributes, not the spec's.
+	 */
+	expected_groups[1].attributes = PKM_KUNIT_SE_GROUP_MANDATORY;
 	pkm_kunit_build_logon_sid(logon_session_id, logon_sid);
 	expected_groups[ARRAY_SIZE(groups)].sid = logon_sid;
 	expected_groups[ARRAY_SIZE(groups)].sid_len = sizeof(logon_sid);
@@ -2079,12 +2087,105 @@ static void pkm_kunit_access_audit_subject_group_sids_msgpack_schema(
 }
 
 
+/* {kind: "service", service: {name: "jellyfin"}}: a PGSS §6.7 context. */
+static const u8 pkm_kunit_service_audit_context[] = {
+	0x82,
+	0xa4, 'k', 'i', 'n', 'd',
+	0xa7, 's', 'e', 'r', 'v', 'i', 'c', 'e',
+	0xa7, 's', 'e', 'r', 'v', 'i', 'c', 'e',
+	0x81,
+	0xa4, 'n', 'a', 'm', 'e',
+	0xa8, 'j', 'e', 'l', 'l', 'y', 'f', 'i', 'n',
+};
+
+/*
+ * Runs the audited READ_CONTROL check through the access-check ioctl with
+ * `context` as its audit context, returning the ioctl's result.
+ */
+static long pkm_kunit_access_check_with_audit_context(const u8 *context,
+						      size_t context_len)
+{
+	u8 args[136];
+	u8 writebacks[12] = { 0 };
+	struct pkm_kunit_mem mem = { };
+	struct pkm_kacs_usercopy_ops ops = {
+		.ctx = &mem,
+		.read_bytes = pkm_kunit_mem_read,
+		.write_bytes = pkm_kunit_mem_write,
+	};
+
+	pkm_kunit_build_args_v136(args);
+	pkm_kunit_write_u32(args, 4, (u32)-1);
+	pkm_kunit_write_u64(args, 8, 0x1000);
+	pkm_kunit_write_u32(args, 16, sizeof(pkm_kunit_system_read_audit_sd));
+	pkm_kunit_write_u32(args, 20, KACS_ACCESS_READ_CONTROL);
+	pkm_kunit_write_u32(args, 24, KACS_ACCESS_READ_CONTROL);
+	pkm_kunit_write_u32(args, 28, KACS_ACCESS_WRITE_DAC);
+	pkm_kunit_write_u32(args, 36,
+			    KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC);
+	pkm_kunit_write_u64(args, 88, 0x3000);
+	pkm_kunit_write_u64(args, 104, 0x2000);
+	pkm_kunit_write_u32(args, 112, context_len);
+	pkm_kunit_write_u64(args, 120, 0x3004);
+	pkm_kunit_write_u64(args, 128, 0x3008);
+
+	pkm_kunit_add_region(&mem, 0x0100, args, sizeof(args));
+	pkm_kunit_add_region(&mem, 0x1000,
+			      (u8 *)pkm_kunit_system_read_audit_sd,
+			      sizeof(pkm_kunit_system_read_audit_sd));
+	pkm_kunit_add_region(&mem, 0x2000, (u8 *)context, context_len);
+	pkm_kunit_add_region(&mem, 0x3000, writebacks, sizeof(writebacks));
+
+	return pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
+}
+
+
+/*
+ * Anything but a §6.7 map fails the ioctl with EINVAL before any check
+ * runs, so no record is written: an opaque blob (the old format), a bare
+ * string, a kind outside the segment grammar, and a body under a key other
+ * than the kind, which would otherwise land beside the subject.
+ */
+static void pkm_kunit_access_audit_object_context_rejects_malformed(
+	struct kunit *test)
+{
+	static const u8 opaque[] = { 0xde, 0xad, 0xbe, 0xef, 0x01 };
+	static const u8 bare_string[] = { 0xa5, 'a', 'd', 'm', 'i', 'n' };
+	static const u8 bad_kind[] = {
+		0x81, 0xa4, 'k', 'i', 'n', 'd', 0xa3, 'J', 'o', 'b',
+	};
+	static const u8 foreign_body[] = {
+		0x82, 0xa4, 'k', 'i', 'n', 'd', 0xa3, 'j', 'o', 'b',
+		0xa7, 's', 'u', 'b', 'j', 'e', 'c', 't', 0x81, 0xa1, 'a', 0x01,
+	};
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_access_check_with_audit_context(
+				opaque, sizeof(opaque)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_access_check_with_audit_context(
+				bare_string, sizeof(bare_string)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_access_check_with_audit_context(
+				bad_kind, sizeof(bad_kind)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test,
+			pkm_kunit_access_check_with_audit_context(
+				foreign_body, sizeof(foreign_body)),
+			(long)-EINVAL);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			-ENOENT);
+}
+
+
 static void pkm_kunit_access_audit_object_context_msgpack_schema(
 	struct kunit *test)
 {
-	static const u8 object_context[] = {
-		0xde, 0xad, 0xbe, 0xef, 0x01,
-	};
+	static const u8 *object_context = pkm_kunit_service_audit_context;
 	u8 args[136];
 	u8 writebacks[12] = { 0 };
 	u8 *buffer;
@@ -2120,7 +2221,8 @@ static void pkm_kunit_access_audit_object_context_msgpack_schema(
 			    KACS_ACCESS_READ_CONTROL | KACS_ACCESS_WRITE_DAC);
 	pkm_kunit_write_u64(args, 88, 0x3000);
 	pkm_kunit_write_u64(args, 104, 0x2000);
-	pkm_kunit_write_u32(args, 112, sizeof(object_context));
+	pkm_kunit_write_u32(args, 112,
+			    sizeof(pkm_kunit_service_audit_context));
 	pkm_kunit_write_u64(args, 120, 0x3004);
 	pkm_kunit_write_u64(args, 128, 0x3008);
 
@@ -2129,7 +2231,7 @@ static void pkm_kunit_access_audit_object_context_msgpack_schema(
 			      (u8 *)pkm_kunit_system_read_audit_sd,
 			      sizeof(pkm_kunit_system_read_audit_sd));
 	pkm_kunit_add_region(&mem, 0x2000, (u8 *)object_context,
-			      sizeof(object_context));
+			      sizeof(pkm_kunit_service_audit_context));
 	pkm_kunit_add_region(&mem, 0x3000, writebacks, sizeof(writebacks));
 
 	ret = pkm_kacs_kunit_access_check_syscall_scalar(&ops, 0x0100);
@@ -2143,8 +2245,7 @@ static void pkm_kunit_access_audit_object_context_msgpack_schema(
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_expect_access_audit_object_context(
-				  test, &view, object_context,
-				  sizeof(object_context)));
+				  test, &view, "service", "jellyfin"));
 
 	pkm_kunit_reset_kmes();
 }
@@ -2168,7 +2269,6 @@ static void pkm_kunit_access_audit_invalid_process_name_is_sanitized(
 	struct pkm_kmes_kunit_snapshot snapshot = { };
 	struct pkm_kunit_kmes_event_view view = { };
 	struct pkm_kunit_msgpack_view root = { };
-	struct pkm_kunit_msgpack_view process = { };
 	size_t written = 0;
 	long ret;
 
@@ -2214,14 +2314,10 @@ static void pkm_kunit_access_audit_invalid_process_name_is_sanitized(
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
 	KUNIT_ASSERT_TRUE(test,
 			  pkm_kunit_msgpack_parse_payload_root(test, &view,
-							       &root, 7));
-	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_require_key(test, &root, "process",
-							PKM_KUNIT_MSGPACK_MAP,
-							&process));
+							       &root, 5));
 	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_msgpack_expect_process_map(
-				  test, &process, 4105, "kacs\xEF\xBF\xBD",
+			  pkm_kunit_msgpack_expect_emitter_key(
+				  test, &root, 4105, "kacs\xEF\xBF\xBD",
 				  PKM_KUNIT_KMES_PROCESS_PATH));
 
 	pkm_kunit_reset_kmes();
@@ -2895,18 +2991,27 @@ static void pkm_kunit_access_check_caap_staging_mismatch_emits_kmes(
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"caap-policy-diagnostic",
-				  sizeof("caap-policy-diagnostic") - 1);
+				  (const u8 *)"kacs.caap.staging.diverged",
+				  sizeof("kacs.caap.staging.diverged") - 1);
+	/*
+	 * The divergence is the event type itself now: the old kind and
+	 * reason strings are gone, and the staged grant is its own field.
+	 */
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
-						 (const u8 *)"staging-mismatch",
-						 sizeof("staging-mismatch") - 1));
-	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_contains_bytes(view.payload_ptr,
-						 view.payload_len,
-						 (const u8 *)"effective-staged-delta",
-						 sizeof("effective-staged-delta") - 1));
+						 (const u8 *)"granted-staged",
+						 sizeof("granted-staged") - 1));
+	KUNIT_EXPECT_FALSE(test,
+			   pkm_kunit_contains_bytes(view.payload_ptr,
+						    view.payload_len,
+						    (const u8 *)"staging-mismatch",
+						    sizeof("staging-mismatch") - 1));
+	KUNIT_EXPECT_FALSE(test,
+			   pkm_kunit_contains_bytes(view.payload_ptr,
+						    view.payload_len,
+						    (const u8 *)"effective-staged-delta",
+						    sizeof("effective-staged-delta") - 1));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -3092,6 +3197,7 @@ static struct kunit_case pkm_kunit_access_cases[] = {
 	KUNIT_CASE(pkm_kunit_access_audit_policy_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_audit_subject_group_sids_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_access_audit_object_context_msgpack_schema),
+	KUNIT_CASE(pkm_kunit_access_audit_object_context_rejects_malformed),
 	KUNIT_CASE(pkm_kunit_access_audit_invalid_process_name_is_sanitized),
 	KUNIT_CASE(pkm_kunit_access_check_public_uses_psb_pip_default),
 	KUNIT_CASE(pkm_kunit_access_check_public_uses_caap_cache),

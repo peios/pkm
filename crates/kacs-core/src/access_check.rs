@@ -33,28 +33,35 @@ pub enum AccessCheckMode {
 
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]
 #[derive(Debug, Eq, PartialEq)]
-/// Records one privilege-use audit decision produced by step 13.
+/// Records one privilege-use audit decision produced by step 13, the source
+/// of a `kacs.audit.privilege.used` record.
 pub struct PrivilegeUseEvent {
     /// Privilege bit responsible for the recorded contribution.
     pub privilege: u64,
-    /// Requested bits attributed to that privilege.
-    pub requested: u32,
-    /// Bits granted by the privilege before later narrowing.
-    pub granted: u32,
-    /// Bits that survived into the final result.
+    /// Bits the privilege supplied, intersected with the requested mask
+    /// (`privilege.contributed`).
+    pub contributed: u32,
+    /// Bits of `contributed` that survived into the final result
+    /// (`privilege.surviving`).
     pub surviving_bits: u32,
+    /// The whole check's requested mask after generic mapping, not this
+    /// privilege's share of it (`access.requested`).
+    pub check_requested: u32,
+    /// The whole check's final granted mask (`access.granted`).
+    pub check_granted: u32,
     /// Whether the privilege use counted as success rather than failure.
     pub success: bool,
     /// Optional object-audit context copied into the event.
     pub object_audit_context: Option<Vec<u8>>,
 }
 
-/// Classifies one CAAP diagnostic KMES event.
+/// Classifies one CAAP diagnostic. Each kind is its own KMES event type.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaapDiagnosticKind {
-    /// A CAAP SACL failed parse or evaluation and its audit contribution was skipped.
+    /// A CAAP SACL failed parse or evaluation and its audit contribution was
+    /// skipped (`kacs.caap.sacl.skipped`).
     SaclError,
-    /// Effective and staged CAAP results differed.
+    /// Effective and staged CAAP results differed (`kacs.caap.staging.diverged`).
     StagingMismatch,
 }
 
@@ -626,6 +633,12 @@ fn evaluate_privilege_use(
         (SE_RELABEL_PRIVILEGE, provenance.relabel_granted),
     ];
 
+    // The whole check's grant, as the caller sees it: in result-list mode the
+    // root node's entry is the object itself.
+    let check_granted = object_granted_list
+        .and_then(|list| list.first().copied())
+        .unwrap_or(final_granted);
+
     for (privilege, provenance_mask) in provenance_entries {
         let requested_contribution = provenance_mask & mapped_desired;
         if requested_contribution == 0 {
@@ -647,9 +660,10 @@ fn evaluate_privilege_use(
             if (token.audit_policy & AUDIT_POLICY_PRIVILEGE_USE_SUCCESS) != 0 {
                 events.push(PrivilegeUseEvent {
                     privilege,
-                    requested: requested_contribution,
-                    granted: requested_contribution,
+                    contributed: requested_contribution,
                     surviving_bits,
+                    check_requested: mapped_desired,
+                    check_granted,
                     success: true,
                     object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
                 })?;
@@ -657,9 +671,10 @@ fn evaluate_privilege_use(
         } else if (token.audit_policy & AUDIT_POLICY_PRIVILEGE_USE_FAILURE) != 0 {
             events.push(PrivilegeUseEvent {
                 privilege,
-                requested: requested_contribution,
-                granted: requested_contribution,
+                contributed: requested_contribution,
                 surviving_bits: 0,
+                check_requested: mapped_desired,
+                check_granted,
                 success: false,
                 object_audit_context: object_audit_context.map(slice_to_vec).transpose()?,
             })?;

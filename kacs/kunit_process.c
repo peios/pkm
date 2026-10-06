@@ -526,8 +526,8 @@ static void pkm_kunit_may_manage_volumes_without_a_token_denies(
 }
 
 /*
- * A granted mount marks the privilege used, so a privilege-use audit records
- * it like every other privileged operation.
+ * A granted mount marks the privilege used, so privilege-use auditing records
+ * it (as kacs.audit.privilege.used) like every other privileged operation.
  */
 static void pkm_kunit_may_manage_volumes_marks_the_privilege_used(
 	struct kunit *test)
@@ -7426,7 +7426,7 @@ static void pkm_kunit_set_file_sd_sacl_audit_emits_kmes(struct kunit *test)
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY, true,
 				  "sacl", expected_ace,
-				  sizeof(expected_ace)));
+				  sizeof(expected_ace), "file"));
 
 	pkm_kacs_free((void *)result_sd);
 }

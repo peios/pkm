@@ -48,8 +48,9 @@ use crate::error::KacsError;
 use crate::lcs_core::casefold_eq;
 use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
 use crate::kmes_payload::{
-    emit_access_check_events_to_kmes, emit_continuous_audit_to_kmes,
-    encode_logon_session_destroyed_payload, emit_logon_session_destroyed_to_kmes,
+    emit_access_check_events_to_kmes, emit_handle_used_to_kmes,
+    encode_logon_session_destroyed_payload, emit_logon_session_destroyed_to_kmes, AuditObject,
+    AuditSubjectIds, AuditTarget, HandleUse,
 };
 use crate::mic::{
     IntegrityLevel, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
@@ -7309,6 +7310,15 @@ impl PkmKacsBootToken {
         f(access_token)
     }
 
+    /// See `audit_subject_ids`: lock-free, fields fixed at creation only.
+    fn audit_subject_ids(&self) -> AuditSubjectIds {
+        AuditSubjectIds {
+            token_id: self.token_id,
+            auth_id: self.session_ref().map(|session| session.logon_session_id),
+            uid: self.projected_uid,
+        }
+    }
+
     fn access_check_conditional_context(&self) -> ConditionalContext<'_> {
         ConditionalContext {
             device_groups: self.device_group_views.as_slice(),
@@ -7926,12 +7936,32 @@ pub(crate) fn with_access_check_resolved_from_token<T>(
     })
 }
 
+/// The subject token's identity fields for an audit record, read from the
+/// live token object.
+///
+/// Called while the token's mutation lock is held by `with_access_token` on
+/// every emission path, so it must not take the lock: it reads only fields
+/// fixed at creation (the LUID, the projected UID and the session pointer).
+pub(crate) fn audit_subject_ids(token_ptr: *const c_void) -> Option<AuditSubjectIds> {
+    let token = unsafe { PkmKacsBootToken::from_ptr(token_ptr) }?;
+    Some(token.audit_subject_ids())
+}
+
+/// `object.token.*` for a check whose object is `target`.
+fn token_audit_object(target: &PkmKacsBootToken) -> AuditObject<'static> {
+    AuditObject::Token {
+        id: target.token_id,
+        guid: target.token_guid,
+    }
+}
+
 fn emit_internal_access_check_events(
     subject: &PkmKacsBootToken,
     access_token: &AccessCheckToken<'_>,
     state: &crate::access_check::AccessCheckCoreState<'_>,
     effective_pip: PipContext,
     policies: &[crate::caap::CaapPolicyEntry<'_>],
+    object: AuditObject<'_>,
 ) -> Result<(), i32> {
     if state.audit_events.is_empty()
         && state.privilege_use_events.is_empty()
@@ -7952,6 +7982,13 @@ fn emit_internal_access_check_events(
         device_claims: subject.device_claims.as_slice(),
         policies,
     };
+    // A kernel-internal check is the kernel's own observation: nothing in
+    // it came from userspace, so it is never marked asserted.
+    let target = AuditTarget {
+        subject_ids: Some(subject.audit_subject_ids()),
+        object,
+        asserted: false,
+    };
 
     emit_access_check_events_to_kmes(
         audit_events.as_slice(),
@@ -7959,6 +7996,7 @@ fn emit_internal_access_check_events(
         state.caap_diagnostic_events.as_slice(),
         resolved,
         effective_pip,
+        &target,
     )
     .map_err(|err| err as i32)
 }
@@ -8237,6 +8275,7 @@ fn token_open_check_errno(
                     &result,
                     pip,
                     EMPTY_POLICIES,
+                    token_audit_object(target),
                 ) {
                     return err;
                 }
@@ -8340,6 +8379,7 @@ fn token_sd_access_check_errno_with_intent(
                     &result,
                     pip,
                     EMPTY_POLICIES,
+                    token_audit_object(target),
                 )?;
                 let granted = result
                     .object_granted_list
@@ -8406,12 +8446,15 @@ fn process_sd_access_outcome_with_intent(
         ) {
             Ok(result) => {
                 subject.mark_privileges_used(result.updated_privileges.used);
+                // The target process is known only by its descriptor here,
+                // so `object.process.{pid,guid}` cannot be filled.
                 emit_internal_access_check_events(
                     subject,
                     &access_token,
                     &result,
                     pip,
                     EMPTY_POLICIES,
+                    AuditObject::Kind(b"process"),
                 )?;
                 let granted = result
                     .object_granted_list
@@ -8542,7 +8585,16 @@ fn file_sd_access_outcome_for_descriptor(
         ) {
             Ok(result) => {
                 subject.mark_privileges_used(result.updated_privileges.used);
-                emit_internal_access_check_events(subject, &access_token, &result, pip, policies)?;
+                // Only the descriptor reaches this check, not the file, so
+                // `object.file.path` cannot be filled.
+                emit_internal_access_check_events(
+                    subject,
+                    &access_token,
+                    &result,
+                    pip,
+                    policies,
+                    AuditObject::Kind(b"file"),
+                )?;
                 let granted = result
                     .object_granted_list
                     .as_ref()
@@ -8680,8 +8732,14 @@ fn emit_file_set_sd_audit_events(
             device_claims: subject.device_claims.as_slice(),
             policies: EMPTY_POLICIES,
         };
+        // As for the other file checks, only the descriptor arrives here.
+        let target = AuditTarget {
+            subject_ids: Some(subject.audit_subject_ids()),
+            object: AuditObject::Kind(b"file"),
+            asserted: false,
+        };
 
-        emit_access_check_events_to_kmes(audit_events.as_slice(), &[], &[], resolved, pip)
+        emit_access_check_events_to_kmes(audit_events.as_slice(), &[], &[], resolved, pip, &target)
             .map_err(|err| err as i32)
     })
 }
@@ -8789,6 +8847,7 @@ fn socket_sd_access_check_errno(
                     &result,
                     pip,
                     EMPTY_POLICIES,
+                    AuditObject::Kind(b"socket"),
                 )?;
                 let granted = result
                     .object_granted_list
@@ -8820,7 +8879,14 @@ fn ipc_sd_access_check_errno(
     desired: u32,
     pip: PipContext,
 ) -> Result<u32, i32> {
-    object_sd_access_check_errno(subject_token, sd_bytes, desired, &IPC_GENERIC_MAPPING, pip)
+    object_sd_access_check_errno(
+        subject_token,
+        sd_bytes,
+        desired,
+        &IPC_GENERIC_MAPPING,
+        pip,
+        AuditObject::Kind(b"ipc"),
+    )
 }
 
 fn mnt_ns_sd_access_check_errno(
@@ -8829,18 +8895,29 @@ fn mnt_ns_sd_access_check_errno(
     desired: u32,
     pip: PipContext,
 ) -> Result<u32, i32> {
-    object_sd_access_check_errno(subject_token, sd_bytes, desired, &MNTNS_GENERIC_MAPPING, pip)
+    // `object.kind` has no value for a mount namespace, so its records name
+    // no object rather than a wrong one.
+    object_sd_access_check_errno(
+        subject_token,
+        sd_bytes,
+        desired,
+        &MNTNS_GENERIC_MAPPING,
+        pip,
+        AuditObject::Unknown,
+    )
 }
 
 /// AccessCheck of `subject_token` against a standalone object descriptor
 /// (System V IPC objects, port reservations) for `desired` under `mapping`.
-/// Emits the internal audit events and marks privilege use on the token.
+/// Emits the internal audit events, naming `object`, and marks privilege use
+/// on the token.
 fn object_sd_access_check_errno(
     subject_token: *const c_void,
     sd_bytes: &[u8],
     desired: u32,
     mapping: &GenericMapping,
     pip: PipContext,
+    object: AuditObject<'static>,
 ) -> Result<u32, i32> {
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
@@ -8876,6 +8953,7 @@ fn object_sd_access_check_errno(
                     &result,
                     pip,
                     EMPTY_POLICIES,
+                    object,
                 )?;
                 let granted = result
                     .object_granted_list
@@ -10732,25 +10810,32 @@ pub extern "C" fn kacs_rust_granted_cached_file_sd_with_intent_audit_caap(
 }
 
 #[no_mangle]
-/// Emits one file-handle continuous-audit event for an already classified
-/// operation-time enforcement decision.
+/// Emits one `kacs.audit.handle.used` event for an already classified
+/// operation-time enforcement decision. `path_ptr` may be null when the
+/// handle's path could not be resolved; `reason` is the `KACS_FSR_*` code.
 pub extern "C" fn kacs_rust_emit_file_continuous_audit(
     subject_token_ptr: *const c_void,
     pip_type: u32,
     pip_trust: u32,
     operation_ptr: *const u8,
     operation_len: usize,
+    path_ptr: *const u8,
+    path_len: usize,
     requested_access: u32,
     matched_access: u32,
     granted_access: u32,
+    audit_mask: u32,
     success: u8,
+    reason: u8,
 ) -> i32 {
     if subject_token_ptr.is_null()
         || operation_ptr.is_null()
         || operation_len == 0
+        || (path_ptr.is_null() && path_len != 0)
         || requested_access == 0
         || matched_access == 0
         || (matched_access & requested_access) != matched_access
+        || (matched_access & audit_mask) != matched_access
     {
         return -EINVAL;
     }
@@ -10759,18 +10844,26 @@ pub extern "C" fn kacs_rust_emit_file_continuous_audit(
         return -EACCES;
     };
     let operation = unsafe { core::slice::from_raw_parts(operation_ptr, operation_len) };
+    let path = if path_ptr.is_null() || path_len == 0 {
+        None
+    } else {
+        Some(unsafe { core::slice::from_raw_parts(path_ptr, path_len) })
+    };
     let pip = pip_context_from_abi(pip_type, pip_trust);
+    let subject_ids = subject.audit_subject_ids();
+    let handle = HandleUse {
+        operation,
+        path,
+        requested_access,
+        matched_access,
+        granted_access,
+        audit_mask,
+        success: success != 0,
+        reason,
+    };
 
     subject.with_access_token(|access_token| {
-        match emit_continuous_audit_to_kmes(
-            &access_token,
-            pip,
-            operation,
-            requested_access,
-            matched_access,
-            granted_access,
-            success != 0,
-        ) {
+        match emit_handle_used_to_kmes(&access_token, Some(&subject_ids), pip, &handle) {
             Ok(()) => 0,
             Err(err) => i32::try_from(err).unwrap_or(-EIO),
         }
@@ -11882,7 +11975,7 @@ pub extern "C" fn kacs_rust_kunit_logon_session_snapshot(
 }
 
 #[no_mangle]
-/// Runs the `logon-session-destroyed` payload encoder over an arbitrary
+/// Runs the `kacs.session.destroyed` payload encoder over an arbitrary
 /// authentication-package name, so KUnit can witness the drop condition the
 /// live path can never reach: the name is validated as UTF-8 when the session
 /// is created, so only a probe can hand the encoder anything else.  Returns 0
@@ -12259,12 +12352,15 @@ pub extern "C" fn kacs_rust_port_bind_check(
         Ok(sd) => sd,
         Err(err) => return err,
     };
+    // A port reservation guards a socket bind, so its records name the
+    // object a socket; the reservation itself has no `object.kind` of its own.
     match object_sd_access_check_errno(
         subject_token_ptr,
         sd.as_slice(),
         PORT_BIND,
         &PORT_GENERIC_MAPPING,
         pip_context_from_abi(pip_type, pip_trust),
+        AuditObject::Kind(b"socket"),
     ) {
         Ok(_) => 0,
         Err(err) => err,

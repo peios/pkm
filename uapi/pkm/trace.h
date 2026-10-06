@@ -719,7 +719,7 @@
 #define KACS_FSR_GRANT_DENY		2U  /* granted access lacked required right */
 #define KACS_FSR_APPEND_DENY		3U  /* append/write intent lacked write grant */
 #define KACS_FSR_UNMANAGED_SYSFS	4U  /* unmanaged fd: sysfs write gate applied */
-#define KACS_FSR_AUDIT_EMIT_FAIL	5U  /* continuous-audit emit failed */
+#define KACS_FSR_AUDIT_EMIT_FAIL	5U  /* kacs.audit.handle.used emit failed */
 
 /*
  * kacs_metadata reason — the file-metadata (getattr/setattr/xattr/getsecurity)

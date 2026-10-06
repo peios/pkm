@@ -2,14 +2,16 @@
 type: uint
 
 Which stratum an object was read from, by index within the mount's stack.
+Absent when no provider was determined, as `source.stratum.path` is.
 
 --- field source.stratum.path
 type: str.path
 
-The filesystem path of the stratum an object was read from. Null when the
-refusal was raised before any provider was determined — creation, tmpfile,
-and the heads of link and rename — in which case `source.stratum.index` is
-`-1` and the two agree that no provider was involved.
+The filesystem path of the stratum an object was read from. Absent when
+the refusal was raised before any provider was determined — creation,
+tmpfile, and the heads of link and rename — in which case
+`source.stratum.index` is absent too, and the two agree that no provider
+was involved.
 
 --- field destination.stratum.index
 type: uint
@@ -21,55 +23,149 @@ type: str.path
 
 The filesystem path of the stratum an object was written into.
 
---- event stratafs.copy-up
-origin: kacs
+--- field source.stratum.flags
+type: uint.flags
+values: 0x1 create | 0x2 read-only | 0x4 absent-may
+
+The configuration flags of the stratum an object was read from, as the
+mount option set them: `+create`, `+ro` and `+am`. `create` marks the one
+stratum new objects and copy-ups are written into, `read-only` forbids
+writing into the stratum in place, and `absent-may` lets the mount succeed
+while the stratum's directory does not exist.
+
+--- field destination.stratum.flags
+type: uint.flags
+values: 0x1 create | 0x2 read-only | 0x4 absent-may
+
+The configuration flags of the stratum an object was written into, as the
+mount option set them. Decoded as `source.stratum.flags` is. A copy-up
+always writes into the stratum flagged `create`, so on a copy-up record
+this field says nothing new; it matters where an object was written in
+place.
+
+--- field source.stratum-previous.path
+type: str.path
+
+The filesystem path of the stratum that provided an object before the
+change the record describes. Read with `source.stratum.path`: a record
+where the two differ is an object that now comes from a different layer,
+so a reader of the merged path sees different contents without the path
+having changed.
+
+--- field source.stratum-previous.index
+type: uint
+
+The position, within the mount's stack, of the stratum that provided an
+object before the change the record describes. Present exactly when
+`source.stratum-previous.path` is.
+
+--- field object.mount.strata
+type: str.path[]
+
+The configured stack of strata of a StrataFS mount, as an ordered list of
+directory paths. Index 0 is the highest-precedence stratum: where several
+strata hold the same name, the one with the lowest index provides it. At
+most 16 entries. Each entry's position is the index that
+`source.stratum.index` and its relatives refer to.
+
+--- field object.mount.options
+type: str
+
+The stack option string of a StrataFS mount exactly as the caller supplied
+it, whether or not it could be parsed. That is what makes it useful on a
+rejected mount: it shows what was asked for, where `object.mount.strata`
+could only show what was understood.
+
+--- field object.mount.options-previous
+type: str
+
+The stack option string a StrataFS mount was created with, recorded on a
+remount beside the string the remount supplied in `object.mount.options`.
+A remount may not change the stack, and the test is a byte-for-byte
+comparison of the two strings, so a stack that is equivalent but written
+differently is refused.
+
+--- field object.mount.depth
+type: uint
+
+The filesystem stacking depth of a StrataFS mount: one more than the
+deepest stacking filesystem among its strata. Linux permits a depth of at
+most 2, so a mount whose strata are themselves stacked filesystems can be
+refused with `ELOOP`.
+
+--- field test.rendezvous.name
+type: str
+
+The test rendezvous point a record concerns, one of `copy-up-begin`,
+`copy-up-publish`, `rename-provider` and `link-install`. Rendezvous points
+exist only in a kernel built with test hooks and booted with
+`stratafs.test_hooks=1`, and let a conformance test hold an operation open
+mid-flight or make one internal step fail. A production system never
+records one.
+
+--- field test.rendezvous.action
+type: str.enum
+values: none | hold | fail
+closed: false
+
+What a test rendezvous point is set to do to the next task that reaches it.
+`hold` blocks every task that arrives until the point is cleared. `fail`
+makes the next arriving task's step fail with a chosen error, once, then
+reverts to `none`, which leaves tasks unaffected.
+
+--- field test.rendezvous.waiters
+type: uint
+
+The number of tasks blocked at a test rendezvous point, at the moment of
+the record. A test polls it to know its target has arrived before acting
+on the held state. Non-zero only while the point is set to `hold`.
+
+--- event stratafs.file.copied-up
 tier: standard
 gating: none — every copy-up is recorded
-cardinality: once per copy-up
-emitters: kacs/file_access.c — pkm_kacs_stratafs_audit_copy_up
 
 The record that StrataFS materialised an object into a writable stratum,
 successful or not. Copy-up is how a layered mount turns a read-only object
 into a writable one, so this is the record of a file coming into existence
 in a place it did not previously exist.
 
-**There is no caller in the payload, and that is not an omission.** Copy-up
-preserves the source object's descriptor, so the resulting file records
-nothing about who caused it to exist. The actor is identified by the
-envelope instead: copy-up runs in the caller's own context, so
-`subject.token.guid` and `subject.process.guid` in the header are the
-caller's.
+The record is written through KACS, so its `emitter.class` is `kacs`.
 
-That identification is currently weaker than it looks. The envelope carries
+**There is no subject in the payload, and that is not an omission.**
+Copy-up preserves the source object's descriptor, so the resulting file
+records nothing about who caused it to exist. The actor is identified by
+the header instead: copy-up runs in the caller's own context, so
+`emitter.token.guid` and `emitter.process.guid` are the caller's.
+
+That identification is currently weaker than it looks. The header carries
 GUIDs and nothing in the stream binds a GUID to a SID, an image or a
 process name, so an operator reading these records can group them by actor
 but cannot say who the actor was.
 
 **`ENOTDIR` from a failed parent materialisation surfaces here**, in
 `outcome.errno`, rather than as a refusal record. Searching
-`stratafs.mutation-refused` for it finds nothing; the record exists under
+`stratafs.mutation.refused` for it finds nothing; the record exists under
 this type with every field present.
 
-field: object.file.relative_path    required
+field: object.file.path-relative    required
 field: source.stratum.index         required
 field: source.stratum.path          required
 field: destination.stratum.index    required
 field: destination.stratum.path     required
-field: outcome.errno                required
-  Zero on success, the failure otherwise.
+field: outcome.success              required
+field: outcome.errno                when outcome.success == false
 
---- event stratafs.mutation-refused
-origin: kacs
+--- event stratafs.mutation.refused
 tier: standard
 gating: none — every arrangement refusal is recorded
-cardinality: once per refused mutation
-emitters: kacs/file_access.c — pkm_kacs_stratafs_audit_mutation_refused
 
 The record that a mutation was refused because of how the mount is
 arranged, rather than because of an access check. Software writing where it
 cannot, or an arrangement that does not admit an operation someone expected
 — a mismatch between intent and configuration that is otherwise visible
 only as an error returned to a caller who may discard it.
+
+The record is written through KACS, so its `emitter.class` is `kacs`.
 
 The refusals that count are one explicit list: `EROFS`, `EXDEV`, `ENOTDIR`,
 `EISDIR`, `ENOTEMPTY`, `EEXIST` and `EINVAL`. Call sites cover every
@@ -78,7 +174,7 @@ mutating path.
 **`EACCES` is deliberately absent.** A refusal produced by an access check
 is recorded by the mechanism that performed it, so StrataFS does not
 duplicate it. Looking here for a permission denial finds nothing — look at
-`kacs.audit.access`.
+`kacs.audit.access.checked`.
 
 There is one exception, and it is deliberate. A refused **deferred**
 deletion is recorded on any non-zero result, including one refused by an
@@ -93,18 +189,16 @@ on every path operation, reveal nothing the resulting access check does
 not, and recording them would produce volume out of all proportion to their
 significance.
 
-field: object.file.relative_path    required
+field: object.file.path-relative    required
 field: operation.name               required
+  values: copy-file-range | copy-up-publication-rollback | create | create-rollback | fallocate | link | link-rollback | mmap | remap-file-range | removexattr | rename | rmdir | setattr | setxattr | splice-write | supersede | supersede-publication | tmpfile | truncate | unlink | write
+  closed: false
   StrataFS names its own operations, and the set is disjoint from the
-  `file.` names an already-open handle uses: `copy-file-range`,
-  `copy-up-publication-rollback`, `create`, `create-rollback`,
-  `fallocate`, `link`, `link-rollback`, `mmap`, `remap-file-range`,
-  `removexattr`, `rename`, `rmdir`, `setattr`, `setxattr`,
-  `splice-write`, `supersede`, `supersede-publication`, `tmpfile`,
-  `truncate`, `unlink`, `write`.
-field: source.stratum.index         required
-  `-1` when the refusal was raised before any provider was determined.
-field: source.stratum.path          when source.stratum.index >= 0
+  `file.` names an already-open handle uses.
+field: source.stratum.index         optional
+  Absent when the refusal was raised before any provider was determined.
+field: source.stratum.path          optional
+  Present exactly when `source.stratum.index` is.
 field: outcome.errno                required
 field: outcome.deferred             required
   Whether the refusal was deferred — set on rollbacks and on deferred

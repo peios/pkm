@@ -678,9 +678,10 @@ static void pkm_kunit_security_capable_marks_privilege_use_twice(
 }
 
 /*
- * Section 3.9.7 / 3.C: the two StrataFS emissions are best-effort.  An empty
- * or over-long operation string drops the refusal event silently, an over-long
- * path drops the copy-up event, and neither failure reaches the caller.  (The
+ * Section 3.9.7 / 3.C: the two StrataFS emissions, stratafs.mutation.refused
+ * and stratafs.file.copied-up, are best-effort.  An empty or over-long
+ * operation string drops the refusal event silently, an over-long path drops
+ * the copy-up event, and neither failure reaches the caller.  (The
  * other drop condition, an allocation failure, has no witness here.)
  */
 static void pkm_kunit_stratafs_audit_emission_is_best_effort(struct kunit *test)
@@ -739,7 +740,7 @@ static void pkm_kunit_stratafs_audit_emission_is_best_effort(struct kunit *test)
 }
 
 /*
- * Section 3.C: logon-session-destroyed is best-effort where the package name
+ * Section 3.C: kacs.session.destroyed is best-effort where the package name
  * is not valid UTF-8.  No live session can carry such a name -- creation
  * validates it -- so the encoder is probed directly: it refuses the payload,
  * and the emitter drops the event on that refusal.

@@ -820,9 +820,11 @@ int kacs_rust_emit_file_continuous_audit(const void *subject_token_ptr,
 					 u32 pip_type, u32 pip_trust,
 					 const u8 *operation_ptr,
 					 size_t operation_len,
+					 const u8 *path_ptr, size_t path_len,
 					 u32 requested_access,
 					 u32 matched_access,
-					 u32 granted_access, u8 success);
+					 u32 granted_access, u32 audit_mask,
+					 u8 success, u8 reason);
 int kacs_rust_emit_file_set_sd_audit(const void *subject_token_ptr,
 				     const u8 *sd_ptr, size_t sd_len,
 				     u32 desired, u32 pip_type, u32 pip_trust);

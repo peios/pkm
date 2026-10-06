@@ -72,8 +72,8 @@ pub use access_check::{
 };
 pub use access_check_abi::{
     execute_access_check_abi, execute_access_check_list_abi, parse_access_check_abi_request,
-    AccessCheckAbiExecution, AccessCheckAbiMemory, AccessCheckAbiRequest, AccessCheckAbiResolved,
-    AccessCheckAbiReturn, KacsNodeResultAbi, OwnedAuditEvent, U32Writeback, KACS_ABI_EACCES,
+    parse_audit_context_map, AccessCheckAbiExecution, AccessCheckAbiMemory, AccessCheckAbiRequest,
+    AccessCheckAbiResolved, AccessCheckAbiReturn, AuditContextView, KacsNodeResultAbi, OwnedAuditEvent, U32Writeback, KACS_ABI_EACCES,
     KACS_ACCESS_CHECK_ARGS_SIZE, KACS_ACCESS_CHECK_ARGS_V1_SIZE,
     KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN, KACS_ACCESS_CHECK_MAX_LOCAL_CLAIMS_LEN,
     KACS_ACCESS_CHECK_MAX_OBJECT_TYPE_COUNT, KACS_OBJECT_TYPE_ENTRY_SIZE,

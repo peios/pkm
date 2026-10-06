@@ -1228,8 +1228,20 @@ bool pkm_kunit_msgpack_expect_nil_key(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
 	const char *key);
 
+bool pkm_kunit_msgpack_expect_absent_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key);
+
+bool pkm_kunit_msgpack_require_map_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key, u32 expected_count, struct pkm_kunit_msgpack_view *out);
+
 bool pkm_kunit_msgpack_expect_process_map(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	u64 expected_pid, const char *expected_name, const char *expected_path);
+
+bool pkm_kunit_msgpack_expect_emitter_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *root,
 	u64 expected_pid, const char *expected_name, const char *expected_path);
 
 bool pkm_kunit_msgpack_expect_subject_map(
@@ -1254,7 +1266,7 @@ bool pkm_kunit_expect_access_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_requested, u32 expected_granted, bool expected_success,
 	const char *expected_trigger_kind, const u8 *expected_ace,
-	size_t expected_ace_len);
+	size_t expected_ace_len, const char *expected_object_kind);
 
 bool pkm_kunit_expect_access_audit_subject_group_sids(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
@@ -1263,23 +1275,25 @@ bool pkm_kunit_expect_access_audit_subject_group_sids(
 
 bool pkm_kunit_expect_access_audit_object_context(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	const u8 *expected_context, size_t expected_context_len);
+	const char *expected_kind, const char *expected_name);
 
 bool pkm_kunit_expect_continuous_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_requested, u32 expected_matched, u32 expected_granted,
-	bool expected_success);
+	u32 expected_audit_mask, bool expected_success);
 
 bool pkm_kunit_expect_continuous_audit_schema_op(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	const char *expected_operation, u32 expected_requested,
-	u32 expected_matched, u32 expected_granted, bool expected_success,
+	u32 expected_matched, u32 expected_granted, u32 expected_audit_mask,
+	bool expected_success, const char *expected_reason,
 	u32 expected_pip_type, u32 expected_pip_trust, u64 expected_pid);
 
 bool pkm_kunit_expect_privilege_use_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	u32 expected_requested, u32 expected_granted, u32 expected_surviving,
-	bool expected_success);
+	u32 expected_contributed, u32 expected_surviving,
+	u32 expected_check_requested, u32 expected_check_granted,
+	bool expected_success, const char *expected_object_kind);
 
 bool pkm_kunit_expect_caap_diagnostic_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
@@ -1287,7 +1301,7 @@ bool pkm_kunit_expect_caap_diagnostic_schema(
 
 bool pkm_kunit_expect_logon_destroyed_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	u64 expected_logon_session_id, u32 expected_logon_type,
+	u64 expected_logon_session_id, const char *expected_logon_type,
 	const char *expected_auth_package, u64 expected_created_at);
 
 void pkm_kunit_expect_boot_snapshot_eq_internal(

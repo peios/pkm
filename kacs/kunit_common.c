@@ -919,7 +919,7 @@ void pkm_kunit_reset_kmes(void)
 	/*
 	 * Settle what earlier cases left to RCU first: a cred freed by a
 	 * revert drops its token from an RCU callback, and a token's last
-	 * drop destroys its logon session and emits logon-session-destroyed
+	 * drop destroys its logon session and emits kacs.session.destroyed
 	 * on whichever CPU runs the callback — into a case that expects its
 	 * own events alone, on one ring (PEI-1313 made those frees real).
 	 */
@@ -1618,6 +1618,35 @@ bool pkm_kunit_msgpack_expect_nil_key(
 }
 
 
+bool pkm_kunit_msgpack_expect_absent_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key)
+{
+	struct pkm_kunit_msgpack_view value = { };
+	bool absent = !pkm_kunit_msgpack_map_get(map, key, &value);
+
+	KUNIT_EXPECT_TRUE(test, absent);
+	return absent;
+}
+
+
+bool pkm_kunit_msgpack_require_map_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key, u32 expected_count, struct pkm_kunit_msgpack_view *out)
+{
+	struct pkm_kunit_msgpack_view value = { };
+
+	if (!pkm_kunit_msgpack_require_key(test, map, key,
+					   PKM_KUNIT_MSGPACK_MAP, &value))
+		return false;
+	KUNIT_EXPECT_EQ(test, value.count, expected_count);
+	if (out)
+		*out = value;
+	return value.count == expected_count;
+}
+
+
+/* emitter.process: {pid, name, executable}. */
 bool pkm_kunit_msgpack_expect_process_map(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
 	u64 expected_pid, const char *expected_name, const char *expected_path)
@@ -1631,51 +1660,157 @@ bool pkm_kunit_msgpack_expect_process_map(
 						expected_pid);
 	ok &= pkm_kunit_msgpack_expect_str_key(test, map, "name",
 					       expected_name);
-	ok &= pkm_kunit_msgpack_expect_str_key(test, map, "executable_path",
+	ok &= pkm_kunit_msgpack_expect_str_key(test, map, "executable",
 					       expected_path);
 	return ok;
 }
 
 
+/* The payload root's emitter: {process: {pid, name, executable}}. */
+bool pkm_kunit_msgpack_expect_emitter_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *root,
+	u64 expected_pid, const char *expected_name, const char *expected_path)
+{
+	struct pkm_kunit_msgpack_view emitter = { };
+	struct pkm_kunit_msgpack_view process = { };
+
+	if (!pkm_kunit_msgpack_require_map_key(test, root, "emitter", 1U,
+					       &emitter))
+		return false;
+	if (!pkm_kunit_msgpack_require_key(test, &emitter, "process",
+					   PKM_KUNIT_MSGPACK_MAP, &process))
+		return false;
+	return pkm_kunit_msgpack_expect_process_map(
+		test, &process, expected_pid, expected_name, expected_path);
+}
+
+
+/*
+ * Walks subject.token.groups and subject.token.group-attributes together:
+ * the two arrays are parallel, so they must be the same length, every group
+ * a binary SID and every attribute word a uint. With expected_groups, each
+ * entry must also match in order, SID and attributes both.
+ */
+static bool pkm_kunit_msgpack_expect_group_arrays(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *token,
+	const struct pkm_kunit_sid_attr_spec *expected_groups,
+	u32 expected_group_count)
+{
+	struct pkm_kunit_msgpack_view groups = { };
+	struct pkm_kunit_msgpack_view attributes = { };
+	struct pkm_kunit_msgpack_view group = { };
+	struct pkm_kunit_msgpack_view attribute = { };
+	size_t group_offset = 0;
+	size_t attribute_offset = 0;
+	bool ok = true;
+	u32 i;
+
+	if (!pkm_kunit_msgpack_require_key(test, token, "groups",
+					   PKM_KUNIT_MSGPACK_ARRAY, &groups))
+		return false;
+	if (!pkm_kunit_msgpack_require_key(test, token, "group-attributes",
+					   PKM_KUNIT_MSGPACK_ARRAY,
+					   &attributes))
+		return false;
+	KUNIT_EXPECT_EQ(test, attributes.count, groups.count);
+	if (attributes.count != groups.count)
+		return false;
+	if (expected_groups) {
+		KUNIT_EXPECT_EQ(test, groups.count, expected_group_count);
+		ok &= groups.count == expected_group_count;
+	}
+
+	for (i = 0; i < groups.count; i++) {
+		if (!pkm_kunit_msgpack_parse_one(groups.data_ptr + group_offset,
+						 groups.data_len - group_offset,
+						 &group, 0) ||
+		    !pkm_kunit_msgpack_parse_one(
+			    attributes.data_ptr + attribute_offset,
+			    attributes.data_len - attribute_offset,
+			    &attribute, 0)) {
+			KUNIT_EXPECT_TRUE(test, false);
+			return false;
+		}
+		KUNIT_EXPECT_EQ(test, group.kind, PKM_KUNIT_MSGPACK_BIN);
+		KUNIT_EXPECT_EQ(test, attribute.kind, PKM_KUNIT_MSGPACK_UINT);
+		ok &= group.kind == PKM_KUNIT_MSGPACK_BIN &&
+		      attribute.kind == PKM_KUNIT_MSGPACK_UINT;
+		if (expected_groups && i < expected_group_count) {
+			bool sid_matches = pkm_kunit_msgpack_bin_eq(
+				&group, expected_groups[i].sid,
+				expected_groups[i].sid_len);
+
+			KUNIT_EXPECT_TRUE(test, sid_matches);
+			KUNIT_EXPECT_EQ(test, attribute.uint_value,
+					(u64)expected_groups[i].attributes);
+			ok &= sid_matches &&
+			      attribute.uint_value ==
+				      (u64)expected_groups[i].attributes;
+		}
+		group_offset += group.total_len;
+		attribute_offset += attribute.total_len;
+	}
+	KUNIT_EXPECT_EQ(test, group_offset, groups.data_len);
+	KUNIT_EXPECT_EQ(test, attribute_offset, attributes.data_len);
+	return ok && group_offset == groups.data_len &&
+	       attribute_offset == attributes.data_len;
+}
+
+
+/*
+ * subject: {token: {sid, groups, group-attributes, integrity, id, auth-id,
+ * type, impersonation, uid}, pip: {type, trust}}. Every KMES-captured record
+ * here comes from a live token, so all nine token fields are present.
+ */
 bool pkm_kunit_msgpack_expect_subject_map(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
 	const u8 *expected_user_sid, size_t expected_user_sid_len,
 	u32 expected_integrity, u32 expected_pip_type, u32 expected_pip_trust)
 {
-	struct pkm_kunit_msgpack_view groups = { };
-	struct pkm_kunit_msgpack_view group = { };
-	size_t offset = 0;
+	struct pkm_kunit_msgpack_view token = { };
+	struct pkm_kunit_msgpack_view pip = { };
+	struct pkm_kunit_msgpack_view type = { };
+	struct pkm_kunit_msgpack_view impersonation = { };
+	bool primary;
 	bool ok = true;
-	u32 i;
 
 	KUNIT_EXPECT_EQ(test, map->kind, PKM_KUNIT_MSGPACK_MAP);
-	KUNIT_EXPECT_EQ(test, map->count, 5U);
-	ok &= map->kind == PKM_KUNIT_MSGPACK_MAP && map->count == 5U;
-	ok &= pkm_kunit_msgpack_expect_bin_key(test, map, "user_sid",
+	KUNIT_EXPECT_EQ(test, map->count, 2U);
+	ok &= map->kind == PKM_KUNIT_MSGPACK_MAP && map->count == 2U;
+	if (!pkm_kunit_msgpack_require_map_key(test, map, "token", 9U, &token))
+		return false;
+	ok &= pkm_kunit_msgpack_expect_bin_key(test, &token, "sid",
 					       expected_user_sid,
 					       expected_user_sid_len);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, map, "integrity_level",
+	ok &= pkm_kunit_msgpack_expect_uint_key(test, &token, "integrity",
 						expected_integrity);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, map, "pip_type",
-						expected_pip_type);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, map, "pip_trust",
-						expected_pip_trust);
-	if (!pkm_kunit_msgpack_require_key(test, map, "group_sids",
-					   PKM_KUNIT_MSGPACK_ARRAY, &groups))
+	ok &= pkm_kunit_msgpack_require_key(test, &token, "id",
+					    PKM_KUNIT_MSGPACK_UINT, NULL);
+	ok &= pkm_kunit_msgpack_require_key(test, &token, "auth-id",
+					    PKM_KUNIT_MSGPACK_UINT, NULL);
+	ok &= pkm_kunit_msgpack_require_key(test, &token, "uid",
+					    PKM_KUNIT_MSGPACK_UINT, NULL);
+	if (!pkm_kunit_msgpack_require_key(test, &token, "type",
+					   PKM_KUNIT_MSGPACK_STR, &type) ||
+	    !pkm_kunit_msgpack_require_key(test, &token, "impersonation",
+					   PKM_KUNIT_MSGPACK_UINT,
+					   &impersonation))
 		return false;
-	for (i = 0; i < groups.count; i++) {
-		if (!pkm_kunit_msgpack_parse_one(groups.data_ptr + offset,
-						 groups.data_len - offset,
-						 &group, 0)) {
-			KUNIT_EXPECT_TRUE(test, false);
-			return false;
-		}
-		KUNIT_EXPECT_EQ(test, group.kind, PKM_KUNIT_MSGPACK_BIN);
-		ok &= group.kind == PKM_KUNIT_MSGPACK_BIN;
-		offset += group.total_len;
-	}
-	KUNIT_EXPECT_EQ(test, offset, groups.data_len);
-	return ok && offset == groups.data_len;
+	/* A primary token reports level 0; an impersonation token 0..3. */
+	primary = pkm_kunit_msgpack_str_eq(&type, "primary");
+	KUNIT_EXPECT_TRUE(test, primary ||
+				pkm_kunit_msgpack_str_eq(&type, "impersonation"));
+	KUNIT_EXPECT_LE(test, impersonation.uint_value, primary ? 0ULL : 3ULL);
+	ok &= impersonation.uint_value <= (primary ? 0ULL : 3ULL);
+	ok &= pkm_kunit_msgpack_expect_group_arrays(test, &token, NULL, 0);
+
+	if (!pkm_kunit_msgpack_require_map_key(test, map, "pip", 2U, &pip))
+		return false;
+	ok &= pkm_kunit_msgpack_expect_uint_key(test, &pip, "type",
+						expected_pip_type);
+	ok &= pkm_kunit_msgpack_expect_uint_key(test, &pip, "trust",
+						expected_pip_trust);
+	return ok;
 }
 
 
@@ -1684,39 +1819,16 @@ bool pkm_kunit_msgpack_expect_subject_group_sids(
 	const struct pkm_kunit_sid_attr_spec *expected_groups,
 	u32 expected_group_count)
 {
-	struct pkm_kunit_msgpack_view groups = { };
-	struct pkm_kunit_msgpack_view group = { };
-	size_t offset = 0;
-	bool ok = true;
-	u32 i;
+	struct pkm_kunit_msgpack_view token = { };
 
 	KUNIT_EXPECT_EQ(test, map->kind, PKM_KUNIT_MSGPACK_MAP);
-	ok &= map->kind == PKM_KUNIT_MSGPACK_MAP;
-	if (!pkm_kunit_msgpack_require_key(test, map, "group_sids",
-					   PKM_KUNIT_MSGPACK_ARRAY, &groups))
+	if (map->kind != PKM_KUNIT_MSGPACK_MAP)
 		return false;
-
-	KUNIT_EXPECT_EQ(test, groups.count, expected_group_count);
-	ok &= groups.count == expected_group_count;
-	for (i = 0; i < groups.count; i++) {
-		if (!pkm_kunit_msgpack_parse_one(groups.data_ptr + offset,
-						 groups.data_len - offset,
-						 &group, 0)) {
-			KUNIT_EXPECT_TRUE(test, false);
-			return false;
-		}
-		if (i < expected_group_count) {
-			bool sid_matches = pkm_kunit_msgpack_bin_eq(
-				&group, expected_groups[i].sid,
-				expected_groups[i].sid_len);
-
-			KUNIT_EXPECT_TRUE(test, sid_matches);
-			ok &= sid_matches;
-		}
-		offset += group.total_len;
-	}
-	KUNIT_EXPECT_EQ(test, offset, groups.data_len);
-	return ok && offset == groups.data_len;
+	if (!pkm_kunit_msgpack_require_key(test, map, "token",
+					   PKM_KUNIT_MSGPACK_MAP, &token))
+		return false;
+	return pkm_kunit_msgpack_expect_group_arrays(
+		test, &token, expected_groups, expected_group_count);
 }
 
 
@@ -1755,59 +1867,136 @@ bool pkm_kunit_expect_kmes_event_type(
 }
 
 
+/*
+ * The `object` key of an access-check record: {kind: <expected_kind>} when
+ * the kind is known with no identity fields, or absent when expected_kind is
+ * NULL. Records whose object carries identity fields check them directly.
+ */
+static bool pkm_kunit_msgpack_expect_object_kind_only(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *root,
+	const char *expected_kind)
+{
+	struct pkm_kunit_msgpack_view object = { };
+
+	if (!expected_kind)
+		return pkm_kunit_msgpack_expect_absent_key(test, root, "object");
+	if (!pkm_kunit_msgpack_require_map_key(test, root, "object", 1U,
+					       &object))
+		return false;
+	return pkm_kunit_msgpack_expect_str_key(test, &object, "kind",
+						expected_kind);
+}
+
+
+/* fields: {attestation: {userspace: true}}, or absent. */
+static bool pkm_kunit_msgpack_expect_attestation(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *root,
+	bool expected_asserted)
+{
+	struct pkm_kunit_msgpack_view fields = { };
+	struct pkm_kunit_msgpack_view attestation = { };
+
+	if (!expected_asserted)
+		return pkm_kunit_msgpack_expect_absent_key(test, root, "fields");
+	if (!pkm_kunit_msgpack_require_map_key(test, root, "fields", 1U,
+					       &fields) ||
+	    !pkm_kunit_msgpack_require_map_key(test, &fields, "attestation", 1U,
+					       &attestation))
+		return false;
+	return pkm_kunit_msgpack_expect_bool_key(test, &attestation,
+						 "userspace", true);
+}
+
+
+/* access: {requested, granted} with exactly those two keys. */
+static bool pkm_kunit_msgpack_expect_access_pair(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *root,
+	u32 expected_requested, u32 expected_granted)
+{
+	struct pkm_kunit_msgpack_view access = { };
+	bool ok = true;
+
+	if (!pkm_kunit_msgpack_require_map_key(test, root, "access", 2U,
+					       &access))
+		return false;
+	ok &= pkm_kunit_msgpack_expect_uint_key(test, &access, "requested",
+						expected_requested);
+	ok &= pkm_kunit_msgpack_expect_uint_key(test, &access, "granted",
+						expected_granted);
+	return ok;
+}
+
+
+/* outcome: {success} with exactly that key. */
+static bool pkm_kunit_msgpack_expect_outcome_success(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *root,
+	bool expected_success)
+{
+	struct pkm_kunit_msgpack_view outcome = { };
+
+	if (!pkm_kunit_msgpack_require_map_key(test, root, "outcome", 1U,
+					       &outcome))
+		return false;
+	return pkm_kunit_msgpack_expect_bool_key(test, &outcome, "success",
+						 expected_success);
+}
+
+
+/*
+ * kacs.audit.access.checked: subject, emitter, [object], access, outcome,
+ * trigger, [fields]. expected_object_kind NULL means the record names no
+ * object (an access-check ioctl with no audit context).
+ */
 bool pkm_kunit_expect_access_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_requested, u32 expected_granted, bool expected_success,
 	const char *expected_trigger_kind, const u8 *expected_ace,
-	size_t expected_ace_len)
+	size_t expected_ace_len, const char *expected_object_kind)
 {
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
-	struct pkm_kunit_msgpack_view process = { };
 	struct pkm_kunit_msgpack_view trigger = { };
 	struct pkm_kunit_msgpack_view ace = { };
 	bool ace_matches;
 	bool ok = true;
 
-	ok &= pkm_kunit_expect_kmes_event_type(test, event, "access-audit");
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 7))
+	ok &= pkm_kunit_expect_kmes_event_type(test, event,
+					       "kacs.audit.access.checked");
+	if (!pkm_kunit_msgpack_parse_payload_root(
+		    test, event, &root, expected_object_kind ? 6U : 5U))
 		return false;
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
 	ok &= pkm_kunit_msgpack_expect_subject_map(
 		test, &subject, pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid),
 		PKM_KUNIT_IL_SYSTEM, 0U, 0U);
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "object_context");
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"requested_access",
-						expected_requested);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"granted_access",
-						expected_granted);
-	ok &= pkm_kunit_msgpack_expect_bool_key(test, &root, "success",
-						expected_success);
-	ok &= pkm_kunit_msgpack_require_key(test, &root, "trigger",
-					    PKM_KUNIT_MSGPACK_MAP, &trigger);
-	KUNIT_EXPECT_EQ(test, trigger.count, 2U);
-	ok &= trigger.count == 2U;
+	ok &= pkm_kunit_msgpack_expect_object_kind_only(test, &root,
+							expected_object_kind);
+	ok &= pkm_kunit_msgpack_expect_access_pair(test, &root,
+						   expected_requested,
+						   expected_granted);
+	ok &= pkm_kunit_msgpack_expect_outcome_success(test, &root,
+						       expected_success);
+	/* A policy-forced record has no ACE, so its trigger is kind alone. */
+	ok &= pkm_kunit_msgpack_require_map_key(test, &root, "trigger",
+						expected_ace ? 2U : 1U,
+						&trigger);
 	ok &= pkm_kunit_msgpack_expect_str_key(test, &trigger, "kind",
 					       expected_trigger_kind);
-	if (!pkm_kunit_msgpack_map_get(&trigger, "ace", &ace)) {
+	if (!expected_ace) {
+		ok &= pkm_kunit_msgpack_expect_absent_key(test, &trigger, "ace");
+	} else if (!pkm_kunit_msgpack_map_get(&trigger, "ace", &ace)) {
 		KUNIT_EXPECT_TRUE(test, false);
 		ok = false;
-	} else if (!expected_ace) {
-		KUNIT_EXPECT_EQ(test, ace.kind, PKM_KUNIT_MSGPACK_NIL);
-		ok &= ace.kind == PKM_KUNIT_MSGPACK_NIL;
 	} else {
 		ace_matches = pkm_kunit_msgpack_bin_eq(&ace, expected_ace,
 						       expected_ace_len);
 		KUNIT_EXPECT_TRUE(test, ace_matches);
 		ok &= ace_matches;
 	}
-	ok &= pkm_kunit_msgpack_require_key(test, &root, "process",
-					    PKM_KUNIT_MSGPACK_MAP, &process);
-	ok &= pkm_kunit_msgpack_expect_process_map(
-		test, &process, 4105, PKM_KUNIT_KMES_PROCESS_NAME,
+	ok &= pkm_kunit_msgpack_expect_attestation(test, &root, false);
+	ok &= pkm_kunit_msgpack_expect_emitter_key(
+		test, &root, 4105, PKM_KUNIT_KMES_PROCESS_NAME,
 		PKM_KUNIT_KMES_PROCESS_PATH);
 	return ok;
 }
@@ -1821,7 +2010,8 @@ bool pkm_kunit_expect_access_audit_subject_group_sids(
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
 
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 7))
+	/* An access-check ioctl with no audit context or PIP: no object. */
+	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 5))
 		return false;
 	if (!pkm_kunit_msgpack_require_key(test, &root, "subject",
 					   PKM_KUNIT_MSGPACK_MAP, &subject))
@@ -1831,19 +2021,38 @@ bool pkm_kunit_expect_access_audit_subject_group_sids(
 }
 
 
+/*
+ * A record from an access-check ioctl whose caller supplied a PGSS §6.7
+ * audit context {kind: <k>, <k>: {name: <name>}}: the context lands as
+ * object.kind and object.<k>.name, and the record is marked as carrying a
+ * userspace assertion.
+ */
 bool pkm_kunit_expect_access_audit_object_context(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	const u8 *expected_context, size_t expected_context_len)
+	const char *expected_kind, const char *expected_name)
 {
 	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view object = { };
+	struct pkm_kunit_msgpack_view body = { };
 	bool ok = true;
 
-	ok &= pkm_kunit_expect_kmes_event_type(test, event, "access-audit");
+	ok &= pkm_kunit_expect_kmes_event_type(test, event,
+					       "kacs.audit.access.checked");
 	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 7))
 		return false;
-	ok &= pkm_kunit_msgpack_expect_bin_key(test, &root, "object_context",
-					       expected_context,
-					       expected_context_len);
+	if (!pkm_kunit_msgpack_require_map_key(test, &root, "object", 2U,
+					       &object))
+		return false;
+	ok &= pkm_kunit_msgpack_expect_str_key(test, &object, "kind",
+					       expected_kind);
+	if (!pkm_kunit_msgpack_require_map_key(test, &object, expected_kind,
+					       1U, &body))
+		return false;
+	ok &= pkm_kunit_msgpack_expect_str_key(test, &body, "name",
+					       expected_name);
+	ok &= pkm_kunit_msgpack_expect_attestation(test, &root, true);
+	ok &= pkm_kunit_msgpack_expect_absent_key(test, &root,
+						  "object_context");
 	return ok;
 }
 
@@ -1851,165 +2060,183 @@ bool pkm_kunit_expect_access_audit_object_context(
 bool pkm_kunit_expect_continuous_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_requested, u32 expected_matched, u32 expected_granted,
-	bool expected_success)
+	u32 expected_audit_mask, bool expected_success)
 {
-	struct pkm_kunit_msgpack_view root = { };
-	struct pkm_kunit_msgpack_view subject = { };
-	struct pkm_kunit_msgpack_view process = { };
-	bool ok = true;
-
-	ok &= pkm_kunit_expect_kmes_event_type(test, event, "continuous-audit");
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 8))
-		return false;
-	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
-					    PKM_KUNIT_MSGPACK_MAP, &subject);
-	ok &= pkm_kunit_msgpack_expect_subject_map(
-		test, &subject, pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid),
-		PKM_KUNIT_IL_SYSTEM, 0U, 0U);
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "object_context");
-	ok &= pkm_kunit_msgpack_expect_str_key(test, &root, "operation",
-					       "file.permission");
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"requested_access",
-						expected_requested);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "matched_access",
-						expected_matched);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "granted_access",
-						expected_granted);
-	ok &= pkm_kunit_msgpack_expect_bool_key(test, &root, "success",
-						expected_success);
-	ok &= pkm_kunit_msgpack_require_key(test, &root, "process",
-					    PKM_KUNIT_MSGPACK_MAP, &process);
-	ok &= pkm_kunit_msgpack_expect_process_map(
-		test, &process, 4301, PKM_KUNIT_KMES_PROCESS_NAME,
-		PKM_KUNIT_KMES_PROCESS_PATH);
-	return ok;
+	return pkm_kunit_expect_continuous_audit_schema_op(
+		test, event, "file.permission", expected_requested,
+		expected_matched, expected_granted, expected_audit_mask,
+		expected_success, expected_success ? NULL : "grant-deny", 0U,
+		0U, 4301);
 }
 
 
+/*
+ * kacs.audit.handle.used: subject, emitter, object, operation, access,
+ * outcome. The KUnit fixture files are not opened files, so object.file.path
+ * is never resolved here and object is {kind: "file"} alone.
+ * expected_reason is the outcome.reason a failure carries; NULL on success.
+ */
 bool pkm_kunit_expect_continuous_audit_schema_op(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	const char *expected_operation, u32 expected_requested,
-	u32 expected_matched, u32 expected_granted, bool expected_success,
+	u32 expected_matched, u32 expected_granted, u32 expected_audit_mask,
+	bool expected_success, const char *expected_reason,
 	u32 expected_pip_type, u32 expected_pip_trust, u64 expected_pid)
 {
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
-	struct pkm_kunit_msgpack_view process = { };
+	struct pkm_kunit_msgpack_view operation = { };
+	struct pkm_kunit_msgpack_view access = { };
+	struct pkm_kunit_msgpack_view outcome = { };
 	bool ok = true;
 
-	ok &= pkm_kunit_expect_kmes_event_type(test, event, "continuous-audit");
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 8))
+	ok &= pkm_kunit_expect_kmes_event_type(test, event,
+					       "kacs.audit.handle.used");
+	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 6))
 		return false;
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
 	ok &= pkm_kunit_msgpack_expect_subject_map(
 		test, &subject, pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid),
 		PKM_KUNIT_IL_SYSTEM, expected_pip_type, expected_pip_trust);
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "object_context");
-	ok &= pkm_kunit_msgpack_expect_str_key(test, &root, "operation",
-					       expected_operation);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"requested_access",
-						expected_requested);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "matched_access",
-						expected_matched);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "granted_access",
-						expected_granted);
-	ok &= pkm_kunit_msgpack_expect_bool_key(test, &root, "success",
-						expected_success);
-	ok &= pkm_kunit_msgpack_require_key(test, &root, "process",
-					    PKM_KUNIT_MSGPACK_MAP, &process);
-	ok &= pkm_kunit_msgpack_expect_process_map(
-		test, &process, expected_pid, PKM_KUNIT_KMES_PROCESS_NAME,
+	ok &= pkm_kunit_msgpack_expect_object_kind_only(test, &root, "file");
+	if (pkm_kunit_msgpack_require_map_key(test, &root, "operation", 1U,
+					      &operation))
+		ok &= pkm_kunit_msgpack_expect_str_key(test, &operation, "name",
+						       expected_operation);
+	else
+		ok = false;
+	if (pkm_kunit_msgpack_require_map_key(test, &root, "access", 4U,
+					      &access)) {
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &access,
+							"requested",
+							expected_requested);
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &access, "matched",
+							expected_matched);
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &access, "granted",
+							expected_granted);
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &access,
+							"audit-mask",
+							expected_audit_mask);
+	} else {
+		ok = false;
+	}
+	if (pkm_kunit_msgpack_require_map_key(test, &root, "outcome",
+					      expected_reason ? 2U : 1U,
+					      &outcome)) {
+		ok &= pkm_kunit_msgpack_expect_bool_key(test, &outcome,
+							"success",
+							expected_success);
+		if (expected_reason)
+			ok &= pkm_kunit_msgpack_expect_str_key(
+				test, &outcome, "reason", expected_reason);
+		else
+			ok &= pkm_kunit_msgpack_expect_absent_key(
+				test, &outcome, "reason");
+	} else {
+		ok = false;
+	}
+	ok &= pkm_kunit_msgpack_expect_emitter_key(
+		test, &root, expected_pid, PKM_KUNIT_KMES_PROCESS_NAME,
 		PKM_KUNIT_KMES_PROCESS_PATH);
 	return ok;
 }
 
 
+/*
+ * kacs.audit.privilege.used: subject, emitter, [object], privilege, access,
+ * outcome. access.* is the whole check's requested and granted masks;
+ * privilege.contributed and privilege.surviving are this privilege's part.
+ */
 bool pkm_kunit_expect_privilege_use_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	u32 expected_requested, u32 expected_granted, u32 expected_surviving,
-	bool expected_success)
+	u32 expected_contributed, u32 expected_surviving,
+	u32 expected_check_requested, u32 expected_check_granted,
+	bool expected_success, const char *expected_object_kind)
 {
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
-	struct pkm_kunit_msgpack_view process = { };
+	struct pkm_kunit_msgpack_view privilege = { };
 	bool ok = true;
 
-	ok &= pkm_kunit_expect_kmes_event_type(test, event, "privilege-use");
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 8))
+	ok &= pkm_kunit_expect_kmes_event_type(test, event,
+					       "kacs.audit.privilege.used");
+	if (!pkm_kunit_msgpack_parse_payload_root(
+		    test, event, &root, expected_object_kind ? 6U : 5U))
 		return false;
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
 	ok &= pkm_kunit_msgpack_expect_subject_map(
 		test, &subject, pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid),
 		PKM_KUNIT_IL_SYSTEM, 0U, 0U);
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "object_context");
-	ok &= pkm_kunit_msgpack_expect_str_key(test, &root, "privilege",
-					       "SeSecurityPrivilege");
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"requested_access",
-						expected_requested);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"granted_access",
-						expected_granted);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"surviving_access",
-						expected_surviving);
-	ok &= pkm_kunit_msgpack_expect_bool_key(test, &root, "success",
-						expected_success);
-	ok &= pkm_kunit_msgpack_require_key(test, &root, "process",
-					    PKM_KUNIT_MSGPACK_MAP, &process);
-	ok &= pkm_kunit_msgpack_expect_process_map(
-		test, &process, 4206, PKM_KUNIT_KMES_PRIV_PROCESS_NAME,
+	ok &= pkm_kunit_msgpack_expect_object_kind_only(test, &root,
+							expected_object_kind);
+	if (pkm_kunit_msgpack_require_map_key(test, &root, "privilege", 3U,
+					      &privilege)) {
+		ok &= pkm_kunit_msgpack_expect_str_key(test, &privilege, "name",
+						       "SeSecurityPrivilege");
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &privilege,
+							"contributed",
+							expected_contributed);
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &privilege,
+							"surviving",
+							expected_surviving);
+	} else {
+		ok = false;
+	}
+	ok &= pkm_kunit_msgpack_expect_access_pair(test, &root,
+						   expected_check_requested,
+						   expected_check_granted);
+	ok &= pkm_kunit_msgpack_expect_outcome_success(test, &root,
+						       expected_success);
+	ok &= pkm_kunit_msgpack_expect_attestation(test, &root, false);
+	ok &= pkm_kunit_msgpack_expect_emitter_key(
+		test, &root, 4206, PKM_KUNIT_KMES_PRIV_PROCESS_NAME,
 		PKM_KUNIT_KMES_PRIV_PROCESS_PATH);
 	return ok;
 }
 
 
+/*
+ * kacs.caap.staging.diverged from an access-check ioctl with no audit
+ * context: subject, emitter, access {requested, granted, granted-staged}.
+ */
 bool pkm_kunit_expect_caap_diagnostic_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_effective, u32 expected_staged)
 {
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
-	struct pkm_kunit_msgpack_view process = { };
+	struct pkm_kunit_msgpack_view access = { };
 	bool ok = true;
 
 	ok &= pkm_kunit_expect_kmes_event_type(test, event,
-					       "caap-policy-diagnostic");
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 12))
+					       "kacs.caap.staging.diverged");
+	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 3))
 		return false;
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
 	ok &= pkm_kunit_msgpack_expect_subject_map(
 		test, &subject, pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid),
 		PKM_KUNIT_IL_SYSTEM, 0U, 0U);
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "object_context");
-	ok &= pkm_kunit_msgpack_expect_str_key(test, &root, "kind",
-					       "staging-mismatch");
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "phase");
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "policy_sid");
-	ok &= pkm_kunit_msgpack_expect_nil_key(test, &root, "rule_index");
-	ok &= pkm_kunit_msgpack_expect_str_key(test, &root, "reason",
-					       "effective-staged-delta");
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"requested_access",
-						KACS_ACCESS_READ_CONTROL);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"effective_granted_access",
-						expected_effective);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root,
-						"staged_granted_access",
-						expected_staged);
-	ok &= pkm_kunit_msgpack_expect_bool_key(test, &root,
-						"object_results_differ",
-						false);
-	ok &= pkm_kunit_msgpack_require_key(test, &root, "process",
-					    PKM_KUNIT_MSGPACK_MAP, &process);
-	ok &= pkm_kunit_msgpack_expect_process_map(
-		test, &process, 4307, PKM_KUNIT_KMES_PROCESS_NAME,
+	ok &= pkm_kunit_msgpack_expect_absent_key(test, &root, "object");
+	/* The diverged record carries no reason, phase, policy or rule. */
+	ok &= pkm_kunit_msgpack_expect_absent_key(test, &root, "outcome");
+	ok &= pkm_kunit_msgpack_expect_absent_key(test, &root, "caap");
+	if (pkm_kunit_msgpack_require_map_key(test, &root, "access", 3U,
+					      &access)) {
+		ok &= pkm_kunit_msgpack_expect_uint_key(
+			test, &access, "requested", KACS_ACCESS_READ_CONTROL);
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &access, "granted",
+							expected_effective);
+		ok &= pkm_kunit_msgpack_expect_uint_key(test, &access,
+							"granted-staged",
+							expected_staged);
+	} else {
+		ok = false;
+	}
+	ok &= pkm_kunit_msgpack_expect_emitter_key(
+		test, &root, 4307, PKM_KUNIT_KMES_PROCESS_NAME,
 		PKM_KUNIT_KMES_PROCESS_PATH);
 	return ok;
 }
@@ -2017,27 +2244,39 @@ bool pkm_kunit_expect_caap_diagnostic_schema(
 
 bool pkm_kunit_expect_logon_destroyed_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
-	u64 expected_logon_session_id, u32 expected_logon_type,
+	u64 expected_logon_session_id, const char *expected_logon_type,
 	const char *expected_auth_package, u64 expected_created_at)
 {
 	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view object = { };
+	struct pkm_kunit_msgpack_view session = { };
+	struct pkm_kunit_msgpack_view user = { };
 	bool ok = true;
 
 	ok &= pkm_kunit_expect_kmes_event_type(test, event,
-					       "logon-session-destroyed");
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 5))
+					       "kacs.session.destroyed");
+	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 1))
 		return false;
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "session_id",
+	if (!pkm_kunit_msgpack_require_map_key(test, &root, "object", 1U,
+					       &object) ||
+	    !pkm_kunit_msgpack_require_map_key(test, &object, "session", 5U,
+					       &session) ||
+	    !pkm_kunit_msgpack_require_map_key(test, &session, "user", 1U,
+					       &user))
+		return false;
+	ok &= pkm_kunit_msgpack_expect_uint_key(test, &session, "id",
 						expected_logon_session_id);
-	ok &= pkm_kunit_msgpack_expect_bin_key(test, &root, "user_sid",
+	ok &= pkm_kunit_msgpack_expect_bin_key(test, &user, "sid",
 					       pkm_kunit_local_service_sid,
 					       sizeof(pkm_kunit_local_service_sid));
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "logon_type",
-						expected_logon_type);
-	ok &= pkm_kunit_msgpack_expect_str_key(test, &root, "auth_package",
+	ok &= pkm_kunit_msgpack_expect_str_key(test, &session, "logon-type",
+					       expected_logon_type);
+	ok &= pkm_kunit_msgpack_expect_str_key(test, &session, "auth-package",
 					       expected_auth_package);
-	ok &= pkm_kunit_msgpack_expect_uint_key(test, &root, "created_at",
-						expected_created_at);
+	/* Sessions keep whole seconds; the record is uint.time nanoseconds. */
+	ok &= pkm_kunit_msgpack_expect_uint_key(test, &session, "logon-time",
+						expected_created_at *
+							1000000000ULL);
 	return ok;
 }
 

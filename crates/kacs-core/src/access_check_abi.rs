@@ -503,7 +503,213 @@ fn parse_audit_context<M: AccessCheckAbiMemory>(
     if len > KACS_ACCESS_CHECK_MAX_AUDIT_CONTEXT_LEN {
         return Err(KacsError::InvalidAbiInput("audit_context_len exceeds 4096"));
     }
-    read_optional_memory(memory, "audit_context", ptr, len)
+    let context = read_optional_memory(memory, "audit_context", ptr, len)?;
+    if let Some(bytes) = context.as_deref() {
+        let _ = parse_audit_context_map(bytes)?;
+    }
+    Ok(context)
+}
+
+const AUDIT_CONTEXT_INVALID: KacsError =
+    KacsError::InvalidAbiInput("audit_context is not a PGSS 6.7 audit context map");
+
+/// A validated PGSS §6.7 audit context, borrowed from the caller's bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuditContextView<'a> {
+    /// The `kind` value: the object kind, one event-type segment.
+    pub kind: &'a [u8],
+    /// The encoded map held under the key equal to `kind`, when present.
+    pub body: Option<&'a [u8]>,
+}
+
+/// Parses the audit context an access-check caller supplies:
+/// `{kind: "<k>", "<k>": {...}}`.
+///
+/// The map must hold a string `kind` matching the event-type segment grammar
+/// (PGSS §6.3), may hold one non-empty map under the key equal to that kind,
+/// and must hold nothing else. The kernel splices the two into the record as
+/// `object.kind` and `object.<k>.*`, so this shape is what stops a caller
+/// writing anywhere but beneath its own `object.<k>`: an extra key would
+/// otherwise land in the record beside the subject and the access.
+///
+/// This checks structure only. Well-formedness inside the body (UTF-8
+/// strings, nesting depth) is the KMES emit validator's, which the kernel
+/// glue runs on the same bytes; that validator is not reachable from this
+/// crate.
+pub fn parse_audit_context_map(bytes: &[u8]) -> KacsResult<AuditContextView<'_>> {
+    let mut pos = 0usize;
+    let entries = msgpack_map_len(bytes, &mut pos).ok_or(AUDIT_CONTEXT_INVALID)?;
+    if entries == 0 || entries > 2 {
+        return Err(AUDIT_CONTEXT_INVALID);
+    }
+
+    let mut kind = None;
+    let mut other: Option<(&[u8], &[u8])> = None;
+    for _ in 0..entries {
+        let key = msgpack_str(bytes, &mut pos).ok_or(AUDIT_CONTEXT_INVALID)?;
+        let value_start = pos;
+        msgpack_skip_value(bytes, &mut pos).ok_or(AUDIT_CONTEXT_INVALID)?;
+        let value = &bytes[value_start..pos];
+
+        if key == b"kind" {
+            if kind.is_some() {
+                return Err(AUDIT_CONTEXT_INVALID);
+            }
+            let mut value_pos = 0usize;
+            let kind_value = msgpack_str(value, &mut value_pos).ok_or(AUDIT_CONTEXT_INVALID)?;
+            if value_pos != value.len() || !is_event_segment(kind_value) {
+                return Err(AUDIT_CONTEXT_INVALID);
+            }
+            kind = Some(kind_value);
+        } else {
+            other = Some((key, value));
+        }
+    }
+    if pos != bytes.len() {
+        return Err(AUDIT_CONTEXT_INVALID);
+    }
+
+    let kind = kind.ok_or(AUDIT_CONTEXT_INVALID)?;
+    let body = match other {
+        None => None,
+        Some((key, value)) => {
+            if key != kind {
+                return Err(AUDIT_CONTEXT_INVALID);
+            }
+            validate_audit_context_body(value)?;
+            Some(value)
+        }
+    };
+
+    Ok(AuditContextView { kind, body })
+}
+
+/// The body is the object's identifying fields: a non-empty map whose keys
+/// are field-path segments, since each becomes `object.<k>.<key>`.
+fn validate_audit_context_body(body: &[u8]) -> KacsResult<()> {
+    let mut pos = 0usize;
+    let entries = msgpack_map_len(body, &mut pos).ok_or(AUDIT_CONTEXT_INVALID)?;
+    if entries == 0 {
+        return Err(AUDIT_CONTEXT_INVALID);
+    }
+    for _ in 0..entries {
+        let key = msgpack_str(body, &mut pos).ok_or(AUDIT_CONTEXT_INVALID)?;
+        if !is_event_segment(key) {
+            return Err(AUDIT_CONTEXT_INVALID);
+        }
+        msgpack_skip_value(body, &mut pos).ok_or(AUDIT_CONTEXT_INVALID)?;
+    }
+    if pos != body.len() {
+        return Err(AUDIT_CONTEXT_INVALID);
+    }
+    Ok(())
+}
+
+/// PGSS §6.3's segment grammar, `[a-z][a-z0-9]*(-[a-z0-9]+)*`.
+fn is_event_segment(segment: &[u8]) -> bool {
+    let Some((&first, rest)) = segment.split_first() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    let mut previous = first;
+    for &byte in rest {
+        let ok = byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || (byte == b'-' && previous != b'-');
+        if !ok {
+            return false;
+        }
+        previous = byte;
+    }
+    previous != b'-'
+}
+
+fn msgpack_take<'a>(bytes: &'a [u8], pos: &mut usize, len: usize) -> Option<&'a [u8]> {
+    let end = pos.checked_add(len)?;
+    let chunk = bytes.get(*pos..end)?;
+    *pos = end;
+    Some(chunk)
+}
+
+fn msgpack_be(bytes: &[u8], pos: &mut usize, width: usize) -> Option<usize> {
+    let chunk = msgpack_take(bytes, pos, width)?;
+    let mut value = 0usize;
+    for &byte in chunk {
+        value = value.checked_mul(256)?.checked_add(usize::from(byte))?;
+    }
+    Some(value)
+}
+
+fn msgpack_map_len(bytes: &[u8], pos: &mut usize) -> Option<usize> {
+    let tag = *msgpack_take(bytes, pos, 1)?.first()?;
+    match tag {
+        0x80..=0x8f => Some(usize::from(tag & 0x0f)),
+        0xde => msgpack_be(bytes, pos, 2),
+        0xdf => msgpack_be(bytes, pos, 4),
+        _ => None,
+    }
+}
+
+fn msgpack_str<'a>(bytes: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    let tag = *msgpack_take(bytes, pos, 1)?.first()?;
+    let len = match tag {
+        0xa0..=0xbf => usize::from(tag & 0x1f),
+        0xd9 => msgpack_be(bytes, pos, 1)?,
+        0xda => msgpack_be(bytes, pos, 2)?,
+        0xdb => msgpack_be(bytes, pos, 4)?,
+        _ => return None,
+    };
+    let value = msgpack_take(bytes, pos, len)?;
+    core::str::from_utf8(value).ok()?;
+    Some(value)
+}
+
+/// Steps over one complete msgpack value. Iterative, counting the values
+/// still owed rather than recursing, so a deeply nested caller buffer costs
+/// no stack; every value occupies at least one byte, so the count is bounded
+/// by what is left of the buffer.
+fn msgpack_skip_value(bytes: &[u8], pos: &mut usize) -> Option<()> {
+    let mut pending = 1usize;
+    while pending > 0 {
+        pending -= 1;
+        let tag = *msgpack_take(bytes, pos, 1)?.first()?;
+        let (skip, children) = match tag {
+            0x00..=0x7f | 0xc0 | 0xc2 | 0xc3 | 0xe0..=0xff => (0, 0),
+            0x80..=0x8f => (0, usize::from(tag & 0x0f).checked_mul(2)?),
+            0x90..=0x9f => (0, usize::from(tag & 0x0f)),
+            0xa0..=0xbf => (usize::from(tag & 0x1f), 0),
+            0xc4 | 0xd9 => (msgpack_be(bytes, pos, 1)?, 0),
+            0xc5 | 0xda => (msgpack_be(bytes, pos, 2)?, 0),
+            0xc6 | 0xdb => (msgpack_be(bytes, pos, 4)?, 0),
+            0xc7 => (msgpack_be(bytes, pos, 1)?.checked_add(1)?, 0),
+            0xc8 => (msgpack_be(bytes, pos, 2)?.checked_add(1)?, 0),
+            0xc9 => (msgpack_be(bytes, pos, 4)?.checked_add(1)?, 0),
+            0xca => (4, 0),
+            0xcb => (8, 0),
+            0xcc | 0xd0 => (1, 0),
+            0xcd | 0xd1 => (2, 0),
+            0xce | 0xd2 => (4, 0),
+            0xcf | 0xd3 => (8, 0),
+            0xd4 => (2, 0),
+            0xd5 => (3, 0),
+            0xd6 => (5, 0),
+            0xd7 => (9, 0),
+            0xd8 => (17, 0),
+            0xdc => (0, msgpack_be(bytes, pos, 2)?),
+            0xdd => (0, msgpack_be(bytes, pos, 4)?),
+            0xde => (0, msgpack_be(bytes, pos, 2)?.checked_mul(2)?),
+            0xdf => (0, msgpack_be(bytes, pos, 4)?.checked_mul(2)?),
+            _ => return None,
+        };
+        msgpack_take(bytes, pos, skip)?;
+        pending = pending.checked_add(children)?;
+        if pending > bytes.len() - *pos {
+            return None;
+        }
+    }
+    Some(())
 }
 
 fn read_optional_memory<M: AccessCheckAbiMemory>(
@@ -858,6 +1064,135 @@ mod tests {
         assert_eq!(
             parse_access_check_abi_request(&args, &TestMemory::new()).unwrap_err(),
             KacsError::InvalidAbiInput("audit_context_len exceeds 4096")
+        );
+    }
+
+    // {kind: "service", service: {name: "jellyfin"}}
+    const SERVICE_CONTEXT: &[u8] = &[
+        0x82, 0xa4, b'k', b'i', b'n', b'd', 0xa7, b's', b'e', b'r', b'v', b'i', b'c', b'e', 0xa7,
+        b's', b'e', b'r', b'v', b'i', b'c', b'e', 0x81, 0xa4, b'n', b'a', b'm', b'e', 0xa8, b'j',
+        b'e', b'l', b'l', b'y', b'f', b'i', b'n',
+    ];
+    const SERVICE_BODY: &[u8] = &[
+        0x81, 0xa4, b'n', b'a', b'm', b'e', 0xa8, b'j', b'e', b'l', b'l', b'y', b'f', b'i', b'n',
+    ];
+
+    fn args_with_context(len: usize) -> std::vec::Vec<u8> {
+        let mut args = base_args(KACS_ACCESS_CHECK_ARGS_SIZE as u32);
+        write_u64(&mut args, 104, AUDIT_PTR);
+        write_u32(&mut args, 112, len as u32);
+        args
+    }
+
+    #[test]
+    fn audit_context_map_yields_kind_and_body() {
+        let view = parse_audit_context_map(SERVICE_CONTEXT).unwrap();
+        assert_eq!(view.kind, b"service");
+        assert_eq!(view.body, Some(SERVICE_BODY));
+    }
+
+    #[test]
+    fn audit_context_map_accepts_body_before_kind() {
+        // Maps are unordered: an encoder that sorts keys writes `file`
+        // before `kind`.
+        let mut context = std::vec![0x82, 0xa4, b'f', b'i', b'l', b'e'];
+        context.extend_from_slice(&[0x81, 0xa4, b'p', b'a', b't', b'h', 0xa2, b'/', b'x']);
+        context.extend_from_slice(&[0xa4, b'k', b'i', b'n', b'd', 0xa4, b'f', b'i', b'l', b'e']);
+        let view = parse_audit_context_map(&context).unwrap();
+        assert_eq!(view.kind, b"file");
+        assert_eq!(
+            view.body,
+            Some(&[0x81, 0xa4, b'p', b'a', b't', b'h', 0xa2, b'/', b'x'][..])
+        );
+    }
+
+    #[test]
+    fn audit_context_map_accepts_kind_alone() {
+        let context = [0x81, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b'];
+        let view = parse_audit_context_map(&context).unwrap();
+        assert_eq!(view.kind, b"job");
+        assert_eq!(view.body, None);
+    }
+
+    #[test]
+    fn audit_context_map_rejects_every_other_shape() {
+        let invalid: &[&[u8]] = &[
+            // eventd's free-form strings: a msgpack-less byte string.
+            b"events:kacs.*",
+            b"admin",
+            // A bare msgpack string rather than a map.
+            &[0xa5, b'a', b'd', b'm', b'i', b'n'],
+            // An empty map: no kind.
+            &[0x80],
+            // No kind, only a body.
+            &[0x81, 0xa3, b'j', b'o', b'b', 0x81, 0xa1, b'a', 0x01],
+            // Kind that breaks the segment grammar: capitals, a dot, a
+            // trailing hyphen, a doubled hyphen, a leading digit.
+            &[0x81, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'J', b'o', b'b'],
+            &[0x81, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'a', b'.', b'b'],
+            &[0x81, 0xa4, b'k', b'i', b'n', b'd', 0xa2, b'a', b'-'],
+            &[0x81, 0xa4, b'k', b'i', b'n', b'd', 0xa4, b'a', b'-', b'-', b'b'],
+            &[0x81, 0xa4, b'k', b'i', b'n', b'd', 0xa2, b'1', b'a'],
+            // Kind that is not a string.
+            &[0x81, 0xa4, b'k', b'i', b'n', b'd', 0x01],
+            // A body under a key other than the kind: the forgery this rule
+            // exists to stop.
+            &[
+                0x82, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xa7, b's', b'u', b'b',
+                b'j', b'e', b'c', b't', 0x81, 0xa1, b'a', 0x01,
+            ],
+            // A body that is not a map, and one that is empty.
+            &[
+                0x82, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xa3, b'j', b'o', b'b',
+                0x01,
+            ],
+            &[
+                0x82, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xa3, b'j', b'o', b'b',
+                0x80,
+            ],
+            // A body key that is not a path segment.
+            &[
+                0x82, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xa3, b'j', b'o', b'b',
+                0x81, 0xa3, b'a', b'.', b'b', 0x01,
+            ],
+            // Three entries.
+            &[
+                0x83, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xa3, b'j', b'o', b'b',
+                0x81, 0xa1, b'a', 0x01, 0xa1, b'x', 0x01,
+            ],
+            // Two kinds.
+            &[
+                0x82, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xa4, b'k', b'i', b'n',
+                b'd', 0xa3, b'j', b'o', b'b',
+            ],
+            // Trailing bytes, and a truncated body.
+            &[0x81, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xc0],
+            &[
+                0x82, 0xa4, b'k', b'i', b'n', b'd', 0xa3, b'j', b'o', b'b', 0xa3, b'j', b'o', b'b',
+                0x81, 0xa1, b'a', 0xdc, 0xff, 0xff,
+            ],
+        ];
+        for context in invalid {
+            assert_eq!(
+                parse_audit_context_map(context).unwrap_err(),
+                AUDIT_CONTEXT_INVALID,
+                "{context:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_validates_audit_context() {
+        let memory = TestMemory::new().with(AUDIT_PTR, SERVICE_CONTEXT);
+        let request =
+            parse_access_check_abi_request(&args_with_context(SERVICE_CONTEXT.len()), &memory)
+                .unwrap();
+        assert_eq!(request.audit_context.as_deref(), Some(SERVICE_CONTEXT));
+
+        let memory = TestMemory::new().with(AUDIT_PTR, b"admin");
+        assert_eq!(
+            parse_access_check_abi_request(&args_with_context(5), &memory).unwrap_err(),
+            AUDIT_CONTEXT_INVALID
         );
     }
 }

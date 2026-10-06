@@ -331,13 +331,13 @@ fn scalar_access_check_ordered_golden_vector_composes_all_major_stages() {
         SE_SECURITY_PRIVILEGE
     );
     assert_eq!(
-        result.privilege_use_events[0].requested,
+        result.privilege_use_events[0].contributed,
         kacs_core::ACCESS_SYSTEM_SECURITY
     );
-    assert_eq!(
-        result.privilege_use_events[0].granted,
-        kacs_core::ACCESS_SYSTEM_SECURITY
-    );
+    // access.requested / access.granted describe the whole check, not the
+    // privilege's share: the same masks every access-audit event carries.
+    assert_eq!(result.privilege_use_events[0].check_requested, desired);
+    assert_eq!(result.privilege_use_events[0].check_granted, READ_CONTROL);
     assert_eq!(result.privilege_use_events[0].surviving_bits, 0);
     assert!(!result.privilege_use_events[0].success);
     assert_eq!(result.updated_privileges.used & SE_SECURITY_PRIVILEGE, 0);

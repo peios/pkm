@@ -2414,33 +2414,33 @@ static void pkm_kunit_logon_session_destroy_last_token_emits_kmes(
 	KUNIT_EXPECT_EQ(test, kmes_snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, kmes_snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"logon-session-destroyed",
-				  sizeof("logon-session-destroyed") - 1);
+				  (const u8 *)"kacs.session.destroyed",
+				  sizeof("kacs.session.destroyed") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
-						 (const u8 *)"session_id",
-						 sizeof("session_id") - 1));
+						 (const u8 *)"session",
+						 sizeof("session") - 1));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
-						 (const u8 *)"user_sid",
-						 sizeof("user_sid") - 1));
+						 (const u8 *)"user",
+						 sizeof("user") - 1));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
-						 (const u8 *)"logon_type",
-						 sizeof("logon_type") - 1));
+						 (const u8 *)"logon-type",
+						 sizeof("logon-type") - 1));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
-						 (const u8 *)"auth_package",
-						 sizeof("auth_package") - 1));
+						 (const u8 *)"auth-package",
+						 sizeof("auth-package") - 1));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
-						 (const u8 *)"created_at",
-						 sizeof("created_at") - 1));
+						 (const u8 *)"logon-time",
+						 sizeof("logon-time") - 1));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -2536,9 +2536,8 @@ static void pkm_kunit_logon_session_destroyed_msgpack_schema(
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_expect_logon_destroyed_schema(
-				  test, &view, logon_session_id,
-				  PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
-				  created_at));
+				  test, &view, logon_session_id, "network",
+				  "Kerberos", created_at));
 }
 
 
@@ -2589,8 +2588,8 @@ static void pkm_kunit_destroy_empty_logon_session_success_emits_kmes(
 	KUNIT_EXPECT_EQ(test, kmes_snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, kmes_snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"logon-session-destroyed",
-				  sizeof("logon-session-destroyed") - 1);
+				  (const u8 *)"kacs.session.destroyed",
+				  sizeof("kacs.session.destroyed") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -8671,8 +8670,8 @@ static void pkm_kunit_linked_logon_session_destroy_emits_single_kmes_event(
 	KUNIT_EXPECT_EQ(test, kmes_snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, kmes_snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"logon-session-destroyed",
-				  sizeof("logon-session-destroyed") - 1);
+				  (const u8 *)"kacs.session.destroyed",
+				  sizeof("kacs.session.destroyed") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -12839,7 +12838,9 @@ static void pkm_kunit_privilege_use_msgpack_schema(struct kunit *test)
 				  test, &view,
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
-				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY, true));
+				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
+				  PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT, true,
+				  NULL));
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	kacs_rust_token_drop(target_token);

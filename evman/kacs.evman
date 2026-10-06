@@ -1,10 +1,12 @@
 --- field privilege.name
 type: str.enum
 values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege
+closed: false
 
 The privilege that contributed access. Only these five can influence an
-access check, so only these five can appear — a privilege used for anything
-else produces no record here.
+access check today, so only these five appear. The set is open because a
+privilege used to satisfy a Linux capability gate is a privilege use too,
+and will be recorded with `linux.cap` as its context.
 
 --- field privilege.contributed
 type: uint.mask
@@ -21,12 +23,339 @@ Empty means the privilege fired and a later layer stripped it — a
 confinement, a CAAP rule, or PIP non-dominance — which is usually the more
 interesting record of the two, because it shows a boundary doing its job.
 
---- event kacs.audit.access
-origin: kacs
+--- field privilege.authority
+type: str.enum
+values: privilege | administrators
+closed: false
+
+Which rung of a privileged gate let the operation through. `privilege`
+means the caller's token held the privilege the gate asks for, enabled,
+and the use was marked against it. `administrators` means it did not, and
+the gate fell back to the caller's enabled membership of Administrators.
+
+The second is an authorisation by group membership rather than by
+privilege. From outside the kernel the two look identical, so this field
+is the only way to tell a gate passed by SeTcbPrivilege from one passed by
+an administrator who never held it.
+
+--- field privilege.held
+type: bool
+
+Whether the caller's effective token held `privilege.name`, enabled, at
+the moment the gate asked. Every privilege gate tests for an enabled
+privilege, so a privilege present on the token but disabled counts as not
+held: false here, with the privilege visible in the token, is a caller
+that did not enable it, not one that lacked it.
+
+--- field privilege.required-held
+type: bool
+
+Whether the operation the caller asked for was the privileged variant, so
+that a privilege had to be spent to perform it. Several KACS operations
+have an ordinary form and a privileged one — installing a primary token
+for a different identity rather than the caller's own, for example — and
+this says which the caller reached for.
+
+A boolean, not a privilege name: the privilege in question is
+`privilege.name`.
+
+--- field caap.phase
+type: str.enum
+values: effective-sacl | staged-sacl
+closed: false
+
+Which phase of a central access policy's audit evaluation a CAAP
+diagnostic describes. `effective-sacl` is a rule's SACL in the policy in
+force, whose audit records are real. `staged-sacl` is the SACL of a rule's
+staged, not-yet-effective version, evaluated alongside it only so that an
+administrator can see what rolling it out would do; a failure there
+changes nothing about the access or its audit.
+
+Absent on a diagnostic about the whole check rather than one rule's SACL,
+such as a disagreement between the staged and effective results.
+
+--- field caap.policy.sid
+type: bin.sid
+
+The SID identifying a central access policy. An object's SACL names the
+policies that apply to it by this SID, and the kernel's policy cache is
+keyed on it, so it ties a record to the policy an administrator
+installed. It identifies a policy, never a user or group, even though it
+has the form of a SID.
+
+--- field caap.rule.index
+type: uint
+
+The zero-based position of a rule within the central access policy named
+by `caap.policy.sid`. Meaningful only against the policy as it stood when
+the record was made: replacing a policy's specification replaces its rule
+list, so an index in an older record can point at a different rule today.
+
+--- field caap.staged-differs
+type: bool
+
+Whether evaluating the staged policies gave a different result from the
+effective ones for this access check. True when the staged grant differs
+from the effective grant, when the per-object results of an object-type
+check differ, or when the staged audit records differ from those actually
+produced.
+
+A difference changes nothing about the access itself, which the effective
+policies decided. It is the signal that promoting the staged policy would
+change the outcome for this subject and object.
+
+--- field firmware.policy-mode
+type: str.enum
+values: enforce | log
+closed: true
+
+The firmware signature policy in force. `enforce` refuses a firmware blob
+that does not verify at the PeiosTcb tier; `log` loads it anyway and
+records the verdict.
+
+**The shipping default is `log`.** On a stock system a failing
+`firmware.result` therefore does not mean the blob was refused; read this
+field before concluding that a device went without its firmware. The mode
+is fixed for the boot and never changes at runtime.
+
+--- field firmware.policy-origin
+type: str.enum
+values: compiled-default | command-line
+closed: true
+
+Where `firmware.policy-mode` came from for this boot. `compiled-default`
+is the kernel build's own setting; `command-line` is a `kacs_fwsig=enforce`
+or `kacs_fwsig=log` override. An override lasts one boot and needs only
+access to the bootloader, which is why it is recorded apart from the mode
+itself. An unrecognised `kacs_fwsig=` value is ignored with a kernel
+warning and leaves the origin `compiled-default`.
+
+--- field firmware.result
+type: str.enum
+values: allowed | unsigned | no-key-match | below-tcb | unverifiable | probe-failed
+closed: false
+
+The verdict on a firmware load, named for its `KACS_FW_*` code. `allowed`
+is the only passing verdict: the blob verified against a built-in key at
+the PeiosTcb tier. `unsigned` means the file carried no signature,
+`no-key-match` that it was signed but no built-in key verified it,
+`below-tcb` that a key verified it at a lower tier, `unverifiable` that
+verification could not run, and `probe-failed` that the signature
+material could not be read.
+
+**A failing verdict is not a refusal under `log` policy.** Whether the
+blob was loaded is `firmware.policy-mode`'s to say; this field is what the
+kernel concluded about the blob either way. `unverifiable` and
+`probe-failed` fail rather than pass on purpose: a verification that
+cannot run must not become the way around it.
+
+--- field identity.sids
+type: bin.sid[]
+
+The user SIDs of the well-known identities the kernel mints at boot:
+today SYSTEM (S-1-5-18) and Anonymous Logon (S-1-5-7), the roots of every
+identity on the system. A boot record without one of them means that
+token could not be built — a failure the code otherwise returns silently.
+
+--- field linux.cap
+type: str.enum
+values: chown | dac-override | dac-read-search | fowner | fsetid | kill | setgid | setuid | setpcap | linux-immutable | net-bind-service | net-broadcast | net-admin | net-raw | ipc-lock | ipc-owner | sys-module | sys-rawio | sys-chroot | sys-ptrace | sys-pacct | sys-admin | sys-boot | sys-nice | sys-resource | sys-time | sys-tty-config | mknod | lease | audit-write | audit-control | setfcap | mac-override | mac-admin | syslog | wake-alarm | block-suspend | audit-read | perfmon | bpf | checkpoint-restore
+closed: false
+
+The Linux capability whose check prompted the record, named as its
+`CAP_*` constant with the prefix removed, in kebab case: `CAP_NET_ADMIN`
+is `net-admin`. Context, never the decision. On Peios every capability
+check is answered by KACS, either by mapping the capability to a
+privilege — `net-admin` to SeTcbPrivilege, for example — or with a fixed
+answer, so this says which Linux gate asked and `privilege.name` and the
+outcome say what was decided.
+
+Two sets have fixed answers and never involve a privilege. Twelve are
+granted to every process unconditionally, because KACS makes the real
+decision elsewhere: `chown`, `dac-override`, `dac-read-search`, `fowner`,
+`fsetid`, `kill`, `setgid`, `setuid`, `net-bind-service`,
+`net-broadcast`, `ipc-owner` and `lease`. `setpcap`, `setfcap` and
+`mac-override` are refused whatever the token holds.
+
+The set is open because new Linux releases add capabilities.
+
+--- field memory.check-phase
+type: str.enum
+values: mmap | mprotect | enable-time-scan
+closed: false
+
+When a memory-protection check fired. `mmap` and `mprotect` are the calls
+a process makes. `enable-time-scan` is the sweep KACS makes over a
+process's existing mappings when a mitigation is turned on, and what it
+refuses is the mitigation, not a mapping: a refusal in that phase leaves
+the process unprotected rather than short of memory.
+
+--- field memory.protection
+type: uint.flags
+values: 0x1 PROT_READ | 0x2 PROT_WRITE | 0x4 PROT_EXEC | 0x8 PROT_SEM | 0x1000000 PROT_GROWSDOWN | 0x2000000 PROT_GROWSUP
+
+The protection bits a mapping call asked for: the `prot` argument to
+`mmap` or `mprotect`. Write-XOR-execute refuses any request that carries
+both `PROT_WRITE` and `PROT_EXEC`.
+
+--- field memory.protection-previous
+type: uint.flags
+values: 0x1 PROT_READ | 0x2 PROT_WRITE | 0x4 PROT_EXEC
+
+The protection an existing mapping carried before an `mprotect`, in the
+same bit encoding as `memory.protection`. Read from the mapping's own
+flags, so only the read, write and execute bits are ever set. Absent on
+`mmap`, which has no earlier mapping.
+
+It matters because write-XOR-execute judges the transition, not just the
+request: an `mprotect` to `PROT_EXEC` alone is refused when the mapping is
+currently writable, and one to `PROT_WRITE` alone when it is currently
+executable.
+
+--- field mitigation.action
+type: str.enum
+values: enable | disable | lock | unlock
+closed: true
+
+The direction of a change to a process mitigation's state. `enable` and
+`lock` harden a process; `disable` and `unlock` loosen it, and are the
+ones to read closely. A Peios mitigation is meant to persist once set, so
+a permitted `disable` or `unlock` is unusual, and a refused one is a
+process trying to weaken its own protection.
+
+--- field mitigation.name
+type: str.enum
+values: wxp | tlp | lsv | ui-access | no-child | cfif | cfib | pie | sml
+closed: false
+
+The single process mitigation a record is about, named for its
+`KACS_MIT_*` bit: `wxp` write-XOR-execute, `tlp` trusted library paths,
+`lsv` library signature verification, `no-child` the ban on creating
+processes, `cfif` and `cfib` forward- and backward-edge control-flow
+integrity, `pie` the refusal of non-PIE executables, `sml` the
+speculation mitigation lock, and `ui-access`, which is reserved.
+
+There is no `cfi`. The legacy `KACS_MIT_CFI` bit is an alias that sets
+both `cfif` and `cfib` and is not itself kept, so a record names whichever
+of the two it concerns.
+
+**A request for `cfif` fails today on every live process**, because the
+kernel offers no way to turn on IBT for a running task. A service that
+asks for it is not protected by it, whatever it believes.
+
+--- field mitigation.trusted-prefixes
+type: str.path[]
+
+The path prefixes the trusted library paths mitigation (`tlp`) accepts. A
+process under it may map a file executable only if the file's path begins
+with one of these. Each entry begins and ends with `/` and is compared
+byte for byte with the start of the path, without normalisation. At most
+64, held in one table for the whole system.
+
+These are prefixes, not files: a search for a file's path does not match
+the prefix that admitted it. **An empty list trusts nothing** rather than
+checking nothing, so a process under `tlp` is then refused every
+file-backed executable mapping.
+
+--- field signature.algorithm
+type: str.enum
+values: ml-dsa-65
+closed: false
+
+The algorithm a signature was made with. Peios code signatures are
+ML-DSA-65 over a SHA-256 digest of the file, and that is the only value
+today; the set is open so that a second algorithm can be added.
+
+--- field signature.crypto-stage
+type: str.enum
+values: alloc-transform | set-pubkey | boot-probe
+closed: false
+
+Where the signature machinery failed, when verification could not run.
+`alloc-transform` means the kernel could not obtain an ML-DSA-65
+transform; `set-pubkey` that the transform rejected a key from the
+built-in table, which is a fault in the table rather than a signature
+that did not match; `boot-probe` that the one-off check made once the
+crypto subsystem is up found the algorithm unavailable.
+
+Each makes verification impossible rather than negative. The exec path
+refuses a signed binary it cannot verify rather than run it unlabelled,
+so a crypto failure shows as refused execs across the whole system.
+
+--- field signature.location
+type: str.enum
+values: none | elf-section | xattr
+closed: false
+
+Where a file's signature was found. `elf-section` is the `.peios.sig`
+section of an ELF file, `xattr` the `security.peios.sig` extended
+attribute, and `none` means the file carried neither and is unsigned. The
+ELF section is looked for first; an ELF file whose headers are malformed
+is not then checked for the attribute.
+
+--- field signature.parse-error
+type: str.enum
+values: elf-magic-read | elf-short-ehdr | elf-ehdr-read | elf-bad-ident | elf-bad-shtable | elf-shdrs-range | elf-shstr-read | elf-strtab-range | elf-shdr-read | elf-name-read | elf-bad-sig-section | elf-bad-blob | elf-hash-fail | xattr-bad-blob | xattr-hash-fail | size-changed
+closed: false
+
+Why the signature material on a file could not be read, named for its
+`KACS_SIG_*` code. The `elf-` values are failures walking the ELF header
+and section table to the `.peios.sig` section, or reading and hashing the
+signature inside it; the `xattr-` values are the same for the
+`security.peios.sig` attribute. `size-changed` is not a parsing failure:
+the file changed size while it was being read, and the kernel discarded
+what it had found.
+
+**Every value leaves the file treated as unsigned.** The binary runs
+without the integrity label its signature would have given it, so a
+record carrying this field is the only thing that tells a damaged or
+tampered signature from no signature at all.
+
+--- field signature.result
+type: str.enum
+values: unsigned | bad-key-table | no-key-match | verified | crypto-unavailable | crypto-mismatch
+closed: false
+
+The outcome of checking a signature against the built-in signing keys,
+named for its `KACS_SIG_*` code. `verified` means a key verified it and
+the file takes that key's integrity tier; `no-key-match` that it was
+signed but no built-in key verified it; `unsigned` that there was nothing
+to check. `bad-key-table` and `crypto-unavailable` mean verification
+could not run at all, and the exec path treats both as a refusal, never as
+unsigned. `crypto-mismatch` is the result for one key that did not verify
+the signature on the way to the next; the whole check then ends in
+`verified` or `no-key-match`.
+
+**`no-key-match` runs the binary unlabelled, exactly as `unsigned` does.**
+It is a stronger signal than it looks: something was signed with a key
+this system does not trust.
+
+--- field signature.signing-key.fingerprint
+type: bin
+
+The fingerprint of a signing key: the SHA-256 digest of its public key,
+the value the `kacs/signing_keys` listing shows as `key_sha256`. **Not
+emitted today.** The verification path identifies a key only by its
+position in the built-in table and never digests it, so nothing at the
+point of decision can supply this value; `signature.signing-key.index` is
+all a record carries. Until it is, a `no-key-match` verdict cannot say
+which key a binary was expected to match.
+
+--- field signature.signing-key.index
+type: uint
+
+The zero-based position of a signing key in the kernel's built-in key
+table, which is all that identifies a key at the point of verification
+today. The table is compiled into the kernel, so an index means something
+only against the same kernel build: compare it with the
+`kacs/signing_keys` listing in securityfs, whose lines are in table order,
+on a machine running that build. The same index on another build may be a
+different key.
+
+--- event kacs.audit.access.checked
 tier: essential
 gating: a matching SACL audit ACE, or the token's audit policy
 cardinality: once per matching audit ACE, not once per access
-emitters: kacs/token_runtime.rs — token_open_check_errno, token_sd_access_check_errno_with_intent, process_sd_access_outcome_with_intent, file_sd_access_outcome_for_descriptor, socket_sd_access_check_errno, object_sd_access_check_errno
 
 The record that an access check completed, and what it decided. The most
 common event on the system, and the one most investigations start from.
@@ -52,7 +381,6 @@ field: object.process.pid       when object.kind == process
 field: object.process.guid      when object.kind == process
 field: object.token.id          when object.kind == token
 field: object.token.guid        when object.kind == token
-field: object.context           optional
 field: access.requested         required
 field: access.granted           required
   The mask this check granted.
@@ -62,18 +390,19 @@ field: outcome.success          required
   available and cannot fail — so a success rate computed over these records
   is skewed by them.
 field: trigger.kind             required
-field: trigger.ace              optional
+field: trigger.ace              when trigger.kind == sacl
+field: fields.attestation.userspace  optional
+  Set when the check came through the access-check ioctl and its caller
+  supplied the PIP state.
 
---- event kacs.audit.continuous
-origin: kacs
+--- event kacs.audit.handle.used
 tier: standard
 gating: the operation's required access overlaps the alarm mask cached on the handle
 cardinality: once per operation on the handle
-emitters: kacs/file_access.c — pkm_kacs_emit_file_continuous_audit
 
 The record of what was done with a handle after it was opened. Where
-`kacs.audit.access` records the decision to open something, this records
-each subsequent use of it.
+`kacs.audit.access.checked` records the decision to open something, this
+records each subsequent use of it.
 
 The mask is configured by `SYSTEM_ALARM*` ACEs at the access check that
 opened the handle, and the record is produced afterwards by whatever
@@ -96,6 +425,8 @@ field: object.kind              required
   Always `file` today, because FACS is the only enforcement point.
 field: object.file.path         required
 field: operation.name           required
+  values: file.access | file.mmap | file.mprotect | file.permission | file.write | file.ioctl | file.lock | file.fcntl | file.truncate | file.fallocate
+  closed: false
 field: access.requested         required
   What this operation needs — a read needs `FILE_READ_DATA`, an `mmap` with
   `PROT_EXEC` needs `FILE_EXECUTE`.
@@ -103,20 +434,20 @@ field: access.matched           required
 field: access.granted           required
   What the handle was opened with, not what this operation was granted. An
   operation can only succeed if `access.requested` is a subset of it.
-field: access.audit_mask        required
+field: access.audit-mask        required
 field: outcome.success          required
   Whether the operation itself was allowed.
-field: outcome.reason           required
+field: outcome.reason           when outcome.success == false
+  values: signed-exec | grant-deny | append-deny | unmanaged-sysfs
+  closed: false
   From `KACS_FSR_*`, excluding `DECISION` (which names the ordinary path
   rather than a reason) and `AUDIT_EMIT_FAIL` (which cannot appear, being
   the failure of this record's own emission).
 
---- event kacs.audit.privilege
-origin: kacs
+--- event kacs.audit.privilege.used
 tier: essential
 gating: the token's audit policy, success and failure flavours independently
 cardinality: once per privilege that contributed access
-emitters: crates/kacs-core/src/access_check.rs — evaluate_privilege_use
 
 The record that a privilege contributed access to a check, and whether that
 contribution survived. Purely token-policy driven — no SACL is involved, so
@@ -142,7 +473,6 @@ field: object.process.pid       when object.kind == process
 field: object.process.guid      when object.kind == process
 field: object.token.id          when object.kind == token
 field: object.token.guid        when object.kind == token
-field: object.context           optional
 field: privilege.name           required
 field: privilege.contributed    required
 field: privilege.surviving      required
@@ -154,3 +484,158 @@ field: outcome.success          required
   True when `privilege.surviving` is non-empty. Derived rather than
   independently decided, and kept so that a single query for failed
   outcomes works across every event type.
+field: fields.attestation.userspace  optional
+  Set when the check came through the access-check ioctl and its caller
+  supplied the PIP state.
+
+--- event kacs.caap.sacl.skipped
+tier: standard
+gating: an access check that evaluates a central access policy rule whose SACL cannot be used
+cardinality: once per rule whose SACL failed
+
+The record that a central access policy rule's SACL could not be parsed or
+evaluated, so the audit it asked for was skipped. The access decision is
+unaffected — a rule's SACL only adds audit records — but the records that
+rule should have produced for this access do not exist.
+
+**This is the only evidence of the missing audit.** An administrator who
+put an audit ACE in a policy rule expects records from every object the
+policy covers; while the rule's SACL is broken, none arrive, and nothing
+else says so.
+
+A failure in a rule's staged SACL (`caap.phase` is `staged-sacl`) is
+recorded too. It changes nothing in force, and is the warning that
+promoting the staged policy would install a SACL that does not work.
+
+include: subject
+field: object.kind              required
+field: object.file.path         when object.kind == file
+field: object.process.pid       when object.kind == process
+field: object.process.guid      when object.kind == process
+field: object.token.id          when object.kind == token
+field: object.token.guid        when object.kind == token
+field: caap.policy.sid          required
+field: caap.rule.index          required
+field: caap.phase               required
+field: outcome.reason           required
+  values: invalid-caap-sacl | caap-sacl-evaluation-error
+  closed: false
+  `invalid-caap-sacl` means the SACL would not parse; `caap-sacl-evaluation-error`
+  means it parsed and evaluating it failed.
+field: access.requested         required
+field: access.granted           required
+  The effective grant of the check the rule was evaluated in.
+field: access.granted-staged    required
+field: fields.attestation.userspace  optional
+  Set when the check came through the access-check ioctl and its caller
+  supplied the PIP state.
+
+--- event kacs.caap.staging.diverged
+tier: standard
+gating: a staged central access policy applies to the object, and its result differs from the effective one
+cardinality: once per access check
+
+The record that a staged central access policy would have decided an
+access differently from the policy in force. The access itself is decided
+by the effective policy alone; this records what promoting the staged one
+would change, for this subject and this object.
+
+It is the event to watch while trialling a policy: stage it, let the
+system run, and read these records to see who would gain or lose access
+before anyone does. **It is silent unless a staged policy exists**, so on
+most systems it never fires.
+
+The difference is not always in the grant. Staged and effective
+evaluation also differ when the per-object results of an object-type
+check differ, or when the audit records the two would produce differ, so
+a record can carry equal `access.granted` and `access.granted-staged`.
+
+include: subject
+field: object.kind              required
+field: object.file.path         when object.kind == file
+field: object.process.pid       when object.kind == process
+field: object.process.guid      when object.kind == process
+field: object.token.id          when object.kind == token
+field: object.token.guid        when object.kind == token
+field: access.requested         required
+field: access.granted           required
+  What the effective policy granted: the access the caller actually got.
+field: access.granted-staged    required
+  What the staged policy would have granted instead.
+field: fields.attestation.userspace  optional
+  Set when the check came through the access-check ioctl and its caller
+  supplied the PIP state.
+
+--- event kacs.descriptor.rejected
+tier: standard
+gating: none — every unreadable stored descriptor is recorded
+
+The record that KACS read an object's stored security descriptor, found it
+corrupt, and refused to use it. The object is then treated as having a
+descriptor nobody can satisfy, so every access to it is denied until the
+descriptor is replaced by someone allowed to write one.
+
+**This is often the only explanation for a sudden, universal denial.** A
+file that everyone could open and nobody now can, with no change to its
+descriptor anyone remembers making, is usually this: the stored bytes no
+longer parse, whether from disk corruption, a tool writing the extended
+attribute directly, or an interrupted write.
+
+KACS records the event once per descriptor read, when the object's
+descriptor cache is filled, not on every denied access that follows.
+
+field: object.kind              required
+  Always `file` today: file descriptors are the only stored descriptors KACS
+  reads this way.
+field: object.file.path         optional
+  Not carried today. The descriptor is read through an anchor that has no
+  mount, so no absolute path can be resolved at that point.
+field: outcome.reason           required
+  values: corrupt
+  closed: false
+  Why the descriptor was refused. `corrupt` is the only reason today.
+
+--- event kacs.signature.crypto.failed
+tier: essential
+gating: none — recorded whenever the signature machinery cannot run
+
+The record that the machinery for verifying signed executables cannot run.
+From then on **every signed executable is refused**: a signature that cannot
+be verified fails the exec rather than passing as unsigned.
+
+Recorded at boot when the probe for the ML-DSA-65 transform fails. KACS
+cannot refuse to start over it — a security module that fails to
+initialise boots with no protection at all, which is worse — so it reports
+instead, and the refusal happens at each exec. Without this record, the
+condition would show only as every process running without an integrity
+label.
+
+field: signature.crypto-stage   required
+  Always `boot-probe` today.
+field: outcome.errno            required
+
+--- event kacs.session.destroyed
+tier: standard
+
+The record that a logon session ended because its last token went away.
+KACS destroys a session once no token refers to it, or once the only
+tokens left are its own linked elevated and filtered pair with nothing else
+holding them, and writes this record as it does.
+
+A session that never acquired a token ends another way: a holder of
+SeTcbPrivilege destroys it explicitly with `kacs_destroy_empty_logon_session`,
+and the same record is written.
+
+**A session whose authentication package name is not valid UTF-8 produces
+no record.** KACS cannot encode the name and skips the event rather than
+write it, and the session is destroyed regardless.
+
+field: object.session.id           required
+field: object.session.user.sid     required
+field: object.session.logon-type   required
+  KACS writes the `KACS_LOGON_TYPE_*` number today rather than its name,
+  which must be converted.
+field: object.session.auth-package required
+field: object.session.logon-time   required
+  When the session was created. KACS writes it today in whole seconds of
+  the realtime clock, not nanoseconds, which must be converted.

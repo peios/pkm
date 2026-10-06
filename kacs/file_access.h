@@ -64,7 +64,7 @@ int pkm_kacs_check_file_fallocate_snapshot(struct file *file, int mode);
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 /*
- * The STRATAFS_MUTATION_REFUSED payload encoder, exposed so a test can read
+ * The stratafs.mutation.refused payload encoder, exposed so a test can read
  * the bytes. With out == NULL it returns the size; with a buffer it encodes
  * and returns the bytes written. 0 means unencodable.
  */

@@ -792,8 +792,8 @@ static void pkm_kunit_file_continuous_audit_read_emits_kmes(
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"continuous-audit",
-				  sizeof("continuous-audit") - 1);
+				  (const u8 *)"kacs.audit.handle.used",
+				  sizeof("kacs.audit.handle.used") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -858,8 +858,8 @@ static void pkm_kunit_file_continuous_audit_denial_emits_failure(
 	KUNIT_ASSERT_TRUE(test,
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"continuous-audit",
-				  sizeof("continuous-audit") - 1);
+				  (const u8 *)"kacs.audit.handle.used",
+				  sizeof("kacs.audit.handle.used") - 1);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -870,6 +870,14 @@ static void pkm_kunit_file_continuous_audit_denial_emits_failure(
 						 view.payload_len,
 						 (const u8[]){ 0xc2 },
 						 1));
+	/* A failed use names why: the grant lacked the right. */
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_expect_continuous_audit_schema_op(
+				  test, &view, "file.permission",
+				  PKM_KUNIT_FILE_READ_DATA,
+				  PKM_KUNIT_FILE_READ_DATA, 0,
+				  PKM_KUNIT_FILE_READ_DATA, false,
+				  "grant-deny", 0U, 0U, 4302));
 }
 
 
@@ -883,10 +891,22 @@ static void pkm_kunit_file_continuous_audit_emit_malformed_fails_closed(
 			kacs_rust_emit_file_continuous_audit(
 				subject_token, 0U, 0U,
 				(const u8 *)"file.permission",
-				sizeof("file.permission") - 1,
+				sizeof("file.permission") - 1, NULL, 0,
 				PKM_KUNIT_FILE_READ_DATA,
 				PKM_KUNIT_FILE_WRITE_DATA,
-				PKM_KUNIT_FILE_READ_DATA, 1),
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_WRITE_DATA, 1, 0),
+			-EINVAL);
+	/* A path length without a path is as malformed. */
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_emit_file_continuous_audit(
+				subject_token, 0U, 0U,
+				(const u8 *)"file.permission",
+				sizeof("file.permission") - 1, NULL, 4,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_READ_DATA,
+				PKM_KUNIT_FILE_READ_DATA, 1, 0),
 			-EINVAL);
 }
 
@@ -1046,8 +1066,9 @@ static void pkm_kunit_file_continuous_audit_operation_matrix(
 			test, pkm_kunit_expect_continuous_audit_schema_op(
 				      test, &view, cases[i].operation,
 				      cases[i].requested, cases[i].matched,
-				      cases[i].granted, cases[i].success, 0U,
-				      0U, pid));
+				      cases[i].granted,
+				      cases[i].continuous_audit,
+				      cases[i].success, NULL, 0U, 0U, pid));
 	}
 }
 
@@ -1099,7 +1120,8 @@ static void pkm_kunit_file_continuous_audit_records_current_pip(
 				  test, &view, "file.permission",
 				  PKM_KUNIT_FILE_READ_DATA,
 				  PKM_KUNIT_FILE_READ_DATA,
-				  PKM_KUNIT_FILE_READ_DATA, true,
+				  PKM_KUNIT_FILE_READ_DATA,
+				  PKM_KUNIT_FILE_READ_DATA, true, NULL,
 				  PKM_KUNIT_PIP_TYPE_PROTECTED,
 				  PKM_KUNIT_PIP_TRUST_TEST, 4417));
 }
@@ -3513,6 +3535,9 @@ static void pkm_kunit_file_sd_cache_population_corrupt_emits_once(
 	u8 *buffer;
 	struct pkm_kmes_kunit_snapshot snapshot = { };
 	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view object = { };
+	struct pkm_kunit_msgpack_view outcome = { };
 	size_t written = 0;
 	long first_ret = 0;
 	long second_ret = 0;
@@ -3538,13 +3563,23 @@ static void pkm_kunit_file_sd_cache_population_corrupt_emits_once(
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_expect_kmes_event_type(test, &view,
-							   "corrupt-sd"));
-	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_contains_bytes(view.payload_ptr,
-						   view.payload_len,
-						   (const u8 *)"corrupt-sd",
-						   sizeof("corrupt-sd") - 1));
+			  pkm_kunit_expect_kmes_event_type(
+				  test, &view, "kacs.descriptor.rejected"));
+	/* {object: {kind: "file"}, outcome: {reason: "corrupt"}} */
+	if (pkm_kunit_msgpack_parse_payload_root(test, &view, &root, 2)) {
+		if (pkm_kunit_msgpack_require_map_key(test, &root, "object", 1U,
+						      &object))
+			KUNIT_EXPECT_TRUE(test,
+					  pkm_kunit_msgpack_expect_str_key(
+						  test, &object, "kind",
+						  "file"));
+		if (pkm_kunit_msgpack_require_map_key(test, &root, "outcome",
+						      1U, &outcome))
+			KUNIT_EXPECT_TRUE(test,
+					  pkm_kunit_msgpack_expect_str_key(
+						  test, &outcome, "reason",
+						  "corrupt"));
+	}
 }
 
 
@@ -3880,6 +3915,8 @@ static void pkm_kunit_file_open_sacl_audit_emits_kmes(struct kunit *test)
 	u8 *buffer;
 	struct pkm_kmes_kunit_snapshot snapshot = { };
 	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view object = { };
 	size_t written = 0;
 	u32 granted = 0;
 
@@ -3900,9 +3937,9 @@ static void pkm_kunit_file_open_sacl_audit_emits_kmes(struct kunit *test)
 	KUNIT_EXPECT_NE(test, granted, 0U);
 	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_copy_latest_matching_event(
-				KMES_ORIGIN_KACS, "access-audit",
-				sizeof("access-audit") - 1, buffer,
-				PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				KMES_ORIGIN_KACS, "kacs.audit.access.checked",
+				sizeof("kacs.audit.access.checked") - 1,
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
 				&snapshot),
 			0);
 	KUNIT_ASSERT_TRUE(test,
@@ -3910,8 +3947,15 @@ static void pkm_kunit_file_open_sacl_audit_emits_kmes(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
-				  (const u8 *)"access-audit",
-				  sizeof("access-audit") - 1);
+				  (const u8 *)"kacs.audit.access.checked",
+				  sizeof("kacs.audit.access.checked") - 1);
+	/* A file open names its object a file, without the path. */
+	if (pkm_kunit_msgpack_parse_payload_root(test, &view, &root, 6) &&
+	    pkm_kunit_msgpack_require_map_key(test, &root, "object", 1U,
+					      &object))
+		KUNIT_EXPECT_TRUE(test,
+				  pkm_kunit_msgpack_expect_str_key(
+					  test, &object, "kind", "file"));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_contains_bytes(view.payload_ptr,
 						 view.payload_len,
@@ -10693,6 +10737,64 @@ static bool pkm_kunit_msgpack_expect_str(const u8 *buf, size_t len, size_t *pos,
 	return true;
 }
 
+/* Read one expected byte, such as a fixmap header. */
+static bool pkm_kunit_msgpack_expect_byte(const u8 *buf, size_t len,
+					  size_t *pos, u8 expect)
+{
+	if (*pos >= len || buf[*pos] != expect)
+		return false;
+	*pos += 1;
+	return true;
+}
+
+/* object: {file: {path-relative: <expect>}} */
+static bool pkm_kunit_stratafs_expect_path_object(struct kunit *test,
+						  const u8 *buf, size_t len,
+						  size_t *pos,
+						  const char *expect)
+{
+	return pkm_kunit_msgpack_expect_str(buf, len, pos, "object") &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, 0x81) &&
+	       pkm_kunit_msgpack_expect_str(buf, len, pos, "file") &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, 0x81) &&
+	       pkm_kunit_msgpack_expect_str(buf, len, pos, "path-relative") &&
+	       pkm_kunit_msgpack_expect_str(buf, len, pos, expect);
+}
+
+/* operation: {name: <expect>} */
+static bool pkm_kunit_stratafs_expect_operation(struct kunit *test,
+						const u8 *buf, size_t len,
+						size_t *pos,
+						const char *expect)
+{
+	return pkm_kunit_msgpack_expect_str(buf, len, pos, "operation") &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, 0x81) &&
+	       pkm_kunit_msgpack_expect_str(buf, len, pos, "name") &&
+	       pkm_kunit_msgpack_expect_str(buf, len, pos, expect);
+}
+
+/* outcome: {errno: <negative int32>, deferred: <bool>} */
+static bool pkm_kunit_stratafs_expect_refusal_outcome(struct kunit *test,
+						      const u8 *buf,
+						      size_t len, size_t *pos,
+						      s32 expect_errno,
+						      bool expect_deferred)
+{
+	u32 raw = (u32)expect_errno;
+
+	return pkm_kunit_msgpack_expect_str(buf, len, pos, "outcome") &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, 0x82) &&
+	       pkm_kunit_msgpack_expect_str(buf, len, pos, "errno") &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, 0xd2) &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, raw >> 24) &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, raw >> 16) &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, raw >> 8) &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos, raw) &&
+	       pkm_kunit_msgpack_expect_str(buf, len, pos, "deferred") &&
+	       pkm_kunit_msgpack_expect_byte(buf, len, pos,
+					     expect_deferred ? 0xc3 : 0xc2);
+}
+
 static void pkm_kunit_stratafs_refusal_payload_shapes(struct kunit *test)
 {
 	u8 buf[256];
@@ -10712,73 +10814,78 @@ static void pkm_kunit_stratafs_refusal_payload_shapes(struct kunit *test)
 		false);
 	KUNIT_ASSERT_EQ(test, len, size);
 
+	/*
+	 * {object: {file: {path-relative}}, operation: {name},
+	 *  source: {stratum: {index, path}}, outcome: {errno, deferred}}
+	 */
 	pos = 0;
-	KUNIT_EXPECT_EQ(test, buf[pos], 0x86);
+	KUNIT_EXPECT_EQ(test, buf[pos], 0x84);
 	pos++;
 	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "path"));
+			  pkm_kunit_stratafs_expect_path_object(test, buf, len,
+								&pos, "/a/b"));
 	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "/a/b"));
-	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "operation"));
-	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "unlink"));
+			  pkm_kunit_stratafs_expect_operation(test, buf, len,
+							      &pos, "unlink"));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "provider_index"));
+						       "source"));
+	KUNIT_ASSERT_LT(test, pos, len);
+	KUNIT_EXPECT_EQ(test, buf[pos], 0x81);
+	pos++;
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
+						       "stratum"));
+	KUNIT_ASSERT_LT(test, pos, len);
+	KUNIT_EXPECT_EQ(test, buf[pos], 0x82);
+	pos++;
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "index"));
 	KUNIT_ASSERT_LT(test, pos + 5, len);
-	KUNIT_EXPECT_EQ(test, buf[pos], 0xd2);
+	KUNIT_EXPECT_EQ(test, buf[pos], 0xce);
 	KUNIT_EXPECT_EQ(test, buf[pos + 4], 2);
 	pos += 5;
 	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "provider_stratum"));
+			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "path"));
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
 						       "/mnt/lower"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_stratafs_expect_refusal_outcome(
+				  test, buf, len, &pos, -EROFS, false));
+	KUNIT_EXPECT_EQ(test, pos, len);
 
 	/*
 	 * A refusal raised before any provider is known -- create, tmpfile,
-	 * the heads of link and rename -- reports nil, not an empty string, so
-	 * a reader can tell "no provider was involved" from "the provider's
-	 * path is empty". provider_index stays -1 alongside it.
+	 * the heads of link and rename -- has no stratum to name, and the
+	 * caller passes provider_index -1. The whole source map is absent:
+	 * not an index of -1 and a nil path.
 	 */
 	size = pkm_kacs_kunit_stratafs_refusal_payload(
-		NULL, 0, "/a/b", "create", -1, "", -EROFS, false);
+		NULL, 0, "/a/b", "create", -1, "", -EROFS, true);
 	KUNIT_ASSERT_GT(test, size, 0UL);
 	KUNIT_ASSERT_LE(test, size, sizeof(buf));
 	len = pkm_kacs_kunit_stratafs_refusal_payload(
-		buf, sizeof(buf), "/a/b", "create", -1, "", -EROFS, false);
+		buf, sizeof(buf), "/a/b", "create", -1, "", -EROFS, true);
 	KUNIT_ASSERT_EQ(test, len, size);
 
-	pos = 1;
+	pos = 0;
+	KUNIT_EXPECT_EQ(test, buf[pos], 0x83);
+	pos++;
 	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "path"));
+			  pkm_kunit_stratafs_expect_path_object(test, buf, len,
+								&pos, "/a/b"));
 	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "/a/b"));
-	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "operation"));
-	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "create"));
-	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "provider_index"));
-	KUNIT_ASSERT_LT(test, pos + 5, len);
-	KUNIT_EXPECT_EQ(test, buf[pos], 0xd2);
-	KUNIT_EXPECT_EQ(test, buf[pos + 1], 0xff);
-	KUNIT_EXPECT_EQ(test, buf[pos + 2], 0xff);
-	KUNIT_EXPECT_EQ(test, buf[pos + 3], 0xff);
-	KUNIT_EXPECT_EQ(test, buf[pos + 4], 0xff);
-	pos += 5;
-	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos,
-						       "provider_stratum"));
-	KUNIT_ASSERT_LT(test, pos, len);
-	KUNIT_EXPECT_EQ(test, buf[pos], 0xc0);
+			  pkm_kunit_stratafs_expect_operation(test, buf, len,
+							      &pos, "create"));
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_stratafs_expect_refusal_outcome(
+				  test, buf, len, &pos, -EROFS, true));
+	KUNIT_EXPECT_EQ(test, pos, len);
+	KUNIT_EXPECT_FALSE(test,
+			   pkm_kunit_contains_bytes(buf, len,
+						    (const u8 *)"source",
+						    sizeof("source") - 1));
 
 	/*
 	 * Sizing and writing are two passes over the same field list. If they
@@ -10798,10 +10905,9 @@ static void pkm_kunit_stratafs_refusal_payload_shapes(struct kunit *test)
 		buf, sizeof(buf), "a/b", "create", -1, "", -EROFS, false);
 	KUNIT_EXPECT_EQ(test, len, size);
 	pos = 1;
-	KUNIT_ASSERT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "path"));
 	KUNIT_EXPECT_TRUE(test,
-			  pkm_kunit_msgpack_expect_str(buf, len, &pos, "/a/b"));
+			  pkm_kunit_stratafs_expect_path_object(test, buf, len,
+								&pos, "/a/b"));
 
 	/* A success result is not a refusal and encodes nothing. */
 	KUNIT_EXPECT_EQ(test,

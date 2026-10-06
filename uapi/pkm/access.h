@@ -59,6 +59,14 @@ struct kacs_access_check_args {
 	__u64 granted_out_ptr;
 	__u32 pip_type;
 	__u32 pip_trust;
+	/*
+	 * Optional audit context naming the object the caller guards: one
+	 * MessagePack map, {kind: "<k>", "<k>": {<field>: ...}} (PGSS 6.7).
+	 * kind is one event-type segment; the map under the key equal to kind
+	 * is optional and non-empty; nothing else may appear. Anything else
+	 * fails the call with EINVAL. Audit records of the check carry it as
+	 * object.kind and object.<k>.*, marked fields.attestation.userspace.
+	 */
 	__u64 audit_context_ptr;
 	__u32 audit_context_len;
 	__u32 _pad2;

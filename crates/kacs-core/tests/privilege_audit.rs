@@ -169,11 +169,7 @@ fn successful_privilege_use_marks_used_and_emits_events() {
         SE_SECURITY_PRIVILEGE
     );
     assert_eq!(
-        state.privilege_use_events[0].requested,
-        ACCESS_SYSTEM_SECURITY
-    );
-    assert_eq!(
-        state.privilege_use_events[0].granted,
+        state.privilege_use_events[0].contributed,
         ACCESS_SYSTEM_SECURITY
     );
     assert_eq!(
@@ -185,9 +181,17 @@ fn successful_privilege_use_marks_used_and_emits_events() {
         Some(b"/priv-success".to_vec().into())
     );
     assert_eq!(state.privilege_use_events[1].privilege, SE_BACKUP_PRIVILEGE);
-    assert_eq!(state.privilege_use_events[1].requested, READ_CONTROL);
-    assert_eq!(state.privilege_use_events[1].granted, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[1].contributed, READ_CONTROL);
     assert_eq!(state.privilege_use_events[1].surviving_bits, READ_CONTROL);
+    // Both records carry the whole check's masks, not their own share.
+    for event in state.privilege_use_events.iter() {
+        assert_eq!(event.check_requested, state.mapped_desired);
+        assert_eq!(event.check_granted, state.granted);
+        assert_eq!(
+            event.check_granted & (ACCESS_SYSTEM_SECURITY | READ_CONTROL),
+            ACCESS_SYSTEM_SECURITY | READ_CONTROL
+        );
+    }
     assert_eq!(
         state.privilege_use_events[1].object_audit_context,
         Some(b"/priv-success".to_vec().into())
@@ -273,13 +277,14 @@ fn pip_stripping_causes_failure_privilege_use_event_without_mark_used() {
         SE_SECURITY_PRIVILEGE
     );
     assert_eq!(
-        state.privilege_use_events[0].requested,
+        state.privilege_use_events[0].contributed,
         ACCESS_SYSTEM_SECURITY
     );
     assert_eq!(
-        state.privilege_use_events[0].granted,
+        state.privilege_use_events[0].check_requested,
         ACCESS_SYSTEM_SECURITY
     );
+    assert_eq!(state.privilege_use_events[0].check_granted, state.granted);
     assert_eq!(state.privilege_use_events[0].surviving_bits, 0);
     assert!(!state.privilege_use_events[0].success);
 }
@@ -443,9 +448,12 @@ fn result_list_mode_counts_survival_on_any_node_as_success() {
     assert_eq!(state.privilege_use_events.len(), 1);
     assert_eq!(state.privilege_use_events[0].privilege, SE_BACKUP_PRIVILEGE);
     assert!(state.privilege_use_events[0].success);
-    assert_eq!(state.privilege_use_events[0].requested, READ_CONTROL);
-    assert_eq!(state.privilege_use_events[0].granted, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[0].contributed, READ_CONTROL);
     assert_eq!(state.privilege_use_events[0].surviving_bits, READ_CONTROL);
+    // In result-list mode the whole check's grant is the root node's: zero
+    // here, though the privilege survived on a child.
+    assert_eq!(state.privilege_use_events[0].check_requested, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[0].check_granted, 0);
 }
 
 #[test]
@@ -488,8 +496,12 @@ fn confinement_stripping_causes_failure_privilege_use_event_without_mark_used() 
     assert_eq!(state.updated_privileges.used, 0);
     assert_eq!(state.privilege_use_events.len(), 1);
     assert_eq!(state.privilege_use_events[0].privilege, SE_BACKUP_PRIVILEGE);
-    assert_eq!(state.privilege_use_events[0].requested, READ_CONTROL);
-    assert_eq!(state.privilege_use_events[0].granted, READ_CONTROL);
+    assert_eq!(state.privilege_use_events[0].contributed, READ_CONTROL);
+    assert_eq!(
+        state.privilege_use_events[0].check_requested,
+        state.mapped_desired
+    );
+    assert_eq!(state.privilege_use_events[0].check_granted, 0);
     assert_eq!(state.privilege_use_events[0].surviving_bits, 0);
     assert!(!state.privilege_use_events[0].success);
     assert_eq!(

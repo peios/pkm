@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-//! Narrow KMES payload builders for AccessCheck-generated KACS audit events.
+//! Narrow KMES payload builders for the KACS audit events.
+//!
+//! Each payload is the shape its event's record in `pkm/evman/kacs.evman`
+//! describes (PGSS §6.4–§6.6): one nested map per field-path segment, a value
+//! the emitter does not have left out rather than written as nil, and map
+//! lengths counting only the keys written.
 
-use crate::access_check_abi::{AccessCheckAbiResolved, OwnedAuditEvent};
+use crate::access_check_abi::{
+    parse_audit_context_map, AccessCheckAbiResolved, AuditContextView, OwnedAuditEvent,
+};
 use crate::pip::PipContext;
 use crate::pkm_alloc::Vec;
 use crate::privilege::{
     SE_BACKUP_PRIVILEGE, SE_RELABEL_PRIVILEGE, SE_RESTORE_PRIVILEGE, SE_SECURITY_PRIVILEGE,
     SE_TAKE_OWNERSHIP_PRIVILEGE,
 };
-use crate::token::{AccessCheckToken, SidAndAttributes};
+use crate::token::{AccessCheckToken, ImpersonationLevel, SidAndAttributes, TokenType};
 use crate::{CaapDiagnosticEvent, CaapDiagnosticKind, CaapSaclPhase, PrivilegeUseEvent};
 use core::ffi::c_long;
 use core::ptr::null_mut;
@@ -20,11 +27,14 @@ const ENOMEM: c_long = -12;
 const ERANGE: c_long = -34;
 
 const KMES_ORIGIN_KACS: u8 = 2;
-const ACCESS_AUDIT_TYPE: &[u8] = b"access-audit";
-const CONTINUOUS_AUDIT_TYPE: &[u8] = b"continuous-audit";
-const PRIVILEGE_USE_TYPE: &[u8] = b"privilege-use";
-const CAAP_POLICY_DIAGNOSTIC_TYPE: &[u8] = b"caap-policy-diagnostic";
-const LOGON_SESSION_DESTROYED_TYPE: &[u8] = b"logon-session-destroyed";
+const ACCESS_CHECKED_TYPE: &[u8] = b"kacs.audit.access.checked";
+const HANDLE_USED_TYPE: &[u8] = b"kacs.audit.handle.used";
+const PRIVILEGE_USED_TYPE: &[u8] = b"kacs.audit.privilege.used";
+const CAAP_SACL_SKIPPED_TYPE: &[u8] = b"kacs.caap.sacl.skipped";
+const CAAP_STAGING_DIVERGED_TYPE: &[u8] = b"kacs.caap.staging.diverged";
+const SESSION_DESTROYED_TYPE: &[u8] = b"kacs.session.destroyed";
+
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
 extern "C" {
     fn pkm_kmes_emit_kernel(
@@ -158,10 +168,6 @@ impl MsgpackWriter {
         self.push_byte(if value { 0xc3 } else { 0xc2 })
     }
 
-    fn write_nil(&mut self) -> Result<(), c_long> {
-        self.push_byte(0xc0)
-    }
-
     fn write_key(&mut self, key: &[u8]) -> Result<(), c_long> {
         self.write_str(key)
     }
@@ -171,6 +177,58 @@ struct ProcessInfo {
     pid: u64,
     name: Vec<u8>,
     executable_path: Vec<u8>,
+}
+
+/// The parts of the subject token's identity that live on the kernel token
+/// object rather than on the `AccessCheckToken` view the core decides with.
+#[derive(Clone, Copy)]
+pub(crate) struct AuditSubjectIds {
+    /// The token's own LUID (`subject.token.id`).
+    pub(crate) token_id: u64,
+    /// The token's logon-session LUID (`subject.token.auth-id`), when the
+    /// token still has a session.
+    pub(crate) auth_id: Option<u64>,
+    /// The Linux UID the token projects onto (`subject.token.uid`).
+    pub(crate) uid: u32,
+}
+
+/// What an access check was about, as the record's `object.*` describes it.
+pub(crate) enum AuditObject<'a> {
+    /// The kind is unknown, so `object` is left out: an access-check ioctl
+    /// whose caller supplied no audit context, or an object kind the
+    /// catalogue has no `object.kind` value for.
+    Unknown,
+    /// The kind alone. Its identity fields are not reachable where the check
+    /// runs, so `object.<kind>` is left out.
+    Kind(&'static [u8]),
+    /// A token, identified by LUID and durable GUID.
+    Token { id: u64, guid: [u8; 16] },
+    /// The audit context an access-check ioctl caller supplied, already
+    /// validated as a PGSS §6.7 map. Copied as the caller's claim.
+    Asserted(AuditContextView<'a>),
+}
+
+impl<'a> AuditObject<'a> {
+    /// The object an access-check ioctl names in its audit context, if any.
+    pub(crate) fn from_audit_context(context: Option<&'a [u8]>) -> Result<Self, c_long> {
+        match context {
+            None => Ok(Self::Unknown),
+            Some(bytes) => parse_audit_context_map(bytes)
+                .map(Self::Asserted)
+                .map_err(|_| EIO),
+        }
+    }
+}
+
+/// Per-check inputs to the access-check records beyond the core's own
+/// output: who the subject token is and what the check was about.
+pub(crate) struct AuditTarget<'a> {
+    pub(crate) subject_ids: Option<AuditSubjectIds>,
+    pub(crate) object: AuditObject<'a>,
+    /// Whether the record carries values userspace supplied — an audit
+    /// context, or the caller's own PIP state — and so must say
+    /// `fields.attestation.userspace` (PGSS §6.7).
+    pub(crate) asserted: bool,
 }
 
 fn allocate_zeroed(len: usize) -> Result<Vec<u8>, c_long> {
@@ -281,13 +339,6 @@ fn privilege_name(privilege: u64) -> Result<&'static [u8], c_long> {
     }
 }
 
-fn caap_diagnostic_kind_name(kind: CaapDiagnosticKind) -> &'static [u8] {
-    match kind {
-        CaapDiagnosticKind::SaclError => b"sacl-error",
-        CaapDiagnosticKind::StagingMismatch => b"staging-mismatch",
-    }
-}
-
 fn caap_sacl_phase_name(phase: CaapSaclPhase) -> &'static [u8] {
     match phase {
         CaapSaclPhase::Effective => b"effective-sacl",
@@ -295,226 +346,425 @@ fn caap_sacl_phase_name(phase: CaapSaclPhase) -> &'static [u8] {
     }
 }
 
-fn encode_sid_array(
+/// `object.session.logon-type`, named for its `KACS_LOGON_TYPE_*` value. The
+/// kernel refuses to create a session of any other type, so an unknown one
+/// is an internal fault and the record is skipped rather than mislabelled.
+fn logon_type_name(logon_type: u32) -> Result<&'static [u8], c_long> {
+    match logon_type {
+        2 => Ok(b"interactive"),
+        3 => Ok(b"network"),
+        4 => Ok(b"batch"),
+        5 => Ok(b"service"),
+        8 => Ok(b"network-cleartext"),
+        9 => Ok(b"new-credentials"),
+        10 => Ok(b"remote-interactive"),
+        _ => Err(EIO),
+    }
+}
+
+/// `outcome.reason` on a failed `kacs.audit.handle.used`, from the
+/// `KACS_FSR_*` code with its prefix stripped and case folded. `DECISION`
+/// names the ordinary path rather than a reason, and `AUDIT_EMIT_FAIL` is the
+/// failure of this record's own emission, so neither is a value.
+fn handle_failure_reason(reason: u8) -> Option<&'static [u8]> {
+    match reason {
+        1 => Some(b"signed-exec"),
+        2 => Some(b"grant-deny"),
+        3 => Some(b"append-deny"),
+        4 => Some(b"unmanaged-sysfs"),
+        _ => None,
+    }
+}
+
+fn impersonation_level_value(level: ImpersonationLevel) -> u64 {
+    match level {
+        ImpersonationLevel::Anonymous => 0,
+        ImpersonationLevel::Identification => 1,
+        ImpersonationLevel::Impersonation => 2,
+        ImpersonationLevel::Delegation => 3,
+    }
+}
+
+fn write_group_arrays(
     writer: &mut MsgpackWriter,
     groups: &[SidAndAttributes<'_>],
 ) -> Result<(), c_long> {
+    writer.write_key(b"groups")?;
     writer.write_array_len(groups.len())?;
     for group in groups {
         writer.write_bin(group.sid.as_bytes())?;
     }
+    // Parallel to `groups`: the attributes the check itself read, so a
+    // consumer can tell an enabled group from a deny-only one.
+    writer.write_key(b"group-attributes")?;
+    writer.write_array_len(groups.len())?;
+    for group in groups {
+        writer.write_u64(u64::from(group.attributes))?;
+    }
     Ok(())
 }
 
-fn encode_subject_token_map(
+/// The `subject` map: `subject.token.*` and `subject.pip.*`.
+fn encode_subject_map(
     token: &AccessCheckToken<'_>,
+    ids: Option<&AuditSubjectIds>,
     effective_pip: PipContext,
 ) -> Result<Vec<u8>, c_long> {
-    let mut writer = MsgpackWriter::with_capacity(256)?;
+    let mut writer = MsgpackWriter::with_capacity(256 + token.subject.groups.len() * 32)?;
+    let id_fields = match ids {
+        Some(ids) => 2 + usize::from(ids.auth_id.is_some()),
+        None => 0,
+    };
 
-    writer.write_map_len(5)?;
-    writer.write_key(b"user_sid")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"token")?;
+    writer.write_map_len(6 + id_fields)?;
+    writer.write_key(b"sid")?;
     writer.write_bin(token.subject.user.as_bytes())?;
-    writer.write_key(b"group_sids")?;
-    encode_sid_array(&mut writer, token.subject.groups)?;
-    writer.write_key(b"integrity_level")?;
-    writer.write_u64(token.integrity_level.0 as u64)?;
-    writer.write_key(b"pip_type")?;
-    writer.write_u64(effective_pip.pip_type as u64)?;
-    writer.write_key(b"pip_trust")?;
-    writer.write_u64(effective_pip.pip_trust as u64)?;
+    write_group_arrays(&mut writer, token.subject.groups)?;
+    writer.write_key(b"integrity")?;
+    writer.write_u64(u64::from(token.integrity_level.0))?;
+    if let Some(ids) = ids {
+        writer.write_key(b"id")?;
+        writer.write_u64(ids.token_id)?;
+        if let Some(auth_id) = ids.auth_id {
+            writer.write_key(b"auth-id")?;
+            writer.write_u64(auth_id)?;
+        }
+    }
+    writer.write_key(b"type")?;
+    // A primary token reports impersonation level 0, as Anonymous does;
+    // `type` is what tells the two apart.
+    let impersonation = match token.token_type {
+        TokenType::Primary => {
+            writer.write_str(b"primary")?;
+            0
+        }
+        TokenType::Impersonation => {
+            writer.write_str(b"impersonation")?;
+            impersonation_level_value(token.impersonation_level)
+        }
+    };
+    writer.write_key(b"impersonation")?;
+    writer.write_u64(impersonation)?;
+    if let Some(ids) = ids {
+        writer.write_key(b"uid")?;
+        writer.write_u64(u64::from(ids.uid))?;
+    }
+    writer.write_key(b"pip")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"type")?;
+    writer.write_u64(u64::from(effective_pip.pip_type))?;
+    writer.write_key(b"trust")?;
+    writer.write_u64(u64::from(effective_pip.pip_trust))?;
 
     Ok(writer.into_vec())
 }
 
-fn encode_subject_map(
-    resolved: AccessCheckAbiResolved<'_>,
-    effective_pip: PipContext,
-) -> Result<Vec<u8>, c_long> {
-    encode_subject_token_map(resolved.token, effective_pip)
-}
-
-fn encode_process_map(process: &ProcessInfo) -> Result<Vec<u8>, c_long> {
+/// The `emitter` map: `emitter.process.*`. A kernel access check runs in
+/// the caller's own context, so the process that acted wrote the record.
+fn encode_emitter_map(process: &ProcessInfo) -> Result<Vec<u8>, c_long> {
     let mut writer = MsgpackWriter::with_capacity(96 + process.executable_path.len())?;
 
+    writer.write_map_len(1)?;
+    writer.write_key(b"process")?;
     writer.write_map_len(3)?;
     writer.write_key(b"pid")?;
     writer.write_u64(process.pid)?;
     writer.write_key(b"name")?;
     writer.write_str(process.name.as_slice())?;
-    writer.write_key(b"executable_path")?;
+    writer.write_key(b"executable")?;
     writer.write_str(process.executable_path.as_slice())?;
 
     Ok(writer.into_vec())
 }
 
-fn encode_object_context(
-    writer: &mut MsgpackWriter,
-    object_context: Option<&[u8]>,
-) -> Result<(), c_long> {
-    match object_context {
-        Some(bytes) => writer.write_bin(bytes),
-        None => writer.write_nil(),
+/// The `object` map, or `None` when the kind is unknown and the whole map
+/// is left out.
+fn encode_object_map(object: &AuditObject<'_>) -> Result<Option<Vec<u8>>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(64)?;
+
+    match object {
+        AuditObject::Unknown => return Ok(None),
+        AuditObject::Kind(kind) => {
+            writer.write_map_len(1)?;
+            writer.write_key(b"kind")?;
+            writer.write_str(kind)?;
+        }
+        AuditObject::Token { id, guid } => {
+            writer.write_map_len(2)?;
+            writer.write_key(b"kind")?;
+            writer.write_str(b"token")?;
+            writer.write_key(b"token")?;
+            writer.write_map_len(2)?;
+            writer.write_key(b"id")?;
+            writer.write_u64(*id)?;
+            writer.write_key(b"guid")?;
+            writer.write_bin(guid)?;
+        }
+        AuditObject::Asserted(context) => {
+            writer.write_map_len(1 + usize::from(context.body.is_some()))?;
+            writer.write_key(b"kind")?;
+            writer.write_str(context.kind)?;
+            if let Some(body) = context.body {
+                // The body is the caller's map verbatim, so its fields land
+                // as `object.<kind>.*` and nowhere else.
+                writer.write_key(context.kind)?;
+                writer.extend(body)?;
+            }
+        }
+    }
+
+    Ok(Some(writer.into_vec()))
+}
+
+/// The maps every access-check record shares, built once per check.
+struct CheckMaps {
+    subject: Vec<u8>,
+    emitter: Vec<u8>,
+    object: Option<Vec<u8>>,
+    asserted: bool,
+}
+
+impl CheckMaps {
+    /// Root keys common to every access-check record beyond its own.
+    fn common_len(&self) -> usize {
+        2 + usize::from(self.object.is_some()) + usize::from(self.asserted)
+    }
+
+    fn write_head(&self, writer: &mut MsgpackWriter) -> Result<(), c_long> {
+        writer.write_key(b"subject")?;
+        writer.extend(self.subject.as_slice())?;
+        writer.write_key(b"emitter")?;
+        writer.extend(self.emitter.as_slice())?;
+        if let Some(object) = self.object.as_ref() {
+            writer.write_key(b"object")?;
+            writer.extend(object.as_slice())?;
+        }
+        Ok(())
+    }
+
+    fn write_tail(&self, writer: &mut MsgpackWriter) -> Result<(), c_long> {
+        if self.asserted {
+            writer.write_key(b"fields")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"attestation")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"userspace")?;
+            writer.write_bool(true)?;
+        }
+        Ok(())
     }
 }
 
-fn encode_access_trigger(event: &OwnedAuditEvent) -> Result<Vec<u8>, c_long> {
-    let mut writer = MsgpackWriter::with_capacity(48)?;
+fn encode_access_checked_payload(
+    event: &OwnedAuditEvent,
+    maps: &CheckMaps,
+) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(512)?;
 
-    writer.write_map_len(2)?;
-    writer.write_key(b"kind")?;
-    if event.policy_forced {
-        writer.write_str(b"policy")?;
-    } else {
-        writer.write_str(b"sacl")?;
-    }
-    writer.write_key(b"ace")?;
-    if event.policy_forced {
-        writer.write_nil()?;
-    } else if let Some(bytes) = event.ace_bytes.as_ref() {
-        writer.write_bin(bytes.as_slice())?;
-    } else {
+    if !event.policy_forced && event.ace_bytes.is_none() {
         return Err(EIO);
     }
 
-    Ok(writer.into_vec())
-}
-
-fn encode_access_audit_payload(
-    event: &OwnedAuditEvent,
-    subject_map: &[u8],
-    process_map: &[u8],
-) -> Result<Vec<u8>, c_long> {
-    let trigger = encode_access_trigger(event)?;
-    let mut writer = MsgpackWriter::with_capacity(256)?;
-
-    writer.write_map_len(7)?;
-    writer.write_key(b"subject")?;
-    writer.extend(subject_map)?;
-    writer.write_key(b"object_context")?;
-    encode_object_context(&mut writer, event.object_audit_context.as_deref())?;
-    writer.write_key(b"requested_access")?;
-    writer.write_u64(event.requested as u64)?;
-    writer.write_key(b"granted_access")?;
-    writer.write_u64(event.granted as u64)?;
+    writer.write_map_len(maps.common_len() + 3)?;
+    maps.write_head(&mut writer)?;
+    writer.write_key(b"access")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"requested")?;
+    writer.write_u64(u64::from(event.requested))?;
+    writer.write_key(b"granted")?;
+    writer.write_u64(u64::from(event.granted))?;
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1)?;
     writer.write_key(b"success")?;
     writer.write_bool(event.success)?;
     writer.write_key(b"trigger")?;
-    writer.extend(trigger.as_slice())?;
-    writer.write_key(b"process")?;
-    writer.extend(process_map)?;
+    match event.ace_bytes.as_ref() {
+        Some(ace) if !event.policy_forced => {
+            writer.write_map_len(2)?;
+            writer.write_key(b"kind")?;
+            writer.write_str(b"sacl")?;
+            writer.write_key(b"ace")?;
+            writer.write_bin(ace.as_slice())?;
+        }
+        _ => {
+            writer.write_map_len(1)?;
+            writer.write_key(b"kind")?;
+            writer.write_str(b"policy")?;
+        }
+    }
+    maps.write_tail(&mut writer)?;
 
     Ok(writer.into_vec())
 }
 
-fn encode_privilege_use_payload(
+fn encode_privilege_used_payload(
     event: &PrivilegeUseEvent,
-    subject_map: &[u8],
-    process_map: &[u8],
+    maps: &CheckMaps,
 ) -> Result<Vec<u8>, c_long> {
-    let mut writer = MsgpackWriter::with_capacity(256)?;
+    let mut writer = MsgpackWriter::with_capacity(512)?;
 
-    writer.write_map_len(8)?;
-    writer.write_key(b"subject")?;
-    writer.extend(subject_map)?;
-    writer.write_key(b"object_context")?;
-    encode_object_context(&mut writer, event.object_audit_context.as_deref())?;
+    writer.write_map_len(maps.common_len() + 3)?;
+    maps.write_head(&mut writer)?;
     writer.write_key(b"privilege")?;
+    writer.write_map_len(3)?;
+    writer.write_key(b"name")?;
     writer.write_str(privilege_name(event.privilege)?)?;
-    writer.write_key(b"requested_access")?;
-    writer.write_u64(event.requested as u64)?;
-    writer.write_key(b"granted_access")?;
-    writer.write_u64(event.granted as u64)?;
-    writer.write_key(b"surviving_access")?;
-    writer.write_u64(event.surviving_bits as u64)?;
+    writer.write_key(b"contributed")?;
+    writer.write_u64(u64::from(event.contributed))?;
+    writer.write_key(b"surviving")?;
+    writer.write_u64(u64::from(event.surviving_bits))?;
+    writer.write_key(b"access")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"requested")?;
+    writer.write_u64(u64::from(event.check_requested))?;
+    writer.write_key(b"granted")?;
+    writer.write_u64(u64::from(event.check_granted))?;
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1)?;
     writer.write_key(b"success")?;
     writer.write_bool(event.success)?;
-    writer.write_key(b"process")?;
-    writer.extend(process_map)?;
+    maps.write_tail(&mut writer)?;
 
     Ok(writer.into_vec())
 }
 
-fn encode_caap_policy_diagnostic_payload(
+fn write_staged_access(
+    writer: &mut MsgpackWriter,
     event: &CaapDiagnosticEvent,
-    subject_map: &[u8],
-    process_map: &[u8],
-) -> Result<Vec<u8>, c_long> {
-    let mut writer = MsgpackWriter::with_capacity(320)?;
-
-    let _ = str::from_utf8(event.reason.as_bytes()).map_err(|_| EIO)?;
-
-    writer.write_map_len(12)?;
-    writer.write_key(b"subject")?;
-    writer.extend(subject_map)?;
-    writer.write_key(b"object_context")?;
-    encode_object_context(&mut writer, event.object_audit_context.as_deref())?;
-    writer.write_key(b"kind")?;
-    writer.write_str(caap_diagnostic_kind_name(event.kind))?;
-    writer.write_key(b"phase")?;
-    match event.phase {
-        Some(phase) => writer.write_str(caap_sacl_phase_name(phase))?,
-        None => writer.write_nil()?,
-    }
-    writer.write_key(b"policy_sid")?;
-    match event.policy_sid.as_ref() {
-        Some(policy_sid) => writer.write_bin(policy_sid.as_slice())?,
-        None => writer.write_nil()?,
-    }
-    writer.write_key(b"rule_index")?;
-    match event.rule_index {
-        Some(rule_index) => writer.write_u64(rule_index as u64)?,
-        None => writer.write_nil()?,
-    }
-    writer.write_key(b"reason")?;
-    writer.write_str(event.reason.as_bytes())?;
-    writer.write_key(b"requested_access")?;
-    writer.write_u64(event.requested as u64)?;
-    writer.write_key(b"effective_granted_access")?;
-    writer.write_u64(event.effective_granted as u64)?;
-    writer.write_key(b"staged_granted_access")?;
-    writer.write_u64(event.staged_granted as u64)?;
-    writer.write_key(b"object_results_differ")?;
-    writer.write_bool(event.object_results_differ)?;
-    writer.write_key(b"process")?;
-    writer.extend(process_map)?;
-
-    Ok(writer.into_vec())
+) -> Result<(), c_long> {
+    writer.write_key(b"access")?;
+    writer.write_map_len(3)?;
+    writer.write_key(b"requested")?;
+    writer.write_u64(u64::from(event.requested))?;
+    writer.write_key(b"granted")?;
+    writer.write_u64(u64::from(event.effective_granted))?;
+    writer.write_key(b"granted-staged")?;
+    writer.write_u64(u64::from(event.staged_granted))
 }
 
-fn encode_continuous_audit_payload(
-    subject_map: &[u8],
-    process_map: &[u8],
-    operation: &[u8],
-    requested_access: u32,
-    matched_access: u32,
-    granted_access: u32,
-    success: bool,
-) -> Result<Vec<u8>, c_long> {
-    let mut writer = MsgpackWriter::with_capacity(256 + operation.len())?;
+/// `kacs.caap.sacl.skipped` or `kacs.caap.staging.diverged`, with the event
+/// type it is written under.
+fn encode_caap_payload(
+    event: &CaapDiagnosticEvent,
+    maps: &CheckMaps,
+) -> Result<(&'static [u8], Vec<u8>), c_long> {
+    let mut writer = MsgpackWriter::with_capacity(512)?;
 
-    let _ = str::from_utf8(operation).map_err(|_| EIO)?;
-    if requested_access == 0 || matched_access == 0 {
+    match event.kind {
+        CaapDiagnosticKind::SaclError => {
+            let phase = event.phase.ok_or(EIO)?;
+            let policy_sid = event.policy_sid.as_ref().ok_or(EIO)?;
+            let rule_index = event.rule_index.ok_or(EIO)?;
+            let _ = str::from_utf8(event.reason.as_bytes()).map_err(|_| EIO)?;
+
+            writer.write_map_len(maps.common_len() + 3)?;
+            maps.write_head(&mut writer)?;
+            writer.write_key(b"caap")?;
+            writer.write_map_len(3)?;
+            writer.write_key(b"policy")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"sid")?;
+            writer.write_bin(policy_sid.as_slice())?;
+            writer.write_key(b"rule")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"index")?;
+            writer.write_u64(u64::from(rule_index))?;
+            writer.write_key(b"phase")?;
+            writer.write_str(caap_sacl_phase_name(phase))?;
+            writer.write_key(b"outcome")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"reason")?;
+            writer.write_str(event.reason.as_bytes())?;
+            write_staged_access(&mut writer, event)?;
+            maps.write_tail(&mut writer)?;
+            Ok((CAAP_SACL_SKIPPED_TYPE, writer.into_vec()))
+        }
+        CaapDiagnosticKind::StagingMismatch => {
+            writer.write_map_len(maps.common_len() + 1)?;
+            maps.write_head(&mut writer)?;
+            write_staged_access(&mut writer, event)?;
+            maps.write_tail(&mut writer)?;
+            Ok((CAAP_STAGING_DIVERGED_TYPE, writer.into_vec()))
+        }
+    }
+}
+
+/// One operation on an already-open file handle, as FACS reports it for
+/// `kacs.audit.handle.used`.
+pub(crate) struct HandleUse<'a> {
+    /// `operation.name`, such as `file.permission`.
+    pub(crate) operation: &'a [u8],
+    /// The absolute path of the handle's file, when it could be resolved.
+    pub(crate) path: Option<&'a [u8]>,
+    pub(crate) requested_access: u32,
+    pub(crate) matched_access: u32,
+    pub(crate) granted_access: u32,
+    /// The continuous-audit mask cached on the handle.
+    pub(crate) audit_mask: u32,
+    pub(crate) success: bool,
+    /// The `KACS_FSR_*` code the enforcement point resolved with.
+    pub(crate) reason: u8,
+}
+
+fn encode_handle_used_payload(
+    subject_map: &[u8],
+    emitter_map: &[u8],
+    handle: &HandleUse<'_>,
+) -> Result<Vec<u8>, c_long> {
+    let path_len = handle.path.map_or(0, <[u8]>::len);
+    let mut writer = MsgpackWriter::with_capacity(320 + handle.operation.len() + path_len)?;
+    let reason = if handle.success {
+        None
+    } else {
+        handle_failure_reason(handle.reason)
+    };
+
+    let _ = str::from_utf8(handle.operation).map_err(|_| EIO)?;
+    if handle.requested_access == 0 || handle.matched_access == 0 {
         return Err(EIO);
     }
 
-    writer.write_map_len(8)?;
+    writer.write_map_len(6)?;
     writer.write_key(b"subject")?;
     writer.extend(subject_map)?;
-    writer.write_key(b"object_context")?;
-    encode_object_context(&mut writer, None)?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map)?;
+    writer.write_key(b"object")?;
+    // FACS is the only enforcement point that reports handle use, so the
+    // object is always a file.
+    writer.write_map_len(1 + usize::from(handle.path.is_some()))?;
+    writer.write_key(b"kind")?;
+    writer.write_str(b"file")?;
+    if let Some(path) = handle.path {
+        writer.write_key(b"file")?;
+        writer.write_map_len(1)?;
+        writer.write_key(b"path")?;
+        writer.write_str(path)?;
+    }
     writer.write_key(b"operation")?;
-    writer.write_str(operation)?;
-    writer.write_key(b"requested_access")?;
-    writer.write_u64(requested_access as u64)?;
-    writer.write_key(b"matched_access")?;
-    writer.write_u64(matched_access as u64)?;
-    writer.write_key(b"granted_access")?;
-    writer.write_u64(granted_access as u64)?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(handle.operation)?;
+    writer.write_key(b"access")?;
+    writer.write_map_len(4)?;
+    writer.write_key(b"requested")?;
+    writer.write_u64(u64::from(handle.requested_access))?;
+    writer.write_key(b"matched")?;
+    writer.write_u64(u64::from(handle.matched_access))?;
+    writer.write_key(b"granted")?;
+    writer.write_u64(u64::from(handle.granted_access))?;
+    writer.write_key(b"audit-mask")?;
+    writer.write_u64(u64::from(handle.audit_mask))?;
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1 + usize::from(reason.is_some()))?;
     writer.write_key(b"success")?;
-    writer.write_bool(success)?;
-    writer.write_key(b"process")?;
-    writer.extend(process_map)?;
+    writer.write_bool(handle.success)?;
+    if let Some(reason) = reason {
+        writer.write_key(b"reason")?;
+        writer.write_str(reason)?;
+    }
 
     Ok(writer.into_vec())
 }
@@ -526,23 +776,47 @@ pub(crate) fn encode_logon_session_destroyed_payload(
     auth_package: &[u8],
     created_at: u64,
 ) -> Result<Vec<u8>, c_long> {
-    let mut writer = MsgpackWriter::with_capacity(96 + user_sid.len() + auth_package.len())?;
+    let mut writer = MsgpackWriter::with_capacity(128 + user_sid.len() + auth_package.len())?;
+    let logon_type = logon_type_name(logon_type)?;
+    // Sessions record their creation in whole seconds of the realtime clock;
+    // `uint.time` is nanoseconds.
+    let logon_time = created_at
+        .checked_mul(NANOSECONDS_PER_SECOND)
+        .ok_or(ERANGE)?;
 
     let _ = str::from_utf8(auth_package).map_err(|_| EIO)?;
 
+    writer.write_map_len(1)?;
+    writer.write_key(b"object")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"session")?;
     writer.write_map_len(5)?;
-    writer.write_key(b"session_id")?;
+    writer.write_key(b"id")?;
     writer.write_u64(session_id)?;
-    writer.write_key(b"user_sid")?;
+    writer.write_key(b"user")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"sid")?;
     writer.write_bin(user_sid)?;
-    writer.write_key(b"logon_type")?;
-    writer.write_u64(logon_type as u64)?;
-    writer.write_key(b"auth_package")?;
+    writer.write_key(b"logon-type")?;
+    writer.write_str(logon_type)?;
+    writer.write_key(b"auth-package")?;
     writer.write_str(auth_package)?;
-    writer.write_key(b"created_at")?;
-    writer.write_u64(created_at)?;
+    writer.write_key(b"logon-time")?;
+    writer.write_u64(logon_time)?;
 
     Ok(writer.into_vec())
+}
+
+fn emit(event_type: &[u8], payload: &[u8]) {
+    unsafe {
+        pkm_kmes_emit_kernel(
+            KMES_ORIGIN_KACS,
+            event_type.as_ptr().cast(),
+            event_type.len(),
+            payload.as_ptr().cast(),
+            payload.len(),
+        );
+    }
 }
 
 pub(crate) fn emit_access_check_events_to_kmes(
@@ -551,11 +825,8 @@ pub(crate) fn emit_access_check_events_to_kmes(
     caap_diagnostic_events: &[CaapDiagnosticEvent],
     resolved: AccessCheckAbiResolved<'_>,
     effective_pip: PipContext,
+    target: &AuditTarget<'_>,
 ) -> Result<(), c_long> {
-    let process_info;
-    let process_map;
-    let subject_map;
-
     if audit_events.is_empty()
         && privilege_use_events.is_empty()
         && caap_diagnostic_events.is_empty()
@@ -563,93 +834,59 @@ pub(crate) fn emit_access_check_events_to_kmes(
         return Ok(());
     }
 
-    process_info = load_process_info()?;
-    process_map = encode_process_map(&process_info)?;
-    subject_map = encode_subject_map(resolved, effective_pip)?;
+    let process_info = load_process_info()?;
+    let maps = CheckMaps {
+        subject: encode_subject_map(resolved.token, target.subject_ids.as_ref(), effective_pip)?,
+        emitter: encode_emitter_map(&process_info)?,
+        object: encode_object_map(&target.object)?,
+        asserted: target.asserted,
+    };
 
     for event in privilege_use_events {
-        let payload =
-            encode_privilege_use_payload(event, subject_map.as_slice(), process_map.as_slice())?;
-
-        unsafe {
-            pkm_kmes_emit_kernel(
-                KMES_ORIGIN_KACS,
-                PRIVILEGE_USE_TYPE.as_ptr().cast(),
-                PRIVILEGE_USE_TYPE.len(),
-                payload.as_ptr().cast(),
-                payload.len(),
-            );
-        }
+        let payload = encode_privilege_used_payload(event, &maps)?;
+        emit(PRIVILEGE_USED_TYPE, payload.as_slice());
     }
 
     for event in audit_events {
-        let payload =
-            encode_access_audit_payload(event, subject_map.as_slice(), process_map.as_slice())?;
-
-        unsafe {
-            pkm_kmes_emit_kernel(
-                KMES_ORIGIN_KACS,
-                ACCESS_AUDIT_TYPE.as_ptr().cast(),
-                ACCESS_AUDIT_TYPE.len(),
-                payload.as_ptr().cast(),
-                payload.len(),
-            );
-        }
+        let payload = encode_access_checked_payload(event, &maps)?;
+        emit(ACCESS_CHECKED_TYPE, payload.as_slice());
     }
 
     for event in caap_diagnostic_events {
-        let payload = encode_caap_policy_diagnostic_payload(
-            event,
-            subject_map.as_slice(),
-            process_map.as_slice(),
-        )?;
-
-        unsafe {
-            pkm_kmes_emit_kernel(
-                KMES_ORIGIN_KACS,
-                CAAP_POLICY_DIAGNOSTIC_TYPE.as_ptr().cast(),
-                CAAP_POLICY_DIAGNOSTIC_TYPE.len(),
-                payload.as_ptr().cast(),
-                payload.len(),
-            );
-        }
+        let (event_type, payload) = encode_caap_payload(event, &maps)?;
+        emit(event_type, payload.as_slice());
     }
 
     Ok(())
 }
 
-pub(crate) fn emit_continuous_audit_to_kmes(
+pub(crate) fn emit_handle_used_to_kmes(
     token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
     effective_pip: PipContext,
-    operation: &[u8],
-    requested_access: u32,
-    matched_access: u32,
-    granted_access: u32,
-    success: bool,
+    handle: &HandleUse<'_>,
 ) -> Result<(), c_long> {
     let process_info = load_process_info()?;
-    let process_map = encode_process_map(&process_info)?;
-    let subject_map = encode_subject_token_map(token, effective_pip)?;
-    let payload = encode_continuous_audit_payload(
-        subject_map.as_slice(),
-        process_map.as_slice(),
-        operation,
-        requested_access,
-        matched_access,
-        granted_access,
-        success,
-    )?;
+    let emitter_map = encode_emitter_map(&process_info)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    // A file name is an arbitrary byte string. As with the process name,
+    // sanitise rather than refuse: a failed emission fails the operation.
+    let path = match handle.path {
+        Some(path) => {
+            let mut copy = Vec::with_capacity(path.len()).map_err(|_| ENOMEM)?;
+            copy.extend_from_slice(path).map_err(|_| ENOMEM)?;
+            Some(sanitize_utf8_lossy(copy)?)
+        }
+        None => None,
+    };
+    let handle = HandleUse {
+        path: path.as_deref(),
+        ..*handle
+    };
+    let payload =
+        encode_handle_used_payload(subject_map.as_slice(), emitter_map.as_slice(), &handle)?;
 
-    unsafe {
-        pkm_kmes_emit_kernel(
-            KMES_ORIGIN_KACS,
-            CONTINUOUS_AUDIT_TYPE.as_ptr().cast(),
-            CONTINUOUS_AUDIT_TYPE.len(),
-            payload.as_ptr().cast(),
-            payload.len(),
-        );
-    }
-
+    emit(HANDLE_USED_TYPE, payload.as_slice());
     Ok(())
 }
 
@@ -668,15 +905,6 @@ pub(crate) fn emit_logon_session_destroyed_to_kmes(
         created_at,
     )?;
 
-    unsafe {
-        pkm_kmes_emit_kernel(
-            KMES_ORIGIN_KACS,
-            LOGON_SESSION_DESTROYED_TYPE.as_ptr().cast(),
-            LOGON_SESSION_DESTROYED_TYPE.len(),
-            payload.as_ptr().cast(),
-            payload.len(),
-        );
-    }
-
+    emit(SESSION_DESTROYED_TYPE, payload.as_slice());
     Ok(())
 }
