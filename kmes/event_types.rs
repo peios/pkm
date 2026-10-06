@@ -42,114 +42,194 @@ pub(crate) const KACS_AUDIT_ACCESS_CHECKED: EventType = EventType {
     name: b"kacs.audit.access.checked",
     tier: Tier::Essential,
 };
-pub(crate) const KACS_AUDIT_HANDLE_USED: EventType = EventType {
+pub(crate) const KACS_AUDIT_DESCRIPTOR_CHANGED: EventType = EventType {
     id: 1,
+    name: b"kacs.audit.descriptor.changed",
+    tier: Tier::Essential,
+};
+pub(crate) const KACS_AUDIT_HANDLE_USED: EventType = EventType {
+    id: 2,
     name: b"kacs.audit.handle.used",
     tier: Tier::Essential,
 };
 pub(crate) const KACS_AUDIT_PRIVILEGE_USED: EventType = EventType {
-    id: 2,
+    id: 3,
     name: b"kacs.audit.privilege.used",
     tier: Tier::Essential,
 };
+pub(crate) const KACS_CAAP_POLICY_CHANGED: EventType = EventType {
+    id: 4,
+    name: b"kacs.caap.policy.changed",
+    tier: Tier::Essential,
+};
 pub(crate) const KACS_CAAP_SACL_SKIPPED: EventType = EventType {
-    id: 3,
+    id: 5,
     name: b"kacs.caap.sacl.skipped",
     tier: Tier::Standard,
 };
 pub(crate) const KACS_CAAP_STAGING_DIVERGED: EventType = EventType {
-    id: 4,
+    id: 6,
     name: b"kacs.caap.staging.diverged",
     tier: Tier::Standard,
 };
+pub(crate) const KACS_CONFIG_VALUE_REJECTED: EventType = EventType {
+    id: 7,
+    name: b"kacs.config.value.rejected",
+    tier: Tier::Essential,
+};
 pub(crate) const KACS_DESCRIPTOR_REJECTED: EventType = EventType {
-    id: 5,
+    id: 8,
     name: b"kacs.descriptor.rejected",
     tier: Tier::Standard,
 };
+pub(crate) const KACS_IMPERSONATION_REVERTED: EventType = EventType {
+    id: 9,
+    name: b"kacs.impersonation.reverted",
+    tier: Tier::Verbose,
+};
+pub(crate) const KACS_IMPERSONATION_STARTED: EventType = EventType {
+    id: 10,
+    name: b"kacs.impersonation.started",
+    tier: Tier::Standard,
+};
+pub(crate) const KACS_MOUNT_POLICY_CHANGED: EventType = EventType {
+    id: 11,
+    name: b"kacs.mount.policy.changed",
+    tier: Tier::Essential,
+};
 pub(crate) const KACS_SESSION_DESTROYED: EventType = EventType {
-    id: 6,
+    id: 12,
     name: b"kacs.session.destroyed",
     tier: Tier::Essential,
 };
 pub(crate) const KACS_SIGNATURE_CRYPTO_FAILED: EventType = EventType {
-    id: 7,
+    id: 13,
     name: b"kacs.signature.crypto.failed",
     tier: Tier::Essential,
 };
 pub(crate) const KMES_BUFFER_SWAP_FAILED: EventType = EventType {
-    id: 8,
+    id: 14,
     name: b"kmes.buffer.swap.failed",
     tier: Tier::Standard,
 };
 pub(crate) const KMES_CONFIG_APPLIED: EventType = EventType {
-    id: 9,
+    id: 15,
     name: b"kmes.config.applied",
     tier: Tier::Standard,
 };
 pub(crate) const KMES_CONFIG_REFRESH_FAILED: EventType = EventType {
-    id: 10,
+    id: 16,
     name: b"kmes.config.refresh.failed",
     tier: Tier::Essential,
 };
 pub(crate) const KMES_CONFIG_VALUE_REJECTED: EventType = EventType {
-    id: 11,
+    id: 17,
     name: b"kmes.config.value.rejected",
     tier: Tier::Essential,
 };
 pub(crate) const LCS_AUDIT_BACKUP_ENDED: EventType = EventType {
-    id: 12,
+    id: 18,
     name: b"lcs.audit.backup.ended",
     tier: Tier::Essential,
 };
 pub(crate) const LCS_AUDIT_BACKUP_STARTED: EventType = EventType {
-    id: 13,
+    id: 19,
     name: b"lcs.audit.backup.started",
     tier: Tier::Essential,
 };
+pub(crate) const LCS_AUDIT_KEY_CREATED: EventType = EventType {
+    id: 20,
+    name: b"lcs.audit.key.created",
+    tier: Tier::Essential,
+};
+pub(crate) const LCS_AUDIT_KEY_DELETED: EventType = EventType {
+    id: 21,
+    name: b"lcs.audit.key.deleted",
+    tier: Tier::Essential,
+};
+pub(crate) const LCS_AUDIT_KEY_DESCRIPTOR_CHANGED: EventType = EventType {
+    id: 22,
+    name: b"lcs.audit.key.descriptor.changed",
+    tier: Tier::Essential,
+};
+pub(crate) const LCS_AUDIT_KEY_HIDDEN: EventType = EventType {
+    id: 23,
+    name: b"lcs.audit.key.hidden",
+    tier: Tier::Essential,
+};
 pub(crate) const LCS_AUDIT_KEY_OPENED: EventType = EventType {
-    id: 14,
+    id: 24,
     name: b"lcs.audit.key.opened",
     tier: Tier::Essential,
 };
+pub(crate) const LCS_AUDIT_KEY_TOMBSTONED: EventType = EventType {
+    id: 25,
+    name: b"lcs.audit.key.tombstoned",
+    tier: Tier::Essential,
+};
 pub(crate) const LCS_AUDIT_RESTORE_ENDED: EventType = EventType {
-    id: 15,
+    id: 26,
     name: b"lcs.audit.restore.ended",
     tier: Tier::Essential,
 };
 pub(crate) const LCS_AUDIT_RESTORE_STARTED: EventType = EventType {
-    id: 16,
+    id: 27,
     name: b"lcs.audit.restore.started",
     tier: Tier::Essential,
 };
+pub(crate) const LCS_AUDIT_TRANSACTION_COMMITTED: EventType = EventType {
+    id: 28,
+    name: b"lcs.audit.transaction.committed",
+    tier: Tier::Essential,
+};
+pub(crate) const LCS_AUDIT_VALUE_DELETED: EventType = EventType {
+    id: 29,
+    name: b"lcs.audit.value.deleted",
+    tier: Tier::Essential,
+};
+pub(crate) const LCS_AUDIT_VALUE_SET: EventType = EventType {
+    id: 30,
+    name: b"lcs.audit.value.set",
+    tier: Tier::Essential,
+};
 pub(crate) const LCS_CONFIG_VALUE_REJECTED: EventType = EventType {
-    id: 17,
+    id: 31,
     name: b"lcs.config.value.rejected",
     tier: Tier::Essential,
 };
 pub(crate) const LCS_SOURCE_RESPONSE_REJECTED: EventType = EventType {
-    id: 18,
+    id: 32,
     name: b"lcs.source.response.rejected",
     tier: Tier::Essential,
 };
+pub(crate) const NTFE_POLICY_PUBLISHED: EventType = EventType {
+    id: 33,
+    name: b"ntfe.policy.published",
+    tier: Tier::Standard,
+};
+pub(crate) const NTFE_POLICY_REJECTED: EventType = EventType {
+    id: 34,
+    name: b"ntfe.policy.rejected",
+    tier: Tier::Essential,
+};
 pub(crate) const NTFE_VERDICT_REPORTED: EventType = EventType {
-    id: 19,
+    id: 35,
     name: b"ntfe.verdict.reported",
     tier: Tier::Essential,
 };
 pub(crate) const STRATAFS_FILE_COPIED_UP: EventType = EventType {
-    id: 20,
+    id: 36,
     name: b"stratafs.file.copied-up",
     tier: Tier::Standard,
 };
 pub(crate) const STRATAFS_MUTATION_REFUSED: EventType = EventType {
-    id: 21,
+    id: 37,
     name: b"stratafs.mutation.refused",
     tier: Tier::Standard,
 };
 
 /// How many kernel event types there are.
-pub(crate) const COUNT: u32 = 22;
+pub(crate) const COUNT: u32 = 38;
 
 extern "C" {
     fn pkm_kmes_event_enabled_ffi(id: u32) -> bool;
