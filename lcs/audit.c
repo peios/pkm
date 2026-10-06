@@ -37,20 +37,12 @@ u64 pkm_lcs_trace_guid_hash(const u8 *guid)
 #define PKM_LCS_SACL_MATCH_SUCCESS 0x1U
 #define PKM_LCS_SACL_MATCH_FAILURE 0x2U
 
-static const char pkm_lcs_key_open_audit_event_type[] =
-	"lcs.audit.key.opened";
-static const char pkm_lcs_backup_start_event_type[] =
-	"lcs.audit.backup.started";
-static const char pkm_lcs_backup_complete_event_type[] =
-	"lcs.audit.backup.ended";
-static const char pkm_lcs_restore_start_event_type[] =
-	"lcs.audit.restore.started";
-static const char pkm_lcs_restore_complete_event_type[] =
-	"lcs.audit.restore.ended";
-static const char pkm_lcs_source_validation_failure_event_type[] =
-	"lcs.source.response.rejected";
-static const char pkm_lcs_self_config_invalid_event_type[] =
-	"lcs.config.value.rejected";
+/*
+ * Every emitter here asks the emission policy first, before it builds the
+ * caller summary or sizes the payload, and names its type with the
+ * generated string (kmes/event_types.h). A type that is switched off is
+ * not an error: the emitter returns 0 having written nothing.
+ */
 
 /*
  * Mirrors PkmLcsAuditCallerSummaryCopy in rust_ingress.rs and the KUnit
@@ -117,18 +109,32 @@ extern int lcs_rust_registry_set_security_required_access(u32 security_info,
 static_assert(sizeof(struct pkm_lcs_key_audit_record) ==
 	      PKM_LCS_KEY_AUDIT_RECORD_SIZE);
 
-static const char * const pkm_lcs_key_audit_event_types[] = {
-	[PKM_LCS_KEY_AUDIT_VALUE_SET] = "lcs.audit.value.set",
-	[PKM_LCS_KEY_AUDIT_VALUE_DELETED] = "lcs.audit.value.deleted",
-	[PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED] = "lcs.audit.key.tombstoned",
-	[PKM_LCS_KEY_AUDIT_KEY_DELETED] = "lcs.audit.key.deleted",
-	[PKM_LCS_KEY_AUDIT_KEY_HIDDEN] = "lcs.audit.key.hidden",
-	[PKM_LCS_KEY_AUDIT_KEY_CREATED] = "lcs.audit.key.created",
+/* The kernel event type of each registry write record. */
+static const enum pkm_kmes_event_id pkm_lcs_key_audit_event_ids[] = {
+	[PKM_LCS_KEY_AUDIT_VALUE_SET] = PKM_KMES_EV_LCS_AUDIT_VALUE_SET,
+	[PKM_LCS_KEY_AUDIT_VALUE_DELETED] = PKM_KMES_EV_LCS_AUDIT_VALUE_DELETED,
+	[PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED] =
+		PKM_KMES_EV_LCS_AUDIT_KEY_TOMBSTONED,
+	[PKM_LCS_KEY_AUDIT_KEY_DELETED] = PKM_KMES_EV_LCS_AUDIT_KEY_DELETED,
+	[PKM_LCS_KEY_AUDIT_KEY_HIDDEN] = PKM_KMES_EV_LCS_AUDIT_KEY_HIDDEN,
+	[PKM_LCS_KEY_AUDIT_KEY_CREATED] = PKM_KMES_EV_LCS_AUDIT_KEY_CREATED,
 	[PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED] =
-		"lcs.audit.key.descriptor.changed",
+		PKM_KMES_EV_LCS_AUDIT_KEY_DESCRIPTOR_CHANGED,
 };
-static const char pkm_lcs_transaction_committed_event_type[] =
-	"lcs.audit.transaction.committed";
+static const char * const pkm_lcs_key_audit_event_types[] = {
+	[PKM_LCS_KEY_AUDIT_VALUE_SET] = PKM_KMES_EV_LCS_AUDIT_VALUE_SET_TYPE,
+	[PKM_LCS_KEY_AUDIT_VALUE_DELETED] =
+		PKM_KMES_EV_LCS_AUDIT_VALUE_DELETED_TYPE,
+	[PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED] =
+		PKM_KMES_EV_LCS_AUDIT_KEY_TOMBSTONED_TYPE,
+	[PKM_LCS_KEY_AUDIT_KEY_DELETED] = PKM_KMES_EV_LCS_AUDIT_KEY_DELETED_TYPE,
+	[PKM_LCS_KEY_AUDIT_KEY_HIDDEN] = PKM_KMES_EV_LCS_AUDIT_KEY_HIDDEN_TYPE,
+	[PKM_LCS_KEY_AUDIT_KEY_CREATED] = PKM_KMES_EV_LCS_AUDIT_KEY_CREATED_TYPE,
+	[PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED] =
+		PKM_KMES_EV_LCS_AUDIT_KEY_DESCRIPTOR_CHANGED_TYPE,
+};
+static_assert(ARRAY_SIZE(pkm_lcs_key_audit_event_ids) ==
+	      ARRAY_SIZE(pkm_lcs_key_audit_event_types));
 
 static long pkm_lcs_build_audit_caller_summary(
 	const void *token, struct pkm_lcs_audit_caller_summary *caller)
@@ -174,6 +180,8 @@ long pkm_lcs_emit_key_open_audit_for_token(
 	u8 *payload;
 	long ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_AUDIT_KEY_OPENED))
+		return 0;
 	if (!token || !key_guid || !plan)
 		return -EINVAL;
 	if (!plan->key_open_sacl_audit_required)
@@ -214,8 +222,9 @@ long pkm_lcs_emit_key_open_audit_for_token(
 		return -EIO;
 	}
 
-	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, pkm_lcs_key_open_audit_event_type,
-			     sizeof(pkm_lcs_key_open_audit_event_type) - 1,
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
+			     PKM_KMES_EV_LCS_AUDIT_KEY_OPENED_TYPE,
+			     sizeof(PKM_KMES_EV_LCS_AUDIT_KEY_OPENED_TYPE) - 1,
 			     payload, written);
 	trace_lcs_audit_emit(LCS_AUDIT_KEY_OPEN, key_guid, 0,
 			     plan->allowed ? 1U : 0U, 0);
@@ -255,6 +264,8 @@ long pkm_lcs_emit_backup_start_audit_for_token(
 	u8 *payload;
 	long ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_AUDIT_BACKUP_STARTED))
+		return 0;
 	if (!token || !key_guid)
 		return -EINVAL;
 	if (pkm_lcs_kunit_start_audit_should_fail())
@@ -284,8 +295,9 @@ long pkm_lcs_emit_backup_start_audit_for_token(
 		return -EIO;
 	}
 
-	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, pkm_lcs_backup_start_event_type,
-			     sizeof(pkm_lcs_backup_start_event_type) - 1,
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
+			     PKM_KMES_EV_LCS_AUDIT_BACKUP_STARTED_TYPE,
+			     sizeof(PKM_KMES_EV_LCS_AUDIT_BACKUP_STARTED_TYPE) - 1,
 			     payload, written);
 	trace_lcs_audit_emit(LCS_AUDIT_BACKUP_START, key_guid, 0, 0, 0);
 	kfree(payload);
@@ -301,6 +313,8 @@ long pkm_lcs_emit_backup_complete_audit_for_token(
 	u8 *payload;
 	long ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_AUDIT_BACKUP_ENDED))
+		return 0;
 	if (!token || !key_guid)
 		return -EINVAL;
 
@@ -330,8 +344,8 @@ long pkm_lcs_emit_backup_complete_audit_for_token(
 	}
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
-			     pkm_lcs_backup_complete_event_type,
-			     sizeof(pkm_lcs_backup_complete_event_type) - 1,
+			     PKM_KMES_EV_LCS_AUDIT_BACKUP_ENDED_TYPE,
+			     sizeof(PKM_KMES_EV_LCS_AUDIT_BACKUP_ENDED_TYPE) - 1,
 			     payload, written);
 	trace_lcs_audit_emit(LCS_AUDIT_BACKUP_COMPLETE, key_guid, result_errno,
 			     0, 0);
@@ -348,6 +362,8 @@ long pkm_lcs_emit_restore_start_audit_for_token(
 	u8 *payload;
 	long ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_AUDIT_RESTORE_STARTED))
+		return 0;
 	if (!token || !key_guid)
 		return -EINVAL;
 	if (pkm_lcs_kunit_start_audit_should_fail())
@@ -377,8 +393,9 @@ long pkm_lcs_emit_restore_start_audit_for_token(
 		return -EIO;
 	}
 
-	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, pkm_lcs_restore_start_event_type,
-			     sizeof(pkm_lcs_restore_start_event_type) - 1,
+	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
+			     PKM_KMES_EV_LCS_AUDIT_RESTORE_STARTED_TYPE,
+			     sizeof(PKM_KMES_EV_LCS_AUDIT_RESTORE_STARTED_TYPE) - 1,
 			     payload, written);
 	trace_lcs_audit_emit(LCS_AUDIT_RESTORE_START, key_guid, 0, 0, 0);
 	kfree(payload);
@@ -394,6 +411,8 @@ long pkm_lcs_emit_restore_complete_audit_for_token(
 	u8 *payload;
 	long ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_AUDIT_RESTORE_ENDED))
+		return 0;
 	if (!token || !key_guid)
 		return -EINVAL;
 
@@ -423,8 +442,8 @@ long pkm_lcs_emit_restore_complete_audit_for_token(
 	}
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
-			     pkm_lcs_restore_complete_event_type,
-			     sizeof(pkm_lcs_restore_complete_event_type) - 1,
+			     PKM_KMES_EV_LCS_AUDIT_RESTORE_ENDED_TYPE,
+			     sizeof(PKM_KMES_EV_LCS_AUDIT_RESTORE_ENDED_TYPE) - 1,
 			     payload, written);
 	trace_lcs_audit_emit(LCS_AUDIT_RESTORE_COMPLETE, key_guid, result_errno,
 			     0, 0);
@@ -443,6 +462,8 @@ long pkm_lcs_emit_source_validation_failure_audit(
 	u8 *payload;
 	int ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_SOURCE_RESPONSE_REJECTED))
+		return 0;
 	if (!source_id)
 		return -EINVAL;
 	if (hive_name_present && (!hive_name || !hive_name_len))
@@ -484,8 +505,8 @@ long pkm_lcs_emit_source_validation_failure_audit(
 	}
 
 	pkm_kmes_emit_kernel(
-		KMES_ORIGIN_LCS, pkm_lcs_source_validation_failure_event_type,
-		sizeof(pkm_lcs_source_validation_failure_event_type) - 1,
+		KMES_ORIGIN_LCS, PKM_KMES_EV_LCS_SOURCE_RESPONSE_REJECTED_TYPE,
+		sizeof(PKM_KMES_EV_LCS_SOURCE_RESPONSE_REJECTED_TYPE) - 1,
 		payload, written);
 	trace_lcs_audit_emit(LCS_AUDIT_VALIDATION_FAILURE,
 			     key_guid_present ? key_guid : NULL,
@@ -504,6 +525,8 @@ long pkm_lcs_emit_self_config_invalid_audit(
 	u8 *payload;
 	int ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_CONFIG_VALUE_REJECTED))
+		return 0;
 	if (!configuration_name || !configuration_name_len)
 		return -EINVAL;
 	switch (received_kind) {
@@ -549,8 +572,8 @@ long pkm_lcs_emit_self_config_invalid_audit(
 	}
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
-			     pkm_lcs_self_config_invalid_event_type,
-			     sizeof(pkm_lcs_self_config_invalid_event_type) - 1,
+			     PKM_KMES_EV_LCS_CONFIG_VALUE_REJECTED_TYPE,
+			     sizeof(PKM_KMES_EV_LCS_CONFIG_VALUE_REJECTED_TYPE) - 1,
 			     payload, written);
 	trace_lcs_audit_emit(LCS_AUDIT_SELF_CONFIG_INVALID, NULL,
 			     received_kind, 0, 0);
@@ -651,6 +674,13 @@ long pkm_lcs_emit_key_audit_for_token(
 	if (record->event < PKM_LCS_KEY_AUDIT_VALUE_SET ||
 	    record->event >= ARRAY_SIZE(pkm_lcs_key_audit_event_types))
 		return -EINVAL;
+	/*
+	 * The id is read from a table, so the check does not fold at compile
+	 * time; pkm_kmes_event_tier() still answers essential without reading
+	 * the policy.
+	 */
+	if (!pkm_kmes_event_enabled(pkm_lcs_key_audit_event_ids[record->event]))
+		return 0;
 	event_type = pkm_lcs_key_audit_event_types[record->event];
 
 	ret = pkm_lcs_build_audit_caller_summary(token, &caller);
@@ -740,6 +770,8 @@ long pkm_lcs_emit_transaction_committed_audit(
 	u8 *payload;
 	int ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_LCS_AUDIT_TRANSACTION_COMMITTED))
+		return 0;
 	if (!snapshot || !snapshot->user_sid || !snapshot->user_sid_len)
 		return -EINVAL;
 
@@ -771,10 +803,10 @@ long pkm_lcs_emit_transaction_committed_audit(
 		return -EIO;
 	}
 
-	pkm_kmes_emit_kernel(KMES_ORIGIN_LCS,
-			     pkm_lcs_transaction_committed_event_type,
-			     sizeof(pkm_lcs_transaction_committed_event_type) - 1,
-			     payload, written);
+	pkm_kmes_emit_kernel(
+		KMES_ORIGIN_LCS, PKM_KMES_EV_LCS_AUDIT_TRANSACTION_COMMITTED_TYPE,
+		sizeof(PKM_KMES_EV_LCS_AUDIT_TRANSACTION_COMMITTED_TYPE) - 1,
+		payload, written);
 	kfree(payload);
 	return 0;
 }

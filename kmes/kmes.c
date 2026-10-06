@@ -74,10 +74,6 @@
 /* attach_core's out-param for a call that opens no descriptor. */
 #define PKM_KMES_NO_FD (-1)
 
-static const char pkm_kmes_self_config_invalid_event_type[] =
-	"kmes.config.value.rejected";
-static const char pkm_kmes_buffer_swap_failed_event_type[] =
-	"kmes.buffer.swap.failed";
 static const char pkm_kmes_config_parent_path[] = "Machine\\System\\KMES";
 
 struct pkm_kmes_cpu_state {
@@ -1255,6 +1251,8 @@ static int pkm_kmes_emit_self_config_invalid(
 	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
 	int ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KMES_CONFIG_VALUE_REJECTED))
+		return 0;
 	if (!audit || !audit->configuration_name_len ||
 	    audit->configuration_name_len >
 		    PKM_KMES_SELF_CONFIG_MAX_PARAMETER_NAME_LEN)
@@ -1340,8 +1338,8 @@ static int pkm_kmes_emit_self_config_invalid(
 		return ret;
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_KMES,
-			     pkm_kmes_self_config_invalid_event_type,
-			     sizeof(pkm_kmes_self_config_invalid_event_type) - 1,
+			     PKM_KMES_EV_KMES_CONFIG_VALUE_REJECTED_TYPE,
+			     sizeof(PKM_KMES_EV_KMES_CONFIG_VALUE_REJECTED_TYPE) - 1,
 			     payload, writer.pos - payload);
 	return 0;
 }
@@ -1357,6 +1355,8 @@ static int pkm_kmes_emit_buffer_swap_failed(u64 requested_capacity,
 	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
 	int ret;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KMES_BUFFER_SWAP_FAILED))
+		return 0;
 	writer.pos = payload;
 	writer.end = payload + sizeof(payload);
 	ret = pkm_kmes_msgpack_write_map_len(&writer, 2);
@@ -1394,8 +1394,8 @@ static int pkm_kmes_emit_buffer_swap_failed(u64 requested_capacity,
 		return ret;
 
 	pkm_kmes_emit_kernel(KMES_ORIGIN_KMES,
-			     pkm_kmes_buffer_swap_failed_event_type,
-			     sizeof(pkm_kmes_buffer_swap_failed_event_type) - 1,
+			     PKM_KMES_EV_KMES_BUFFER_SWAP_FAILED_TYPE,
+			     sizeof(PKM_KMES_EV_KMES_BUFFER_SWAP_FAILED_TYPE) - 1,
 			     payload, writer.pos - payload);
 	return 0;
 }
@@ -1411,6 +1411,8 @@ void pkm_kmes_emit_config_refresh_failed(const char *key_path,
 	struct pkm_kmes_msgpack_writer writer;
 	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KMES_CONFIG_REFRESH_FAILED))
+		return;
 	if (!key_path || !key_path_len || !error)
 		return;
 
@@ -1447,12 +1449,16 @@ static int pkm_kmes_emit_config_applied(
 {
 	struct pkm_kmes_msgpack_writer writer;
 	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
-	u64 capacity = READ_ONCE(pkm_kmes_active_buffer_capacity);
-	u32 rate = READ_ONCE(pkm_kmes_active_max_emit_rate_per_process);
+	u64 capacity;
+	u32 rate;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KMES_CONFIG_APPLIED))
+		return 0;
 	if (!plan)
 		return -EINVAL;
 
+	capacity = READ_ONCE(pkm_kmes_active_buffer_capacity);
+	rate = READ_ONCE(pkm_kmes_active_max_emit_rate_per_process);
 	writer.pos = payload;
 	writer.end = payload + sizeof(payload);
 	if (pkm_kmes_msgpack_write_map_len(&writer, 3) ||

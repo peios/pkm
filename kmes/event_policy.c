@@ -30,6 +30,12 @@
  * about 50 ms plus one walk, however busy the tree is.
  */
 
+/*
+ * Before any include: kmes.h brings in event_types.h too, and its include
+ * guard would otherwise shut the tables out of this file.
+ */
+#define PKM_KMES_EVENT_TYPES_WANT_TABLES
+
 #include <linux/atomic.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -44,8 +50,6 @@
 #include "../lcs/rsi.h"
 #include "../lcs/source_device.h"
 #include "kmes.h"
-
-#define PKM_KMES_EVENT_TYPES_WANT_TABLES
 #include "event_policy.h"
 
 /* Quiet time after the first change of a burst before the re-walk runs. */

@@ -14,6 +14,7 @@
 
 #include <pkm/token.h>
 
+#include "../kmes/event_policy.h"
 #include "access_check.h"
 #include "capability.h"
 #include "copy_up.h"
@@ -376,6 +377,9 @@ bool pkm_kacs_note_privilege_use(const struct cred *cred, unsigned int bit,
 	u8 guid[KACS_UUID_BYTES];
 	const void *token;
 
+	/* The policy first: noting a use claims it and queues task work. */
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_AUDIT_PRIVILEGE_USED))
+		return false;
 	if (!held || (opts & CAP_OPT_NOAUDIT) || bit > PKM_KACS_PRIV_USE_VOLUME_BIT)
 		return false;
 	if (!in_task() || (current->flags & PF_KTHREAD) || !current->security)

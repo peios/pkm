@@ -24,6 +24,7 @@
 #include <pkm/sd.h>
 #include <pkm/token.h>
 
+#include "../kmes/event_policy.h"
 #include "access_check.h"
 #include "caap_cache.h"
 #include "file_access.h"
@@ -66,6 +67,8 @@ bool pkm_kacs_descriptor_change_audited(u32 security_info, u32 requested,
  */
 void pkm_kacs_audit_descriptor_changed(struct pkm_kacs_sd_change_view *chg)
 {
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_AUDIT_DESCRIPTOR_CHANGED))
+		return;
 	if (!chg || !chg->subject_token)
 		return;
 	if (chg->old_sd && chg->old_sd_len)
@@ -999,6 +1002,9 @@ static void pkm_kacs_audit_file_sd_change(
 	};
 	char *path_buf = NULL;
 
+	/* The policy first: the path is resolved for the record alone. */
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_AUDIT_DESCRIPTOR_CHANGED))
+		return;
 	if ((file->f_mode & FMODE_OPENED) && file->f_path.mnt &&
 	    file->f_path.dentry)
 		path_buf = kmalloc(PATH_MAX, GFP_KERNEL);

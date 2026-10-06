@@ -47,6 +47,9 @@ use crate::condition::ConditionalContext;
 use crate::error::KacsError;
 use crate::lcs_core::casefold_eq;
 use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
+// The emission policy: each `kacs_rust_emit_*` entry asks it first, before it
+// resolves the subject or builds anything (kmes/event_types.rs).
+use crate::kmes_event_types::{self, enabled as kmes_event_enabled};
 use crate::kmes_payload::{
     emit_access_check_events_to_kmes, emit_gate_privilege_use_to_kmes, emit_handle_used_to_kmes,
     emit_impersonation_reverted_to_kmes, emit_impersonation_started_to_kmes,
@@ -8756,6 +8759,10 @@ fn emit_file_set_sd_audit_events(
     desired: u32,
     pip: PipContext,
 ) -> Result<(), i32> {
+    // The policy first: the SACL walk below exists only for the records.
+    if !kmes_event_enabled(&kmes_event_types::KACS_AUDIT_ACCESS_CHECKED) {
+        return Ok(());
+    }
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return Err(-EACCES);
     };
@@ -9703,6 +9710,9 @@ pub extern "C" fn kacs_rust_emit_impersonation_started(
     pip_type: u32,
     pip_trust: u32,
 ) -> i32 {
+    if !kmes_event_enabled(&kmes_event_types::KACS_IMPERSONATION_STARTED) {
+        return 0;
+    }
     let Some(server) = (unsafe { PkmKacsBootToken::from_ptr(server_token) }) else {
         return -EINVAL;
     };
@@ -9806,6 +9816,9 @@ fn descriptor_facts<'a>(
 pub extern "C" fn kacs_rust_emit_descriptor_changed(chg: *const PkmKacsSdChangeView) -> i32 {
     use crate::kmes_payload::{DescriptorChange, DescriptorObject};
 
+    if !kmes_event_enabled(&kmes_event_types::KACS_AUDIT_DESCRIPTOR_CHANGED) {
+        return 0;
+    }
     let Some(chg) = (unsafe { chg.as_ref() }) else {
         return -EINVAL;
     };
@@ -9887,6 +9900,9 @@ pub extern "C" fn kacs_rust_emit_caap_policy_changed(
     pip_type: u32,
     pip_trust: u32,
 ) -> i32 {
+    if !kmes_event_enabled(&kmes_event_types::KACS_CAAP_POLICY_CHANGED) {
+        return 0;
+    }
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
         return -EINVAL;
     };
@@ -9925,6 +9941,9 @@ pub extern "C" fn kacs_rust_emit_mount_policy_changed(
     pip_type: u32,
     pip_trust: u32,
 ) -> i32 {
+    if !kmes_event_enabled(&kmes_event_types::KACS_MOUNT_POLICY_CHANGED) {
+        return 0;
+    }
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
         return -EINVAL;
     };
@@ -9963,6 +9982,9 @@ pub extern "C" fn kacs_rust_emit_descriptor_rejected(
     pip_type: u32,
     pip_trust: u32,
 ) -> i32 {
+    if !kmes_event_enabled(&kmes_event_types::KACS_DESCRIPTOR_REJECTED) {
+        return 0;
+    }
     let result = match unsafe { PkmKacsBootToken::from_ptr(token) } {
         Some(token) => {
             let ids = token.audit_subject_ids();
@@ -10035,6 +10057,9 @@ pub extern "C" fn kacs_rust_emit_privilege_use(
     pip_type: u32,
     pip_trust: u32,
 ) -> i32 {
+    if !kmes_event_enabled(&kmes_event_types::KACS_AUDIT_PRIVILEGE_USED) {
+        return 0;
+    }
     let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
         return -EINVAL;
     };
@@ -10074,6 +10099,9 @@ pub extern "C" fn kacs_rust_emit_impersonation_reverted(
     pip_type: u32,
     pip_trust: u32,
 ) -> i32 {
+    if !kmes_event_enabled(&kmes_event_types::KACS_IMPERSONATION_REVERTED) {
+        return 0;
+    }
     let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
         return -EINVAL;
     };
@@ -11348,6 +11376,9 @@ pub extern "C" fn kacs_rust_emit_file_continuous_audit(
     success: u8,
     reason: u8,
 ) -> i32 {
+    if !kmes_event_enabled(&kmes_event_types::KACS_AUDIT_HANDLE_USED) {
+        return 0;
+    }
     if subject_token_ptr.is_null()
         || operation_ptr.is_null()
         || operation_len == 0

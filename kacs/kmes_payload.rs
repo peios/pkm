@@ -27,19 +27,22 @@ const ENOMEM: c_long = -12;
 const ERANGE: c_long = -34;
 
 const KMES_ORIGIN_KACS: u8 = 2;
-const ACCESS_CHECKED_TYPE: &[u8] = b"kacs.audit.access.checked";
-const HANDLE_USED_TYPE: &[u8] = b"kacs.audit.handle.used";
-const PRIVILEGE_USED_TYPE: &[u8] = b"kacs.audit.privilege.used";
-const CAAP_SACL_SKIPPED_TYPE: &[u8] = b"kacs.caap.sacl.skipped";
-const CAAP_STAGING_DIVERGED_TYPE: &[u8] = b"kacs.caap.staging.diverged";
-const SESSION_DESTROYED_TYPE: &[u8] = b"kacs.session.destroyed";
-const IMPERSONATION_STARTED_TYPE: &[u8] = b"kacs.impersonation.started";
-const IMPERSONATION_REVERTED_TYPE: &[u8] = b"kacs.impersonation.reverted";
-const DESCRIPTOR_CHANGED_TYPE: &[u8] = b"kacs.audit.descriptor.changed";
-const DESCRIPTOR_REJECTED_TYPE: &[u8] = b"kacs.descriptor.rejected";
-const CAAP_POLICY_CHANGED_TYPE: &[u8] = b"kacs.caap.policy.changed";
-const MOUNT_POLICY_CHANGED_TYPE: &[u8] = b"kacs.mount.policy.changed";
-const CONFIG_VALUE_REJECTED_TYPE: &[u8] = b"kacs.config.value.rejected";
+// The event types, ids and tiers come from the generated table
+// (kmes/event_types.rs). Every emitter here asks `enabled()` before it
+// builds anything, so a type the emission policy switches off costs one
+// check; an essential type's check folds to `true`.
+use crate::kmes_event_types::{
+    enabled, EventType, KACS_AUDIT_ACCESS_CHECKED as ACCESS_CHECKED,
+    KACS_AUDIT_DESCRIPTOR_CHANGED as DESCRIPTOR_CHANGED, KACS_AUDIT_HANDLE_USED as HANDLE_USED,
+    KACS_AUDIT_PRIVILEGE_USED as PRIVILEGE_USED, KACS_CAAP_POLICY_CHANGED as CAAP_POLICY_CHANGED,
+    KACS_CAAP_SACL_SKIPPED as CAAP_SACL_SKIPPED,
+    KACS_CAAP_STAGING_DIVERGED as CAAP_STAGING_DIVERGED,
+    KACS_CONFIG_VALUE_REJECTED as CONFIG_VALUE_REJECTED,
+    KACS_DESCRIPTOR_REJECTED as DESCRIPTOR_REJECTED,
+    KACS_IMPERSONATION_REVERTED as IMPERSONATION_REVERTED,
+    KACS_IMPERSONATION_STARTED as IMPERSONATION_STARTED,
+    KACS_MOUNT_POLICY_CHANGED as MOUNT_POLICY_CHANGED, KACS_SESSION_DESTROYED as SESSION_DESTROYED,
+};
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -450,6 +453,9 @@ pub(crate) fn emit_gate_privilege_use_to_kmes(
     gate: PrivilegeGate,
     privilege: u64,
 ) -> Result<(), c_long> {
+    if !enabled(&PRIVILEGE_USED) {
+        return Ok(());
+    }
     let name = privilege_name(privilege)?;
     let (operation, cap): (&[u8], Option<&[u8]>) = match gate {
         PrivilegeGate::LinuxCap(cap) => (b"linux-cap", Some(linux_cap_name(cap).ok_or(EIO)?)),
@@ -485,7 +491,7 @@ pub(crate) fn emit_gate_privilege_use_to_kmes(
     writer.write_key(b"success")?;
     writer.write_bool(true)?;
 
-    emit(PRIVILEGE_USED_TYPE, writer.into_vec().as_slice());
+    emit(&PRIVILEGE_USED, writer.into_vec().as_slice());
     Ok(())
 }
 
@@ -809,12 +815,20 @@ fn write_staged_access(
     writer.write_u64(u64::from(event.staged_granted))
 }
 
+/// The event type a CAAP diagnostic is written under.
+fn caap_event_type(kind: &CaapDiagnosticKind) -> &'static EventType {
+    match kind {
+        CaapDiagnosticKind::SaclError => &CAAP_SACL_SKIPPED,
+        CaapDiagnosticKind::StagingMismatch => &CAAP_STAGING_DIVERGED,
+    }
+}
+
 /// `kacs.caap.sacl.skipped` or `kacs.caap.staging.diverged`, with the event
 /// type it is written under.
 fn encode_caap_payload(
     event: &CaapDiagnosticEvent,
     maps: &CheckMaps,
-) -> Result<(&'static [u8], Vec<u8>), c_long> {
+) -> Result<(&'static EventType, Vec<u8>), c_long> {
     let mut writer = MsgpackWriter::with_capacity(512)?;
 
     match event.kind {
@@ -844,14 +858,14 @@ fn encode_caap_payload(
             writer.write_str(event.reason.as_bytes())?;
             write_staged_access(&mut writer, event)?;
             maps.write_tail(&mut writer)?;
-            Ok((CAAP_SACL_SKIPPED_TYPE, writer.into_vec()))
+            Ok((&CAAP_SACL_SKIPPED, writer.into_vec()))
         }
         CaapDiagnosticKind::StagingMismatch => {
             writer.write_map_len(maps.common_len() + 1)?;
             maps.write_head(&mut writer)?;
             write_staged_access(&mut writer, event)?;
             maps.write_tail(&mut writer)?;
-            Ok((CAAP_STAGING_DIVERGED_TYPE, writer.into_vec()))
+            Ok((&CAAP_STAGING_DIVERGED, writer.into_vec()))
         }
     }
 }
@@ -1099,6 +1113,9 @@ pub(crate) fn emit_impersonation_started_to_kmes(
     errno: i32,
     reason: Option<&[u8]>,
 ) -> Result<(), c_long> {
+    if !enabled(&IMPERSONATION_STARTED) {
+        return Ok(());
+    }
     let process_info = load_process_info()?;
     let emitter_map = encode_emitter_thread_map(&process_info, tid)?;
     let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
@@ -1110,7 +1127,7 @@ pub(crate) fn emit_impersonation_started_to_kmes(
         reason,
     )?;
 
-    emit(IMPERSONATION_STARTED_TYPE, payload.as_slice());
+    emit(&IMPERSONATION_STARTED, payload.as_slice());
     Ok(())
 }
 
@@ -1125,6 +1142,9 @@ pub(crate) fn emit_config_value_rejected_to_kmes(
     errno: i32,
     fallback: bool,
 ) -> Result<(), c_long> {
+    if !enabled(&CONFIG_VALUE_REJECTED) {
+        return Ok(());
+    }
     // A value name is an arbitrary registry string: sanitise, never refuse.
     let name = match name {
         Some(name) => {
@@ -1163,7 +1183,7 @@ pub(crate) fn emit_config_value_rejected_to_kmes(
     writer.write_key(b"fallback")?;
     writer.write_bool(fallback)?;
 
-    emit(CONFIG_VALUE_REJECTED_TYPE, writer.into_vec().as_slice());
+    emit(&CONFIG_VALUE_REJECTED, writer.into_vec().as_slice());
     Ok(())
 }
 
@@ -1190,6 +1210,9 @@ pub(crate) fn emit_caap_policy_changed_to_kmes(
     removed: bool,
     errno: i32,
 ) -> Result<(), c_long> {
+    if !enabled(&CAAP_POLICY_CHANGED) {
+        return Ok(());
+    }
     let (subject, emitter) = actor_maps(token, subject_ids, effective_pip)?;
     let mut writer =
         MsgpackWriter::with_capacity(160 + subject.len() + emitter.len() + policy_sid.len())?;
@@ -1211,7 +1234,7 @@ pub(crate) fn emit_caap_policy_changed_to_kmes(
     writer.write_str(if removed { b"remove" } else { b"set" })?;
     write_outcome(&mut writer, errno, None)?;
 
-    emit(CAAP_POLICY_CHANGED_TYPE, writer.into_vec().as_slice());
+    emit(&CAAP_POLICY_CHANGED, writer.into_vec().as_slice());
     Ok(())
 }
 
@@ -1238,6 +1261,9 @@ pub(crate) fn emit_mount_policy_changed_to_kmes(
     previous: u32,
     generation: u32,
 ) -> Result<(), c_long> {
+    if !enabled(&MOUNT_POLICY_CHANGED) {
+        return Ok(());
+    }
     let policy = mount_policy_name(policy)?;
     let previous = mount_policy_name(previous)?;
     let (subject, emitter) = actor_maps(token, subject_ids, effective_pip)?;
@@ -1266,7 +1292,7 @@ pub(crate) fn emit_mount_policy_changed_to_kmes(
     writer.write_u64(u64::from(generation))?;
     write_outcome(&mut writer, 0, None)?;
 
-    emit(MOUNT_POLICY_CHANGED_TYPE, writer.into_vec().as_slice());
+    emit(&MOUNT_POLICY_CHANGED, writer.into_vec().as_slice());
     Ok(())
 }
 
@@ -1279,6 +1305,9 @@ pub(crate) fn emit_descriptor_rejected_to_kmes(
     device: u64,
     sd_len: u64,
 ) -> Result<(), c_long> {
+    if !enabled(&DESCRIPTOR_REJECTED) {
+        return Ok(());
+    }
     let maps = match actor {
         Some((token, ids, pip)) => {
             let process_info = load_process_info()?;
@@ -1318,7 +1347,7 @@ pub(crate) fn emit_descriptor_rejected_to_kmes(
     writer.write_key(b"reason")?;
     writer.write_str(b"corrupt")?;
 
-    emit(DESCRIPTOR_REJECTED_TYPE, writer.into_vec().as_slice());
+    emit(&DESCRIPTOR_REJECTED, writer.into_vec().as_slice());
     Ok(())
 }
 
@@ -1443,6 +1472,9 @@ pub(crate) fn emit_descriptor_changed_to_kmes(
     effective_pip: PipContext,
     change: &DescriptorChange<'_>,
 ) -> Result<(), c_long> {
+    if !enabled(&DESCRIPTOR_CHANGED) {
+        return Ok(());
+    }
     // A file name is an arbitrary byte string: sanitise, as for handle use.
     let sanitized = match &change.object {
         DescriptorObject::File { path: Some(path) } => {
@@ -1511,7 +1543,7 @@ pub(crate) fn emit_descriptor_changed_to_kmes(
     }
     write_outcome(&mut writer, change.errno, None)?;
 
-    emit(DESCRIPTOR_CHANGED_TYPE, writer.into_vec().as_slice());
+    emit(&DESCRIPTOR_CHANGED, writer.into_vec().as_slice());
     Ok(())
 }
 
@@ -1527,6 +1559,9 @@ pub(crate) fn emit_impersonation_reverted_to_kmes(
     operation: &[u8],
     errno: i32,
 ) -> Result<(), c_long> {
+    if !enabled(&IMPERSONATION_REVERTED) {
+        return Ok(());
+    }
     let process_info = load_process_info()?;
     let emitter_map = encode_emitter_thread_map(&process_info, tid)?;
     let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
@@ -1555,7 +1590,7 @@ pub(crate) fn emit_impersonation_reverted_to_kmes(
     writer.write_str(operation)?;
     write_outcome(&mut writer, errno, None)?;
 
-    emit(IMPERSONATION_REVERTED_TYPE, writer.into_vec().as_slice());
+    emit(&IMPERSONATION_REVERTED, writer.into_vec().as_slice());
     Ok(())
 }
 
@@ -1597,12 +1632,13 @@ pub(crate) fn encode_logon_session_destroyed_payload(
     Ok(writer.into_vec())
 }
 
-fn emit(event_type: &[u8], payload: &[u8]) {
+/// Writes one record of `event`. The caller has already asked `enabled()`.
+fn emit(event: &EventType, payload: &[u8]) {
     unsafe {
         pkm_kmes_emit_kernel(
             KMES_ORIGIN_KACS,
-            event_type.as_ptr().cast(),
-            event_type.len(),
+            event.name.as_ptr().cast(),
+            event.name.len(),
             payload.as_ptr().cast(),
             payload.len(),
         );
@@ -1617,10 +1653,18 @@ pub(crate) fn emit_access_check_events_to_kmes(
     effective_pip: PipContext,
     target: &AuditTarget<'_>,
 ) -> Result<(), c_long> {
-    if audit_events.is_empty()
-        && privilege_use_events.is_empty()
-        && caap_diagnostic_events.is_empty()
-    {
+    // The policy first, per type: a list whose type is switched off is
+    // dropped before the shared maps are built, and with nothing left to
+    // write nothing is built at all.
+    let audit_events = if enabled(&ACCESS_CHECKED) { audit_events } else { &[] };
+    let privilege_use_events = if enabled(&PRIVILEGE_USED) {
+        privilege_use_events
+    } else {
+        &[]
+    };
+    let caap_wanted = |event: &CaapDiagnosticEvent| enabled(caap_event_type(&event.kind));
+    let any_caap = caap_diagnostic_events.iter().any(caap_wanted);
+    if audit_events.is_empty() && privilege_use_events.is_empty() && !any_caap {
         return Ok(());
     }
 
@@ -1635,7 +1679,7 @@ pub(crate) fn emit_access_check_events_to_kmes(
 
     for event in privilege_use_events {
         let payload = encode_privilege_used_payload(event, &maps)?;
-        emit(PRIVILEGE_USED_TYPE, payload.as_slice());
+        emit(&PRIVILEGE_USED, payload.as_slice());
     }
 
     for event in audit_events {
@@ -1643,12 +1687,14 @@ pub(crate) fn emit_access_check_events_to_kmes(
             continue;
         }
         let payload = encode_access_checked_payload(event, &maps)?;
-        emit(ACCESS_CHECKED_TYPE, payload.as_slice());
+        emit(&ACCESS_CHECKED, payload.as_slice());
     }
 
-    for event in caap_diagnostic_events {
-        let (event_type, payload) = encode_caap_payload(event, &maps)?;
-        emit(event_type, payload.as_slice());
+    if any_caap {
+        for event in caap_diagnostic_events.iter().filter(|event| caap_wanted(*event)) {
+            let (event_type, payload) = encode_caap_payload(event, &maps)?;
+            emit(event_type, payload.as_slice());
+        }
     }
 
     Ok(())
@@ -1660,6 +1706,9 @@ pub(crate) fn emit_handle_used_to_kmes(
     effective_pip: PipContext,
     handle: &HandleUse<'_>,
 ) -> Result<(), c_long> {
+    if !enabled(&HANDLE_USED) {
+        return Ok(());
+    }
     let process_info = load_process_info()?;
     let emitter_map = encode_emitter_map(&process_info)?;
     let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
@@ -1680,7 +1729,7 @@ pub(crate) fn emit_handle_used_to_kmes(
     let payload =
         encode_handle_used_payload(subject_map.as_slice(), emitter_map.as_slice(), &handle)?;
 
-    emit(HANDLE_USED_TYPE, payload.as_slice());
+    emit(&HANDLE_USED, payload.as_slice());
     Ok(())
 }
 
@@ -1691,6 +1740,9 @@ pub(crate) fn emit_logon_session_destroyed_to_kmes(
     auth_package: &[u8],
     created_at: u64,
 ) -> Result<(), c_long> {
+    if !enabled(&SESSION_DESTROYED) {
+        return Ok(());
+    }
     let payload = encode_logon_session_destroyed_payload(
         session_id,
         user_sid,
@@ -1699,6 +1751,6 @@ pub(crate) fn emit_logon_session_destroyed_to_kmes(
         created_at,
     )?;
 
-    emit(SESSION_DESTROYED_TYPE, payload.as_slice());
+    emit(&SESSION_DESTROYED, payload.as_slice());
     Ok(())
 }

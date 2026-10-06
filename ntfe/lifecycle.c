@@ -174,6 +174,9 @@ void peios_ntfe_policy_published_emit(u64 generation, u64 generation_previous,
 	struct ntfe_lc_mp m = { .buf = payload, .cap = sizeof(payload) };
 	unsigned int i;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_NTFE_POLICY_PUBLISHED))
+		return;
+
 	lc_map(&m, 1);
 	lc_cstr(&m, "policy");
 	lc_map(&m, 5);
@@ -189,9 +192,10 @@ void peios_ntfe_policy_published_emit(u64 generation, u64 generation_previous,
 
 	if (m.overflow)
 		return;	/* cannot happen at this size; never emit a lie */
-	pkm_kmes_emit_kernel(KMES_ORIGIN_NTFE, PEIOS_NTFE_EV_POLICY_PUBLISHED,
-			     sizeof(PEIOS_NTFE_EV_POLICY_PUBLISHED) - 1, payload,
-			     m.len);
+	pkm_kmes_emit_kernel(KMES_ORIGIN_NTFE,
+			     PKM_KMES_EV_NTFE_POLICY_PUBLISHED_TYPE,
+			     sizeof(PKM_KMES_EV_NTFE_POLICY_PUBLISHED_TYPE) - 1,
+			     payload, m.len);
 }
 
 int peios_ntfe_policy_rejected_emit(const struct peios_ntfe_build_why *why,
@@ -207,6 +211,9 @@ int peios_ntfe_policy_rejected_emit(const struct peios_ntfe_build_why *why,
 	size_t reason_len = strnlen(why->reason, sizeof(why->reason));
 	size_t action_len = strnlen(why->action_error,
 				    sizeof(why->action_error));
+
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_NTFE_POLICY_REJECTED))
+		return 0;
 
 	lc_map(&m, 2 + (has_rule ? 1 : 0));
 
@@ -268,8 +275,9 @@ int peios_ntfe_policy_rejected_emit(const struct peios_ntfe_build_why *why,
 
 	if (m.overflow)
 		return -EOVERFLOW;	/* cannot happen at these sizes */
-	pkm_kmes_emit_kernel(KMES_ORIGIN_NTFE, PEIOS_NTFE_EV_POLICY_REJECTED,
-			     sizeof(PEIOS_NTFE_EV_POLICY_REJECTED) - 1, payload,
-			     m.len);
+	pkm_kmes_emit_kernel(KMES_ORIGIN_NTFE,
+			     PKM_KMES_EV_NTFE_POLICY_REJECTED_TYPE,
+			     sizeof(PKM_KMES_EV_NTFE_POLICY_REJECTED_TYPE) - 1,
+			     payload, m.len);
 	return m.len;
 }

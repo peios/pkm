@@ -13,6 +13,7 @@
 #include <linux/task_work.h>
 #include <linux/types.h>
 
+#include "../kmes/event_policy.h"
 #include "access_check.h"
 #include "capability.h"
 #include "cred_lifecycle.h"
@@ -181,10 +182,13 @@ static long pkm_kacs_revert_current_impersonation(void)
 static void pkm_kacs_audit_impersonation_reverted(const void *dropped,
 						  u32 cause, long err)
 {
-	const void *subject = pkm_kacs_current_effective_token_ptr();
+	const void *subject;
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_IMPERSONATION_REVERTED))
+		return;
+	subject = pkm_kacs_current_effective_token_ptr();
 	if (!subject || !dropped)
 		return;
 	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
@@ -210,9 +214,11 @@ static long pkm_kacs_revert_current_impersonation_for(u32 cause)
 
 	/*
 	 * Hold the impersonation token across the revert: dropping the
-	 * override cred below can free it, and the record names it.
+	 * override cred below can free it, and the record names it. The hold
+	 * is for the record alone, so the emission policy is asked first.
 	 */
-	if (cause != PKM_KACS_REVERT_SILENT)
+	if (cause != PKM_KACS_REVERT_SILENT &&
+	    pkm_kmes_event_enabled(PKM_KMES_EV_KACS_IMPERSONATION_REVERTED))
 		dropped = kacs_rust_token_clone(
 			pkm_kacs_current_effective_token_ptr());
 

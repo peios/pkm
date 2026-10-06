@@ -1143,7 +1143,6 @@ int pkm_kacs_signing_crypto_probe(void)
  */
 static int __init pkm_kacs_signing_crypto_announce(void)
 {
-	static const char event_type[] = "kacs.signature.crypto.failed";
 	/*
 	 * {signature: {crypto-stage: "boot-probe"}, outcome: {errno: int32}}.
 	 * The errno is the probe's own return, already negative.
@@ -1169,6 +1168,12 @@ static int __init pkm_kacs_signing_crypto_announce(void)
 	pr_err("pkm: ML-DSA signature transform unavailable (%d); every signed exec will be refused\n",
 	       ret);
 
+	/*
+	 * The probe and the console line are not the record's, so they stay
+	 * ahead of the policy; the payload is built only for a record.
+	 */
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_SIGNATURE_CRYPTO_FAILED))
+		return 0;
 	memcpy(payload, head, sizeof(head));
 	out = payload + sizeof(head);
 	*out++ = 0xd2;
@@ -1176,8 +1181,10 @@ static int __init pkm_kacs_signing_crypto_announce(void)
 	*out++ = (u32)ret >> 16;
 	*out++ = (u32)ret >> 8;
 	*out++ = (u32)ret;
-	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-			     sizeof(event_type) - 1, payload, out - payload);
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS,
+			     PKM_KMES_EV_KACS_SIGNATURE_CRYPTO_FAILED_TYPE,
+			     sizeof(PKM_KMES_EV_KACS_SIGNATURE_CRYPTO_FAILED_TYPE) - 1,
+			     payload, out - payload);
 	return 0;
 }
 late_initcall(pkm_kacs_signing_crypto_announce);

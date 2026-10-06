@@ -14,6 +14,7 @@
 
 #include <pkm/token.h>
 
+#include "../kmes/event_policy.h"
 #include "access_check.h"
 #include "capability.h"
 
@@ -302,10 +303,13 @@ static void pkm_kacs_audit_mount_policy_changed(const void *subject_token,
 						u32 previous, u32 policy,
 						u32 generation)
 {
-	const char *fs_type = sb->s_type ? sb->s_type->name : NULL;
+	const char *fs_type;
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_MOUNT_POLICY_CHANGED))
+		return;
+	fs_type = sb->s_type ? sb->s_type->name : NULL;
 	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
 		pip_type = 0;
 		pip_trust = 0;

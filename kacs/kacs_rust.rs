@@ -53,8 +53,9 @@ mod ntfe_runtime;
 #[path = "../kmes/kmes_validate.rs"]
 mod kmes_validate;
 // The kernel's event types and the emission-policy check, generated from the
-// evman fragments by tools/gen-kmes-event-table.py. No Rust emitter consults
-// it yet (that is the emitter-adoption pass), so it is dead code here for now.
+// evman fragments by tools/gen-kmes-event-table.py. The KACS emitters
+// (kmes_payload.rs, token_runtime.rs) ask it before building a record; the
+// types only C writes (kmes.*, lcs.*, ntfe.*, stratafs.*) read as dead here.
 #[allow(dead_code)]
 #[path = "../kmes/event_types.rs"]
 mod kmes_event_types;

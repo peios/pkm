@@ -281,6 +281,8 @@ static void pkm_kacs_emit_corrupt_sd_event(const struct inode *inode,
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_DESCRIPTOR_REJECTED))
+		return;
 	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
 		pip_type = 0;
 		pip_trust = 0;

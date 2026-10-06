@@ -27,7 +27,6 @@
 #include "ntfe.h"
 
 #define NTFE_REPORT_MAX_PAYLOAD	512
-#define NTFE_REPORT_EVENT_TYPE	"ntfe.verdict.reported"
 
 struct ntfe_mp {
 	u8 *buf;
@@ -234,6 +233,9 @@ void peios_ntfe_report_emit(const struct peios_ntfe_snapshot *snap,
 	size_t room, rule_map, n = rule_len;
 	bool truncated = false;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_NTFE_VERDICT_REPORTED))
+		return;
+
 	/* outcome, network, policy and rule always; source and destination
 	 * with an address family; flow when tracking applied.
 	 */
@@ -319,7 +321,9 @@ void peios_ntfe_report_emit(const struct peios_ntfe_snapshot *snap,
 		return;	/* cannot happen at these sizes; never emit a lie */
 	payload[rule_map] = 0x80 | (truncated ? 6 : 5);
 
-	pkm_kmes_emit_kernel(KMES_ORIGIN_NTFE, NTFE_REPORT_EVENT_TYPE,
-			     sizeof(NTFE_REPORT_EVENT_TYPE) - 1, payload, m.len);
+	pkm_kmes_emit_kernel(KMES_ORIGIN_NTFE,
+			     PKM_KMES_EV_NTFE_VERDICT_REPORTED_TYPE,
+			     sizeof(PKM_KMES_EV_NTFE_VERDICT_REPORTED_TYPE) - 1,
+			     payload, m.len);
 	atomic64_inc(&peios_ntfe_stats.reports_emitted);
 }

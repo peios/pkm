@@ -341,11 +341,9 @@ int peios_ntfe_policy_publish_why(void *packet_forest, void *raw_forest,
 
 /*
  * NTFE's lifecycle events (lifecycle.c), both written in process context
- * and never from the packet path. The type strings are here, together, so
- * the kernel's event table can find them.
+ * and never from the packet path. Their type strings and policy ids are the
+ * generated PKM_KMES_EV_NTFE_POLICY_* in security/pkm/kmes/event_types.h.
  */
-#define PEIOS_NTFE_EV_POLICY_PUBLISHED	"ntfe.policy.published"
-#define PEIOS_NTFE_EV_POLICY_REJECTED	"ntfe.policy.rejected"
 
 /*
  * ntfe.policy.published: a generation of rules went into force.

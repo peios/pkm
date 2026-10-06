@@ -238,14 +238,16 @@ void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 				     const char *create_stratum,
 				     int result)
 {
-	static const char event_type[] = "stratafs.file.copied-up";
 	const char *relative = relative_path ? relative_path : "";
-	size_t relative_len = strnlen(relative, PATH_MAX);
 	u8 reduced[PKM_KACS_STRATAFS_REDUCED_MAX];
+	size_t relative_len;
 	size_t provider_len;
 	size_t create_len;
 	struct pkm_kacs_mp mp = { };
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_STRATAFS_FILE_COPIED_UP))
+		return;
+	relative_len = strnlen(relative, PATH_MAX);
 	if (!provider_stratum || !create_stratum || relative_len == PATH_MAX)
 		return;
 	provider_len = strnlen(provider_stratum, PATH_MAX);
@@ -266,8 +268,10 @@ void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 			&mp, relative, relative_len, provider_index,
 			provider_stratum, provider_len, create_index,
 			create_stratum, create_len, result, false);
-		pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-				     sizeof(event_type) - 1, mp.out, mp.len);
+		pkm_kmes_emit_kernel(
+			KMES_ORIGIN_KACS, PKM_KMES_EV_STRATAFS_FILE_COPIED_UP_TYPE,
+			sizeof(PKM_KMES_EV_STRATAFS_FILE_COPIED_UP_TYPE) - 1,
+			mp.out, mp.len);
 		kfree(mp.out);
 		return;
 	}
@@ -288,8 +292,10 @@ void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 					 provider_len, create_index,
 					 create_stratum, create_len, result,
 					 true);
-	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-			     sizeof(event_type) - 1, mp.out, mp.len);
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS,
+			     PKM_KMES_EV_STRATAFS_FILE_COPIED_UP_TYPE,
+			     sizeof(PKM_KMES_EV_STRATAFS_FILE_COPIED_UP_TYPE) - 1,
+			     mp.out, mp.len);
 }
 
 static void pkm_kacs_stratafs_refusal_fields(
@@ -377,12 +383,13 @@ void pkm_kacs_stratafs_audit_mutation_refused(
 	const char *relative_path, const char *operation, s32 provider_index,
 	const char *provider_stratum, int result, bool deferred)
 {
-	static const char event_type[] = "stratafs.mutation.refused";
 	u8 reduced[PKM_KACS_STRATAFS_REDUCED_MAX];
 	size_t size;
 	size_t len;
 	u8 *payload;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_STRATAFS_MUTATION_REFUSED))
+		return;
 	size = pkm_kacs_stratafs_refusal_payload(
 		NULL, 0, relative_path, operation, provider_index,
 		provider_stratum, result, deferred, false);
@@ -406,9 +413,10 @@ void pkm_kacs_stratafs_audit_mutation_refused(
 		WARN_ON_ONCE(!len);
 	}
 	if (len)
-		pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-				     sizeof(event_type) - 1,
-				     payload ? payload : reduced, len);
+		pkm_kmes_emit_kernel(
+			KMES_ORIGIN_KACS, PKM_KMES_EV_STRATAFS_MUTATION_REFUSED_TYPE,
+			sizeof(PKM_KMES_EV_STRATAFS_MUTATION_REFUSED_TYPE) - 1,
+			payload ? payload : reduced, len);
 	kfree(payload);
 }
 
@@ -1443,7 +1451,12 @@ static int pkm_kacs_emit_file_continuous_audit(struct file *file, u8 op,
 		return decision;
 
 	matched_access = file_sec->continuous_audit_mask & required_access;
-	if (!matched_access) {
+	/*
+	 * The policy, then the handle's alarm mask, both before the subject
+	 * or the path is looked up.
+	 */
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_AUDIT_HANDLE_USED) ||
+	    !matched_access) {
 		pkm_kacs_trace_file_snapshot(file, op, required_access, reason,
 					     decision);
 		return decision;

@@ -7,6 +7,12 @@
 
 #include <pkm/kmes.h>
 
+/*
+ * Every kernel emitter asks pkm_kmes_event_enabled() before it builds a
+ * payload, and names its type with the generated PKM_KMES_EV_*_TYPE string.
+ */
+#include "event_policy.h"
+
 int pkm_kmes_init(void);
 void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 			  size_t event_type_len, const void *payload,

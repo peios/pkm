@@ -16,6 +16,7 @@
 
 #include <pkm/token.h>
 
+#include "../kmes/event_policy.h"
 #include "access_check.h"
 #include "caap_cache.h"
 #include "token_runtime.h"
@@ -186,6 +187,8 @@ static void pkm_kacs_audit_caap_policy_changed(const void *token,
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_CAAP_POLICY_CHANGED))
+		return;
 	if (!token || !policy_sid || !policy_sid_len)
 		return;
 	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {

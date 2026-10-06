@@ -18,6 +18,7 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 
+#include "../kmes/event_policy.h"
 #include "access_check.h"
 #include "token_fd.h"
 #include "token_runtime.h"
@@ -456,6 +457,8 @@ static void pkm_kacs_audit_impersonation_started(
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
 
+	if (!pkm_kmes_event_enabled(PKM_KMES_EV_KACS_IMPERSONATION_STARTED))
+		return;
 	if (!server_token || !client_token)
 		return;
 	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {

@@ -1043,7 +1043,7 @@ static void ntfe_kunit_policy_published_lands_in_kmes(struct kunit *test)
 			0);
 	gen = ntfe_rust_generation();
 	KUNIT_EXPECT_EQ(test, gen, before + 1);
-	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_PUBLISHED, buf,
+	p = ntfe_test_latest_event(test, PKM_KMES_EV_NTFE_POLICY_PUBLISHED_TYPE, buf,
 				   &len);
 	want_len = ntfe_test_published(want, gen, before, packet_only,
 				       sizeof(packet_only) - 1, 4, 3);
@@ -1061,7 +1061,7 @@ static void ntfe_kunit_policy_published_lands_in_kmes(struct kunit *test)
 				ntfe_test_pass_forest(test, PEIOS_NTFE_LAYER_FLOW),
 				2),
 			0);
-	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_PUBLISHED, buf,
+	p = ntfe_test_latest_event(test, PKM_KMES_EV_NTFE_POLICY_PUBLISHED_TYPE, buf,
 				   &len);
 	want_len = ntfe_test_published(want, gen + 1, gen, all_three,
 				       sizeof(all_three) - 1, 2, 4);
@@ -1072,7 +1072,7 @@ static void ntfe_kunit_policy_published_lands_in_kmes(struct kunit *test)
 	 * restores permissiveness for whatever runs next.
 	 */
 	KUNIT_ASSERT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1), 0);
-	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_PUBLISHED, buf,
+	p = ntfe_test_latest_event(test, PKM_KMES_EV_NTFE_POLICY_PUBLISHED_TYPE, buf,
 				   &len);
 	want_len = ntfe_test_published(want, gen + 2, gen + 1, none,
 				       sizeof(none) - 1, 1, 2);
@@ -1200,7 +1200,7 @@ static void ntfe_kunit_policy_rejected_lands_in_kmes(struct kunit *test)
 	why.rule_len = 9;
 	KUNIT_EXPECT_GT(test, peios_ntfe_policy_rejected_emit(&why, -EINVAL),
 			0);
-	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+	p = ntfe_test_latest_event(test, PKM_KMES_EV_NTFE_POLICY_REJECTED_TYPE, buf,
 				   &len);
 	at = 0;
 	NTFE_TEST_PUT(want, at, "\x83" "\xa6" "policy" "\x82"
@@ -1224,7 +1224,7 @@ static void ntfe_kunit_policy_rejected_lands_in_kmes(struct kunit *test)
 	strscpy(why.reason, "registry-read-failed", sizeof(why.reason));
 	KUNIT_EXPECT_GT(test,
 			peios_ntfe_policy_rejected_emit(&why, -ETIMEDOUT), 0);
-	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+	p = ntfe_test_latest_event(test, PKM_KMES_EV_NTFE_POLICY_REJECTED_TYPE, buf,
 				   &len);
 	at = 0;
 	NTFE_TEST_PUT(want, at, "\x82" "\xa6" "policy" "\x82"
@@ -1241,7 +1241,7 @@ static void ntfe_kunit_policy_rejected_lands_in_kmes(struct kunit *test)
 	peios_ntfe_build_why_reset(&why);
 	strscpy(why.reason, "no-rules-key", sizeof(why.reason));
 	KUNIT_EXPECT_GT(test, peios_ntfe_policy_rejected_emit(&why, 0), 0);
-	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+	p = ntfe_test_latest_event(test, PKM_KMES_EV_NTFE_POLICY_REJECTED_TYPE, buf,
 				   &len);
 	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
 		"\xa7" "outcome" "\x81" "\xa6" "reason" "\xac" "no-rules-key"));
@@ -1262,7 +1262,7 @@ static void ntfe_kunit_policy_rejected_lands_in_kmes(struct kunit *test)
 	why.rule_truncated = 1;
 	KUNIT_EXPECT_GT(test, peios_ntfe_policy_rejected_emit(&why, -EINVAL),
 			0);
-	p = ntfe_test_latest_event(test, PEIOS_NTFE_EV_POLICY_REJECTED, buf,
+	p = ntfe_test_latest_event(test, PKM_KMES_EV_NTFE_POLICY_REJECTED_TYPE, buf,
 				   &len);
 	KUNIT_EXPECT_LE(test, len, (size_t)512);
 	/* No layer: the rule map is the name and the cut. */

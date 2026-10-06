@@ -2536,6 +2536,14 @@ static void pkm_kunit_impersonation_started_and_reverted_records(
 	KUNIT_ASSERT_GE(test, fd, 0L);
 
 	pkm_kunit_reset_kmes();
+	/*
+	 * kacs.impersonation.reverted is verbose, so the tier defaults leave
+	 * it off: switch it on, as an administrator would. The reset at the
+	 * end, or the next case's, puts the defaults back.
+	 */
+	pkm_kmes_event_policy_kunit_publish(
+		PKM_KMES_EV_DEFAULT_MASK |
+		BIT_ULL(PKM_KMES_EV_KACS_IMPERSONATION_REVERTED));
 	KUNIT_ASSERT_EQ(test,
 			pkm_kacs_kunit_token_fd_impersonate((int)fd,
 							   primary_token),

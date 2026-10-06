@@ -6,7 +6,111 @@
 #include <linux/timer.h>
 #include <linux/unaligned.h>
 
+#include "capability.h"
 #include "kunit_common.h"
+
+/* Whether a record of @type from @origin is anywhere on the rings. */
+static bool pkm_kunit_kmes_policy_has_event(u8 origin, const char *type,
+					    u8 *buffer)
+{
+	size_t written = 0;
+
+	return pkm_kmes_kunit_copy_latest_matching_event(
+		       origin, type, strlen(type), buffer,
+		       PKM_KUNIT_KMES_CAPTURE_BYTES, &written, NULL) == 0;
+}
+
+/*
+ * PKM *policy.mask-one-bit-per-type and *policy.essential-never-consults,
+ * through the emitters themselves: a standard type the policy switches off
+ * is not written, by a C emitter or a Rust one (which asks through
+ * pkm_kmes_event_enabled_ffi()), and is written again once the policy is
+ * back to its tier defaults; an essential type is written with every bit of
+ * the mask clear, from C and from Rust alike.
+ */
+static void pkm_kunit_kmes_policy_emitters_obey_mask(struct kunit *test)
+{
+	static const char sentinel[] = "pkm.kunit.policy.sentinel";
+	static const char key_path[] = "Machine\\Generic\\Events";
+	const void *token = pkm_kacs_current_primary_token_ptr();
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+
+	/* C, standard: stratafs.mutation.refused. */
+	pkm_kunit_reset_kmes();
+	/* Something on a ring, so absence is absence and not an idle ring. */
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, sentinel, sizeof(sentinel) - 1,
+			     sentinel, 1);
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_kmes_policy_has_event(
+					KMES_ORIGIN_KACS, sentinel, buffer));
+	pkm_kmes_event_policy_kunit_publish(
+		PKM_KMES_EV_DEFAULT_MASK &
+		~BIT_ULL(PKM_KMES_EV_STRATAFS_MUTATION_REFUSED));
+	KUNIT_EXPECT_FALSE(test, pkm_kmes_event_enabled(
+					 PKM_KMES_EV_STRATAFS_MUTATION_REFUSED));
+	pkm_kacs_stratafs_audit_mutation_refused("/f", "write", 0, "lo",
+						 -EACCES, false);
+	KUNIT_EXPECT_FALSE(test, pkm_kunit_kmes_policy_has_event(
+					 KMES_ORIGIN_KACS,
+					 PKM_KMES_EV_STRATAFS_MUTATION_REFUSED_TYPE,
+					 buffer));
+	pkm_kmes_event_policy_kunit_reset();
+	pkm_kacs_stratafs_audit_mutation_refused("/f", "write", 0, "lo",
+						 -EACCES, false);
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_kmes_policy_has_event(
+					KMES_ORIGIN_KACS,
+					PKM_KMES_EV_STRATAFS_MUTATION_REFUSED_TYPE,
+					buffer));
+
+	/* Rust, standard: kacs.descriptor.rejected, here with no subject. */
+	pkm_kunit_reset_kmes();
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, sentinel, sizeof(sentinel) - 1,
+			     sentinel, 1);
+	pkm_kmes_event_policy_kunit_publish(
+		PKM_KMES_EV_DEFAULT_MASK &
+		~BIT_ULL(PKM_KMES_EV_KACS_DESCRIPTOR_REJECTED));
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_emit_descriptor_rejected(NULL, 11, 12, 13, 0,
+							   0),
+			0);
+	KUNIT_EXPECT_FALSE(test, pkm_kunit_kmes_policy_has_event(
+					 KMES_ORIGIN_KACS,
+					 PKM_KMES_EV_KACS_DESCRIPTOR_REJECTED_TYPE,
+					 buffer));
+	pkm_kmes_event_policy_kunit_reset();
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_emit_descriptor_rejected(NULL, 11, 12, 13, 0,
+							   0),
+			0);
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_kmes_policy_has_event(
+					KMES_ORIGIN_KACS,
+					PKM_KMES_EV_KACS_DESCRIPTOR_REJECTED_TYPE,
+					buffer));
+
+	/* Essential, with the whole mask clear: written from C and Rust. */
+	pkm_kunit_reset_kmes();
+	pkm_kmes_event_policy_kunit_publish(0);
+	pkm_kmes_emit_config_refresh_failed(key_path, sizeof(key_path) - 1,
+					    -EIO);
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_kmes_policy_has_event(
+					KMES_ORIGIN_KMES,
+					PKM_KMES_EV_KMES_CONFIG_REFRESH_FAILED_TYPE,
+					buffer));
+	KUNIT_EXPECT_EQ(test,
+			kacs_rust_emit_privilege_use(
+				token, PKM_KACS_PRIV_USE_OP_LINUX_CAP,
+				CAP_SYS_ADMIN, PKM_KUNIT_SE_TCB_PRIVILEGE, 0, 0),
+			0);
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_kmes_policy_has_event(
+					KMES_ORIGIN_KACS,
+					PKM_KMES_EV_KACS_AUDIT_PRIVILEGE_USED_TYPE,
+					buffer));
+
+	pkm_kunit_reset_kmes();
+}
 
 
 static void pkm_kunit_kmes_direct_emit_writes_single_event(struct kunit *test)
@@ -2293,6 +2397,7 @@ static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_cpu_mismatch_discards_on_every_path),
 	KUNIT_CASE(pkm_kunit_kmes_wake_before_attach_advances_private_counter_only),
 	KUNIT_CASE(pkm_kunit_kmes_attach_hole_is_einval_and_enumeration_continues),
+	KUNIT_CASE(pkm_kunit_kmes_policy_emitters_obey_mask),
 	{}
 };
 
