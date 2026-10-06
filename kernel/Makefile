@@ -29,7 +29,7 @@ pkm-$(CONFIG_SECURITY_PKM_KUNIT) += \
 	lcs/kunit_common.o lcs/kunit_key.o lcs/kunit_open.o \
 	lcs/kunit_source.o lcs/kunit_transaction.o lcs/kunit_layer.o \
 	lcs/kunit_rsi.o lcs/kunit_backup.o lcs/kunit_symlink.o \
-	lcs/kunit_kmes.o lcs/kunit_misc.o
+	lcs/kunit_kmes.o lcs/kunit_misc.o lcs/kunit_audit.o
 
 # Only explicit slow-track scaffolds live here today. New objects should be
 # added deliberately as their implementation slices are opened.

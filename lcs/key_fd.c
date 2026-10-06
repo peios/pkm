@@ -13388,6 +13388,24 @@ long pkm_lcs_kunit_key_fd_set_security(
 	return ret;
 }
 
+long pkm_lcs_kunit_key_fd_set_security_for_token(
+	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	const struct reg_set_security_args *args)
+{
+	struct pkm_lcs_key_fd *key_fd;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_key_fd_get(fd, &held, &key_fd);
+	if (ret)
+		return ret;
+
+	ret = pkm_lcs_key_fd_set_security_from_args_for_token(key_fd, token,
+							       ops, args);
+	fdput(held);
+	return ret;
+}
+
 long pkm_lcs_kunit_key_fd_set_value_for_token(
 	int fd, const void *token, const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_value_args *args)

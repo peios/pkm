@@ -4903,6 +4903,51 @@ long pkm_lcs_kunit_transaction_fd_flush_timeout_work(int fd)
 	return 0;
 }
 
+/*
+ * Marks the transaction as having staged a recorded write by `token`, as
+ * commit_mutation does for an audited handle, without a source round trip.
+ */
+long pkm_lcs_kunit_transaction_fd_mark_audited(int fd, const void *token)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+	if (!txn->audit_caller.user_sid)
+		ret = pkm_lcs_audit_caller_snapshot_take(token,
+							 &txn->audit_caller);
+	if (!ret)
+		txn->audit_pending = true;
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return ret;
+}
+
+/* Whether the transaction still owes its lcs.audit.transaction.committed. */
+long pkm_lcs_kunit_transaction_fd_audit_pending(int fd, bool *pending)
+{
+	struct pkm_lcs_transaction_fd *txn;
+	struct fd held;
+	long ret;
+
+	if (!pending)
+		return -EINVAL;
+	ret = pkm_lcs_transaction_fd_get(fd, &held, &txn);
+	if (ret)
+		return ret;
+
+	mutex_lock(&txn->bind_lock);
+	*pending = txn->audit_pending;
+	mutex_unlock(&txn->bind_lock);
+	fdput(held);
+	return 0;
+}
+
 long pkm_lcs_kunit_transaction_fd_commit_timeout(int fd, u32 timeout_ms)
 {
 	struct pkm_lcs_transaction_fd *txn;
