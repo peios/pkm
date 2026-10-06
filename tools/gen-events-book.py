@@ -8,16 +8,16 @@ them, so the book cannot drift from what the fragments define.
 
 This file owns its pages outright and overwrites them wholesale:
 
-  2--groups/            one page per group
-  3--kacs/ .. 7--ntfe/  one chapter per event-type root, one page per event
+  2--groups/             one page per group
+  3--kacs/ .. 15--trustd/  one chapter per event-type root, one page per
+                         event
   a1--all-event-types.md
-  a2--field-index/      one page per field root
+  a2--field-index/       one page per field root
 
 An owned directory holds nothing but what this writes; a page in it that
 the catalogue no longer produces is deleted. Prose that is not generated
--- the introduction, the chapters for emitters not yet in the catalogue,
-the registry's watch records -- lives in the book's other pages, which
-this never touches.
+-- the introduction and the registry's watch records, which are not
+events -- lives in the book's other pages, which this never touches.
 
 Page slugs are the event name with each `.` replaced by `-`
 (`kacs.audit.access.checked` -> `kacs-audit-access-checked`). Groups are
@@ -44,6 +44,11 @@ USERSPACE_FRAGMENTS = [
     ROOT / "peinit" / "peinit.evman",
     ROOT / "peipkg" / "peipkg.evman",
     ROOT / "eventd" / "eventd.evman",
+    ROOT / "authd" / "authd.evman",
+    ROOT / "authd" / "lpsd.evman",
+    ROOT / "timed" / "timed.evman",
+    ROOT / "netd" / "netd.evman",
+    ROOT / "trustd" / "trustd.evman",
 ]
 BOOK = (ROOT / "learn/peios.product/2--using-peios.antho/600--reference.shelf"
         / "100--events.book")
@@ -56,14 +61,23 @@ BOOK_REF = "~peios/events"
 
 # One chapter per event-type root, in book order. An event whose root is
 # not listed stops the generator: placing a new root in the book is a
-# decision, not something to guess. When a userspace emitter is converted,
-# its root goes here and its hand-written chapter goes.
+# decision, not something to guess. The kernel's roots come first, then
+# userspace's. The book's hand-written chapter on the registry's watch
+# records, which are not events, is numbered after the last of these.
 CHAPTERS = [
     ("kacs", "3--kacs", "Access and Identity Events"),
     ("stratafs", "4--stratafs", "Filesystem Events"),
     ("lcs", "5--lcs", "Registry Events"),
     ("kmes", "6--kmes", "Event Stream Events"),
     ("ntfe", "7--ntfe", "Network Policy Events"),
+    ("peinit", "8--peinit", "Service Events"),
+    ("peipkg", "9--peipkg", "Package Events"),
+    ("eventd", "10--eventd", "Event Store Events"),
+    ("authd", "11--authd", "Authentication Events"),
+    ("lpsd", "12--lpsd", "Local Principal Events"),
+    ("timed", "13--timed", "Time Events"),
+    ("netd", "14--netd", "Network Configuration Events"),
+    ("trustd", "15--trustd", "Trust Events"),
 ]
 GROUPS_DIR = "2--groups"
 FIELD_INDEX_DIR = "a2--field-index"
@@ -305,12 +319,14 @@ def check(cat):
         texts = [rec.body()] + [ln.gloss() for ln in rec.lines]
         if any(BARE_SECTION.search(strip_code(t)) for t in texts):
             cat.problem(rec.fragment, rec.line,
-                        f"{rec.kind} {rec.name}: a bare § reference would "
-                        "resolve against the Events Index, not the book "
-                        "it means")
+                        f"{rec.kind} {rec.name}: a § reference names no "
+                        "book directly before it, so a reader cannot tell "
+                        "which document it cites")
 
 
-BARE_SECTION = re.compile(r"(?<![A-Z] )§")
+# A book's short name, then a space or a line break, then the sign. md()
+# keeps any § from linking into this book either way: see SECTION_SIGN.
+BARE_SECTION = re.compile(r"(?<![A-Z]\s)§")
 
 
 def strip_code(text):
@@ -321,6 +337,14 @@ def strip_code(text):
 
 CODE_SPAN = re.compile(r"`[^`]*`")
 
+# Trail links a bare `§5.3` to section 5.3 of the book the page is in, and
+# the PCSA books declare no inline_ref phrase, so even "PSPU §5.3" is a bare
+# `§5.3` to it. In fragment prose that is never this book: it would link a
+# citation of PSPU to whichever event page happens to be §5.3 here. The sign
+# alone in an inline element is a text run of its own with no number after
+# it, which trail leaves plain; the page reads the same.
+SECTION_SIGN = "<span>§</span>"
+
 
 def md(text):
     """Fragment prose as Markdown.
@@ -328,12 +352,15 @@ def md(text):
     §6.10 limits inline markup to **bold** and `code`, so every other
     character Markdown would act on is escaped: a lone `*`, brackets, and
     angle brackets. Code spans are left alone.
+
+    A section sign is wrapped as SECTION_SIGN describes.
     """
     def esc_run(run):
         run = run.replace("\\", "\\\\")
         run = re.sub(r"(?<!\*)\*(?!\*)", r"\\*", run)
         run = run.replace("[", "\\[").replace("]", "\\]")
-        return run.replace("<", "&lt;").replace(">", "&gt;")
+        run = run.replace("<", "&lt;").replace(">", "&gt;")
+        return run.replace("§", SECTION_SIGN)
 
     out, pos = [], 0
     for m in CODE_SPAN.finditer(text):
@@ -448,7 +475,8 @@ def broken_warning(cat, fragment):
     found = [f"line {n}: {m}" for f, n, m in cat.problems if f == fragment]
     out = ["> [!WARNING]",
            f"> `{fragment}` breaks the catalogue rules that make a fragment "
-           "define anything (PGSS §6.10, rules 1 to 3). What it says is "
+           f"define anything (PGSS {SECTION_SIGN}6.10, rules 1 to 3). What "
+           "it says is "
            "shown, but it is not in force:", ">"]
     out += [f"> - {md(x)}" for x in found]
     return out + [""]
@@ -651,7 +679,8 @@ def all_types_page(cat):
       + ", ".join(f"`{f}`" for f in cat.fragments) + ".")
     w("")
     w("The tier sets whether an event type is recorded by default "
-      "(PGSS §6.8). Each type links to its page; each page's fields link "
+      f"(PGSS {SECTION_SIGN}6.8). Each type links to its page; each page's "
+      "fields link "
       "to the field index.")
     w("")
     for root, d, title in CHAPTERS:
@@ -665,16 +694,12 @@ def all_types_page(cat):
                  cell(md(cat.events[n].summary()))] for n in names]
         o += table(["Event type", "Tier", "Fragment", "Summary"], rows)
         w("")
-    w("## Not yet in the catalogue")
+    w("## Not in the catalogue")
     w("")
-    w("peinit, peipkg and eventd define their fields in the catalogue but "
-      "do not yet write catalogue events. What they emit today is in "
-      f"[Service Events]({BOOK_REF}/service-events/job-events), "
-      f"[Package Events]({BOOK_REF}/package-events/the-event-set) and "
-      f"[Event Daemon Events]({BOOK_REF}/event-daemon-events/"
-      "synthetic-events). The registry's "
+    w("The registry's "
       f"[watch records]({BOOK_REF}/registry-watch-records/watch-records) "
-      "are not events at all.")
+      "are not events, so no fragment defines them and this table does not "
+      "list them.")
     w("")
     w(generated_note("the evman catalogue"))
     return "\n".join(o) + "\n"
