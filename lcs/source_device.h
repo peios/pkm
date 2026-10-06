@@ -408,6 +408,7 @@ struct pkm_lcs_source_bootstrap_refresh_result {
 	bool layers_root_present;
 	bool port_root_present;
 	bool network_root_present;
+	bool events_root_present;
 };
 
 struct pkm_lcs_path_validation_result {

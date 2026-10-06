@@ -631,7 +631,7 @@ How many verdict records NTFE's private ring holds before the oldest is
 overwritten.
 
 --- event ntfe.verdict.reported
-tier: standard
+tier: essential
 gating: an explicit report directive in the matching rule
 cardinality: once per matching evaluation
 

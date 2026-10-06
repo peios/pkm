@@ -52,6 +52,12 @@ mod pnp_core;
 mod ntfe_runtime;
 #[path = "../kmes/kmes_validate.rs"]
 mod kmes_validate;
+// The kernel's event types and the emission-policy check, generated from the
+// evman fragments by tools/gen-kmes-event-table.py. No Rust emitter consults
+// it yet (that is the emitter-adoption pass), so it is dead code here for now.
+#[allow(dead_code)]
+#[path = "../kmes/event_types.rs"]
+mod kmes_event_types;
 // KACS token-runtime scaffolding: constants, fields, and helpers for
 // token-query paths not yet wired, plus a few benign local bindings (each
 // individually reviewed — none are bugs). Allowed rather than deleted so the

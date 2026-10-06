@@ -2,6 +2,7 @@
 
 #include <linux/sched/signal.h>
 
+#include "../kmes/event_policy.h"
 #include "kunit_common.h"
 #include "source_internal.h"
 
@@ -2337,6 +2338,10 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
+	/* And the emission policy: no Machine\Generic, so no Events. */
+	static const struct pkm_lcs_kunit_walk_source_step events_steps[] = {
+		{ .expected_child = "Generic", .empty = true },
+	};
 	static const u8 owner_only_sd[] = {
 		0x01, 0x00, 0x00, 0x80,
 		0x14, 0x00, 0x00, 0x00,
@@ -2386,6 +2391,10 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 			.steps = network_steps,
 			.step_count = ARRAY_SIZE(network_steps),
 		},
+		.events_walk = {
+			.steps = events_steps,
+			.step_count = ARRAY_SIZE(events_steps),
+		},
 		.layers_walk = {
 			.steps = layer_steps,
 			.step_count = ARRAY_SIZE(layer_steps),
@@ -2433,6 +2442,11 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	pkm_lcs_kunit_reset_layer_table();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
 	script.file = &file;
+	/*
+	 * PKM *policy.absent-key-is-tier-defaults: a policy some earlier walk
+	 * published, which a hive with no Machine\Generic\Events must undo.
+	 */
+	pkm_kmes_event_policy_kunit_publish(0);
 
 	task = pkm_lcs_kunit_kthread_run(
 		pkm_lcs_kunit_source_bootstrap_source_thread, &script,
@@ -2446,8 +2460,11 @@ static void pkm_lcs_kunit_source_bootstrap_refresh_machine_hive_success(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 18U);
-	KUNIT_EXPECT_EQ(test, script.writes, 18U);
+	KUNIT_EXPECT_EQ(test, script.reads, 19U);
+	KUNIT_EXPECT_EQ(test, script.writes, 19U);
+	KUNIT_EXPECT_FALSE(test, result.events_root_present);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_event_policy_mask(),
+			PKM_KMES_EV_DEFAULT_MASK);
 	KUNIT_EXPECT_TRUE(test, result.registry_root_present);
 	KUNIT_EXPECT_EQ(test, result.self_config.applied_count, 1U);
 	KUNIT_EXPECT_TRUE(test, result.kmes_root_present);
@@ -2537,6 +2554,10 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		{ .expected_child = "System", .guid = system_guid },
 		{ .expected_child = "Network", .empty = true },
 	};
+	/* And the emission policy: no Machine\Generic, so no Events. */
+	static const struct pkm_lcs_kunit_walk_source_step events_steps[] = {
+		{ .expected_child = "Generic", .empty = true },
+	};
 	static const u8 owner_only_sd[] = {
 		0x01, 0x00, 0x00, 0x80,
 		0x14, 0x00, 0x00, 0x00,
@@ -2589,6 +2610,10 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 		.network_walk = {
 			.steps = network_steps,
 			.step_count = ARRAY_SIZE(network_steps),
+		},
+		.events_walk = {
+			.steps = events_steps,
+			.step_count = ARRAY_SIZE(events_steps),
 		},
 		.layers_walk = {
 			.steps = layer_steps,
@@ -2657,8 +2682,8 @@ static void pkm_lcs_kunit_source_registration_bootstrap_queues_after_publish(
 	KUNIT_EXPECT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 18U);
-	KUNIT_EXPECT_EQ(test, script.writes, 18U);
+	KUNIT_EXPECT_EQ(test, script.reads, 19U);
+	KUNIT_EXPECT_EQ(test, script.writes, 19U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_runtime_limits_snapshot(&snapshot), 0L);
 	KUNIT_EXPECT_EQ(test, snapshot.request_timeout_ms, 1000U);
 	KUNIT_ASSERT_EQ(test,

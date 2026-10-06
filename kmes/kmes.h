@@ -85,6 +85,20 @@ long pkm_kmes_runtime_config_apply_self_config(
 long pkm_kmes_runtime_config_refresh_from_key(
 	u32 source_id, const u8 kmes_guid[16],
 	struct pkm_kmes_self_config_apply_plan *result_out);
+/*
+ * The refresh the internal watch runs when Machine\System\KMES changes. A
+ * read that fails is reported as kmes.config.refresh.failed; a failed
+ * capacity swap is not, because it has its own record and the rest of the
+ * read committed.
+ */
+long pkm_kmes_runtime_config_refresh_on_change(u32 source_id,
+					       const u8 kmes_guid[16]);
+/*
+ * Record kmes.config.refresh.failed for the configuration key @key_path,
+ * whose read failed with @error (a negative errno). Best effort.
+ */
+void pkm_kmes_emit_config_refresh_failed(const char *key_path,
+					 size_t key_path_len, long error);
 long pkm_kmes_config_root_discover_from_machine_hive(
 	u32 source_id, const u8 machine_root_guid[16], bool *present_out,
 	u8 kmes_guid_out[16]);
@@ -173,6 +187,8 @@ bool pkm_kmes_kunit_set_ready(bool ready);
 u64 pkm_kmes_kunit_pre_init_drops(void);
 void pkm_kmes_kunit_set_ring_cpu_id_skew(bool skew);
 int pkm_kmes_kunit_set_all_need_wake(u8 value);
+void pkm_kmes_kunit_flush_deferred_wakes(void);
+u64 pkm_kmes_kunit_irq_context_drops(void);
 int pkm_kmes_kunit_set_slot_hole(u32 cpu_id, bool hole);
 #endif
 

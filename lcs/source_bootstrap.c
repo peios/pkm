@@ -11,6 +11,7 @@
 #include <trace/events/lcs.h>
 
 #include "../kacs/port_reservations.h"
+#include "../kmes/event_policy.h"
 #include "source_device.h"
 
 long pkm_lcs_source_bootstrap_refresh_machine_hive(
@@ -23,11 +24,13 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	u8 layers_root_guid[RSI_GUID_SIZE] = { };
 	u8 port_guid[RSI_GUID_SIZE] = { };
 	u8 network_guid[RSI_GUID_SIZE] = { };
+	u8 events_guid[RSI_GUID_SIZE] = { };
 	bool registry_root_present = false;
 	bool kmes_root_present = false;
 	bool layers_root_present = false;
 	bool port_root_present = false;
 	bool network_root_present = false;
+	bool events_root_present = false;
 	u8 stage = LCS_BOOT_REGISTRY;
 	long ret;
 
@@ -119,12 +122,31 @@ long pkm_lcs_source_bootstrap_refresh_machine_hive(
 	if (network_root_present)
 		peios_ntfe_network_refresh_from_key(source_id, network_guid);
 
+	/*
+	 * The emission policy, Machine\Generic\Events (kmes/event_policy.c),
+	 * the sixth kernel-read key, discovered last for the same reason:
+	 * only its discovery walk may fail the bootstrap. A walk that fails
+	 * keeps the mask in force and says so in kmes.config.refresh.failed.
+	 * No key at all means no Enabled anywhere, so the tier decides for
+	 * every type -- which also undoes the policy of a key since deleted.
+	 */
+	ret = pkm_kmes_event_policy_root_discover_from_machine_hive(
+		source_id, machine_root_guid, &events_root_present, events_guid);
+	if (ret)
+		goto out;
+	result->events_root_present = events_root_present;
+	if (events_root_present)
+		pkm_kmes_event_policy_refresh_from_key(source_id, events_guid);
+	else
+		pkm_kmes_event_policy_reset_to_tier_defaults();
+
 	stage = LCS_BOOT_SELF_WATCH;
 	ret = pkm_lcs_internal_self_watch_arm_full(
 		source_id, machine_root_guid, registry_root_present,
 		registry_guid, layers_root_present, layers_root_guid,
 		kmes_root_present, kmes_guid, port_root_present, port_guid,
-		network_root_present, network_guid, &result->self_watch);
+		network_root_present, network_guid, events_root_present,
+		events_guid, &result->self_watch);
 	if (ret)
 		goto out;
 
@@ -151,7 +173,8 @@ out:
 
 		arm_ret = pkm_lcs_internal_self_watch_arm_full(
 			source_id, machine_root_guid, false, NULL, false, NULL,
-			false, NULL, false, NULL, false, NULL, &fallback);
+			false, NULL, false, NULL, false, NULL, false, NULL,
+			&fallback);
 		trace_lcs_bootstrap_refresh(source_id, 0, 0, 0,
 					    LCS_BOOT_SELF_WATCH, arm_ret);
 	}

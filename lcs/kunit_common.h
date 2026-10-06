@@ -610,6 +610,11 @@ struct pkm_lcs_kunit_source_bootstrap_source_script {
 	struct pkm_lcs_kunit_walk_source_script port_walk;
 	/* NTFE's Network key: the discovery walk that follows port reservations. */
 	struct pkm_lcs_kunit_walk_source_script network_walk;
+	/*
+	 * The emission policy, Machine\Generic\Events: the discovery walk that
+	 * follows the Network key. Every script so far answers it absent.
+	 */
+	struct pkm_lcs_kunit_walk_source_script events_walk;
 	struct pkm_lcs_kunit_walk_source_script layers_walk;
 	struct pkm_lcs_kunit_layer_metadata_refresh_all_source_script layers_refresh;
 	bool expect_kmes_query;

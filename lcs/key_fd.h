@@ -142,6 +142,11 @@ enum pkm_lcs_internal_watch_target {
 	 * netd's inventory together; depth-unbounded, all mutation kinds.
 	 */
 	PKM_LCS_INTERNAL_WATCH_NETWORK = 6,
+	/* The emission policy, Machine\Generic\Events (kmes/event_policy.c):
+	 * depth-unbounded like NETWORK, filtered to the Events key itself and
+	 * the kernel's own roots beneath it, and to the Enabled value.
+	 */
+	PKM_LCS_INTERNAL_WATCH_EVENT_POLICY = 7,
 };
 
 enum pkm_lcs_internal_self_watch_mode {
@@ -161,6 +166,7 @@ struct pkm_lcs_internal_self_watch_arm_result {
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
 	u8 port_guid[PKM_LCS_GUID_BYTES];
 	u8 network_guid[PKM_LCS_GUID_BYTES];
+	u8 events_guid[PKM_LCS_GUID_BYTES];
 };
 
 struct pkm_lcs_internal_self_watch_snapshot {
@@ -173,6 +179,7 @@ struct pkm_lcs_internal_self_watch_snapshot {
 	u8 fallback_guid[PKM_LCS_GUID_BYTES];
 	u8 port_guid[PKM_LCS_GUID_BYTES];
 	u8 network_guid[PKM_LCS_GUID_BYTES];
+	u8 events_guid[PKM_LCS_GUID_BYTES];
 };
 
 struct pkm_lcs_watch_dispatch_input {
@@ -253,6 +260,7 @@ long pkm_lcs_internal_self_watch_arm_full(
 	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
 	bool port_present, const u8 port_guid[PKM_LCS_GUID_BYTES],
 	bool network_present, const u8 network_guid[PKM_LCS_GUID_BYTES],
+	bool events_present, const u8 events_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out);
 /*
  * The three-key form, kept for callers that predate port reservations. A
@@ -271,7 +279,7 @@ static inline long pkm_lcs_internal_self_watch_arm(
 	return pkm_lcs_internal_self_watch_arm_full(
 		source_id, machine_root_guid, registry_present, registry_guid,
 		layers_present, layers_guid, kmes_present, kmes_guid, false,
-		NULL, false, NULL, result_out);
+		NULL, false, NULL, false, NULL, result_out);
 }
 
 void pkm_lcs_internal_self_watch_disarm(void);

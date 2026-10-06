@@ -412,7 +412,7 @@ field: outcome.reason           required
   The source-validation failure class.
 
 --- event lcs.config.value.rejected
-tier: standard
+tier: essential
 gating: none — every rejected configuration value is recorded
 cardinality: once per rejected value
 

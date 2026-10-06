@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "The event emission policy (PGSS §6.9): Machine\\Generic\\Events holds",
+    "one key per event-type segment, any of which may carry an Enabled",
+    "REG_DWORD of 0 or 1; the deepest on a type's path decides, and the",
+    "type's tier decides where none does. Essential types never consult it.",
+    "",
+    "  Events  Enabled = 1   Everything not switched off beneath is on,",
+    "                        verbose and debug types included. Remove it",
+    "                        (or set 0) to fall back to the tier defaults,",
+    "                        standard on and verbose and debug off, for",
+    "                        whatever the keys beneath do not decide.",
+    "",
+    "Every emitter reads the tree: the kernel (kmes/event_policy.c, a watch",
+    "on this key, a change applied within about 50 ms plus one walk), and",
+    "libpeios, peios-rs and libp-go for userspace components.",
+    "",
+    "Intended descriptor, NOT APPLIED by this seed. PGSS §6.9 asks for a",
+    "SACL that audits writes, so that a change to what is recorded is",
+    "itself recorded. The SACL wanted is",
+    "",
+    "    S:(AL;CI;0x10002;;;WD)",
+    "",
+    "a SYSTEM_ALARM ACE for Everyone, inherited by every key beneath, over",
+    "KEY_SET_VALUE (0x2) | DELETE (0x10000): the continuous-audit mask a",
+    "handle opened for writing then carries, so each write through it is",
+    "recorded once registry write audit exists. Owner and DACL stay",
+    "inherited from the Machine hive (Administrators and SYSTEM full,",
+    "Authenticated Users read), which is what §6.9 asks for. The batch",
+    "document reg apply reads has no field for a key's descriptor, so the",
+    "SACL has to be set some other way until it gains one (for example",
+    "`reg sd Machine\\Generic\\Events --sacl --set 'S:(AL;CI;0x10002;;;WD)'`",
+    "as SYSTEM).",
+    "",
+    "Shipped by the kernel package into /usr/share/regim/; inert until an",
+    "image names it in [registry] autoapply. Until it is applied the key does",
+    "not exist, every emitter decides by tier, and the kernel keeps its",
+    "machine-root fallback watch armed to notice the key being created."
+  ],
+  "keys": [
+    { "path": "Machine\\Generic" },
+    {
+      "path": "Machine\\Generic\\Events",
+      "values": [
+        { "name": "Enabled", "type": "dword", "data": 1 }
+      ]
+    }
+  ]
+}

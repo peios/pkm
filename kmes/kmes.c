@@ -13,6 +13,7 @@
  */
 
 #include <linux/anon_inodes.h>
+#include <linux/bottom_half.h>
 #include <linux/cpumask.h>
 #include <linux/dcache.h>
 #include <linux/errno.h>
@@ -36,10 +37,12 @@
 #include <linux/timekeeping.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+#include <linux/workqueue.h>
 
 #include "../../../kernel/futex/futex.h"
 #include "../kacs/token_runtime.h"
 #include "../lcs/source_device.h"
+#include "event_policy.h"
 #include "kmes.h"
 
 #include <trace/events/kmes.h>
@@ -93,6 +96,8 @@ struct pkm_kmes_cpu_state {
 	u8 *producer_shared_page;
 	u8 *consumer_page;
 	u8 *data;
+	/* A consumer wake handed off by a writer outside task context. */
+	struct work_struct wake_work;
 };
 
 struct pkm_kmes_cpu_slot {
@@ -627,6 +632,85 @@ static bool pkm_kmes_note_wake(struct pkm_kmes_cpu_state *cpu)
 	return true;
 }
 
+/*
+ * The futex core takes hb->lock with plain spin_lock(), bottom halves
+ * enabled, so a softirq that took it while a task on the same CPU held it
+ * would spin forever. A writer outside task context -- NTFE on the receive
+ * path, an RCU callback -- therefore never wakes consumers itself: it hands
+ * the wake to the ring's work item, which runs in process context.
+ *
+ * The decision is made inside the ring section, where the ring is
+ * guaranteed live, and a deferred wake takes a reference there that the
+ * work item drops.
+ */
+static bool pkm_kmes_wake_must_defer(void)
+{
+	return !in_task();
+}
+
+static void pkm_kmes_wake_workfn(struct work_struct *work)
+{
+	struct pkm_kmes_cpu_state *cpu =
+		container_of(work, struct pkm_kmes_cpu_state, wake_work);
+
+	pkm_kmes_futex_wake(cpu);
+	pkm_kmes_ring_put(cpu);
+}
+
+static void pkm_kmes_wake_after_write(struct pkm_kmes_cpu_state *cpu,
+				      bool deferred)
+{
+	if (!deferred) {
+		pkm_kmes_futex_wake(cpu);
+		return;
+	}
+	/*
+	 * Already queued: that run wakes the same waiters, and holds its own
+	 * reference, so this one cannot be the last.
+	 */
+	if (!queue_work(system_wq, &cpu->wake_work))
+		pkm_kmes_ring_put(cpu);
+}
+
+/*
+ * A ring is written by whichever context emits on its CPU: task context
+ * (the emit system calls and most kernel emitters) and softirq (NTFE on the
+ * receive path, RCU callbacks). Preemption off alone let a softirq taken on
+ * interrupt exit write the same ring between a task writer's sequence
+ * increment and its write_pos publish, so every writer also holds off
+ * bottom halves for the reservation and the write.
+ *
+ * local_bh_enable() must not run with interrupts disabled or in hard
+ * interrupt context. With interrupts off, neither a softirq nor a hard
+ * interrupt can reach this CPU, so preemption off is already enough. A
+ * writer in hard interrupt or NMI context could interrupt one that holds the
+ * ring, so it is refused: no kernel emitter runs there.
+ */
+static atomic64_t pkm_kmes_irq_context_drops = ATOMIC64_INIT(0);
+
+static bool pkm_kmes_ring_enter(bool *bh_out)
+{
+	*bh_out = false;
+	if (in_nmi() || in_hardirq()) {
+		atomic64_inc(&pkm_kmes_irq_context_drops);
+		pr_warn_once("kmes: an event was emitted from hard interrupt context and dropped\n");
+		return false;
+	}
+	if (!irqs_disabled()) {
+		local_bh_disable();
+		*bh_out = true;
+	}
+	preempt_disable();
+	return true;
+}
+
+static void pkm_kmes_ring_exit(bool bh)
+{
+	preempt_enable();
+	if (bh)
+		local_bh_enable();
+}
+
 static void pkm_kmes_init_metadata_pages(struct pkm_kmes_cpu_state *cpu)
 {
 	memcpy(cpu->producer_page + KMES_PRODUCER_MAGIC_OFFSET,
@@ -689,6 +773,7 @@ static struct pkm_kmes_cpu_state *pkm_kmes_ring_alloc(u16 cpu_id, u64 generation
 		return ERR_PTR(-ENOMEM);
 
 	refcount_set(&cpu->refs, 1);
+	INIT_WORK(&cpu->wake_work, pkm_kmes_wake_workfn);
 	cpu->cpu_id = cpu_id;
 	cpu->generation = generation;
 	cpu->capacity = capacity;
@@ -1315,8 +1400,103 @@ static int pkm_kmes_emit_buffer_swap_failed(u64 requested_capacity,
 	return 0;
 }
 
-long pkm_kmes_runtime_config_apply(
-	const struct pkm_kmes_runtime_config *config)
+/*
+ * {config: {key: {path}}, outcome: {errno}}: a configuration key that could
+ * not be read, and why. Essential: the registry and the running kernel
+ * disagree until the next change, and this is the only sign.
+ */
+void pkm_kmes_emit_config_refresh_failed(const char *key_path,
+					 size_t key_path_len, long error)
+{
+	struct pkm_kmes_msgpack_writer writer;
+	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
+
+	if (!key_path || !key_path_len || !error)
+		return;
+
+	writer.pos = payload;
+	writer.end = payload + sizeof(payload);
+	if (pkm_kmes_msgpack_write_map_len(&writer, 2) ||
+	    pkm_kmes_msgpack_write_key(&writer, "config") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 1) ||
+	    pkm_kmes_msgpack_write_key(&writer, "key") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 1) ||
+	    pkm_kmes_msgpack_write_key(&writer, "path") ||
+	    pkm_kmes_msgpack_write_str(&writer, key_path, key_path_len) ||
+	    pkm_kmes_msgpack_write_key(&writer, "outcome") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 1) ||
+	    pkm_kmes_msgpack_write_key(&writer, "errno") ||
+	    pkm_kmes_msgpack_write_int(&writer, (s64)error))
+		return;
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KMES,
+			     PKM_KMES_EV_KMES_CONFIG_REFRESH_FAILED_TYPE,
+			     sizeof(PKM_KMES_EV_KMES_CONFIG_REFRESH_FAILED_TYPE) - 1,
+			     payload, writer.pos - payload);
+}
+
+/*
+ * {config: {key: {path}, counts: {applied, retained-missing,
+ * retained-invalid, ignored-unknown}}, buffer: {capacity},
+ * emission: {rate-limit}}: a read of Machine\System\KMES that reached the
+ * commit. The capacity and rate are what is in force afterwards, read back
+ * rather than taken from the plan, so a failed swap shows the capacity kept.
+ */
+static int pkm_kmes_emit_config_applied(
+	const struct pkm_kmes_self_config_apply_plan *plan)
+{
+	struct pkm_kmes_msgpack_writer writer;
+	u8 payload[PKM_KMES_SELF_EVENT_PAYLOAD_MAX];
+	u64 capacity = READ_ONCE(pkm_kmes_active_buffer_capacity);
+	u32 rate = READ_ONCE(pkm_kmes_active_max_emit_rate_per_process);
+
+	if (!plan)
+		return -EINVAL;
+
+	writer.pos = payload;
+	writer.end = payload + sizeof(payload);
+	if (pkm_kmes_msgpack_write_map_len(&writer, 3) ||
+	    pkm_kmes_msgpack_write_key(&writer, "config") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 2) ||
+	    pkm_kmes_msgpack_write_key(&writer, "key") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 1) ||
+	    pkm_kmes_msgpack_write_key(&writer, "path") ||
+	    pkm_kmes_msgpack_write_str(&writer, pkm_kmes_config_parent_path,
+				       sizeof(pkm_kmes_config_parent_path) - 1) ||
+	    pkm_kmes_msgpack_write_key(&writer, "counts") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 4) ||
+	    pkm_kmes_msgpack_write_key(&writer, "applied") ||
+	    pkm_kmes_msgpack_write_uint(&writer, plan->applied_count) ||
+	    pkm_kmes_msgpack_write_key(&writer, "retained-missing") ||
+	    pkm_kmes_msgpack_write_uint(&writer, plan->retained_missing_count) ||
+	    pkm_kmes_msgpack_write_key(&writer, "retained-invalid") ||
+	    pkm_kmes_msgpack_write_uint(&writer, plan->retained_invalid_count) ||
+	    pkm_kmes_msgpack_write_key(&writer, "ignored-unknown") ||
+	    pkm_kmes_msgpack_write_uint(&writer, plan->ignored_unknown_count) ||
+	    pkm_kmes_msgpack_write_key(&writer, "buffer") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 1) ||
+	    pkm_kmes_msgpack_write_key(&writer, "capacity") ||
+	    pkm_kmes_msgpack_write_uint(&writer, capacity) ||
+	    pkm_kmes_msgpack_write_key(&writer, "emission") ||
+	    pkm_kmes_msgpack_write_map_len(&writer, 1) ||
+	    pkm_kmes_msgpack_write_key(&writer, "rate-limit") ||
+	    pkm_kmes_msgpack_write_uint(&writer, rate))
+		return -ENOSPC;
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KMES,
+			     PKM_KMES_EV_KMES_CONFIG_APPLIED_TYPE,
+			     sizeof(PKM_KMES_EV_KMES_CONFIG_APPLIED_TYPE) - 1,
+			     payload, writer.pos - payload);
+	return 0;
+}
+
+/*
+ * The commit. @swap_failed_out, when given, says whether a non-zero return
+ * was the capacity swap failing -- in which case the other three settings
+ * did commit and kmes.buffer.swap.failed has already said why.
+ */
+static long pkm_kmes_runtime_config_commit(
+	const struct pkm_kmes_runtime_config *config, bool *swap_failed_out)
 {
 	u64 current_capacity = 0;
 	u64 failed_requested_capacity = 0;
@@ -1326,6 +1506,8 @@ long pkm_kmes_runtime_config_apply(
 	bool swap_failed = false;
 	long ret;
 
+	if (swap_failed_out)
+		*swap_failed_out = false;
 	if (!pkm_kmes_runtime_config_valid(config))
 		return -EINVAL;
 
@@ -1353,12 +1535,15 @@ long pkm_kmes_runtime_config_apply(
 	if (config->buffer_capacity != current_capacity) {
 		ret = pkm_kmes_swap_capacity_locked(config->buffer_capacity);
 		if (ret) {
-			if (ret == -ENOMEM) {
-				failed_requested_capacity =
-					config->buffer_capacity;
-				failed_retained_capacity = current_capacity;
-				failed_errno = -ENOMEM;
-			}
+			/*
+			 * Every failure is reported, not only -ENOMEM: a
+			 * migration that met a corrupt ring (-EIO) and a
+			 * stop_machine() that would not run are rarer and
+			 * matter more, and used to leave no trace.
+			 */
+			failed_requested_capacity = config->buffer_capacity;
+			failed_retained_capacity = current_capacity;
+			failed_errno = (int)ret;
 			swap_failed = true;
 		}
 	}
@@ -1386,6 +1571,8 @@ long pkm_kmes_runtime_config_apply(
 			config->max_emit_rate_per_process);
 	if (!swap_failed)
 		ret = 0;
+	else if (swap_failed_out)
+		*swap_failed_out = true;
 
 out:
 	mutex_unlock(&pkm_kmes_topology_lock);
@@ -1396,13 +1583,23 @@ out:
 	return ret;
 }
 
+long pkm_kmes_runtime_config_apply(
+	const struct pkm_kmes_runtime_config *config)
+{
+	return pkm_kmes_runtime_config_commit(config, NULL);
+}
+
 static long pkm_kmes_runtime_config_publish_self_config_plan(
 	const struct pkm_kmes_self_config_apply_plan *plan,
-	struct pkm_kmes_self_config_apply_plan *result_out)
+	struct pkm_kmes_self_config_apply_plan *result_out,
+	bool *swap_failed_out)
 {
+	bool swap_failed = false;
 	long ret;
 	u32 i;
 
+	if (swap_failed_out)
+		*swap_failed_out = false;
 	if (result_out)
 		memset(result_out, 0, sizeof(*result_out));
 	if (!plan)
@@ -1419,7 +1616,16 @@ static long pkm_kmes_runtime_config_publish_self_config_plan(
 		pkm_kmes_emit_self_config_invalid(&plan->audits[i]);
 	}
 
-	ret = pkm_kmes_runtime_config_apply(&plan->config);
+	ret = pkm_kmes_runtime_config_commit(&plan->config, &swap_failed);
+	/*
+	 * A failed swap still committed the other three settings, so the read
+	 * is recorded as applied either way; best effort, like the reports
+	 * above.
+	 */
+	if (!ret || swap_failed)
+		pkm_kmes_emit_config_applied(plan);
+	if (swap_failed_out)
+		*swap_failed_out = swap_failed;
 	if (ret)
 		return ret;
 
@@ -1448,13 +1654,14 @@ long pkm_kmes_runtime_config_apply_self_config(
 	if (ret)
 		return ret;
 
-	return pkm_kmes_runtime_config_publish_self_config_plan(&plan,
-							       result_out);
+	return pkm_kmes_runtime_config_publish_self_config_plan(
+		&plan, result_out, NULL);
 }
 
-long pkm_kmes_runtime_config_refresh_from_key(
+static long pkm_kmes_runtime_config_refresh(
 	u32 source_id, const u8 kmes_guid[16],
-	struct pkm_kmes_self_config_apply_plan *result_out)
+	struct pkm_kmes_self_config_apply_plan *result_out,
+	bool *swap_failed_out)
 {
 	struct pkm_kmes_self_config_apply_plan plan = { };
 	struct pkm_kmes_runtime_config active_config = { };
@@ -1498,12 +1705,40 @@ long pkm_kmes_runtime_config_refresh_from_key(
 	if (ret)
 		goto out_frame;
 
-	ret = pkm_kmes_runtime_config_publish_self_config_plan(&plan,
-							       result_out);
+	ret = pkm_kmes_runtime_config_publish_self_config_plan(
+		&plan, result_out, swap_failed_out);
 
 out_frame:
 	pkm_lcs_source_response_frame_destroy(&frame);
 	pkm_lcs_source_layer_snapshot_release(&layers);
+	return ret;
+}
+
+long pkm_kmes_runtime_config_refresh_from_key(
+	u32 source_id, const u8 kmes_guid[16],
+	struct pkm_kmes_self_config_apply_plan *result_out)
+{
+	return pkm_kmes_runtime_config_refresh(source_id, kmes_guid,
+					       result_out, NULL);
+}
+
+long pkm_kmes_runtime_config_refresh_on_change(u32 source_id,
+					       const u8 kmes_guid[16])
+{
+	bool swap_failed = false;
+	long ret;
+
+	ret = pkm_kmes_runtime_config_refresh(source_id, kmes_guid, NULL,
+					      &swap_failed);
+	/*
+	 * The configuration in force stays whatever the failure. A failed
+	 * swap has its own record, and the other three settings committed
+	 * without it, so it is not a failed read.
+	 */
+	if (ret && !swap_failed)
+		pkm_kmes_emit_config_refresh_failed(
+			pkm_kmes_config_parent_path,
+			sizeof(pkm_kmes_config_parent_path) - 1, ret);
 	return ret;
 }
 
@@ -1759,6 +1994,8 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	struct pkm_kmes_batch_walk walk = { };
 	u32 index;
 	bool wake_needed = false;
+	bool wake_deferred = false;
+	bool bh;
 
 	if (!count)
 		return 0;
@@ -1768,22 +2005,27 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 		return -ENOMEM;
 	}
 
-	preempt_disable();
+	/*
+	 * Always task context (a system call), but a softirq writer can
+	 * interrupt it on this CPU, so it holds the ring the same way.
+	 */
+	if (!pkm_kmes_ring_enter(&bh))
+		return -EINVAL;
 
 	cpu_id = smp_processor_id();
 	if (cpu_id >= pkm_kmes_cpu_slots) {
-		preempt_enable();
+		pkm_kmes_ring_exit(bh);
 		return -ENOMEM;
 	}
 
 	slot = &pkm_kmes_cpus[cpu_id];
 	cpu = READ_ONCE(slot->live);
 	if (!cpu || !cpu->data) {
-		preempt_enable();
+		pkm_kmes_ring_exit(bh);
 		return -ENOMEM;
 	}
 	if (cpu->cpu_id != cpu_id) {
-		preempt_enable();
+		pkm_kmes_ring_exit(bh);
 		return -EINVAL;
 	}
 
@@ -1794,7 +2036,7 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 						  cpu->capacity,
 						  KMES_INGRESS_EMIT_OVERSIZE,
 						  -ENOSPC);
-			preempt_enable();
+			pkm_kmes_ring_exit(bh);
 			return -ENOSPC;
 		}
 	}
@@ -1851,10 +2093,14 @@ static long pkm_kmes_emit_staged_events(const struct pkm_kmes_staged_event *even
 	cpu->sequence = sequence;
 	pkm_kmes_store_write_pos(cpu, write_pos);
 	wake_needed = pkm_kmes_note_wake(cpu);
+	if (wake_needed && pkm_kmes_wake_must_defer()) {
+		pkm_kmes_ring_get(cpu);
+		wake_deferred = true;
+	}
 
-	preempt_enable();
+	pkm_kmes_ring_exit(bh);
 	if (wake_needed)
-		pkm_kmes_futex_wake(cpu);
+		pkm_kmes_wake_after_write(cpu, wake_deferred);
 
 	return 0;
 }
@@ -2581,6 +2827,8 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	kacs_uuid_t true_guid;
 	kacs_uuid_t proc_guid;
 	bool wake_needed = false;
+	bool wake_deferred = false;
+	bool bh;
 
 	if (!pkm_kmes_ready) {
 		atomic64_inc(&pkm_kmes_pre_init_drops);
@@ -2590,7 +2838,8 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 	trace_kmes_kacs_emit(origin_class, (u32)event_type_len,
 			     (u32)payload_len, 0);
 
-	preempt_disable();
+	if (!pkm_kmes_ring_enter(&bh))
+		return;
 
 	cpu_id = smp_processor_id();
 	if (cpu_id >= pkm_kmes_cpu_slots)
@@ -2646,6 +2895,10 @@ void pkm_kmes_emit_kernel(u8 origin_class, const void *event_type,
 			     &proc_guid, event_type, event_type_len,
 			     payload, payload_len, timestamp, sequence,
 			     &wake_needed);
+	if (wake_needed && pkm_kmes_wake_must_defer()) {
+		pkm_kmes_ring_get(cpu);
+		wake_deferred = true;
+	}
 	goto out;
 
 drop:
@@ -2654,9 +2907,9 @@ drop:
 			cpu->write_pos, cpu->tail_pos, cpu->capacity,
 			KMES_DROP_VALIDATE);
 out:
-	preempt_enable();
+	pkm_kmes_ring_exit(bh);
 	if (wake_needed)
-		pkm_kmes_futex_wake(cpu);
+		pkm_kmes_wake_after_write(cpu, wake_deferred);
 }
 
 static bool pkm_kmes_kernel_event_structurally_valid(
@@ -2716,14 +2969,17 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 	struct pkm_kmes_batch_walk walk = { };
 	u32 index;
 	bool wake_needed = false;
+	bool wake_deferred = false;
 	bool wrote_any = false;
+	bool bh;
 
 	if (!pkm_kmes_ready && count && events)
 		atomic64_add(count, &pkm_kmes_pre_init_drops);
 	if (!count || !events || !pkm_kmes_ready || !pkm_kmes_cpus)
 		return;
 
-	preempt_disable();
+	if (!pkm_kmes_ring_enter(&bh))
+		return;
 
 	cpu_id = smp_processor_id();
 	if (cpu_id >= pkm_kmes_cpu_slots)
@@ -2820,11 +3076,15 @@ void pkm_kmes_emit_kernel_batch(u8 origin_class,
 	cpu->sequence = sequence;
 	pkm_kmes_store_write_pos(cpu, write_pos);
 	wake_needed = pkm_kmes_note_wake(cpu);
+	if (wake_needed && pkm_kmes_wake_must_defer()) {
+		pkm_kmes_ring_get(cpu);
+		wake_deferred = true;
+	}
 
 out:
-	preempt_enable();
+	pkm_kmes_ring_exit(bh);
 	if (wake_needed)
-		pkm_kmes_futex_wake(cpu);
+		pkm_kmes_wake_after_write(cpu, wake_deferred);
 }
 
 int pkm_kmes_current_process_info(u64 *pid_out, u8 *name_out,
@@ -3130,6 +3390,8 @@ void pkm_kmes_kunit_reset_all(void)
 	struct pkm_kmes_runtime_config defaults = { };
 
 	WRITE_ONCE(pkm_kmes_kunit_fail_next_ring_alloc, false);
+	/* A case that switched types off must not leave them off. */
+	pkm_kmes_event_policy_kunit_reset();
 	pkm_kmes_kunit_set_ring_cpu_id_skew(false);
 	if (pkm_kmes_kunit_holed_ring)
 		(void)pkm_kmes_kunit_set_slot_hole(pkm_kmes_kunit_holed_slot,
@@ -3167,6 +3429,28 @@ void pkm_kmes_kunit_reset_all(void)
 		state->futex_counter = 0;
 		pkm_kmes_init_metadata_pages(state);
 	}
+}
+
+/* Run every consumer wake a softirq writer handed off, and wait for it. */
+void pkm_kmes_kunit_flush_deferred_wakes(void)
+{
+	unsigned int cpu;
+
+	if (!pkm_kmes_ready)
+		return;
+	mutex_lock(&pkm_kmes_topology_lock);
+	for_each_possible_cpu(cpu) {
+		struct pkm_kmes_cpu_state *state = pkm_kmes_cpus[cpu].live;
+
+		if (state)
+			flush_work(&state->wake_work);
+	}
+	mutex_unlock(&pkm_kmes_topology_lock);
+}
+
+u64 pkm_kmes_kunit_irq_context_drops(void)
+{
+	return (u64)atomic64_read(&pkm_kmes_irq_context_drops);
 }
 
 int pkm_kmes_kunit_snapshot_single_active(struct pkm_kmes_kunit_snapshot *out)
@@ -3580,8 +3864,8 @@ long pkm_kmes_kunit_publish_self_config_plan(
 	const struct pkm_kmes_self_config_apply_plan *plan,
 	struct pkm_kmes_self_config_apply_plan *result_out)
 {
-	return pkm_kmes_runtime_config_publish_self_config_plan(plan,
-							       result_out);
+	return pkm_kmes_runtime_config_publish_self_config_plan(
+		plan, result_out, NULL);
 }
 
 /*

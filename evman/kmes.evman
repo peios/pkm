@@ -346,7 +346,7 @@ added to it, so even once it is emitted it is a lower bound rather than a
 total.
 
 --- event kmes.config.value.rejected
-tier: standard
+tier: essential
 gating: none — every rejected configuration value is recorded
 cardinality: once per rejected value
 
@@ -378,7 +378,7 @@ field: config.value               required
 
 --- event kmes.buffer.swap.failed
 tier: standard
-gating: only when the swap failed with ENOMEM
+gating: none — every failed swap is recorded, whatever the error
 cardinality: once per failed swap
 
 The record that KMES could not resize its per-CPU ring buffers and kept the
@@ -391,13 +391,72 @@ a way worth recognising: an administrator typically raises capacity because
 the system is dropping events, and the allocation most likely to fail is
 the one made while the system is already short of memory.
 
-The swap is system-wide rather than per-ring, so no CPU or ring is named.
+The other failures are rarer and more serious. `EIO` means the migration
+found a ring whose framing was corrupt and abandoned the swap rather than
+copy it; any other error is the kernel refusing to quiesce the CPUs for
+the switch-over. In every case the old rings stay live and nothing was
+lost by the attempt.
 
-**Only `ENOMEM` produces a record.** A swap that fails for any other reason
-retains the old capacity and emits nothing, so absence of this event is not
-evidence that a capacity change took effect.
+The swap is system-wide rather than per-ring, so no CPU or ring is named.
 
 field: buffer.capacity-requested  required
 field: buffer.capacity            required
   The capacity kept.
+field: outcome.errno              required
+  `-ENOMEM` when the new rings could not be allocated, `-EIO` when the
+  migration met a corrupt ring.
+
+--- event kmes.config.applied
+tier: standard
+gating: none — every configuration read that reaches the commit is recorded
+cardinality: once per read of `Machine\System\KMES`
+
+The record that KMES read its configuration key and committed what it
+found. Emitted after every read that gets as far as the commit: at boot
+once the registry is available, and again each time a value under the key
+changes.
+
+The four counts account for every setting the read saw, so a record whose
+`config.counts.applied` is zero is a read that changed nothing, and one
+with `config.counts.retained-invalid` above zero comes with a
+`kmes.config.value.rejected` for each value kept back. A read whose
+`BufferCapacity` swap failed is still recorded here, because the other
+three settings commit without it; `buffer.capacity` is then the capacity
+kept, beside the `kmes.buffer.swap.failed` that says why.
+
+field: config.key.path                   required
+  Always `Machine\System\KMES`.
+field: config.counts.applied             required
+field: config.counts.retained-missing    required
+field: config.counts.retained-invalid    required
+field: config.counts.ignored-unknown     required
+field: buffer.capacity                   required
+  The per-CPU ring capacity in force after the commit.
+field: emission.rate-limit               required
+  The per-process emission ceiling in force after the commit.
+
+--- event kmes.config.refresh.failed
+tier: essential
+gating: none — every failed re-read is recorded
+cardinality: once per failed read
+
+The record that KMES could not read one of its configuration keys and kept
+running on what it had. Two keys are read this way: `Machine\System\KMES`,
+KMES's own settings, and `Machine\Generic\Events`, the emission policy
+that decides which kernel event types are written.
+
+A failed read changes nothing. KMES keeps the configuration it last
+committed, or the compiled-in defaults if it never committed one, and the
+emission policy keeps the switches it last computed, or the tier defaults.
+**Until the next change under the key, the registry and the running
+kernel disagree**, and this record is the only sign of it: an
+administrator who switched an event type off and finds it still written
+is looking for one of these.
+
+The usual cause is the registry source failing to answer in time. A
+configuration rejected value by value is not a failed read; that is
+`kmes.config.value.rejected`.
+
+field: config.key.path            required
+  `Machine\System\KMES` or `Machine\Generic\Events`.
 field: outcome.errno              required

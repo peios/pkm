@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/bottom_half.h>
+#include <linux/completion.h>
+#include <linux/irq_work.h>
+#include <linux/timer.h>
+#include <linux/unaligned.h>
+
 #include "kunit_common.h"
 
 
@@ -1717,16 +1723,23 @@ static void pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size(
 
 
 /*
- * PKM *ring.swap.abort-emits-no-event. A corrupt size field met inside the
+ * PKM *ring.swap.abort-emits-event. A corrupt size field met inside the
  * quiesced migration abandons the swap like an allocation failure -- old
- * rings live, generation unchanged, capacity retained -- but the failure is
- * not -ENOMEM, so no kmes.buffer.swap.failed event is emitted.
+ * rings live, generation unchanged, capacity retained -- and is reported
+ * like one: a kmes.buffer.swap.failed naming both capacities and -EIO.
  */
-static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_stays_silent(
+static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
 	struct kunit *test)
 {
 	static const char swap_failed_type[] = "kmes.buffer.swap.failed";
+	/* 1 MiB asked for, the 4 MiB default kept, and -EIO signed. */
+	static const u8 expected[] =
+		"\x82" "\xa6" "buffer" "\x82"
+		"\xb2" "capacity-requested" "\xce\x00\x10\x00\x00"
+		"\xa8" "capacity" "\xce\x00\x40\x00\x00"
+		"\xa7" "outcome" "\x81" "\xa5" "errno" "\xfb";
 	static const u8 payload[] = { 0xc0 };
+	u32 header_size;
 	struct pkm_kmes_runtime_config config;
 	struct pkm_kmes_runtime_config snapshot = { };
 	struct pkm_kmes_kunit_snapshot ring = { };
@@ -1784,21 +1797,25 @@ static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_stays_silent(
 			(u64)PKM_KUNIT_KMES_DEFAULT_CAPACITY);
 
 	/*
-	 * Repair the planted corruption so the ring parses again, then look
-	 * for the event that must not be there. Had it been emitted it would
-	 * sit after the repaired event and still be found.
+	 * Repair the planted corruption so the ring parses again, then read
+	 * the report, which sits after the repaired event.
 	 */
 	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_poke_single_ring(ring.tail_pos,
 							original_size,
 							sizeof(original_size)),
 			0);
-	KUNIT_EXPECT_EQ(test,
+	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_copy_latest_matching_event(
 				KMES_ORIGIN_KMES, swap_failed_type,
 				sizeof(swap_failed_type) - 1, scratch,
 				sizeof(scratch), &written, NULL),
-			-ENOENT);
+			0);
+	header_size = get_unaligned_le32(scratch + KMES_EVENT_HEADER_SIZE_OFFSET);
+	KUNIT_ASSERT_LE(test, (size_t)header_size, written);
+	KUNIT_ASSERT_EQ(test, written - header_size, sizeof(expected) - 1);
+	KUNIT_EXPECT_MEMEQ(test, scratch + header_size, expected,
+			   sizeof(expected) - 1);
 
 	pkm_kunit_close_fds(test, fds, count);
 	kacs_rust_token_drop(token);
@@ -2084,6 +2101,150 @@ static void pkm_kunit_kmes_attach_hole_is_einval_and_enumeration_continues(
 }
 
 
+/* --- writers outside task context --------------------------------------- */
+
+struct pkm_kunit_kmes_context_emit {
+	struct timer_list timer;
+	struct irq_work work;
+	struct completion done;
+	bool softirq;
+	bool hardirq;
+};
+
+static void pkm_kunit_kmes_emit_one(void)
+{
+	static const u8 payload[] = { 0xc0 };
+
+	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+			     sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, payload,
+			     sizeof(payload));
+}
+
+static void pkm_kunit_kmes_emit_from_timer(struct timer_list *timer)
+{
+	struct pkm_kunit_kmes_context_emit *ctx =
+		timer_container_of(ctx, timer, timer);
+
+	ctx->softirq = in_serving_softirq();
+	pkm_kunit_kmes_emit_one();
+	complete(&ctx->done);
+}
+
+static void pkm_kunit_kmes_emit_from_irq_work(struct irq_work *work)
+{
+	struct pkm_kunit_kmes_context_emit *ctx =
+		container_of(work, struct pkm_kunit_kmes_context_emit, work);
+
+	ctx->hardirq = in_hardirq();
+	pkm_kunit_kmes_emit_one();
+}
+
+/*
+ * PKM *ring.softirq-writer-safe. A writer in softirq context -- a timer
+ * callback here, NTFE's receive path in production -- writes its event
+ * whole, and the consumer wake it owes is handed to process context rather
+ * than taken under the futex lock from softirq. The wake still happens: the
+ * private counter advances at the write, and the deferred work runs.
+ */
+static void pkm_kunit_kmes_softirq_emit_lands_and_defers_wake(
+	struct kunit *test)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_kmes_context_emit *ctx;
+	u8 buffer[128] = { 0 };
+	size_t written = 0;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	init_completion(&ctx->done);
+	timer_setup(&ctx->timer, pkm_kunit_kmes_emit_from_timer, 0);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_set_all_need_wake(1), 0);
+	mod_timer(&ctx->timer, jiffies + 1);
+	KUNIT_ASSERT_GT(test,
+			wait_for_completion_timeout(&ctx->done, 5 * HZ), 0UL);
+	timer_delete_sync(&ctx->timer);
+	pkm_kmes_kunit_flush_deferred_wakes();
+
+	KUNIT_EXPECT_TRUE(test, ctx->softirq);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, &snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, written, (size_t)view.event_size);
+	KUNIT_EXPECT_EQ(test, view.sequence, 1ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.futex_counter, 1U);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)PKM_KUNIT_KMES_DIRECT_TYPE,
+				  sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1);
+
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_set_all_need_wake(0), 0);
+}
+
+/*
+ * PKM *ring.bh-held-across-write. A task-context writer holds bottom halves
+ * off across its reservation and write, so it may itself be called with
+ * them already off -- as netfilter's output path does -- and still writes
+ * and wakes directly.
+ */
+static void pkm_kunit_kmes_bh_disabled_task_emit_wakes_directly(
+	struct kunit *test)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_set_all_need_wake(1), 0);
+	local_bh_disable();
+	pkm_kunit_kmes_emit_one();
+	pkm_kunit_kmes_emit_one();
+	local_bh_enable();
+
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 2ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
+	KUNIT_EXPECT_EQ(test, snapshot.futex_counter, 2U);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_set_all_need_wake(0), 0);
+}
+
+/*
+ * PKM *ring.hardirq-writer-refused. Bottom halves cannot be held off from
+ * hard interrupt context, and a writer there could interrupt one holding
+ * the ring, so an emit from hard interrupt context is dropped before it
+ * touches any ring: no sequence number, no ring drop, a private count.
+ */
+static void pkm_kunit_kmes_hardirq_emit_is_refused(struct kunit *test)
+{
+	struct pkm_kunit_kmes_context_emit *ctx;
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	u64 before;
+	u8 buffer[128] = { 0 };
+	size_t written = 0;
+
+	ctx = kunit_kzalloc(test, sizeof(*ctx), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	/* HARD: run in hard interrupt context even where irq_work is lazy. */
+	ctx->work = IRQ_WORK_INIT_HARD(pkm_kunit_kmes_emit_from_irq_work);
+
+	pkm_kunit_reset_kmes();
+	before = pkm_kmes_kunit_irq_context_drops();
+	KUNIT_ASSERT_TRUE(test, irq_work_queue(&ctx->work));
+	irq_work_sync(&ctx->work);
+
+	KUNIT_EXPECT_TRUE(test, ctx->hardirq);
+	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_irq_context_drops(), before + 1);
+	/* Nothing written to any ring: no single active ring to copy. */
+	KUNIT_EXPECT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(buffer, sizeof(buffer),
+							  &written, &snapshot),
+			-ENOENT);
+}
+
 static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_direct_emit_writes_single_event),
 	KUNIT_CASE(pkm_kunit_kmes_identity_stamps_match_kacs_state),
@@ -2123,7 +2284,10 @@ static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_runtime_nesting_depth_controls_validation),
 	KUNIT_CASE(pkm_kunit_kmes_runtime_rate_change_clamps_live_bucket),
 	KUNIT_CASE(pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size),
-	KUNIT_CASE(pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_stays_silent),
+	KUNIT_CASE(pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports),
+	KUNIT_CASE(pkm_kunit_kmes_softirq_emit_lands_and_defers_wake),
+	KUNIT_CASE(pkm_kunit_kmes_bh_disabled_task_emit_wakes_directly),
+	KUNIT_CASE(pkm_kunit_kmes_hardirq_emit_is_refused),
 	KUNIT_CASE(pkm_kunit_kmes_pre_init_kernel_emit_is_silent),
 	KUNIT_CASE(pkm_kunit_kmes_pre_init_syscalls_fail_closed),
 	KUNIT_CASE(pkm_kunit_kmes_cpu_mismatch_discards_on_every_path),

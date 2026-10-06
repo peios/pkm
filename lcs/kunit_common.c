@@ -7633,11 +7633,19 @@ int pkm_lcs_kunit_source_bootstrap_source_thread(void *raw_script)
 	if (ret)
 		goto out;
 
-	/* NTFE's Network key is discovered last. */
+	/* NTFE's Network key is discovered after port reservations. */
 	script->network_walk.file = script->file;
 	ret = pkm_lcs_kunit_walk_source_thread(&script->network_walk);
 	script->reads += script->network_walk.reads;
 	script->writes += script->network_walk.writes;
+	if (ret)
+		goto out;
+
+	/* The emission policy, Machine\Generic\Events, is discovered last. */
+	script->events_walk.file = script->file;
+	ret = pkm_lcs_kunit_walk_source_thread(&script->events_walk);
+	script->reads += script->events_walk.reads;
+	script->writes += script->events_walk.writes;
 
 out:
 	script->result = ret;

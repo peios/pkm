@@ -396,7 +396,7 @@ field: fields.attestation.userspace  optional
   supplied the PIP state.
 
 --- event kacs.audit.handle.used
-tier: standard
+tier: essential
 gating: the operation's required access overlaps the alarm mask cached on the handle
 cardinality: once per operation on the handle
 
@@ -615,7 +615,8 @@ field: signature.crypto-stage   required
 field: outcome.errno            required
 
 --- event kacs.session.destroyed
-tier: standard
+tier: essential
+gating: none — every logon session that ends is recorded
 
 The record that a logon session ended because its last token went away.
 KACS destroys a session once no token refers to it, or once the only

@@ -37,6 +37,7 @@
 
 #include "../kacs/port_reservations.h"
 #include "../kacs/token_runtime.h"
+#include "../kmes/event_policy.h"
 #include "key_fd.h"
 #include "rsi.h"
 #include "source_device.h"
@@ -155,6 +156,7 @@ struct pkm_lcs_internal_self_watch_state {
 	struct pkm_lcs_internal_watch kmes;
 	struct pkm_lcs_internal_watch port;
 	struct pkm_lcs_internal_watch network;
+	struct pkm_lcs_internal_watch events;
 	struct pkm_lcs_internal_watch fallback;
 	u32 source_id;
 	enum pkm_lcs_internal_self_watch_mode mode;
@@ -11242,9 +11244,56 @@ static bool pkm_lcs_internal_watch_event_deliverable(
 		       event_type == REG_WATCH_SUBKEY_CREATED ||
 		       event_type == REG_WATCH_SUBKEY_DELETED ||
 		       event_type == REG_WATCH_KEY_DELETED;
+	case PKM_LCS_INTERNAL_WATCH_EVENT_POLICY:
+		/*
+		 * The policy is a tree of keys, one per event-type segment,
+		 * any of which may carry Enabled: a value or a key appearing
+		 * or going away at any depth can change a decision. Which
+		 * of them can change a kernel type is narrowed below, by
+		 * root and by value name.
+		 */
+		return event_type == REG_WATCH_VALUE_SET ||
+		       event_type == REG_WATCH_VALUE_DELETED ||
+		       event_type == REG_WATCH_SUBKEY_CREATED ||
+		       event_type == REG_WATCH_SUBKEY_DELETED ||
+		       event_type == REG_WATCH_KEY_DELETED;
 	default:
 		return false;
 	}
+}
+
+/*
+ * The emission-policy watch covers the whole Events subtree, but only the
+ * Events key itself, the kernel's own roots beneath it (kacs, kmes, lcs,
+ * ntfe, stratafs) and the Enabled value can change a kernel type. PGSS
+ * §6.9 lets an emitter watch only its own roots; vendor writes under
+ * Events\org\... are dropped here, before any work is queued.
+ */
+static bool pkm_lcs_internal_watch_event_policy_relevant(
+	const struct pkm_lcs_watch_dispatch_context *context,
+	u32 watched_path_index, u32 relative_path_count)
+{
+	const char *root;
+
+	if ((context->event_type == REG_WATCH_VALUE_SET ||
+	     context->event_type == REG_WATCH_VALUE_DELETED) &&
+	    !pkm_kmes_event_policy_value_relevant(context->name,
+						  context->name_len))
+		return false;
+
+	if (relative_path_count == 0) {
+		/* On Events itself, a subkey event names the child. */
+		if (context->event_type == REG_WATCH_SUBKEY_CREATED ||
+		    context->event_type == REG_WATCH_SUBKEY_DELETED)
+			return pkm_kmes_event_policy_root_relevant(
+				(const char *)context->name, context->name_len);
+		return true;
+	}
+
+	root = context->resolved_path[watched_path_index + 1U];
+	if (!root)
+		return true;
+	return pkm_kmes_event_policy_root_relevant(root, (u32)strlen(root));
 }
 
 static long pkm_lcs_internal_watch_collect_locked(
@@ -11268,6 +11317,10 @@ static long pkm_lcs_internal_watch_collect_locked(
 	relative_path_count = changed_index - watched_path_index;
 	if (!pkm_lcs_internal_watch_event_deliverable(
 		    watch, context->event_type, relative_path_count))
+		return 0;
+	if (watch->target == PKM_LCS_INTERNAL_WATCH_EVENT_POLICY &&
+	    !pkm_lcs_internal_watch_event_policy_relevant(
+		    context, watched_path_index, relative_path_count))
 		return 0;
 
 	event = kzalloc(sizeof(*event), GFP_KERNEL);
@@ -11542,10 +11595,11 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 			   PKM_LCS_INTERNAL_WATCH_KMES_CONFIGURATION) {
 			/*
 			 * KMES retains its last known-good configuration if the
-			 * source re-read fails or yields invalid values.
+			 * source re-read fails or yields invalid values, and
+			 * records a failed read as kmes.config.refresh.failed.
 			 */
-			pkm_kmes_runtime_config_refresh_from_key(
-				event->source_id, event->guid, NULL);
+			pkm_kmes_runtime_config_refresh_on_change(
+				event->source_id, event->guid);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_PORT_RESERVATIONS) {
 			/*
@@ -11563,6 +11617,14 @@ static void pkm_lcs_internal_watch_events_deliver(struct list_head *events,
 			 */
 			peios_ntfe_network_registry_changed(event->source_id,
 							 event->guid);
+		} else if (event->target ==
+			   PKM_LCS_INTERNAL_WATCH_EVENT_POLICY) {
+			/*
+			 * Coalesced like NTFE's: one deferred re-walk per
+			 * burst. A failed walk keeps the mask in force.
+			 */
+			pkm_kmes_event_policy_registry_changed(event->source_id,
+							       event->guid);
 		} else if (event->target ==
 			   PKM_LCS_INTERNAL_WATCH_LAYER_METADATA) {
 			pkm_lcs_internal_watch_deliver_layer_event(
@@ -12212,6 +12274,8 @@ static void pkm_lcs_internal_self_watch_disarm_locked(void)
 	pkm_lcs_internal_watch_remove_locked(
 		&pkm_lcs_internal_self_watch.network);
 	pkm_lcs_internal_watch_remove_locked(
+		&pkm_lcs_internal_self_watch.events);
+	pkm_lcs_internal_watch_remove_locked(
 		&pkm_lcs_internal_self_watch.fallback);
 	pkm_lcs_internal_self_watch.source_id = 0;
 	pkm_lcs_internal_self_watch.mode =
@@ -12268,6 +12332,10 @@ static void pkm_lcs_internal_self_watch_fill_result_locked(
 		memcpy(out->network_guid,
 		       pkm_lcs_internal_self_watch.network.registry.guid,
 		       sizeof(out->network_guid));
+	if (pkm_lcs_internal_self_watch.events.registry.linked)
+		memcpy(out->events_guid,
+		       pkm_lcs_internal_self_watch.events.registry.guid,
+		       sizeof(out->events_guid));
 }
 
 long pkm_lcs_internal_self_watch_arm_full(
@@ -12278,6 +12346,7 @@ long pkm_lcs_internal_self_watch_arm_full(
 	bool kmes_present, const u8 kmes_guid[PKM_LCS_GUID_BYTES],
 	bool port_present, const u8 port_guid[PKM_LCS_GUID_BYTES],
 	bool network_present, const u8 network_guid[PKM_LCS_GUID_BYTES],
+	bool events_present, const u8 events_guid[PKM_LCS_GUID_BYTES],
 	struct pkm_lcs_internal_self_watch_arm_result *result_out)
 {
 	bool fallback_needed;
@@ -12298,6 +12367,8 @@ long pkm_lcs_internal_self_watch_arm_full(
 	if (port_present && !pkm_lcs_internal_watch_guid_valid(port_guid))
 		return -EINVAL;
 	if (network_present && !pkm_lcs_internal_watch_guid_valid(network_guid))
+		return -EINVAL;
+	if (events_present && !pkm_lcs_internal_watch_guid_valid(events_guid))
 		return -EINVAL;
 
 	mutex_lock(&pkm_lcs_watch_registry_lock);
@@ -12349,8 +12420,24 @@ long pkm_lcs_internal_self_watch_arm_full(
 		watch_count++;
 	}
 
+	if (events_present) {
+		ret = pkm_lcs_internal_watch_add_locked(
+			&pkm_lcs_internal_self_watch.events, source_id,
+			events_guid, PKM_LCS_INTERNAL_WATCH_EVENT_POLICY);
+		if (ret)
+			goto out_rollback;
+		watch_count++;
+	}
+
+	/*
+	 * Any kernel-read key missing: watch the whole Machine hive for it to
+	 * be created. Machine\Generic\Events is two levels down, and the
+	 * fallback fires on a subkey created at any depth, so its creation --
+	 * with or without Generic already there -- re-runs the bootstrap.
+	 */
 	fallback_needed = !registry_present || !layers_present ||
-			  !kmes_present || !port_present || !network_present;
+			  !kmes_present || !port_present || !network_present ||
+			  !events_present;
 	if (fallback_needed) {
 		ret = pkm_lcs_internal_watch_add_locked(
 			&pkm_lcs_internal_self_watch.fallback, source_id,
@@ -13580,6 +13667,10 @@ long pkm_lcs_kunit_internal_self_watch_snapshot(
 		memcpy(out->network_guid,
 		       pkm_lcs_internal_self_watch.network.registry.guid,
 		       sizeof(out->network_guid));
+	if (pkm_lcs_internal_self_watch.events.registry.linked)
+		memcpy(out->events_guid,
+		       pkm_lcs_internal_self_watch.events.registry.guid,
+		       sizeof(out->events_guid));
 	mutex_unlock(&pkm_lcs_watch_registry_lock);
 	return 0;
 }

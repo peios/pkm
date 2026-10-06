@@ -38,6 +38,11 @@ description = "Peios Kernel - bootable image (based on Linux 7.0.9)"
 # enforcement on at boot (generation 1). Inert until an image names it in
 # [registry] autoapply.
 "@source:regim/pnp-rules.reg" = "usr/share/regim/pnp-rules.reg"
+# The event emission policy root, Machine\Generic\Events (PGSS §6.9,
+# PEI-1281), with Enabled = 1. Inert until an image names it in
+# [registry] autoapply; until then every emitter decides by tier and the
+# kernel keeps its machine-root fallback watch armed for the key.
+"@source:regim/event-policy.reg" = "usr/share/regim/event-policy.reg"
 # regman documentation for the five registry roots the kernel reads
 # (lcs/source_bootstrap.c). The seeds above put values in the registry; these
 # are what `regman <path>` answers with when somebody asks what one means.
