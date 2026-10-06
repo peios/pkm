@@ -529,6 +529,27 @@ static void pkm_kunit_privilege_use_gate_records(struct kunit *test)
 					test, &root, "access"));
 	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
 					test, &root, "object"));
+	/*
+	 * Written from KUnit's kernel thread with no process override: a
+	 * process with no executable gets a record without
+	 * emitter.process.executable, not a refusal.
+	 */
+	{
+		struct pkm_kunit_msgpack_view emitter = { };
+		struct pkm_kunit_msgpack_view process = { };
+
+		KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+						test, &root, "emitter", 1U,
+						&emitter));
+		KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+						test, &emitter, "process", 2U,
+						&process));
+		KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+						test, &process, "name",
+						current->comm));
+		KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+						test, &process, "executable"));
+	}
 
 	pkm_kunit_reset_kmes();
 	KUNIT_ASSERT_EQ(test,
