@@ -9745,6 +9745,161 @@ fn impersonation_revert_operation(cause: u32) -> Option<&'static [u8]> {
     }
 }
 
+#[repr(C)]
+/// `struct pkm_kacs_sd_change_view` (sd_access.h): one descriptor change for
+/// `kacs.audit.descriptor.changed`. Field for field the C layout.
+pub struct PkmKacsSdChangeView {
+    pub subject_token: *const c_void,
+    pub object_token: *const c_void,
+    pub file_path: *const u8,
+    pub file_path_len: usize,
+    pub process_guid: *const u8,
+    pub old_sd: *const u8,
+    pub old_sd_len: usize,
+    pub new_sd: *const u8,
+    pub new_sd_len: usize,
+    pub ipc_id: i64,
+    pub old_digest: [u8; 32],
+    pub new_digest: [u8; 32],
+    pub kind: u32,
+    pub ipc_type: u32,
+    pub security_info: u32,
+    pub requested: u32,
+    pub granted: u32,
+    pub audit_mask: u32,
+    pub has_handle: u32,
+    pub pip_type: u32,
+    pub pip_trust: u32,
+    pub err: i32,
+}
+
+/// One side of a descriptor change, from its bytes and digest.
+fn descriptor_facts<'a>(
+    bytes: *const u8,
+    len: usize,
+    digest: &[u8; 32],
+) -> Option<crate::kmes_payload::DescriptorFacts<'a>> {
+    if bytes.is_null() || len == 0 {
+        return None;
+    }
+    let bytes: &'a [u8] = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let owner = SecurityDescriptor::parse(bytes)
+        .ok()
+        .and_then(|sd| sd.owner())
+        .map(|owner| owner.as_bytes());
+    Some(crate::kmes_payload::DescriptorFacts {
+        len,
+        digest: *digest,
+        owner,
+    })
+}
+
+#[no_mangle]
+/// Writes `kacs.audit.descriptor.changed` for one descriptor change; see
+/// `pkm_kacs_audit_descriptor_changed()`. Best effort.
+pub extern "C" fn kacs_rust_emit_descriptor_changed(chg: *const PkmKacsSdChangeView) -> i32 {
+    use crate::kmes_payload::{DescriptorChange, DescriptorObject};
+
+    let Some(chg) = (unsafe { chg.as_ref() }) else {
+        return -EINVAL;
+    };
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(chg.subject_token) }) else {
+        return -EINVAL;
+    };
+    let object = match chg.kind {
+        1 => DescriptorObject::File {
+            path: (!chg.file_path.is_null() && chg.file_path_len != 0).then(|| unsafe {
+                core::slice::from_raw_parts(chg.file_path, chg.file_path_len)
+            }),
+        },
+        2 => {
+            let Some(target) = (unsafe { PkmKacsBootToken::from_ptr(chg.object_token) }) else {
+                return -EINVAL;
+            };
+            DescriptorObject::Token {
+                id: target.token_id,
+                guid: target.token_guid,
+            }
+        }
+        3 => {
+            if chg.process_guid.is_null() {
+                return -EINVAL;
+            }
+            let mut guid = [0u8; KACS_UUID_BYTES];
+            unsafe { copy_nonoverlapping(chg.process_guid, guid.as_mut_ptr(), KACS_UUID_BYTES) };
+            DescriptorObject::Process { guid }
+        }
+        4 => DescriptorObject::Ipc {
+            kind: match chg.ipc_type {
+                1 => b"sem",
+                2 => b"shm",
+                3 => b"msg",
+                _ => return -EINVAL,
+            },
+            id: chg.ipc_id,
+        },
+        _ => return -EINVAL,
+    };
+    let change = DescriptorChange {
+        object,
+        components: chg.security_info,
+        previous: descriptor_facts(chg.old_sd, chg.old_sd_len, &chg.old_digest),
+        current: if chg.err == 0 {
+            descriptor_facts(chg.new_sd, chg.new_sd_len, &chg.new_digest)
+        } else {
+            None
+        },
+        requested: chg.requested,
+        handle: (chg.has_handle != 0).then_some((chg.granted, chg.audit_mask)),
+        errno: chg.err,
+    };
+    let ids = subject.audit_subject_ids();
+
+    subject.with_access_token(|access_token| {
+        match crate::kmes_payload::emit_descriptor_changed_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(chg.pip_type, chg.pip_trust),
+            &change,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+#[no_mangle]
+/// An allocated copy of the token's own descriptor, for the caller to free
+/// with `pkm_kacs_free`. `*out_sd_ptr` is null on failure.
+pub extern "C" fn kacs_rust_token_own_sd_copy(
+    token: *const c_void,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let (Some(out_sd_ptr), Some(out_sd_len)) =
+        (unsafe { out_sd_ptr.as_mut() }, unsafe { out_sd_len.as_mut() })
+    else {
+        return -EINVAL;
+    };
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let copy = match token.own_sd_rcu_copy() {
+        Ok(copy) => copy,
+        Err(err) => return err,
+    };
+    if copy.is_empty() {
+        return -ENODATA;
+    }
+    *out_sd_ptr = copy.ptr.cast_const();
+    *out_sd_len = copy.len;
+    // Ownership of the allocation passes to the caller.
+    core::mem::forget(copy);
+    0
+}
+
 #[no_mangle]
 /// The token's audit policy (`KACS_AUDIT_POLICY_*`), fixed at creation, or 0
 /// for a null token. Lock-free: the field never changes.

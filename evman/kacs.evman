@@ -526,6 +526,72 @@ field: fields.attestation.userspace  optional
   the descriptor, and with it `trigger.ace`, is always the caller's, as are
   any audit context and PIP state it passes.
 
+--- event kacs.audit.descriptor.changed
+tier: essential
+gating: a change that includes the SACL, always; any other change when the rights it needed overlap the alarm mask on the handle it was made through
+cardinality: once per authorised change
+
+The record that a caller changed, or was authorised to change and failed to
+change, the security descriptor of a file, a token, a process or a System V
+IPC object. Registry keys have their own record of the same shape,
+`lcs.audit.key.descriptor.changed`.
+
+**A change to a SACL is always recorded**, whatever the old or new
+descriptor says. Changing a SACL needs `ACCESS_SYSTEM_SECURITY`, which needs
+SeSecurityPrivilege; it is rare; and removing one is how an intruder stops
+being watched. Before this record existed a file's SACL could be removed in
+silence, because the only audit of a descriptor change was evaluated
+against the new SACL, which then had nothing in it.
+
+Any other change — the owner, the group, the DACL, the integrity label — is
+recorded when the rights it needed overlap the alarm mask on the handle it
+was made through: the rule `kacs.audit.handle.used` follows. Only a file
+handle carries such a mask, so for a token, a process or an IPC object only
+a SACL change is recorded.
+
+The descriptors themselves are not carried, only their SHA-256 digests,
+lengths and owners. Equal digests mean the change rewrote the descriptor
+without altering it.
+
+include: subject
+field: object.kind                 required
+  `file`, `token`, `process` or `ipc`.
+field: object.file.path            optional
+  On a file, its absolute path, when the handle's path could be resolved.
+field: object.token.id             when object.kind == token
+field: object.token.guid           when object.kind == token
+field: object.process.guid         when object.kind == process
+field: object.ipc.type             when object.kind == ipc
+field: object.ipc.id               when object.kind == ipc
+field: object.sd.components        required
+  The parts the caller set. A `SACL` bit means the record was not
+  discretionary: such a change is always recorded.
+field: object.sd.length            when outcome.success == true
+field: object.sd.digest            when outcome.success == true
+  SHA-256 of the descriptor as written.
+field: object.sd.owner             optional
+  The owner of the descriptor written, when it has one.
+field: object.sd.length-previous   optional
+field: object.sd.digest-previous   optional
+  SHA-256 of the descriptor replaced. Absent, with its length and owner,
+  where the object had no stored descriptor to replace.
+field: object.sd.owner-previous    optional
+field: access.requested            required
+  The rights the change needed: `WRITE_OWNER`, `WRITE_DAC`,
+  `ACCESS_SYSTEM_SECURITY`, as the parts set ask.
+field: access.granted              optional
+  What the handle the change was made through was opened with. Absent on a
+  change made without one.
+field: access.audit-mask           optional
+  The alarm mask on that handle.
+field: access.matched              optional
+  The part of `access.requested` the alarm mask matched, on a change made
+  through a handle: zero when only the SACL made the record exist.
+field: outcome.success             required
+  Whether the new descriptor was written. A refused change — one the caller
+  had no right to make — is not this record; it is the access check's.
+field: outcome.errno               when outcome.success == false
+
 --- event kacs.caap.sacl.skipped
 tier: standard
 gating: an access check that evaluates a central access policy rule whose SACL cannot be used

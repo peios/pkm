@@ -35,6 +35,7 @@ const CAAP_STAGING_DIVERGED_TYPE: &[u8] = b"kacs.caap.staging.diverged";
 const SESSION_DESTROYED_TYPE: &[u8] = b"kacs.session.destroyed";
 const IMPERSONATION_STARTED_TYPE: &[u8] = b"kacs.impersonation.started";
 const IMPERSONATION_REVERTED_TYPE: &[u8] = b"kacs.impersonation.reverted";
+const DESCRIPTOR_CHANGED_TYPE: &[u8] = b"kacs.audit.descriptor.changed";
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -1084,6 +1085,199 @@ pub(crate) fn emit_impersonation_started_to_kmes(
     )?;
 
     emit(IMPERSONATION_STARTED_TYPE, payload.as_slice());
+    Ok(())
+}
+
+/// What a descriptor change was made to, as `object.<kind>` names it.
+pub(crate) enum DescriptorObject<'a> {
+    /// A file, by absolute path when the handle's path could be resolved.
+    File { path: Option<&'a [u8]> },
+    /// A token, by LUID and durable GUID.
+    Token { id: u64, guid: [u8; 16] },
+    /// A process, by durable GUID.
+    Process { guid: [u8; 16] },
+    /// A System V IPC object: `sem`, `shm` or `msg`, and its identifier.
+    Ipc { kind: &'static [u8], id: i64 },
+}
+
+/// One side of a descriptor change: its length, SHA-256 digest and owner.
+pub(crate) struct DescriptorFacts<'a> {
+    pub(crate) len: usize,
+    pub(crate) digest: [u8; 32],
+    pub(crate) owner: Option<&'a [u8]>,
+}
+
+/// `kacs.audit.descriptor.changed`'s inputs beyond subject and emitter.
+pub(crate) struct DescriptorChange<'a> {
+    pub(crate) object: DescriptorObject<'a>,
+    /// `object.sd.components`: the `KACS_SECINFO_*` bits addressed.
+    pub(crate) components: u32,
+    /// The descriptor replaced, when it was a stored one.
+    pub(crate) previous: Option<DescriptorFacts<'a>>,
+    /// The descriptor written, when the change applied.
+    pub(crate) current: Option<DescriptorFacts<'a>>,
+    /// The rights the change needed.
+    pub(crate) requested: u32,
+    /// The handle's grant and alarm mask, for a change made through one.
+    pub(crate) handle: Option<(u32, u32)>,
+    pub(crate) errno: i32,
+}
+
+fn write_descriptor_object(
+    writer: &mut MsgpackWriter,
+    change: &DescriptorChange<'_>,
+) -> Result<(), c_long> {
+    let (kind, has_body): (&[u8], bool) = match &change.object {
+        DescriptorObject::File { path } => (b"file", path.is_some()),
+        DescriptorObject::Token { .. } => (b"token", true),
+        DescriptorObject::Process { .. } => (b"process", true),
+        DescriptorObject::Ipc { .. } => (b"ipc", true),
+    };
+
+    writer.write_key(b"object")?;
+    writer.write_map_len(2 + usize::from(has_body))?;
+    writer.write_key(b"kind")?;
+    writer.write_str(kind)?;
+    match &change.object {
+        DescriptorObject::File { path: Some(path) } => {
+            writer.write_key(b"file")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"path")?;
+            writer.write_str(path)?;
+        }
+        DescriptorObject::File { path: None } => {}
+        DescriptorObject::Token { id, guid } => {
+            writer.write_key(b"token")?;
+            writer.write_map_len(2)?;
+            writer.write_key(b"id")?;
+            writer.write_u64(*id)?;
+            writer.write_key(b"guid")?;
+            writer.write_bin(guid)?;
+        }
+        DescriptorObject::Process { guid } => {
+            writer.write_key(b"process")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"guid")?;
+            writer.write_bin(guid)?;
+        }
+        DescriptorObject::Ipc { kind, id } => {
+            writer.write_key(b"ipc")?;
+            writer.write_map_len(2)?;
+            writer.write_key(b"type")?;
+            writer.write_str(kind)?;
+            writer.write_key(b"id")?;
+            write_i64(writer, *id)?;
+        }
+    }
+
+    let side_len = |facts: &Option<DescriptorFacts<'_>>| match facts {
+        Some(facts) => 2 + usize::from(facts.owner.is_some()),
+        None => 0,
+    };
+    writer.write_key(b"sd")?;
+    writer.write_map_len(1 + side_len(&change.current) + side_len(&change.previous))?;
+    writer.write_key(b"components")?;
+    writer.write_u64(u64::from(change.components))?;
+    if let Some(current) = &change.current {
+        writer.write_key(b"length")?;
+        writer.write_u64(current.len as u64)?;
+        writer.write_key(b"digest")?;
+        writer.write_bin(&current.digest)?;
+        if let Some(owner) = current.owner {
+            writer.write_key(b"owner")?;
+            writer.write_bin(owner)?;
+        }
+    }
+    if let Some(previous) = &change.previous {
+        writer.write_key(b"length-previous")?;
+        writer.write_u64(previous.len as u64)?;
+        writer.write_key(b"digest-previous")?;
+        writer.write_bin(&previous.digest)?;
+        if let Some(owner) = previous.owner {
+            writer.write_key(b"owner-previous")?;
+            writer.write_bin(owner)?;
+        }
+    }
+    Ok(())
+}
+
+/// `kacs.audit.descriptor.changed`: `token` is the caller's token, the one
+/// that made (or tried to make) the change.
+pub(crate) fn emit_descriptor_changed_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    change: &DescriptorChange<'_>,
+) -> Result<(), c_long> {
+    // A file name is an arbitrary byte string: sanitise, as for handle use.
+    let sanitized = match &change.object {
+        DescriptorObject::File { path: Some(path) } => {
+            let mut copy = Vec::with_capacity(path.len()).map_err(|_| ENOMEM)?;
+            copy.extend_from_slice(path).map_err(|_| ENOMEM)?;
+            Some(sanitize_utf8_lossy(copy)?)
+        }
+        _ => None,
+    };
+    let change = DescriptorChange {
+        object: match (&change.object, sanitized.as_deref()) {
+            (DescriptorObject::File { .. }, path) => DescriptorObject::File { path },
+            (DescriptorObject::Token { id, guid }, _) => DescriptorObject::Token {
+                id: *id,
+                guid: *guid,
+            },
+            (DescriptorObject::Process { guid }, _) => DescriptorObject::Process { guid: *guid },
+            (DescriptorObject::Ipc { kind, id }, _) => DescriptorObject::Ipc { kind, id: *id },
+        },
+        previous: change.previous.as_ref().map(|facts| DescriptorFacts {
+            len: facts.len,
+            digest: facts.digest,
+            owner: facts.owner,
+        }),
+        current: change.current.as_ref().map(|facts| DescriptorFacts {
+            len: facts.len,
+            digest: facts.digest,
+            owner: facts.owner,
+        }),
+        ..*change
+    };
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_map(&process_info)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let mut writer = MsgpackWriter::with_capacity(
+        512 + subject_map.len() + emitter_map.len() + sanitized.as_ref().map_or(0, |p| p.len()),
+    )?;
+
+    writer.write_map_len(5)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map.as_slice())?;
+    write_descriptor_object(&mut writer, &change)?;
+    writer.write_key(b"access")?;
+    match change.handle {
+        Some((granted, audit_mask)) => {
+            // Zero when only the SACL made the record exist, as on the
+            // registry's own record.
+            let matched = change.requested & audit_mask;
+            writer.write_map_len(4)?;
+            writer.write_key(b"requested")?;
+            writer.write_u64(u64::from(change.requested))?;
+            writer.write_key(b"granted")?;
+            writer.write_u64(u64::from(granted))?;
+            writer.write_key(b"audit-mask")?;
+            writer.write_u64(u64::from(audit_mask))?;
+            writer.write_key(b"matched")?;
+            writer.write_u64(u64::from(matched))?;
+        }
+        None => {
+            writer.write_map_len(1)?;
+            writer.write_key(b"requested")?;
+            writer.write_u64(u64::from(change.requested))?;
+        }
+    }
+    write_outcome(&mut writer, change.errno, None)?;
+
+    emit(DESCRIPTOR_CHANGED_TYPE, writer.into_vec().as_slice());
     Ok(())
 }
 

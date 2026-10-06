@@ -18,10 +18,13 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
+#include <crypto/sha2.h>
+
 #include <pkm/ipc.h>
 #include <pkm/sd.h>
 #include <pkm/token.h>
 
+#include "access_check.h"
 #include "caap_cache.h"
 #include "file_access.h"
 #include "file_sd_cache.h"
@@ -40,6 +43,41 @@
 	(KACS_SECINFO_OWNER | KACS_SECINFO_GROUP | KACS_SECINFO_DACL |      \
 	 KACS_SECINFO_SACL | KACS_SECINFO_LABEL)
 #define PKM_KACS_SD_ALLOWED_AT_FLAGS (AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)
+
+/*
+ * Whether a descriptor change is recorded. A change that includes the SACL
+ * always is: it needs ACCESS_SYSTEM_SECURITY, it is rare, and removing a
+ * SACL is how an intruder stops being watched. Any other change is recorded
+ * when the rights it needed overlap the alarm mask on the handle it was made
+ * through, the same rule as kacs.audit.handle.used.
+ */
+bool pkm_kacs_descriptor_change_audited(u32 security_info, u32 requested,
+					u32 audit_mask)
+{
+	return (security_info & KACS_SECINFO_SACL) != 0 ||
+	       (requested & audit_mask) != 0;
+}
+
+/*
+ * Writes kacs.audit.descriptor.changed for `chg`. Best effort: the change
+ * has happened, or failed, whatever becomes of its record. SHA-256 digests
+ * of both descriptors let a reader tell a real change from a rewrite of the
+ * same bytes without either record carrying a descriptor.
+ */
+void pkm_kacs_audit_descriptor_changed(struct pkm_kacs_sd_change_view *chg)
+{
+	if (!chg || !chg->subject_token)
+		return;
+	if (chg->old_sd && chg->old_sd_len)
+		sha256(chg->old_sd, chg->old_sd_len, chg->old_digest);
+	if (chg->new_sd && chg->new_sd_len)
+		sha256(chg->new_sd, chg->new_sd_len, chg->new_digest);
+	if (pkm_kacs_current_pip_context(&chg->pip_type, &chg->pip_trust)) {
+		chg->pip_type = 0;
+		chg->pip_trust = 0;
+	}
+	(void)kacs_rust_emit_descriptor_changed(chg);
+}
 
 long pkm_kacs_validate_sd_security_info(u32 security_info)
 {
@@ -603,6 +641,11 @@ long pkm_kacs_set_token_sd_core(const void *subject_token,
 				const u8 *input_sd_ptr,
 				size_t input_sd_len)
 {
+	const u8 *old_sd = NULL;
+	const u8 *new_sd = NULL;
+	size_t old_sd_len = 0;
+	size_t new_sd_len = 0;
+	bool audited;
 	u32 desired_access;
 	u32 granted = 0;
 	u32 pip_type = 0;
@@ -632,11 +675,44 @@ long pkm_kacs_set_token_sd_core(const void *subject_token,
 		return ret;
 	}
 
+	/*
+	 * A token handle carries no alarm mask, so only a change that includes
+	 * the SACL is recorded; copy the descriptor it replaces first.
+	 */
+	audited = pkm_kacs_descriptor_change_audited(security_info,
+						     desired_access, 0);
+	if (audited &&
+	    kacs_rust_token_own_sd_copy(target_token, &old_sd, &old_sd_len))
+		old_sd = NULL;
+
 	ret = kacs_rust_set_token_sd(subject_token, target_token, security_info,
 				     input_sd_ptr, input_sd_len);
 	trace_kacs_sd_set(security_info, desired_access, granted,
 			  KACS_SDS_KIND_TOKEN, (u32)input_sd_len,
 			  ret ? KACS_SDS_ACCESS_DENIED : KACS_SDS_SET_OK, ret);
+	if (audited) {
+		struct pkm_kacs_sd_change_view chg = {
+			.subject_token = subject_token,
+			.object_token = target_token,
+			.old_sd = old_sd,
+			.old_sd_len = old_sd ? old_sd_len : 0,
+			.kind = PKM_KACS_SD_CHANGE_TOKEN,
+			.security_info = security_info,
+			.requested = desired_access,
+			.granted = granted,
+			.err = (s32)ret,
+		};
+
+		if (!ret &&
+		    kacs_rust_token_own_sd_copy(target_token, &new_sd,
+						&new_sd_len))
+			new_sd = NULL;
+		chg.new_sd = new_sd;
+		chg.new_sd_len = new_sd ? new_sd_len : 0;
+		pkm_kacs_audit_descriptor_changed(&chg);
+	}
+	pkm_kacs_free((void *)old_sd);
+	pkm_kacs_free((void *)new_sd);
 	return ret;
 }
 
@@ -744,13 +820,14 @@ long pkm_kacs_set_process_sd_core(
 					 input_sd_ptr, input_sd_len,
 					 &new_sd_bytes, &new_sd_len);
 	if (ret)
-		goto out_process_sd;
+		goto out_audit;
 
 	new_sd = pkm_kacs_process_sd_wrap_bytes(new_sd_bytes, new_sd_len);
 	if (!new_sd) {
 		pkm_kacs_free((void *)new_sd_bytes);
+		new_sd_bytes = NULL;
 		ret = -ENOMEM;
-		goto out_process_sd;
+		goto out_audit;
 	}
 
 	pkm_kacs_process_state_replace_sd_locked(target_state, new_sd);
@@ -759,6 +836,31 @@ long pkm_kacs_set_process_sd_core(
 			  KACS_SDS_KIND_PROCESS, (u32)new_sd_len,
 			  KACS_SDS_SET_OK, 0);
 	ret = 0;
+
+out_audit:
+	/*
+	 * Authorised, so recorded whether or not it applied. A process
+	 * descriptor has no handle with an alarm mask, so only a change that
+	 * includes the SACL is. Still under sd_lock: the new descriptor's bytes
+	 * cannot be replaced before they are read.
+	 */
+	if (pkm_kacs_descriptor_change_audited(security_info, desired_access,
+					       0)) {
+		struct pkm_kacs_sd_change_view chg = {
+			.subject_token = subject_token,
+			.process_guid = target_state->process_guid,
+			.old_sd = process_sd->bytes,
+			.old_sd_len = process_sd->len,
+			.new_sd = ret ? NULL : new_sd_bytes,
+			.new_sd_len = ret ? 0 : new_sd_len,
+			.kind = PKM_KACS_SD_CHANGE_PROCESS,
+			.security_info = security_info,
+			.requested = desired_access,
+			.err = (s32)ret,
+		};
+
+		pkm_kacs_audit_descriptor_changed(&chg);
+	}
 
 out_process_sd:
 	pkm_kacs_process_sd_put(process_sd);
@@ -870,6 +972,48 @@ long pkm_kacs_query_path_file_sd_core(const void *subject_token,
  * vfsmount is a stack stand-in) is exempt; every real path and descriptor
  * form carries a real mount.
  */
+/*
+ * kacs.audit.descriptor.changed for a file, naming it by absolute path where
+ * the handle sits on a real mount (as kacs.audit.handle.used does). `new_sd`
+ * is NULL when the change failed.
+ */
+static void pkm_kacs_audit_file_sd_change(
+	const void *subject_token, struct file *file, u32 security_info,
+	u32 requested, bool has_handle, u32 granted, u32 audit_mask,
+	const u8 *old_sd, size_t old_sd_len, const u8 *new_sd,
+	size_t new_sd_len, long err)
+{
+	struct pkm_kacs_sd_change_view chg = {
+		.subject_token = subject_token,
+		.old_sd = old_sd,
+		.old_sd_len = old_sd ? old_sd_len : 0,
+		.new_sd = new_sd,
+		.new_sd_len = new_sd ? new_sd_len : 0,
+		.kind = PKM_KACS_SD_CHANGE_FILE,
+		.security_info = security_info,
+		.requested = requested,
+		.granted = granted,
+		.audit_mask = audit_mask,
+		.has_handle = has_handle,
+		.err = (s32)err,
+	};
+	char *path_buf = NULL;
+
+	if ((file->f_mode & FMODE_OPENED) && file->f_path.mnt &&
+	    file->f_path.dentry)
+		path_buf = kmalloc(PATH_MAX, GFP_KERNEL);
+	if (path_buf) {
+		char *resolved = d_path(&file->f_path, path_buf, PATH_MAX);
+
+		if (!IS_ERR(resolved)) {
+			chg.file_path = (const u8 *)resolved;
+			chg.file_path_len = strlen(resolved);
+		}
+	}
+	pkm_kacs_audit_descriptor_changed(&chg);
+	kfree(path_buf);
+}
+
 static bool pkm_kacs_set_file_sd_needs_mount_write(
 	const struct file *file, const struct pkm_kacs_inode_security *sec)
 {
@@ -892,11 +1036,16 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	struct pkm_kacs_inode_sd_cache *new_cache = NULL;
 	struct inode *inode;
 	const u8 *new_sd_bytes = NULL;
+	const u8 *old_sd = NULL;
 	size_t new_sd_len = 0;
+	size_t old_sd_len = 0;
 	bool used_restore_bypass = false;
 	bool use_live_access_check;
 	bool want_write;
+	bool audited;
 	u32 desired_access = 0;
+	u32 handle_granted = 0;
+	u32 audit_mask = 0;
 	u32 pip_type = 0;
 	u32 pip_trust = 0;
 	long ret;
@@ -931,7 +1080,11 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 			return -EOPNOTSUPP;
 		if ((file_sec->granted_access & desired_access) != desired_access)
 			return -EACCES;
+		handle_granted = file_sec->granted_access;
+		audit_mask = file_sec->continuous_audit_mask;
 	}
+	audited = pkm_kacs_descriptor_change_audited(security_info,
+						     desired_access, audit_mask);
 
 	sec = pkm_kacs_inode(inode);
 	mutex_lock(&sec->lock);
@@ -967,6 +1120,17 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 	}
 
 	/*
+	 * The record names the descriptor being replaced: copy it now, while
+	 * sec->lock still pins it. A missing or corrupt one has nothing to
+	 * name, and its record carries no -previous fields.
+	 */
+	if (audited && cache->state == PKM_KACS_INODE_SD_VALID && cache->bytes &&
+	    cache->len) {
+		old_sd = kmemdup(cache->bytes, cache->len, GFP_KERNEL);
+		old_sd_len = old_sd ? cache->len : 0;
+	}
+
+	/*
 	 * KC-07: the SD xattr write below takes i_rwsem. Ordinary fchmod/
 	 * fsetxattr acquire i_rwsem first and then sec->lock in the LSM hook, so
 	 * holding sec->lock across the i_rwsem acquisition here is an ABBA
@@ -987,6 +1151,13 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 		ret = mnt_want_write(file->f_path.mnt);
 		if (ret) {
 			pkm_kacs_inode_sd_cache_free(new_cache);
+			if (audited)
+				pkm_kacs_audit_file_sd_change(
+					subject_token, file, security_info,
+					desired_access, !use_live_access_check,
+					handle_granted, audit_mask, old_sd,
+					old_sd_len, NULL, 0, ret);
+			kfree(old_sd);
 			return ret;
 		}
 	}
@@ -999,6 +1170,13 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 		pkm_kacs_inode_sd_cache_free(new_cache);
 		new_cache = NULL;
 		new_sd_bytes = NULL;
+		if (audited)
+			pkm_kacs_audit_file_sd_change(
+				subject_token, file, security_info,
+				desired_access, !use_live_access_check,
+				handle_granted, audit_mask, old_sd, old_sd_len,
+				NULL, 0, ret);
+		kfree(old_sd);
 		return ret;
 	}
 
@@ -1013,8 +1191,21 @@ long pkm_kacs_set_file_sd_core(const void *subject_token,
 			  used_restore_bypass ? KACS_SDS_RESTORE_BYPASS :
 						KACS_SDS_SET_OK,
 			  ret);
+	/*
+	 * The descriptor is written whatever became of the SACL records
+	 * above, so the change is recorded as made. Under sec->lock the new
+	 * bytes cannot be replaced before they are read.
+	 */
+	if (audited)
+		pkm_kacs_audit_file_sd_change(subject_token, file, security_info,
+					      desired_access,
+					      !use_live_access_check,
+					      handle_granted, audit_mask, old_sd,
+					      old_sd_len, new_sd_bytes,
+					      new_sd_len, 0);
 	new_sd_bytes = NULL;
 	mutex_unlock(&sec->lock);
+	kfree(old_sd);
 	return ret;
 
 out_bytes:

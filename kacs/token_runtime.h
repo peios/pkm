@@ -632,6 +632,10 @@ int kacs_rust_create_logon_session(const void *creator_token, const u8 *spec,
 			     u64 *logon_session_id_out);
 int kacs_rust_destroy_empty_logon_session(u64 auth_id);
 void kacs_rust_session_audit_drain(void);
+struct pkm_kacs_sd_change_view;
+int kacs_rust_emit_descriptor_changed(const struct pkm_kacs_sd_change_view *chg);
+int kacs_rust_token_own_sd_copy(const void *token, const u8 **out_sd_ptr,
+				size_t *out_sd_len);
 u32 kacs_rust_token_audit_policy(const void *token);
 int kacs_rust_emit_privilege_use(const void *token, u32 operation, int cap,
 				 u64 privilege, u32 pip_type, u32 pip_trust);

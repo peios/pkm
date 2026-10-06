@@ -7611,7 +7611,8 @@ static void pkm_kunit_set_file_sd_sacl_audit_emits_kmes(struct kunit *test)
 			0);
 	KUNIT_ASSERT_TRUE(test,
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
-	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	/* The SACL's record, then the descriptor change's own. */
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 2ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_kunit_expect_access_audit_schema(
@@ -7622,6 +7623,113 @@ static void pkm_kunit_set_file_sd_sacl_audit_emits_kmes(struct kunit *test)
 				  sizeof(expected_ace), "file", false));
 
 	pkm_kacs_free((void *)result_sd);
+}
+
+
+/*
+ * PKM §3.9: a change that includes a file's SACL writes
+ * kacs.audit.descriptor.changed whatever the descriptors say: the parts
+ * addressed, the new and replaced descriptors' lengths, SHA-256 digests and
+ * owners, and the rights the change needed against the handle's grant.
+ */
+static void pkm_kunit_set_file_sd_sacl_change_records_descriptor_changed(
+	struct kunit *test)
+{
+	struct pkm_kacs_kunit_file_sd_set_args args = {
+		.target_file_sd_state = PKM_KACS_KUNIT_FILE_SD_VALID,
+		.target_file_sd_ptr = pkm_kunit_system_read_audit_sd,
+		.target_file_sd_len = sizeof(pkm_kunit_system_read_audit_sd),
+		.security_info = PKM_KUNIT_SACL_SECURITY_INFORMATION,
+		.cached_granted_access = KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
+		.file_mode = FMODE_READ,
+	};
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view object = { };
+	struct pkm_kunit_msgpack_view sd = { };
+	struct pkm_kunit_msgpack_view access = { };
+	struct pkm_kunit_msgpack_view outcome = { };
+	u8 old_digest[SHA256_DIGEST_SIZE];
+	u8 new_digest[SHA256_DIGEST_SIZE];
+	const void *subject_token;
+	const u8 *result_sd = NULL;
+	size_t result_sd_len = 0;
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	args.subject_token = subject_token;
+	args.input_sd_ptr = pkm_kunit_system_file_read_audit_sd;
+	args.input_sd_len = sizeof(pkm_kunit_system_file_read_audit_sd);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_cached_file_sd_for_subject(
+				&args, &result_sd, &result_sd_len),
+			0L);
+	KUNIT_ASSERT_NOT_NULL(test, result_sd);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.audit.descriptor.changed", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 5));
+	/* A KUnit fixture file is not on a real mount: no path. */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "object", 2U, &object));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &object, "kind", "file"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &object, "sd", 7U, &sd));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &sd, "components",
+					PKM_KUNIT_SACL_SECURITY_INFORMATION));
+	sha256(result_sd, result_sd_len, new_digest);
+	sha256(pkm_kunit_system_read_audit_sd,
+	       sizeof(pkm_kunit_system_read_audit_sd), old_digest);
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &sd, "length", result_sd_len));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bin_key(
+					test, &sd, "digest", new_digest,
+					sizeof(new_digest)));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &sd, "length-previous",
+					sizeof(pkm_kunit_system_read_audit_sd)));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bin_key(
+					test, &sd, "digest-previous", old_digest,
+					sizeof(old_digest)));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bin_key(
+					test, &sd, "owner", pkm_kunit_system_sid,
+					sizeof(pkm_kunit_system_sid)));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bin_key(
+					test, &sd, "owner-previous",
+					pkm_kunit_system_sid,
+					sizeof(pkm_kunit_system_sid)));
+	/*
+	 * Made through a handle: its grant and (empty) alarm mask, and no
+	 * overlap — the SACL alone made the record.
+	 */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "access", 4U, &access));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &access, "matched", 0));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &access, "requested",
+					KACS_ACCESS_ACCESS_SYSTEM_SECURITY));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &access, "granted",
+					KACS_ACCESS_ACCESS_SYSTEM_SECURITY));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &access, "audit-mask", 0));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "outcome", 1U, &outcome));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &outcome, "success", true));
+
+	pkm_kacs_free((void *)result_sd);
+	pkm_kunit_reset_kmes();
 }
 
 
@@ -7653,8 +7761,23 @@ static void pkm_kunit_set_file_sd_sacl_audit_unmatched_no_event(
 				&args, &result_sd, &result_sd_len),
 			0L);
 	KUNIT_ASSERT_NOT_NULL(test, result_sd);
-	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
-			-ENOENT);
+	/*
+	 * No ACE in the new SACL matches, so no access record; the one record
+	 * is the SACL change itself (kacs.audit.descriptor.changed).
+	 */
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&snapshot),
+			0);
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	{
+		struct pkm_kunit_kmes_event_view view = { };
+		u8 *buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES,
+					   GFP_KERNEL);
+
+		KUNIT_ASSERT_NOT_NULL(test, buffer);
+		KUNIT_EXPECT_FALSE(test, pkm_kunit_latest_kacs_event(
+						 test, "kacs.audit.access.checked",
+						 buffer, &view));
+	}
 
 	pkm_kacs_free((void *)result_sd);
 }
@@ -10730,6 +10853,7 @@ static struct kunit_case pkm_kunit_process_cases[] = {
 	KUNIT_CASE(pkm_kunit_proc_status_caps_preserve_non_allow_and_ambient),
 	KUNIT_CASE(pkm_kunit_proc_status_caps_null_args_fail_closed),
 	KUNIT_CASE(pkm_kunit_capability_allow_succeeds_without_privilege),
+	KUNIT_CASE(pkm_kunit_set_file_sd_sacl_change_records_descriptor_changed),
 	KUNIT_CASE(pkm_kunit_capability_privilege_success_marks_used),
 	KUNIT_CASE(pkm_kunit_capability_reports_spent_privileges),
 	KUNIT_CASE(pkm_kunit_privilege_use_once_per_process_and_token),
