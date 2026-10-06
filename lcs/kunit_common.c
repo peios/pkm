@@ -3056,7 +3056,7 @@ void pkm_lcs_kunit_expect_restore_stream_result(
 				      KACS_SE_RESTORE_PRIVILEGE,
 			KACS_SE_RESTORE_PRIVILEGE);
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_RESTORE_COMPLETE", "result_errno");
+		test, "lcs.audit.restore.ended", "\xa7" "success");
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -3154,7 +3154,7 @@ pkm_lcs_kunit_expect_restore_root_flag_result_with_sequence(
 	KUNIT_EXPECT_EQ(test, script.saw_commit, expect_success);
 	KUNIT_EXPECT_EQ(test, script.saw_abort, !expect_success);
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_RESTORE_COMPLETE", "result_errno");
+		test, "lcs.audit.restore.ended", "\xa7" "success");
 	if (sequence_after_out)
 		KUNIT_EXPECT_EQ(test,
 				pkm_lcs_source_next_sequence_snapshot(
@@ -9411,7 +9411,7 @@ void pkm_lcs_kunit_expect_source_validation_audit(
 	struct kunit *test, const char *validation_class,
 	const u8 key_guid[RSI_GUID_SIZE])
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const char event_type[] = "lcs.source.response.rejected";
 	struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
 	u8 buffer[512];
 	size_t written = 0;

@@ -170,7 +170,7 @@ fn unknown_status_code_is_malformed_data_and_releases_the_matched_record() {
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::UnknownRsiStatusCode)
             .as_str(),
-        "unknown_rsi_status_code",
+        "unknown-rsi-status-code",
     );
     assert_eq!(table, [Some(source_a_req10)]);
 }

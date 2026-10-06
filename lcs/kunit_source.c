@@ -3190,7 +3190,7 @@ static void pkm_lcs_kunit_route_runtime_raised_scope_limit(
 static void pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const char event_type[] = "lcs.source.response.rejected";
 	static const u8 key_guid[16] = {
 		0x45, 0x25, 0x04, 0x25, 0x45, 0x25, 0x04, 0x25,
 		0x45, 0x25, 0x04, 0x25, 0x45, 0x25, 0x04, 0x25,
@@ -3224,14 +3224,30 @@ static void pkm_lcs_kunit_source_validation_audit_emits_lcs_kmes_event(
 			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
 			       type_len),
 			0);
-	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
+	/*
+	 * source, request, object and outcome. No hive was supplied, so
+	 * source.rsi holds the slot alone rather than a nil hive.
+	 */
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x84);
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written,
+				      "\xa3" "rsi" "\x81\xa4" "slot"));
+	KUNIT_EXPECT_FALSE(test, pkm_lcs_kunit_buffer_contains(
+				       buffer, written, "\xa4" "hive"));
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written,
+				      "\xa7" "request" "\x82\xa2" "id"));
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written,
+				      "\xa6" "reason" "\xd9\x2c"
+				      "malformed-layer-metadata-security-descriptor"));
 }
 
 
 static void pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SELF_CONFIG_INVALID";
+	static const char event_type[] = "lcs.config.value.rejected";
 	static const char config_parent[] = "Machine\\System\\Registry";
 	static const char config_name[] = "RequestTimeoutMs";
 	struct pkm_kmes_kunit_snapshot snapshot = { };
@@ -3263,13 +3279,25 @@ static void pkm_lcs_kunit_self_config_invalid_audit_emits_lcs_kmes_event(
 			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
 			       type_len),
 			0);
-	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x89);
+	/*
+	 * One "config" map of five: key.path, name, expected, received and
+	 * value. A wrong-type value carries received.type and no
+	 * received.value.
+	 */
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x81);
+	KUNIT_ASSERT_TRUE(test, written > header_size + 8);
+	KUNIT_EXPECT_EQ(test,
+			memcmp(buffer + header_size + 1, "\xa6" "config", 7),
+			0);
+	KUNIT_EXPECT_EQ(test, buffer[header_size + 8], 0x85);
 	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
 				      buffer, written, config_parent));
 	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
 				      buffer, written, config_name));
 	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
-				      buffer, written, "wrong_type"));
+				      buffer, written,
+				      "\xa8" "received" "\x82\xa4" "kind"
+				      "\xaa" "wrong-type" "\xa4" "type"));
 }
 
 
@@ -3462,9 +3490,9 @@ static void pkm_lcs_kunit_self_config_apply_invalid_retains_and_audits(
 	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
 				      buffer, written, "MaxValueSize"));
 	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
-				      buffer, written, "wrong_type"));
+				      buffer, written, "wrong-type"));
 	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
-				      buffer, written, "dword_out_of_range"));
+				      buffer, written, "out-of-range"));
 	pkm_lcs_runtime_limits_reset_defaults();
 }
 
@@ -7966,8 +7994,8 @@ static void pkm_lcs_kunit_source_response_unknown_status_releases(
 static void pkm_lcs_kunit_source_write_unknown_status_audits(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
-	static const char validation_class[] = "unknown_rsi_status_code";
+	static const char event_type[] = "lcs.source.response.rejected";
+	static const char validation_class[] = "unknown-rsi-status-code";
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
 		0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c,
 		0x7d, 0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84,
@@ -8053,7 +8081,8 @@ static void pkm_lcs_kunit_source_write_unknown_status_audits(
 			       type_len),
 			0);
 	KUNIT_ASSERT_TRUE(test, written > header_size);
-	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
+	/* source, request, object and outcome: the parent GUID is known. */
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x84);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_lcs_kunit_buffer_contains(
 				  buffer, written, validation_class));
@@ -9054,26 +9083,26 @@ static void pkm_lcs_kunit_source_write_malformed_path_name_audits(
 		u32 validation_failure;
 	} cases[] = {
 		{ RSI_LOOKUP, RSI_LOOKUP_RESPONSE, 0xa1a2a3a4a5a6a7a8ULL,
-		  "Child", "bad/layer", "malformed_layer_name",
+		  "Child", "bad/layer", "malformed-layer-name",
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
 		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
 		  0xb1b2b3b4b5b6b7b8ULL, "Bad/Child", "base",
-		  "malformed_key_name",
+		  "malformed-key-name",
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_NAME },
 		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
 		  0xc1c2c3c4c5c6c7c8ULL, "Child", "bad/layer",
-		  "malformed_layer_name",
+		  "malformed-layer-name",
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
 		{ RSI_LOOKUP, RSI_LOOKUP_RESPONSE, 0xd1d2d3d4d5d6d7d8ULL,
-		  "Child", invalid_layer_name, "malformed_layer_name",
+		  "Child", invalid_layer_name, "malformed-layer-name",
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
 		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
 		  0xe1e2e3e4e5e6e7e8ULL, invalid_child_name, "base",
-		  "malformed_key_name",
+		  "malformed-key-name",
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_NAME },
 		{ RSI_ENUM_CHILDREN, RSI_ENUM_CHILDREN_RESPONSE,
 		  0xf1f2f3f4f5f6f7f8ULL, "Child", invalid_layer_name,
-		  "malformed_layer_name",
+		  "malformed-layer-name",
 		  PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME },
 	};
 	size_t i;
@@ -9267,7 +9296,7 @@ static void pkm_lcs_kunit_source_write_key_value_name_audits(
 				memcmp(response.key_guid, guid, sizeof(guid)),
 				0);
 		pkm_lcs_kunit_expect_source_validation_audit(
-			test, "malformed_key_name", guid);
+			test, "malformed-key-name", guid);
 		pkm_lcs_source_response_frame_destroy(&frame);
 	}
 
@@ -9322,7 +9351,7 @@ static void pkm_lcs_kunit_source_write_key_value_name_audits(
 				memcmp(response.key_guid, guid, sizeof(guid)),
 				0);
 		pkm_lcs_kunit_expect_source_validation_audit(
-			test, "malformed_value_name", guid);
+			test, "malformed-value-name", guid);
 		pkm_lcs_source_response_frame_destroy(&frame);
 	}
 
@@ -9402,7 +9431,7 @@ static void pkm_lcs_kunit_source_write_invalid_utf8_name_audits(
 				memcmp(response.key_guid, guid, sizeof(guid)),
 				0);
 		pkm_lcs_kunit_expect_source_validation_audit(
-			test, "malformed_key_name", guid);
+			test, "malformed-key-name", guid);
 		pkm_lcs_source_response_frame_destroy(&frame);
 	}
 
@@ -9416,14 +9445,14 @@ static void pkm_lcs_kunit_source_write_invalid_utf8_name_audits(
 			{
 				.response_value_name = invalid_value_name,
 				.layer_name = "base",
-				.validation_class = "malformed_value_name",
+				.validation_class = "malformed-value-name",
 				.validation_failure =
 					PKM_LCS_SOURCE_VALIDATION_MALFORMED_VALUE_NAME,
 			},
 			{
 				.response_value_name = "Value",
 				.layer_name = invalid_layer_name,
-				.validation_class = "malformed_layer_name",
+				.validation_class = "malformed-layer-name",
 				.validation_failure =
 					PKM_LCS_SOURCE_VALIDATION_MALFORMED_LAYER_NAME,
 			},
@@ -9589,7 +9618,7 @@ static void pkm_lcs_kunit_source_write_remaining_validation_class_audits(
 			test, waiter_result.source_validation_failure,
 			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_RESPONSE_PAYLOAD);
 		pkm_lcs_kunit_expect_source_validation_audit(
-			test, "malformed_response_payload", key_guid);
+			test, "malformed-response-payload", key_guid);
 
 out_release_status:
 		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
@@ -9663,7 +9692,7 @@ out_release_status:
 			test, waiter_result.source_validation_failure,
 			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_METADATA);
 		pkm_lcs_kunit_expect_source_validation_audit(
-			test, "malformed_key_metadata", parent_guid);
+			test, "malformed-key-metadata", parent_guid);
 
 out_release_lookup:
 		KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file),
@@ -9718,7 +9747,7 @@ out_release_lookup:
 			test, response.source_validation_failure,
 			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_VALUE_PAYLOAD);
 		pkm_lcs_kunit_expect_source_validation_audit(
-			test, "malformed_value_payload", value_guid);
+			test, "malformed-value-payload", value_guid);
 		pkm_lcs_source_response_frame_destroy(&frame);
 
 out_release_query:
@@ -9775,7 +9804,7 @@ out_release_query:
 			(u32)PKM_LCS_SOURCE_VALIDATION_MALFORMED_DELETE_LAYER_ORPHAN_LIST);
 		KUNIT_EXPECT_FALSE(test, response.key_guid_present);
 		pkm_lcs_kunit_expect_source_validation_audit(
-			test, "malformed_delete_layer_orphan_list", NULL);
+			test, "malformed-delete-layer-orphan-list", NULL);
 		pkm_lcs_source_response_frame_destroy(&frame);
 
 out_release_delete_layer:
@@ -9790,8 +9819,8 @@ out_release_delete_layer:
 static void pkm_lcs_kunit_source_write_path_future_sequence_audits(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
-	static const char validation_class[] = "future_sequence_number";
+	static const char event_type[] = "lcs.source.response.rejected";
+	static const char validation_class[] = "future-sequence-number";
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
 		0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8,
 		0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef, 0xf0,
@@ -9967,8 +9996,8 @@ out_release_source:
 static void pkm_lcs_kunit_source_write_path_metadata_sd_audits(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
-	static const char validation_class[] = "malformed_security_descriptor";
+	static const char event_type[] = "lcs.source.response.rejected";
+	static const char validation_class[] = "malformed-security-descriptor";
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
 		0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9,
 		0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1,
@@ -10142,8 +10171,8 @@ out_release_source:
 static void pkm_lcs_kunit_source_write_enum_duplicate_tie_audits(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
-	static const char validation_class[] = "duplicate_winning_sequence_tie";
+	static const char event_type[] = "lcs.source.response.rejected";
+	static const char validation_class[] = "duplicate-winning-sequence-tie";
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
 		0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
 		0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
@@ -10288,8 +10317,8 @@ out_release_source:
 static void pkm_lcs_kunit_source_write_read_key_payload_validation(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
-	static const char validation_class[] = "malformed_security_descriptor";
+	static const char event_type[] = "lcs.source.response.rejected";
+	static const char validation_class[] = "malformed-security-descriptor";
 	static const u8 guid[RSI_GUID_SIZE] = {
 		0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8,
 		0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0,
@@ -10425,8 +10454,8 @@ out_release_source:
 static void pkm_lcs_kunit_source_write_query_values_payload_validation(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
-	static const char validation_class[] = "future_sequence_number";
+	static const char event_type[] = "lcs.source.response.rejected";
+	static const char validation_class[] = "future-sequence-number";
 	static const struct pkm_lcs_rsi_layer_view layers[] = {
 		{ .name = "base", .name_len = 4, .precedence = 0,
 		  .enabled = 1 },

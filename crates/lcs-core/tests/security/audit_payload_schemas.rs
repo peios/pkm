@@ -1,9 +1,10 @@
 use crate::common::sid;
+use kacs_core::TokenType;
 use lcs_core::{
     LCS_CONFIG_ROOT_PATH, LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS, LcsAuditEventKind,
     LcsCallerTokenSummary, LcsError, LcsKeyOpenAuditDecision, LcsSelfConfigReceivedValue,
     LcsSourceValidationClass, REG_DWORD, REG_SZ, REQUEST_TIMEOUT_MS,
-    RsiSourceDataValidationFailure, plan_backup_complete_audit_record,
+    RsiSourceDataValidationFailure, audit_token_type_from_raw, plan_backup_complete_audit_record,
     plan_backup_start_audit_record, plan_key_open_audit_record, plan_restore_complete_audit_record,
     plan_restore_start_audit_record, plan_self_config_invalid_audit_record,
     plan_source_validation_failure_audit_record, validate_sacl_match_flags,
@@ -11,15 +12,12 @@ use lcs_core::{
 
 fn caller(user_sid: &[u8]) -> LcsCallerTokenSummary<'_> {
     LcsCallerTokenSummary {
-        effective_token_guid: [1; 16],
-        true_token_guid: [2; 16],
-        process_guid: [3; 16],
         user_sid,
-        authentication_id: 42,
-        token_id: 99,
-        token_type: 1,
-        impersonation_level: 3,
         integrity_level: 512,
+        token_id: 99,
+        authentication_id: 42,
+        token_type: TokenType::Impersonation,
+        impersonation_level: 3,
     }
 }
 
@@ -40,7 +38,8 @@ fn key_open_audit_record_matches_explicit_schema_and_rejects_bad_flags() {
     assert_eq!(record.event_kind, LcsAuditEventKind::KeyOpenAudit);
     assert_eq!(record.caller.user_sid, user.as_slice());
     assert_eq!(record.key_guid, key_guid);
-    assert_eq!(record.decision.as_str(), "allowed");
+    assert!(record.decision.success());
+    assert!(!LcsKeyOpenAuditDecision::Denied.success());
     assert_eq!(
         record.sacl_match_flags,
         LCS_SACL_MATCH_SUCCESS | LCS_SACL_MATCH_FAILURE
@@ -66,9 +65,17 @@ fn audit_caller_summary_is_bounded_and_validates_user_sid() {
     assert_eq!(
         caller(&malformed_sid).validate(),
         Err(LcsError::MalformedAuditCallerSid {
-            field: "caller.user_sid"
+            field: "subject.token.sid"
         })
     );
+}
+
+#[test]
+fn audit_token_type_maps_only_primary_and_impersonation() {
+    assert_eq!(audit_token_type_from_raw(1), Some(TokenType::Primary));
+    assert_eq!(audit_token_type_from_raw(2), Some(TokenType::Impersonation));
+    assert_eq!(audit_token_type_from_raw(0), None);
+    assert_eq!(audit_token_type_from_raw(3), None);
 }
 
 #[test]
@@ -133,42 +140,42 @@ fn source_validation_failure_audit_record_maps_validation_classes() {
     );
     assert_eq!(
         record.validation_class.as_str(),
-        "malformed_layer_metadata_security_descriptor"
+        "malformed-layer-metadata-security-descriptor"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::FutureSequenceNumber)
             .as_str(),
-        "future_sequence_number"
+        "future-sequence-number"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedKeyName).as_str(),
-        "malformed_key_name"
+        "malformed-key-name"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValueName).as_str(),
-        "malformed_value_name"
+        "malformed-value-name"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedResponsePayload)
             .as_str(),
-        "malformed_response_payload"
+        "malformed-response-payload"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedKeyMetadata)
             .as_str(),
-        "malformed_key_metadata"
+        "malformed-key-metadata"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValuePayload)
             .as_str(),
-        "malformed_value_payload"
+        "malformed-value-payload"
     );
     assert_eq!(
         LcsSourceValidationClass::from(
             RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList,
         )
         .as_str(),
-        "malformed_delete_layer_orphan_list"
+        "malformed-delete-layer-orphan-list"
     );
 }
 
@@ -207,7 +214,7 @@ fn self_config_invalid_record_projects_explicit_received_fields() {
     );
     assert_eq!(out_of_range.configuration_parent_path, LCS_CONFIG_ROOT_PATH);
     assert_eq!(out_of_range.expected_type, REG_DWORD);
-    assert_eq!(out_of_range.received_kind(), "dword_out_of_range");
+    assert_eq!(out_of_range.received_kind(), "out-of-range");
     assert_eq!(out_of_range.received_type(), None);
     assert_eq!(out_of_range.received_u32(), Some(999_999));
     assert_eq!(out_of_range.retained_value, 45_000);
@@ -215,7 +222,7 @@ fn self_config_invalid_record_projects_explicit_received_fields() {
     let wrong_type = LcsSelfConfigReceivedValue::WrongType {
         actual_type: REG_SZ,
     };
-    assert_eq!(wrong_type.received_kind(), "wrong_type");
+    assert_eq!(wrong_type.received_kind(), "wrong-type");
     assert_eq!(wrong_type.received_type(), Some(REG_SZ));
     assert_eq!(wrong_type.received_u32(), None);
 

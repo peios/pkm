@@ -1,4 +1,8 @@
 //! Pure LCS audit-event vocabulary and payload planning.
+//!
+//! Every payload follows the event catalogue's wire rules (PGSS §6.4–§6.6):
+//! a dotted field path is written as nested maps, one per segment, and a
+//! value the emitter does not have is left out rather than written as nil.
 
 use crate::config::{
     ConfigRange, LcsLimits, SelfConfigRetentionReason, SelfConfigValue, retained_config_value,
@@ -8,47 +12,62 @@ use crate::constants::REG_DWORD;
 use crate::error::{LcsError, LcsResult};
 use crate::path::validate_hive_name_bytes;
 use crate::rsi::RsiSourceDataValidationFailure;
-use kacs_core::Sid;
+use kacs_core::{Sid, TokenType};
 
 pub const LCS_CONFIG_ROOT_PATH: &str = "Machine\\System\\Registry";
 pub const LCS_SACL_MATCH_SUCCESS: u32 = 0x1;
 pub const LCS_SACL_MATCH_FAILURE: u32 = 0x2;
 pub const LCS_SACL_MATCH_VALID_MASK: u32 = LCS_SACL_MATCH_SUCCESS | LCS_SACL_MATCH_FAILURE;
 
-const FIELD_CALLER: &str = "caller";
-const FIELD_KEY_GUID: &str = "key_guid";
-const FIELD_REQUESTED_ACCESS: &str = "requested_access";
-const FIELD_GRANTED_ACCESS: &str = "granted_access";
-const FIELD_DECISION: &str = "decision";
-const FIELD_SACL_MATCH_FLAGS: &str = "sacl_match_flags";
+// Map keys, one per field-path segment. `subject.token.sid` is written as
+// `{subject: {token: {sid: ...}}}`, so a key never contains a dot.
+const FIELD_SUBJECT: &str = "subject";
+const FIELD_TOKEN: &str = "token";
+const FIELD_OBJECT: &str = "object";
+const FIELD_KIND: &str = "kind";
+const FIELD_KEY: &str = "key";
+const FIELD_GUID: &str = "guid";
+const FIELD_ACCESS: &str = "access";
+const FIELD_REQUESTED: &str = "requested";
+const FIELD_GRANTED: &str = "granted";
+const FIELD_OUTCOME: &str = "outcome";
+const FIELD_SUCCESS: &str = "success";
+const FIELD_ERRNO: &str = "errno";
+const FIELD_REASON: &str = "reason";
+const FIELD_TRIGGER: &str = "trigger";
+const FIELD_SACL_MATCH: &str = "sacl-match";
+const FIELD_OPERATION: &str = "operation";
 const FIELD_FD: &str = "fd";
-const FIELD_RESULT_ERRNO: &str = "result_errno";
-const FIELD_SOURCE_SLOT: &str = "source_slot";
-const FIELD_HIVE_NAME: &str = "hive_name";
-const FIELD_REQUEST_ID: &str = "request_id";
-const FIELD_OP_CODE: &str = "op_code";
-const FIELD_VALIDATION_CLASS: &str = "validation_class";
-const FIELD_CONFIGURATION_PARENT_PATH: &str = "configuration_parent_path";
-const FIELD_CONFIGURATION_NAME: &str = "configuration_name";
-const FIELD_EXPECTED_TYPE: &str = "expected_type";
-const FIELD_EXPECTED_MIN: &str = "expected_min";
-const FIELD_EXPECTED_MAX: &str = "expected_max";
-const FIELD_RECEIVED_KIND: &str = "received_kind";
-const FIELD_RECEIVED_TYPE: &str = "received_type";
-const FIELD_RECEIVED_U32: &str = "received_u32";
-const FIELD_RETAINED_VALUE: &str = "retained_value";
+const FIELD_SOURCE: &str = "source";
+const FIELD_RSI: &str = "rsi";
+const FIELD_SLOT: &str = "slot";
+const FIELD_HIVE: &str = "hive";
+const FIELD_REQUEST: &str = "request";
+const FIELD_ID: &str = "id";
+const FIELD_OP_CODE: &str = "op-code";
+const FIELD_CONFIG: &str = "config";
+const FIELD_PATH: &str = "path";
+const FIELD_NAME: &str = "name";
+const FIELD_EXPECTED: &str = "expected";
+const FIELD_TYPE: &str = "type";
+const FIELD_MIN: &str = "min";
+const FIELD_MAX: &str = "max";
+const FIELD_RECEIVED: &str = "received";
+const FIELD_VALUE: &str = "value";
 
-const CALLER_FIELD_EFFECTIVE_TOKEN_GUID: &str = "effective_token_guid";
-const CALLER_FIELD_TRUE_TOKEN_GUID: &str = "true_token_guid";
-const CALLER_FIELD_PROCESS_GUID: &str = "process_guid";
-const CALLER_FIELD_USER_SID: &str = "user_sid";
-const CALLER_FIELD_AUTHENTICATION_ID: &str = "authentication_id";
-const CALLER_FIELD_TOKEN_ID: &str = "token_id";
-const CALLER_FIELD_TOKEN_TYPE: &str = "token_type";
-const CALLER_FIELD_IMPERSONATION_LEVEL: &str = "impersonation_level";
-const CALLER_FIELD_INTEGRITY_LEVEL: &str = "integrity_level";
+// The `caller` group: `subject.token.{sid,integrity,id,auth-id,type,
+// impersonation}`, in the group's order.
+const TOKEN_FIELD_SID: &str = "sid";
+const TOKEN_FIELD_INTEGRITY: &str = "integrity";
+const TOKEN_FIELD_ID: &str = "id";
+const TOKEN_FIELD_AUTH_ID: &str = "auth-id";
+const TOKEN_FIELD_TYPE: &str = "type";
+const TOKEN_FIELD_IMPERSONATION: &str = "impersonation";
+const CALLER_TOKEN_FIELD_COUNT: usize = 6;
 
-/// PSD-005 LCS KMES audit event names.
+const OBJECT_KIND_KEY: &str = "key";
+
+/// LCS KMES audit event types, as named in the event catalogue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcsAuditEventKind {
     KeyOpenAudit,
@@ -63,41 +82,56 @@ pub enum LcsAuditEventKind {
 impl LcsAuditEventKind {
     pub const fn event_type(self) -> &'static str {
         match self {
-            Self::KeyOpenAudit => "LCS_KEY_OPEN_AUDIT",
-            Self::BackupStart => "LCS_BACKUP_START",
-            Self::BackupComplete => "LCS_BACKUP_COMPLETE",
-            Self::RestoreStart => "LCS_RESTORE_START",
-            Self::RestoreComplete => "LCS_RESTORE_COMPLETE",
-            Self::SourceValidationFailure => "LCS_SOURCE_VALIDATION_FAILURE",
-            Self::SelfConfigInvalid => "LCS_SELF_CONFIG_INVALID",
+            Self::KeyOpenAudit => "lcs.audit.key.opened",
+            Self::BackupStart => "lcs.audit.backup.started",
+            Self::BackupComplete => "lcs.audit.backup.ended",
+            Self::RestoreStart => "lcs.audit.restore.started",
+            Self::RestoreComplete => "lcs.audit.restore.ended",
+            Self::SourceValidationFailure => "lcs.source.response.rejected",
+            Self::SelfConfigInvalid => "lcs.config.value.rejected",
         }
     }
 }
 
-/// Bounded caller token summary embedded in LCS audit payloads.
+/// Map a uapi `KACS_TOKEN_TYPE_*` value onto the token type an audit
+/// record names. Anything else is not a token LCS can describe.
+pub const fn audit_token_type_from_raw(raw: u32) -> Option<TokenType> {
+    match raw {
+        peios_uapi::KACS_TOKEN_TYPE_PRIMARY => Some(TokenType::Primary),
+        peios_uapi::KACS_TOKEN_TYPE_IMPERSONATION => Some(TokenType::Impersonation),
+        _ => None,
+    }
+}
+
+const fn token_type_name(token_type: TokenType) -> &'static str {
+    match token_type {
+        TokenType::Primary => "primary",
+        TokenType::Impersonation => "impersonation",
+    }
+}
+
+/// Bounded caller token summary written as the `caller` group. The token
+/// and process GUIDs are not here: they ride in the KMES event header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsCallerTokenSummary<'a> {
-    pub effective_token_guid: [u8; 16],
-    pub true_token_guid: [u8; 16],
-    pub process_guid: [u8; 16],
     pub user_sid: &'a [u8],
-    pub authentication_id: u64,
-    pub token_id: u64,
-    pub token_type: u32,
-    pub impersonation_level: u32,
     pub integrity_level: u32,
+    pub token_id: u64,
+    pub authentication_id: u64,
+    pub token_type: TokenType,
+    pub impersonation_level: u32,
 }
 
 impl LcsCallerTokenSummary<'_> {
     pub fn validate(&self) -> LcsResult<()> {
         Sid::parse(self.user_sid).map_err(|_| LcsError::MalformedAuditCallerSid {
-            field: "caller.user_sid",
+            field: "subject.token.sid",
         })?;
         Ok(())
     }
 }
 
-/// AccessCheck decision vocabulary in `LCS_KEY_OPEN_AUDIT`.
+/// AccessCheck decision recorded by `lcs.audit.key.opened`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcsKeyOpenAuditDecision {
     Allowed,
@@ -105,15 +139,13 @@ pub enum LcsKeyOpenAuditDecision {
 }
 
 impl LcsKeyOpenAuditDecision {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Allowed => "allowed",
-            Self::Denied => "denied",
-        }
+    /// The decision as `outcome.success`.
+    pub const fn success(self) -> bool {
+        matches!(self, Self::Allowed)
     }
 }
 
-/// Pure payload plan for `LCS_KEY_OPEN_AUDIT`.
+/// Pure payload plan for `lcs.audit.key.opened`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsKeyOpenAuditRecord<'a> {
     pub event_kind: LcsAuditEventKind,
@@ -131,7 +163,8 @@ pub struct LcsAuditPayloadWritePlan {
     pub bytes: usize,
 }
 
-/// Pure payload plan for backup/restore start events.
+/// Pure payload plan for `lcs.audit.backup.started` and
+/// `lcs.audit.restore.started`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsBackupRestoreStartAuditRecord<'a> {
     pub event_kind: LcsAuditEventKind,
@@ -140,16 +173,20 @@ pub struct LcsBackupRestoreStartAuditRecord<'a> {
     pub fd: i32,
 }
 
-/// Pure payload plan for backup/restore complete events.
+/// Pure payload plan for `lcs.audit.backup.ended` and
+/// `lcs.audit.restore.ended`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsBackupRestoreCompleteAuditRecord<'a> {
     pub event_kind: LcsAuditEventKind,
     pub caller: LcsCallerTokenSummary<'a>,
     pub key_guid: [u8; 16],
+    /// The operation's result as a positive errno, 0 on success. The wire
+    /// carries `outcome.success` and, on failure, the negated errno.
     pub result_errno: u32,
 }
 
-/// Stable source-validation failure vocabulary in `LCS_SOURCE_VALIDATION_FAILURE`.
+/// Source-validation failure class, carried as `outcome.reason` on
+/// `lcs.source.response.rejected`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcsSourceValidationClass {
     MalformedSecurityDescriptor,
@@ -169,20 +206,20 @@ pub enum LcsSourceValidationClass {
 impl LcsSourceValidationClass {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::MalformedSecurityDescriptor => "malformed_security_descriptor",
-            Self::MalformedLayerName => "malformed_layer_name",
-            Self::UnknownRsiStatusCode => "unknown_rsi_status_code",
-            Self::FutureSequenceNumber => "future_sequence_number",
-            Self::DuplicateWinningSequenceTie => "duplicate_winning_sequence_tie",
+            Self::MalformedSecurityDescriptor => "malformed-security-descriptor",
+            Self::MalformedLayerName => "malformed-layer-name",
+            Self::UnknownRsiStatusCode => "unknown-rsi-status-code",
+            Self::FutureSequenceNumber => "future-sequence-number",
+            Self::DuplicateWinningSequenceTie => "duplicate-winning-sequence-tie",
             Self::MalformedLayerMetadataSecurityDescriptor => {
-                "malformed_layer_metadata_security_descriptor"
+                "malformed-layer-metadata-security-descriptor"
             }
-            Self::MalformedKeyName => "malformed_key_name",
-            Self::MalformedValueName => "malformed_value_name",
-            Self::MalformedResponsePayload => "malformed_response_payload",
-            Self::MalformedKeyMetadata => "malformed_key_metadata",
-            Self::MalformedValuePayload => "malformed_value_payload",
-            Self::MalformedDeleteLayerOrphanList => "malformed_delete_layer_orphan_list",
+            Self::MalformedKeyName => "malformed-key-name",
+            Self::MalformedValueName => "malformed-value-name",
+            Self::MalformedResponsePayload => "malformed-response-payload",
+            Self::MalformedKeyMetadata => "malformed-key-metadata",
+            Self::MalformedValuePayload => "malformed-value-payload",
+            Self::MalformedDeleteLayerOrphanList => "malformed-delete-layer-orphan-list",
         }
     }
 }
@@ -216,7 +253,7 @@ impl From<RsiSourceDataValidationFailure> for LcsSourceValidationClass {
     }
 }
 
-/// Pure payload plan for `LCS_SOURCE_VALIDATION_FAILURE`.
+/// Pure payload plan for `lcs.source.response.rejected`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsSourceValidationFailureAuditRecord<'a> {
     pub event_kind: LcsAuditEventKind,
@@ -258,7 +295,7 @@ pub const fn lcs_audit_emission_failure_policy(
     }
 }
 
-/// Received-value summary for `LCS_SELF_CONFIG_INVALID`.
+/// Received-value summary for `lcs.config.value.rejected`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LcsSelfConfigReceivedValue {
     Missing,
@@ -267,11 +304,13 @@ pub enum LcsSelfConfigReceivedValue {
 }
 
 impl LcsSelfConfigReceivedValue {
+    /// `config.received.kind`. The width of an out-of-range value is not
+    /// part of the kind; `config.expected.type` already carries it.
     pub const fn received_kind(self) -> &'static str {
         match self {
             Self::Missing => "missing",
-            Self::WrongType { .. } => "wrong_type",
-            Self::DwordOutOfRange { .. } => "dword_out_of_range",
+            Self::WrongType { .. } => "wrong-type",
+            Self::DwordOutOfRange { .. } => "out-of-range",
         }
     }
 
@@ -290,7 +329,7 @@ impl LcsSelfConfigReceivedValue {
     }
 }
 
-/// Pure payload plan for the `LCS_SELF_CONFIG_INVALID` audit event.
+/// Pure payload plan for the `lcs.config.value.rejected` audit event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LcsSelfConfigInvalidAuditRecord {
     pub event_kind: LcsAuditEventKind,
@@ -330,21 +369,7 @@ pub fn validate_sacl_match_flags(flags: u32) -> LcsResult<u32> {
 
 pub fn key_open_audit_payload_len(record: &LcsKeyOpenAuditRecord<'_>) -> LcsResult<usize> {
     validate_key_open_audit_record(record)?;
-
-    let mut len = msgpack_map_len(6);
-    add_len(&mut len, msgpack_str_len(FIELD_CALLER.len()))?;
-    add_len(&mut len, caller_summary_payload_len(&record.caller)?)?;
-    add_len(&mut len, msgpack_str_len(FIELD_KEY_GUID.len()))?;
-    add_len(&mut len, msgpack_bin_len(record.key_guid.len()))?;
-    add_len(&mut len, msgpack_str_len(FIELD_REQUESTED_ACCESS.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.requested_access as u64))?;
-    add_len(&mut len, msgpack_str_len(FIELD_GRANTED_ACCESS.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.granted_access as u64))?;
-    add_len(&mut len, msgpack_str_len(FIELD_DECISION.len()))?;
-    add_len(&mut len, msgpack_str_len(record.decision.as_str().len()))?;
-    add_len(&mut len, msgpack_str_len(FIELD_SACL_MATCH_FLAGS.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.sacl_match_flags as u64))?;
-    Ok(len)
+    payload_len(|writer| serialize_key_open_audit(writer, record))
 }
 
 pub fn write_key_open_audit_payload(
@@ -352,30 +377,8 @@ pub fn write_key_open_audit_payload(
     output: &mut [u8],
 ) -> LcsResult<LcsAuditPayloadWritePlan> {
     let required_len = key_open_audit_payload_len(record)?;
-    if output.len() < required_len {
-        return Err(LcsError::AuditPayloadOutputBufferTooSmall {
-            buffer_len: output.len(),
-            required_len,
-        });
-    }
-
-    let mut writer = MsgpackWriter::new(&mut output[..required_len]);
-    writer.write_map_len(6)?;
-    writer.write_str(FIELD_CALLER)?;
-    write_caller_summary_payload(&mut writer, &record.caller)?;
-    writer.write_str(FIELD_KEY_GUID)?;
-    writer.write_bin(&record.key_guid)?;
-    writer.write_str(FIELD_REQUESTED_ACCESS)?;
-    writer.write_uint(record.requested_access as u64)?;
-    writer.write_str(FIELD_GRANTED_ACCESS)?;
-    writer.write_uint(record.granted_access as u64)?;
-    writer.write_str(FIELD_DECISION)?;
-    writer.write_str(record.decision.as_str())?;
-    writer.write_str(FIELD_SACL_MATCH_FLAGS)?;
-    writer.write_uint(record.sacl_match_flags as u64)?;
-
-    Ok(LcsAuditPayloadWritePlan {
-        bytes: writer.bytes_written(),
+    write_payload(output, required_len, |writer| {
+        serialize_key_open_audit(writer, record)
     })
 }
 
@@ -383,14 +386,7 @@ pub fn backup_restore_start_audit_payload_len(
     record: &LcsBackupRestoreStartAuditRecord<'_>,
 ) -> LcsResult<usize> {
     validate_backup_restore_start_audit_record(record)?;
-    let mut len = msgpack_map_len(3);
-    add_len(&mut len, msgpack_str_len(FIELD_CALLER.len()))?;
-    add_len(&mut len, caller_summary_payload_len(&record.caller)?)?;
-    add_len(&mut len, msgpack_str_len(FIELD_KEY_GUID.len()))?;
-    add_len(&mut len, msgpack_bin_len(record.key_guid.len()))?;
-    add_len(&mut len, msgpack_str_len(FIELD_FD.len()))?;
-    add_len(&mut len, msgpack_i32_len())?;
-    Ok(len)
+    payload_len(|writer| serialize_backup_restore_start_audit(writer, record))
 }
 
 pub fn write_backup_restore_start_audit_payload(
@@ -398,24 +394,8 @@ pub fn write_backup_restore_start_audit_payload(
     output: &mut [u8],
 ) -> LcsResult<LcsAuditPayloadWritePlan> {
     let required_len = backup_restore_start_audit_payload_len(record)?;
-    if output.len() < required_len {
-        return Err(LcsError::AuditPayloadOutputBufferTooSmall {
-            buffer_len: output.len(),
-            required_len,
-        });
-    }
-
-    let mut writer = MsgpackWriter::new(&mut output[..required_len]);
-    writer.write_map_len(3)?;
-    writer.write_str(FIELD_CALLER)?;
-    write_caller_summary_payload(&mut writer, &record.caller)?;
-    writer.write_str(FIELD_KEY_GUID)?;
-    writer.write_bin(&record.key_guid)?;
-    writer.write_str(FIELD_FD)?;
-    writer.write_i32(record.fd)?;
-
-    Ok(LcsAuditPayloadWritePlan {
-        bytes: writer.bytes_written(),
+    write_payload(output, required_len, |writer| {
+        serialize_backup_restore_start_audit(writer, record)
     })
 }
 
@@ -423,14 +403,7 @@ pub fn backup_restore_complete_audit_payload_len(
     record: &LcsBackupRestoreCompleteAuditRecord<'_>,
 ) -> LcsResult<usize> {
     validate_backup_restore_complete_audit_record(record)?;
-    let mut len = msgpack_map_len(3);
-    add_len(&mut len, msgpack_str_len(FIELD_CALLER.len()))?;
-    add_len(&mut len, caller_summary_payload_len(&record.caller)?)?;
-    add_len(&mut len, msgpack_str_len(FIELD_KEY_GUID.len()))?;
-    add_len(&mut len, msgpack_bin_len(record.key_guid.len()))?;
-    add_len(&mut len, msgpack_str_len(FIELD_RESULT_ERRNO.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.result_errno as u64))?;
-    Ok(len)
+    payload_len(|writer| serialize_backup_restore_complete_audit(writer, record))
 }
 
 pub fn write_backup_restore_complete_audit_payload(
@@ -438,24 +411,8 @@ pub fn write_backup_restore_complete_audit_payload(
     output: &mut [u8],
 ) -> LcsResult<LcsAuditPayloadWritePlan> {
     let required_len = backup_restore_complete_audit_payload_len(record)?;
-    if output.len() < required_len {
-        return Err(LcsError::AuditPayloadOutputBufferTooSmall {
-            buffer_len: output.len(),
-            required_len,
-        });
-    }
-
-    let mut writer = MsgpackWriter::new(&mut output[..required_len]);
-    writer.write_map_len(3)?;
-    writer.write_str(FIELD_CALLER)?;
-    write_caller_summary_payload(&mut writer, &record.caller)?;
-    writer.write_str(FIELD_KEY_GUID)?;
-    writer.write_bin(&record.key_guid)?;
-    writer.write_str(FIELD_RESULT_ERRNO)?;
-    writer.write_uint(record.result_errno as u64)?;
-
-    Ok(LcsAuditPayloadWritePlan {
-        bytes: writer.bytes_written(),
+    write_payload(output, required_len, |writer| {
+        serialize_backup_restore_complete_audit(writer, record)
     })
 }
 
@@ -463,43 +420,7 @@ pub fn source_validation_failure_audit_payload_len(
     record: &LcsSourceValidationFailureAuditRecord<'_>,
 ) -> LcsResult<usize> {
     validate_source_validation_failure_audit_record(record)?;
-    let mut len = msgpack_map_len(6);
-    add_len(&mut len, msgpack_str_len(FIELD_SOURCE_SLOT.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.source_slot as u64))?;
-    add_len(&mut len, msgpack_str_len(FIELD_HIVE_NAME.len()))?;
-    add_len(
-        &mut len,
-        record
-            .hive_name
-            .map_or(msgpack_nil_len(), |value| msgpack_str_len(value.len())),
-    )?;
-    add_len(&mut len, msgpack_str_len(FIELD_REQUEST_ID.len()))?;
-    add_len(
-        &mut len,
-        record
-            .request_id
-            .map_or(msgpack_nil_len(), msgpack_uint_len),
-    )?;
-    add_len(&mut len, msgpack_str_len(FIELD_OP_CODE.len()))?;
-    add_len(
-        &mut len,
-        record
-            .op_code
-            .map_or(msgpack_nil_len(), |value| msgpack_uint_len(value as u64)),
-    )?;
-    add_len(&mut len, msgpack_str_len(FIELD_KEY_GUID.len()))?;
-    add_len(
-        &mut len,
-        record
-            .key_guid
-            .map_or(msgpack_nil_len(), |guid| msgpack_bin_len(guid.len())),
-    )?;
-    add_len(&mut len, msgpack_str_len(FIELD_VALIDATION_CLASS.len()))?;
-    add_len(
-        &mut len,
-        msgpack_str_len(record.validation_class.as_str().len()),
-    )?;
-    Ok(len)
+    payload_len(|writer| serialize_source_validation_failure_audit(writer, record))
 }
 
 pub fn write_source_validation_failure_audit_payload(
@@ -507,42 +428,8 @@ pub fn write_source_validation_failure_audit_payload(
     output: &mut [u8],
 ) -> LcsResult<LcsAuditPayloadWritePlan> {
     let required_len = source_validation_failure_audit_payload_len(record)?;
-    if output.len() < required_len {
-        return Err(LcsError::AuditPayloadOutputBufferTooSmall {
-            buffer_len: output.len(),
-            required_len,
-        });
-    }
-
-    let mut writer = MsgpackWriter::new(&mut output[..required_len]);
-    writer.write_map_len(6)?;
-    writer.write_str(FIELD_SOURCE_SLOT)?;
-    writer.write_uint(record.source_slot as u64)?;
-    writer.write_str(FIELD_HIVE_NAME)?;
-    match record.hive_name {
-        Some(value) => writer.write_str(value)?,
-        None => writer.write_nil()?,
-    }
-    writer.write_str(FIELD_REQUEST_ID)?;
-    match record.request_id {
-        Some(value) => writer.write_uint(value)?,
-        None => writer.write_nil()?,
-    }
-    writer.write_str(FIELD_OP_CODE)?;
-    match record.op_code {
-        Some(value) => writer.write_uint(value as u64)?,
-        None => writer.write_nil()?,
-    }
-    writer.write_str(FIELD_KEY_GUID)?;
-    match record.key_guid {
-        Some(guid) => writer.write_bin(&guid)?,
-        None => writer.write_nil()?,
-    }
-    writer.write_str(FIELD_VALIDATION_CLASS)?;
-    writer.write_str(record.validation_class.as_str())?;
-
-    Ok(LcsAuditPayloadWritePlan {
-        bytes: writer.bytes_written(),
+    write_payload(output, required_len, |writer| {
+        serialize_source_validation_failure_audit(writer, record)
     })
 }
 
@@ -550,42 +437,7 @@ pub fn self_config_invalid_audit_payload_len(
     record: &LcsSelfConfigInvalidAuditRecord,
 ) -> LcsResult<usize> {
     validate_self_config_invalid_audit_record(record)?;
-    let mut len = msgpack_map_len(9);
-    add_len(
-        &mut len,
-        msgpack_str_len(FIELD_CONFIGURATION_PARENT_PATH.len()),
-    )?;
-    add_len(
-        &mut len,
-        msgpack_str_len(record.configuration_parent_path.len()),
-    )?;
-    add_len(&mut len, msgpack_str_len(FIELD_CONFIGURATION_NAME.len()))?;
-    add_len(&mut len, msgpack_str_len(record.configuration_name.len()))?;
-    add_len(&mut len, msgpack_str_len(FIELD_EXPECTED_TYPE.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.expected_type as u64))?;
-    add_len(&mut len, msgpack_str_len(FIELD_EXPECTED_MIN.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.expected_min as u64))?;
-    add_len(&mut len, msgpack_str_len(FIELD_EXPECTED_MAX.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.expected_max as u64))?;
-    add_len(&mut len, msgpack_str_len(FIELD_RECEIVED_KIND.len()))?;
-    add_len(&mut len, msgpack_str_len(record.received_kind().len()))?;
-    add_len(&mut len, msgpack_str_len(FIELD_RECEIVED_TYPE.len()))?;
-    add_len(
-        &mut len,
-        record
-            .received_type()
-            .map_or(msgpack_nil_len(), |value| msgpack_uint_len(value as u64)),
-    )?;
-    add_len(&mut len, msgpack_str_len(FIELD_RECEIVED_U32.len()))?;
-    add_len(
-        &mut len,
-        record
-            .received_u32()
-            .map_or(msgpack_nil_len(), |value| msgpack_uint_len(value as u64)),
-    )?;
-    add_len(&mut len, msgpack_str_len(FIELD_RETAINED_VALUE.len()))?;
-    add_len(&mut len, msgpack_uint_len(record.retained_value as u64))?;
-    Ok(len)
+    payload_len(|writer| serialize_self_config_invalid_audit(writer, record))
 }
 
 pub fn write_self_config_invalid_audit_payload(
@@ -593,42 +445,8 @@ pub fn write_self_config_invalid_audit_payload(
     output: &mut [u8],
 ) -> LcsResult<LcsAuditPayloadWritePlan> {
     let required_len = self_config_invalid_audit_payload_len(record)?;
-    if output.len() < required_len {
-        return Err(LcsError::AuditPayloadOutputBufferTooSmall {
-            buffer_len: output.len(),
-            required_len,
-        });
-    }
-
-    let mut writer = MsgpackWriter::new(&mut output[..required_len]);
-    writer.write_map_len(9)?;
-    writer.write_str(FIELD_CONFIGURATION_PARENT_PATH)?;
-    writer.write_str(record.configuration_parent_path)?;
-    writer.write_str(FIELD_CONFIGURATION_NAME)?;
-    writer.write_str(record.configuration_name)?;
-    writer.write_str(FIELD_EXPECTED_TYPE)?;
-    writer.write_uint(record.expected_type as u64)?;
-    writer.write_str(FIELD_EXPECTED_MIN)?;
-    writer.write_uint(record.expected_min as u64)?;
-    writer.write_str(FIELD_EXPECTED_MAX)?;
-    writer.write_uint(record.expected_max as u64)?;
-    writer.write_str(FIELD_RECEIVED_KIND)?;
-    writer.write_str(record.received_kind())?;
-    writer.write_str(FIELD_RECEIVED_TYPE)?;
-    match record.received_type() {
-        Some(value) => writer.write_uint(value as u64)?,
-        None => writer.write_nil()?,
-    }
-    writer.write_str(FIELD_RECEIVED_U32)?;
-    match record.received_u32() {
-        Some(value) => writer.write_uint(value as u64)?,
-        None => writer.write_nil()?,
-    }
-    writer.write_str(FIELD_RETAINED_VALUE)?;
-    writer.write_uint(record.retained_value as u64)?;
-
-    Ok(LcsAuditPayloadWritePlan {
-        bytes: writer.bytes_written(),
+    write_payload(output, required_len, |writer| {
+        serialize_self_config_invalid_audit(writer, record)
     })
 }
 
@@ -809,142 +627,255 @@ fn validate_self_config_invalid_audit_record(
     Ok(())
 }
 
-fn caller_summary_payload_len(caller: &LcsCallerTokenSummary<'_>) -> LcsResult<usize> {
-    let mut len = msgpack_map_len(9);
-    add_len(
-        &mut len,
-        msgpack_str_len(CALLER_FIELD_EFFECTIVE_TOKEN_GUID.len()),
-    )?;
-    add_len(&mut len, msgpack_bin_len(caller.effective_token_guid.len()))?;
-    add_len(
-        &mut len,
-        msgpack_str_len(CALLER_FIELD_TRUE_TOKEN_GUID.len()),
-    )?;
-    add_len(&mut len, msgpack_bin_len(caller.true_token_guid.len()))?;
-    add_len(&mut len, msgpack_str_len(CALLER_FIELD_PROCESS_GUID.len()))?;
-    add_len(&mut len, msgpack_bin_len(caller.process_guid.len()))?;
-    add_len(&mut len, msgpack_str_len(CALLER_FIELD_USER_SID.len()))?;
-    add_len(&mut len, msgpack_bin_len(caller.user_sid.len()))?;
-    add_len(
-        &mut len,
-        msgpack_str_len(CALLER_FIELD_AUTHENTICATION_ID.len()),
-    )?;
-    add_len(&mut len, msgpack_uint_len(caller.authentication_id))?;
-    add_len(&mut len, msgpack_str_len(CALLER_FIELD_TOKEN_ID.len()))?;
-    add_len(&mut len, msgpack_uint_len(caller.token_id))?;
-    add_len(&mut len, msgpack_str_len(CALLER_FIELD_TOKEN_TYPE.len()))?;
-    add_len(&mut len, msgpack_uint_len(caller.token_type as u64))?;
-    add_len(
-        &mut len,
-        msgpack_str_len(CALLER_FIELD_IMPERSONATION_LEVEL.len()),
-    )?;
-    add_len(
-        &mut len,
-        msgpack_uint_len(caller.impersonation_level as u64),
-    )?;
-    add_len(
-        &mut len,
-        msgpack_str_len(CALLER_FIELD_INTEGRITY_LEVEL.len()),
-    )?;
-    add_len(&mut len, msgpack_uint_len(caller.integrity_level as u64))?;
-    Ok(len)
+// Each payload has one serializer. It runs once against a counting writer
+// to size the payload and once against the caller's buffer, so the length
+// and the bytes cannot drift apart.
+
+fn serialize_key_open_audit(
+    writer: &mut MsgpackWriter<'_>,
+    record: &LcsKeyOpenAuditRecord<'_>,
+) -> LcsResult<()> {
+    writer.write_map_len(5)?;
+    write_caller(writer, &record.caller)?;
+
+    writer.write_str(FIELD_OBJECT)?;
+    writer.write_map_len(2)?;
+    writer.write_str(FIELD_KIND)?;
+    writer.write_str(OBJECT_KIND_KEY)?;
+    write_key_guid(writer, &record.key_guid)?;
+
+    writer.write_str(FIELD_ACCESS)?;
+    writer.write_map_len(2)?;
+    writer.write_str(FIELD_REQUESTED)?;
+    writer.write_uint(record.requested_access as u64)?;
+    writer.write_str(FIELD_GRANTED)?;
+    writer.write_uint(record.granted_access as u64)?;
+
+    writer.write_str(FIELD_OUTCOME)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_SUCCESS)?;
+    writer.write_bool(record.decision.success())?;
+
+    writer.write_str(FIELD_TRIGGER)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_SACL_MATCH)?;
+    writer.write_uint(record.sacl_match_flags as u64)
 }
 
-fn write_caller_summary_payload(
+fn serialize_backup_restore_start_audit(
+    writer: &mut MsgpackWriter<'_>,
+    record: &LcsBackupRestoreStartAuditRecord<'_>,
+) -> LcsResult<()> {
+    writer.write_map_len(3)?;
+    write_caller(writer, &record.caller)?;
+
+    writer.write_str(FIELD_OBJECT)?;
+    writer.write_map_len(1)?;
+    write_key_guid(writer, &record.key_guid)?;
+
+    // Validation has already refused a negative fd, so the cast is exact.
+    writer.write_str(FIELD_OPERATION)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_FD)?;
+    writer.write_uint(record.fd as u64)
+}
+
+fn serialize_backup_restore_complete_audit(
+    writer: &mut MsgpackWriter<'_>,
+    record: &LcsBackupRestoreCompleteAuditRecord<'_>,
+) -> LcsResult<()> {
+    let success = record.result_errno == 0;
+
+    writer.write_map_len(3)?;
+    write_caller(writer, &record.caller)?;
+
+    writer.write_str(FIELD_OBJECT)?;
+    writer.write_map_len(1)?;
+    write_key_guid(writer, &record.key_guid)?;
+
+    // outcome.errno is present exactly when outcome.success is false.
+    writer.write_str(FIELD_OUTCOME)?;
+    writer.write_map_len(if success { 1 } else { 2 })?;
+    writer.write_str(FIELD_SUCCESS)?;
+    writer.write_bool(success)?;
+    if !success {
+        writer.write_str(FIELD_ERRNO)?;
+        writer.write_int(-(record.result_errno as i64))?;
+    }
+    Ok(())
+}
+
+fn serialize_source_validation_failure_audit(
+    writer: &mut MsgpackWriter<'_>,
+    record: &LcsSourceValidationFailureAuditRecord<'_>,
+) -> LcsResult<()> {
+    let request_len =
+        usize::from(record.request_id.is_some()) + usize::from(record.op_code.is_some());
+    let top_len = 2 + usize::from(request_len != 0) + usize::from(record.key_guid.is_some());
+
+    writer.write_map_len(top_len)?;
+
+    writer.write_str(FIELD_SOURCE)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_RSI)?;
+    writer.write_map_len(1 + usize::from(record.hive_name.is_some()))?;
+    writer.write_str(FIELD_SLOT)?;
+    writer.write_uint(record.source_slot as u64)?;
+    if let Some(hive_name) = record.hive_name {
+        writer.write_str(FIELD_HIVE)?;
+        writer.write_str(hive_name)?;
+    }
+
+    if request_len != 0 {
+        writer.write_str(FIELD_REQUEST)?;
+        writer.write_map_len(request_len)?;
+        if let Some(request_id) = record.request_id {
+            writer.write_str(FIELD_ID)?;
+            writer.write_uint(request_id)?;
+        }
+        if let Some(op_code) = record.op_code {
+            writer.write_str(FIELD_OP_CODE)?;
+            writer.write_uint(op_code as u64)?;
+        }
+    }
+
+    if let Some(key_guid) = record.key_guid {
+        writer.write_str(FIELD_OBJECT)?;
+        writer.write_map_len(1)?;
+        write_key_guid(writer, &key_guid)?;
+    }
+
+    writer.write_str(FIELD_OUTCOME)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_REASON)?;
+    writer.write_str(record.validation_class.as_str())
+}
+
+/// The shape is shared with `kmes.config.value.rejected`: one `config` map
+/// holding `key.path`, `name`, `expected.{type,min,max}`,
+/// `received.{kind,type|value}` and `value`, in that order.
+fn serialize_self_config_invalid_audit(
+    writer: &mut MsgpackWriter<'_>,
+    record: &LcsSelfConfigInvalidAuditRecord,
+) -> LcsResult<()> {
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_CONFIG)?;
+    writer.write_map_len(5)?;
+
+    writer.write_str(FIELD_KEY)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_PATH)?;
+    writer.write_str(record.configuration_parent_path)?;
+
+    writer.write_str(FIELD_NAME)?;
+    writer.write_str(record.configuration_name)?;
+
+    writer.write_str(FIELD_EXPECTED)?;
+    writer.write_map_len(3)?;
+    writer.write_str(FIELD_TYPE)?;
+    writer.write_uint(record.expected_type as u64)?;
+    writer.write_str(FIELD_MIN)?;
+    writer.write_uint(record.expected_min as u64)?;
+    writer.write_str(FIELD_MAX)?;
+    writer.write_uint(record.expected_max as u64)?;
+
+    // config.received.type only for wrong-type, config.received.value
+    // only for out-of-range; a missing value carries the kind alone.
+    let received_type = record.received_type();
+    let received_value = record.received_u32();
+    writer.write_str(FIELD_RECEIVED)?;
+    writer.write_map_len(
+        1 + usize::from(received_type.is_some()) + usize::from(received_value.is_some()),
+    )?;
+    writer.write_str(FIELD_KIND)?;
+    writer.write_str(record.received_kind())?;
+    if let Some(received_type) = received_type {
+        writer.write_str(FIELD_TYPE)?;
+        writer.write_uint(received_type as u64)?;
+    }
+    if let Some(received_value) = received_value {
+        writer.write_str(FIELD_VALUE)?;
+        writer.write_uint(received_value as u64)?;
+    }
+
+    writer.write_str(FIELD_VALUE)?;
+    writer.write_uint(record.retained_value as u64)
+}
+
+/// Writes the `caller` group as the top-level `subject` entry.
+fn write_caller(
     writer: &mut MsgpackWriter<'_>,
     caller: &LcsCallerTokenSummary<'_>,
 ) -> LcsResult<()> {
-    writer.write_map_len(9)?;
-    writer.write_str(CALLER_FIELD_EFFECTIVE_TOKEN_GUID)?;
-    writer.write_bin(&caller.effective_token_guid)?;
-    writer.write_str(CALLER_FIELD_TRUE_TOKEN_GUID)?;
-    writer.write_bin(&caller.true_token_guid)?;
-    writer.write_str(CALLER_FIELD_PROCESS_GUID)?;
-    writer.write_bin(&caller.process_guid)?;
-    writer.write_str(CALLER_FIELD_USER_SID)?;
+    writer.write_str(FIELD_SUBJECT)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_TOKEN)?;
+    writer.write_map_len(CALLER_TOKEN_FIELD_COUNT)?;
+    writer.write_str(TOKEN_FIELD_SID)?;
     writer.write_bin(caller.user_sid)?;
-    writer.write_str(CALLER_FIELD_AUTHENTICATION_ID)?;
-    writer.write_uint(caller.authentication_id)?;
-    writer.write_str(CALLER_FIELD_TOKEN_ID)?;
-    writer.write_uint(caller.token_id)?;
-    writer.write_str(CALLER_FIELD_TOKEN_TYPE)?;
-    writer.write_uint(caller.token_type as u64)?;
-    writer.write_str(CALLER_FIELD_IMPERSONATION_LEVEL)?;
-    writer.write_uint(caller.impersonation_level as u64)?;
-    writer.write_str(CALLER_FIELD_INTEGRITY_LEVEL)?;
+    writer.write_str(TOKEN_FIELD_INTEGRITY)?;
     writer.write_uint(caller.integrity_level as u64)?;
-    Ok(())
+    writer.write_str(TOKEN_FIELD_ID)?;
+    writer.write_uint(caller.token_id)?;
+    writer.write_str(TOKEN_FIELD_AUTH_ID)?;
+    writer.write_uint(caller.authentication_id)?;
+    writer.write_str(TOKEN_FIELD_TYPE)?;
+    writer.write_str(token_type_name(caller.token_type))?;
+    writer.write_str(TOKEN_FIELD_IMPERSONATION)?;
+    writer.write_uint(caller.impersonation_level as u64)
 }
 
-fn add_len(total: &mut usize, value: usize) -> LcsResult<()> {
-    *total = total
-        .checked_add(value)
-        .ok_or(LcsError::OutputSizeOverflow)?;
-    Ok(())
+/// Writes `key: {guid: ...}` inside an already-open `object` map.
+fn write_key_guid(writer: &mut MsgpackWriter<'_>, key_guid: &[u8; 16]) -> LcsResult<()> {
+    writer.write_str(FIELD_KEY)?;
+    writer.write_map_len(1)?;
+    writer.write_str(FIELD_GUID)?;
+    writer.write_bin(key_guid)
 }
 
-fn msgpack_map_len(count: usize) -> usize {
-    if count <= 15 {
-        1
-    } else if count <= u16::MAX as usize {
-        3
-    } else {
-        5
+fn payload_len(
+    serialize: impl FnOnce(&mut MsgpackWriter<'_>) -> LcsResult<()>,
+) -> LcsResult<usize> {
+    let mut writer = MsgpackWriter::counting();
+    serialize(&mut writer)?;
+    Ok(writer.bytes_written())
+}
+
+fn write_payload(
+    output: &mut [u8],
+    required_len: usize,
+    serialize: impl FnOnce(&mut MsgpackWriter<'_>) -> LcsResult<()>,
+) -> LcsResult<LcsAuditPayloadWritePlan> {
+    if output.len() < required_len {
+        return Err(LcsError::AuditPayloadOutputBufferTooSmall {
+            buffer_len: output.len(),
+            required_len,
+        });
     }
+
+    let mut writer = MsgpackWriter::new(&mut output[..required_len]);
+    serialize(&mut writer)?;
+    Ok(LcsAuditPayloadWritePlan {
+        bytes: writer.bytes_written(),
+    })
 }
 
-fn msgpack_nil_len() -> usize {
-    1
-}
-
-fn msgpack_str_len(len: usize) -> usize {
-    if len <= 31 {
-        1 + len
-    } else if len <= u8::MAX as usize {
-        2 + len
-    } else if len <= u16::MAX as usize {
-        3 + len
-    } else {
-        5 + len
-    }
-}
-
-fn msgpack_bin_len(len: usize) -> usize {
-    if len <= u8::MAX as usize {
-        2 + len
-    } else if len <= u16::MAX as usize {
-        3 + len
-    } else {
-        5 + len
-    }
-}
-
-fn msgpack_uint_len(value: u64) -> usize {
-    if value <= 0x7f {
-        1
-    } else if value <= u8::MAX as u64 {
-        2
-    } else if value <= u16::MAX as u64 {
-        3
-    } else if value <= u32::MAX as u64 {
-        5
-    } else {
-        9
-    }
-}
-
-fn msgpack_i32_len() -> usize {
-    5
-}
-
+/// A msgpack writer over a buffer, or over nothing when it only counts.
 struct MsgpackWriter<'a> {
-    buf: &'a mut [u8],
+    buf: Option<&'a mut [u8]>,
     pos: usize,
 }
 
 impl<'a> MsgpackWriter<'a> {
     fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            buf: Some(buf),
+            pos: 0,
+        }
+    }
+
+    fn counting() -> Self {
+        Self { buf: None, pos: 0 }
     }
 
     fn bytes_written(&self) -> usize {
@@ -963,8 +894,8 @@ impl<'a> MsgpackWriter<'a> {
         }
     }
 
-    fn write_nil(&mut self) -> LcsResult<()> {
-        self.write_byte(0xc0)
+    fn write_bool(&mut self, value: bool) -> LcsResult<()> {
+        self.write_byte(if value { 0xc3 } else { 0xc2 })
     }
 
     fn write_str(&mut self, value: &str) -> LcsResult<()> {
@@ -1017,9 +948,16 @@ impl<'a> MsgpackWriter<'a> {
         }
     }
 
-    fn write_i32(&mut self, value: i32) -> LcsResult<()> {
-        self.write_byte(0xd2)?;
-        self.write_bytes(&value.to_be_bytes())
+    /// A signed integer as int32, or int64 when it does not fit. Only
+    /// errnos are written this way, and every real errno fits int32.
+    fn write_int(&mut self, value: i64) -> LcsResult<()> {
+        if let Ok(value) = i32::try_from(value) {
+            self.write_byte(0xd2)?;
+            self.write_bytes(&value.to_be_bytes())
+        } else {
+            self.write_byte(0xd3)?;
+            self.write_bytes(&value.to_be_bytes())
+        }
     }
 
     fn write_byte(&mut self, value: u8) -> LcsResult<()> {
@@ -1039,13 +977,15 @@ impl<'a> MsgpackWriter<'a> {
             .pos
             .checked_add(value.len())
             .ok_or(LcsError::OutputSizeOverflow)?;
-        if end > self.buf.len() {
-            return Err(LcsError::AuditPayloadOutputBufferTooSmall {
-                buffer_len: self.buf.len(),
-                required_len: end,
-            });
+        if let Some(buf) = self.buf.as_deref_mut() {
+            if end > buf.len() {
+                return Err(LcsError::AuditPayloadOutputBufferTooSmall {
+                    buffer_len: buf.len(),
+                    required_len: end,
+                });
+            }
+            buf[self.pos..end].copy_from_slice(value);
         }
-        self.buf[self.pos..end].copy_from_slice(value);
         self.pos = end;
         Ok(())
     }

@@ -36,20 +36,26 @@ u64 pkm_lcs_trace_guid_hash(const u8 *guid)
 #define PKM_LCS_SACL_MATCH_FAILURE 0x2U
 
 static const char pkm_lcs_key_open_audit_event_type[] =
-	"LCS_KEY_OPEN_AUDIT";
+	"lcs.audit.key.opened";
 static const char pkm_lcs_backup_start_event_type[] =
-	"LCS_BACKUP_START";
+	"lcs.audit.backup.started";
 static const char pkm_lcs_backup_complete_event_type[] =
-	"LCS_BACKUP_COMPLETE";
+	"lcs.audit.backup.ended";
 static const char pkm_lcs_restore_start_event_type[] =
-	"LCS_RESTORE_START";
+	"lcs.audit.restore.started";
 static const char pkm_lcs_restore_complete_event_type[] =
-	"LCS_RESTORE_COMPLETE";
+	"lcs.audit.restore.ended";
 static const char pkm_lcs_source_validation_failure_event_type[] =
-	"LCS_SOURCE_VALIDATION_FAILURE";
+	"lcs.source.response.rejected";
 static const char pkm_lcs_self_config_invalid_event_type[] =
-	"LCS_SELF_CONFIG_INVALID";
+	"lcs.config.value.rejected";
 
+/*
+ * Mirrors PkmLcsAuditCallerSummaryCopy in rust_ingress.rs and the KUnit
+ * copy in kunit_common.h. The three leading GUIDs are kept for that shared
+ * layout only and are left zero: the token and process GUIDs ride in the
+ * KMES event header, so the payload never carries them.
+ */
 struct pkm_lcs_audit_caller_summary {
 	u8 effective_token_guid[16];
 	u8 true_token_guid[16];
@@ -100,8 +106,6 @@ static long pkm_lcs_build_audit_caller_summary(
 	const void *token, struct pkm_lcs_audit_caller_summary *caller)
 {
 	struct pkm_kacs_token_audit_summary token_summary = { };
-	kacs_uuid_t true_token_guid;
-	kacs_uuid_t process_guid;
 	int ret;
 
 	if (!token || !caller)
@@ -112,15 +116,6 @@ static long pkm_lcs_build_audit_caller_summary(
 	if (ret)
 		return -EIO;
 
-	true_token_guid = kacs_primary_token_guid();
-	process_guid = kacs_process_guid();
-
-	memcpy(caller->effective_token_guid, token_summary.token_guid,
-	       sizeof(caller->effective_token_guid));
-	memcpy(caller->true_token_guid, true_token_guid.bytes,
-	       sizeof(caller->true_token_guid));
-	memcpy(caller->process_guid, process_guid.bytes,
-	       sizeof(caller->process_guid));
 	caller->user_sid = token_summary.user_sid_ptr;
 	caller->user_sid_len = token_summary.user_sid_len;
 	caller->authentication_id = token_summary.auth_id;

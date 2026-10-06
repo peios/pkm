@@ -5,34 +5,34 @@ use lcs_core::{
 };
 
 #[test]
-fn lcs_audit_event_names_match_psd_005() {
+fn lcs_audit_event_names_match_the_event_catalogue() {
     assert_eq!(
         LcsAuditEventKind::KeyOpenAudit.event_type(),
-        "LCS_KEY_OPEN_AUDIT"
+        "lcs.audit.key.opened"
     );
     assert_eq!(
         LcsAuditEventKind::BackupStart.event_type(),
-        "LCS_BACKUP_START"
+        "lcs.audit.backup.started"
     );
     assert_eq!(
         LcsAuditEventKind::BackupComplete.event_type(),
-        "LCS_BACKUP_COMPLETE"
+        "lcs.audit.backup.ended"
     );
     assert_eq!(
         LcsAuditEventKind::RestoreStart.event_type(),
-        "LCS_RESTORE_START"
+        "lcs.audit.restore.started"
     );
     assert_eq!(
         LcsAuditEventKind::RestoreComplete.event_type(),
-        "LCS_RESTORE_COMPLETE"
+        "lcs.audit.restore.ended"
     );
     assert_eq!(
         LcsAuditEventKind::SourceValidationFailure.event_type(),
-        "LCS_SOURCE_VALIDATION_FAILURE"
+        "lcs.source.response.rejected"
     );
     assert_eq!(
         LcsAuditEventKind::SelfConfigInvalid.event_type(),
-        "LCS_SELF_CONFIG_INVALID"
+        "lcs.config.value.rejected"
     );
 }
 

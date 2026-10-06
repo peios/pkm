@@ -286,7 +286,7 @@ static void pkm_lcs_kunit_key_open_audit_not_required_no_event(
 static void pkm_lcs_kunit_key_open_audit_emits_lcs_kmes_event(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_KEY_OPEN_AUDIT";
+	static const char event_type[] = "lcs.audit.key.opened";
 	static const u8 key_guid[16] = {
 		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
 		0x30, 0x30, 0x03, 0x03, 0x30, 0x30, 0x03, 0x03,
@@ -331,7 +331,24 @@ static void pkm_lcs_kunit_key_open_audit_emits_lcs_kmes_event(
 			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
 			       type_len),
 			0);
-	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
+	/*
+	 * subject, object, access, outcome and trigger. object.kind is "key",
+	 * the caller's token is a primary one, and outcome.success is a real
+	 * msgpack true for this allowed open.
+	 */
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x85);
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written,
+				      "\xa4" "kind" "\xa3" "key"));
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written,
+				      "\xa4" "type" "\xa7" "primary"));
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written,
+				      "\xa7" "success" "\xc3"));
+	KUNIT_EXPECT_TRUE(test, pkm_lcs_kunit_buffer_contains(
+				      buffer, written,
+				      "\xa7" "trigger" "\x81\xaa" "sacl-match"));
 
 	kacs_rust_token_drop(token);
 }
@@ -11663,9 +11680,10 @@ static void pkm_lcs_kunit_key_fd_backup_admission(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, after.privileges_used & KACS_SE_BACKUP_PRIVILEGE,
 			KACS_SE_BACKUP_PRIVILEGE);
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_BACKUP_START", "fd");
+		test, "lcs.audit.backup.started",
+		"\xa9" "operation" "\x81\xa2" "fd");
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_BACKUP_COMPLETE", "result_errno");
+		test, "lcs.audit.backup.ended", "\xa7" "success");
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)output_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -11728,9 +11746,9 @@ static void pkm_lcs_kunit_key_fd_backup_cycle_fails_closed(
 	KUNIT_EXPECT_TRUE(test, script.saw_abort);
 	KUNIT_EXPECT_EQ(test, output.len, (size_t)0);
 	pkm_lcs_kunit_expect_source_validation_audit(
-		test, "malformed_key_metadata", child_guid);
+		test, "malformed-key-metadata", child_guid);
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_BACKUP_COMPLETE", "result_errno");
+		test, "lcs.audit.backup.ended", "\xa7" "success");
 	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
 	KUNIT_EXPECT_FALSE(test, source_snapshot.closing);
 	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
@@ -12823,9 +12841,10 @@ static void pkm_lcs_kunit_key_fd_restore_admission(struct kunit *test)
 				      KACS_SE_RESTORE_PRIVILEGE,
 			KACS_SE_RESTORE_PRIVILEGE);
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_RESTORE_START", "fd");
+		test, "lcs.audit.restore.started",
+		"\xa9" "operation" "\x81\xa2" "fd");
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_RESTORE_COMPLETE", "result_errno");
+		test, "lcs.audit.restore.ended", "\xa7" "success");
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -14027,7 +14046,7 @@ static void pkm_lcs_kunit_key_fd_restore_commit_failure_no_effects(
 						  sizeof(event), true),
 			(ssize_t)-EAGAIN);
 	pkm_lcs_kunit_expect_latest_lcs_event(
-		test, "LCS_RESTORE_COMPLETE", "result_errno");
+		test, "lcs.audit.restore.ended", "\xa7" "success");
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)input_fd), 0);
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)key_fd), 0);
@@ -17618,9 +17637,10 @@ static void pkm_lcs_kunit_key_fd_set_value_allocation_failure_is_enomem(
 
 
 /*
- * §5.4.4: if LCS_BACKUP_START cannot be emitted, the backup returns EIO and
- * does not start — nothing is read from the subtree and nothing is written
- * to the output fd. The snapshot that was opened to find out is released.
+ * §5.4.4: if lcs.audit.backup.started cannot be emitted, the backup returns
+ * EIO and does not start — nothing is read from the subtree and nothing is
+ * written to the output fd. The snapshot that was opened to find out is
+ * released.
  */
 static void pkm_lcs_kunit_key_fd_backup_start_audit_failure_is_eio(
 	struct kunit *test)

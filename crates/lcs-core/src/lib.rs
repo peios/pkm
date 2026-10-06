@@ -60,7 +60,7 @@ pub use audit::{
     LcsAuditPayloadWritePlan, LcsBackupRestoreCompleteAuditRecord,
     LcsBackupRestoreStartAuditRecord, LcsCallerTokenSummary, LcsKeyOpenAuditDecision,
     LcsKeyOpenAuditRecord, LcsSelfConfigInvalidAuditRecord, LcsSelfConfigReceivedValue,
-    LcsSourceValidationClass, LcsSourceValidationFailureAuditRecord,
+    LcsSourceValidationClass, LcsSourceValidationFailureAuditRecord, audit_token_type_from_raw,
     backup_restore_complete_audit_payload_len, backup_restore_start_audit_payload_len,
     key_open_audit_payload_len, lcs_audit_emission_failure_policy,
     plan_backup_complete_audit_record, plan_backup_start_audit_record, plan_key_open_audit_record,

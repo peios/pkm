@@ -9,8 +9,8 @@ the backend rather than anything about the caller.
 type: str
 
 The hive the offending source data belonged to, where the failure could be
-attributed to one. Null when the data was malformed before a hive could be
-determined.
+attributed to one. Absent when the data was malformed before a hive could
+be determined.
 
 --- field request.id
 type: uint
@@ -18,17 +18,252 @@ type: uint
 The identifier of the source request this record concerns, for joining a
 record to the exchange that produced it. A pure correlation key.
 
---- field request.op_code
+--- field request.op-code
 type: uint
 
 The source-protocol operation code of the request this record concerns.
 Identifies which kind of exchange returned unusable data.
 
+--- field request.op-code-expected
+type: uint
+
+The source-protocol operation code the kernel expected a response to carry,
+recorded where the source answered with a different one. Read it beside
+`request.op-code`, which holds the code that actually arrived; the
+disagreement between the two is the finding.
+
+A response code is the request code with the high bit `0x8000` set, so an
+expected code of `0x8021` answers a request of `0x0021` (`RSI_SET_VALUE`).
+
+--- field request.status
+type: str.enum
+values: ok | not-found | already-exists | storage-error | not-empty | too-large | txn-busy | invalid | cas-failed | txn-not-supported
+closed: false
+
+The RSI status code a registry source returned for a request, named from
+the `RSI_*` status constants with the prefix removed. The kernel maps each
+status to an errno before the caller sees it, and the errno loses the
+source's own account: `storage-error` and a response the kernel could not
+use at all both reach the caller as `EIO`, and only this field says which
+it was.
+
+A status code outside this list is never carried here. It is rejected as
+malformed source data and recorded on `lcs.source.response.rejected` with
+the reason `unknown-rsi-status-code`.
+
+--- field request.deferred-effect
+type: str.enum
+values: restore-commit | key-mutation
+closed: false
+
+The kind of kernel-side work attached to a source request, to be applied
+when the source's reply arrives rather than when the caller returns.
+`restore-commit` completes a registry restore; `key-mutation` publishes
+the effects of a key write, such as watch notifications and generation
+updates. Absent when the request carries no deferred work.
+
+Deferred work is what makes a late reply consequential. When the caller
+has already given up (`request.waiter-detached`), the effect is still
+applied, so a change the caller was told had failed can land afterwards.
+
+--- field request.waited
+type: bool
+
+Whether the kernel blocked waiting for the source's reply to a request.
+False for a request dispatched without a waiter, whose outcome no caller
+will see directly.
+
+--- field request.timed-out
+type: bool
+
+Whether a request's wait for the source's reply ran out before the reply
+arrived. The deadline is the configured request timeout. A timed-out
+request is not cancelled at the source: its reply may still arrive, and
+any deferred effect attached to it may still be applied.
+
+--- field request.waiter-detached
+type: bool
+
+Whether the caller that issued a request had stopped waiting by the time
+the source's reply arrived. True means the operation had already reported
+failure to userspace, typically a timeout, so any effect the reply carries
+lands after the caller was told it did not. This is the entry condition for
+the kernel's late-effect replay.
+
+--- field source.rsi.generation
+type: uint
+
+The restart generation of a registry source slot: how many times the slot
+has been resumed by a re-registering source after going down. Zero for a
+source that has never been restarted. A count that climbs quickly is a
+source crash-looping.
+
+--- field source.rsi.generation-validated
+type: uint
+
+The source restart generation that a cached key handle was last validated
+against. A handle whose validated generation is behind
+`source.rsi.generation` has outlived a source restart and must be
+revalidated before use, because the key it names may no longer exist.
+
+--- field source.rsi.in-flight
+type: uint
+
+The number of requests dispatched to a registry source and still awaiting
+a reply, at the moment of the record. Bounded by the configured concurrency
+ceiling per source, so a value at that ceiling means new requests are
+queuing behind slow ones.
+
+--- field source.rsi.queued
+type: uint
+
+The number of requests queued for a registry source and not yet delivered
+to it, at the moment of the record. Distinct from `source.rsi.in-flight`:
+a queued request has not reached the source at all, so it is discarded
+rather than failed if the source goes down.
+
+--- field mutation.sequence
+type: uint
+
+The sequence number LCS stamped on a registry mutation. Allocated from the
+kernel's global monotonic counter, so sequences order writes across every
+hive and source, and the higher sequence wins when two writes land in
+layers of equal precedence.
+
+The counter resumes at boot from one past the highest sequence any
+registered source reports. A record's sequence is therefore comparable
+with any other from the same registry, not only those from the same boot.
+
+--- field mutation.sequence-expected
+type: uint
+
+The sequence number a conditional write asserted as the value's current
+one, the precondition of a compare-and-swap. The write proceeds only if
+the value still carries this sequence, and fails with `cas-failed` from the
+source otherwise. Absent on an unconditional write.
+
+--- field mutation.sequence-watermark
+type: uint
+
+The next sequence number the kernel would allocate, at the moment of the
+record. Every sequence legitimately stored in the registry is below it, so
+a source reporting a sequence at or above the watermark is claiming a
+write the kernel never allocated, which is the future-sequence check that
+`lcs.source.response.rejected` records.
+
+--- field object.hive.name
+type: str
+
+The name of the registry hive an operation acted on, such as `Machine` or
+`Users`. A hive is the unit a registry source registers to serve, so this
+names which source's namespace the operation reached.
+
+--- field object.layer.name
+type: str
+
+The name of the registry layer an operation acted on, as written when the
+layer was created. Layer names are compared without regard to case, so
+two records whose names differ only in case name the same layer. The base
+layer is named `base`.
+
+--- field object.layer.base
+type: bool
+
+Whether an operation targeted the base layer, the bottom of every key's
+resolution order. The base layer always exists at precedence 0 and cannot
+be disabled.
+
+--- field object.layer.enabled
+type: bool
+
+Whether a registry layer is enabled, after the change the record
+describes. A disabled layer takes no part in resolution: its values exist
+but no reader sees them.
+
+--- field object.layer.enabled-previous
+type: bool
+
+Whether a registry layer was enabled before the change the record
+describes. Read with `object.layer.enabled`: a record where the two differ
+is a layer being switched on or off.
+
+--- field object.layer.precedence
+type: uint
+
+A registry layer's precedence, after the change the record describes.
+Where two layers define the same value, the one with the higher
+precedence wins, and the higher sequence breaks a tie. This number
+therefore decides which value the whole system sees.
+
+--- field object.layer.precedence-previous
+type: uint
+
+A registry layer's precedence before the change the record describes.
+Read with `object.layer.precedence`: raising a layer above another
+silently changes which of their values every reader resolves.
+
+--- field object.layer.resolution-changed
+type: bool
+
+Whether a change to a layer altered what any reader of the registry
+actually resolves, as opposed to changing a layer whose values were
+already outranked. LCS computes this and discards it today, so it is not
+yet emitted on any record.
+
+--- field object.watch.filter
+type: uint.flags
+values: 0x1 REG_NOTIFY_VALUE | 0x2 REG_NOTIFY_SUBKEY | 0x4 REG_NOTIFY_SD
+
+The categories of change a process asked a registry watch to report: value
+changes, subkey creation and deletion, and security descriptor changes. A
+watcher is told only of changes in the categories it set.
+
+--- field object.watch.subtree
+type: bool
+
+Whether a registry watch covers the whole subtree beneath its key rather
+than the key alone. How deep a subtree watch reaches is
+`object.watch.depth-limit`, and that limit is unbounded by default.
+
+--- field object.watch.depth-limit
+type: uint
+
+The maximum depth beneath its key at which a subtree watch reports
+changes. 0 means unbounded, and 0 is the default. The limit is the
+machine-wide `MaxSubtreeWatchDepth` setting rather than anything the
+watcher chose, so changes deeper than it are suppressed for every subtree
+watch at once.
+
+--- field object.watch.event
+type: str.enum
+values: value-set | value-deleted | subkey-created | subkey-deleted | sd-changed | key-deleted | overflow
+closed: false
+
+The type of a registry watch event, named from its `REG_WATCH_*` constant
+with the prefix removed. `overflow` replaces individual events when they
+could not all be delivered, telling the watcher only that it missed
+something and must re-read the key.
+
+An `overflow` does not always mean a full queue. It is also queued when a
+single event could not be encoded, so a watcher seeing one cannot tell
+which happened.
+
+--- field object.watch.effects
+type: uint.flags
+values: 0x1 layer-delete
+
+The internal effects that a registry commit triggered through the
+kernel's own configuration watches. `layer-delete` means the watch
+dispatch for the commit already handled a layer deletion, so the commit
+skips its own separate layer-delete step. Absent when the commit
+triggered none.
+
 --- group caller
 include: subject.token.sid
 include: subject.token.integrity
 include: subject.token.id
-include: subject.token.auth_id
+include: subject.token.auth-id
+include: subject.token.type
 include: subject.token.impersonation
 
 The identity LCS records on an audited operation. A deliberate subset of
@@ -41,16 +276,10 @@ record cannot answer "which membership let this through" where the
 equivalent KACS record can. The two subsystems reached the bound on what to
 serialise independently and landed in different places.
 
-`token_type` is not carried. It said only whether the token was primary or
-impersonation, which `subject.token.impersonation` already answers — a
-value of 0 is a primary token.
-
---- event lcs.audit.key-open
-origin: lcs
+--- event lcs.audit.key.opened
 tier: essential
 gating: a matching SACL audit ACE on the key
 cardinality: once per matching open
-emitters: crates/lcs-core/src/audit.rs — LcsKeyOpenAuditRecord
 
 The record that a registry key was opened and what access the open
 received. SACL evaluation follows the KACS AccessCheck algorithm, with the
@@ -70,6 +299,8 @@ cannot be **retained** by KMES, the decision and the descriptor stand, and
 the loss is accounted as a gap in the stream rather than as a failed open.
 
 include: caller
+field: object.kind              required
+  Always `key`. Names the table the access masks decode against.
 field: object.key.guid          required
 field: access.requested         required
   After registry generic mapping, with `MAXIMUM_ALLOWED` re-added when the
@@ -80,14 +311,11 @@ field: access.granted           required
 field: outcome.success          required
   Whether the open was allowed. Replaces the former `decision` string,
   which carried the same two states as words.
-field: trigger.sacl_match       required
+field: trigger.sacl-match       required
 
---- event lcs.audit.backup.start
-origin: lcs
+--- event lcs.audit.backup.started
 tier: essential
 gating: none — audited unconditionally
-cardinality: once per backup
-emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreStartAuditRecord
 
 The record that a registry subtree backup began, emitted **before any data
 is read**. Backup is a privilege-gated bulk operation that bypasses
@@ -96,7 +324,7 @@ happened at all — which is why it is audited whatever the target key's
 SACL says.
 
 The start record exists so that an operation dying partway still leaves
-evidence that it began. A start with no matching complete is itself the
+evidence that it began. A start with no matching end is itself the
 finding.
 
 Emission failure fails the operation with `EIO`, unlike every other LCS
@@ -108,29 +336,24 @@ field: object.key.guid          required
 field: operation.fd             required
   The descriptor the backup stream was written to.
 
---- event lcs.audit.backup.complete
-origin: lcs
+--- event lcs.audit.backup.ended
 tier: essential
 gating: none — audited unconditionally
-cardinality: once per backup that started
-emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreCompleteAuditRecord
 
 The record that a registry subtree backup finished, successfully or
-otherwise. Pairs with `lcs.audit.backup.start` on the same key.
+otherwise. Pairs with `lcs.audit.backup.started` on the same key.
 
 Emission failure here does not affect the result, which has already been
 determined by the time this is written.
 
 include: caller
 field: object.key.guid          required
-field: outcome.errno            required
+field: outcome.success          required
+field: outcome.errno            when outcome.success == false
 
---- event lcs.audit.restore.start
-origin: lcs
+--- event lcs.audit.restore.started
 tier: essential
 gating: none — audited unconditionally
-cardinality: once per restore
-emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreStartAuditRecord
 
 The record that a registry subtree restore began, emitted **before any
 state is modified**. As with backup, this is a privilege-gated bulk
@@ -138,7 +361,7 @@ operation that bypasses per-key access checks, and is audited regardless of
 the target's SACL.
 
 A restore rewrites configuration wholesale, so a start with no matching
-complete means the store may be in a partially rewritten state.
+end means the store may be in a partially rewritten state.
 
 Emission failure fails the operation with `EIO`.
 
@@ -147,26 +370,21 @@ field: object.key.guid          required
 field: operation.fd             required
   The descriptor the restore stream was read from.
 
---- event lcs.audit.restore.complete
-origin: lcs
+--- event lcs.audit.restore.ended
 tier: essential
 gating: none — audited unconditionally
-cardinality: once per restore that started
-emitters: crates/lcs-core/src/audit.rs — LcsBackupRestoreCompleteAuditRecord
 
 The record that a registry subtree restore finished, successfully or
-otherwise. Pairs with `lcs.audit.restore.start` on the same key.
+otherwise. Pairs with `lcs.audit.restore.started` on the same key.
 
 include: caller
 field: object.key.guid          required
-field: outcome.errno            required
+field: outcome.success          required
+field: outcome.errno            when outcome.success == false
 
---- event lcs.source-validation-failed
-origin: lcs
+--- event lcs.source.response.rejected
 tier: essential
 gating: none — every rejection is recorded
-cardinality: once per rejected response
-emitters: crates/lcs-core/src/audit.rs — LcsSourceValidationFailureAuditRecord
 
 The record that LCS rejected data a registry source sent it. Sources are
 userspace backends serving configuration into the kernel, so this is the
@@ -177,36 +395,31 @@ misbehaving rather than a principal acting, and there is frequently no
 principal involved — the data arrived on a source channel, not through a
 syscall.
 
-The failure classes are a stable vocabulary of twelve. They distinguish
-malformed structure from semantic impossibility: a security descriptor that
-will not parse is a different problem from a sequence number from the
-future or two layers claiming the same winning sequence.
+The failure classes distinguish malformed structure from semantic
+impossibility: a security descriptor that will not parse is a different
+problem from a sequence number from the future or two layers claiming the
+same winning sequence.
 
 field: source.rsi.slot          required
 field: source.rsi.hive          optional
 field: request.id               optional
-field: request.op_code          optional
+field: request.op-code          optional
 field: object.key.guid          optional
   Present when the rejected data could be attributed to a specific key.
 field: outcome.reason           required
-  From the source-validation class vocabulary: `malformed-security-descriptor`,
-  `malformed-layer-name`, `unknown-rsi-status-code`, `future-sequence-number`,
-  `duplicate-winning-sequence-tie`,
-  `malformed-layer-metadata-security-descriptor`, `malformed-key-name`,
-  `malformed-value-name`, `malformed-response-payload`,
-  `malformed-key-metadata`, `malformed-value-payload`,
-  `malformed-delete-layer-orphan-list`.
+  values: malformed-security-descriptor | malformed-layer-name | unknown-rsi-status-code | future-sequence-number | duplicate-winning-sequence-tie | malformed-layer-metadata-security-descriptor | malformed-key-name | malformed-value-name | malformed-response-payload | malformed-key-metadata | malformed-value-payload | malformed-delete-layer-orphan-list
+  closed: false
+  The source-validation failure class.
 
---- event lcs.config-invalid
-origin: lcs
+--- event lcs.config.value.rejected
 tier: standard
 gating: none — every rejected configuration value is recorded
 cardinality: once per rejected value
-emitters: crates/lcs-core/src/audit.rs — LcsSelfConfigInvalidAuditRecord
 
 The record that LCS read one of its own configuration values, rejected it,
 and carried on with what it had. Identical in shape and meaning to
-`kmes.config-invalid`, differing only in which key the values live under.
+`kmes.config.value.rejected`, differing only in which key the values live
+under.
 
 Validation is reject-or-keep and never clamps, so this event is the only
 place where what an administrator wrote and what LCS is running on can be
@@ -215,7 +428,7 @@ seen to differ.
 Emission failure preserves the retained configuration — a failure to record
 the rejection must not change which value is in force.
 
-field: config.key               required
+field: config.key.path          required
 field: config.name              required
 field: config.expected.type     required
 field: config.expected.min      required
@@ -223,4 +436,5 @@ field: config.expected.max      required
 field: config.received.kind     required
 field: config.received.type     when config.received.kind == wrong-type
 field: config.received.value    when config.received.kind == out-of-range
-field: config.retained.value    required
+field: config.value             required
+  The value retained.

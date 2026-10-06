@@ -1744,9 +1744,9 @@ static void pkm_lcs_kunit_base_layer_metadata_refresh_caches_sd(
 static void pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits(
 	struct kunit *test)
 {
-	static const char event_type[] = "LCS_SOURCE_VALIDATION_FAILURE";
+	static const char event_type[] = "lcs.source.response.rejected";
 	static const char validation_class[] =
-		"malformed_layer_metadata_security_descriptor";
+		"malformed-layer-metadata-security-descriptor";
 	static const char * const metadata_path[] = {
 		"Machine", "System", "Registry", "Layers", "Policy"
 	};
@@ -1828,7 +1828,8 @@ static void pkm_lcs_kunit_layer_metadata_refresh_malformed_sd_audits(
 			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE, event_type,
 			       type_len),
 			0);
-	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x86);
+	/* source, request, object and outcome: the metadata key is known. */
+	KUNIT_EXPECT_EQ(test, buffer[header_size], 0x84);
 	KUNIT_EXPECT_TRUE(test,
 			  pkm_lcs_kunit_buffer_contains(
 				  buffer, written, validation_class));

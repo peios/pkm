@@ -1,4 +1,5 @@
 use crate::common::sid;
+use kacs_core::TokenType;
 use lcs_core::{
     LCS_CONFIG_ROOT_PATH, LcsAuditEventKind, LcsAuditPayloadWritePlan, LcsCallerTokenSummary,
     LcsError, LcsLimits, REG_SZ, REQUEST_TIMEOUT_MS, RsiSourceDataValidationFailure,
@@ -14,15 +15,12 @@ use lcs_core::{
 
 fn caller(user_sid: &[u8]) -> LcsCallerTokenSummary<'_> {
     LcsCallerTokenSummary {
-        effective_token_guid: [1; 16],
-        true_token_guid: [2; 16],
-        process_guid: [3; 16],
         user_sid,
-        authentication_id: 42,
-        token_id: 99,
-        token_type: 1,
-        impersonation_level: 3,
         integrity_level: 512,
+        token_id: 99,
+        authentication_id: 42,
+        token_type: TokenType::Primary,
+        impersonation_level: 0,
     }
 }
 
@@ -61,86 +59,111 @@ fn append_i32(dst: &mut Vec<u8>, value: i32) {
     dst.extend_from_slice(&value.to_be_bytes());
 }
 
-fn append_nil(dst: &mut Vec<u8>) {
-    dst.push(0xc0);
-}
-
+/// The `caller` group: `subject.token.{sid,integrity,id,auth-id,type,
+/// impersonation}`, written as the `subject` entry of the top-level map.
 fn append_caller(dst: &mut Vec<u8>, user_sid: &[u8]) {
-    dst.push(0x89);
-    append_str(dst, "effective_token_guid");
-    append_bin(dst, &[1; 16]);
-    append_str(dst, "true_token_guid");
-    append_bin(dst, &[2; 16]);
-    append_str(dst, "process_guid");
-    append_bin(dst, &[3; 16]);
-    append_str(dst, "user_sid");
+    append_str(dst, "subject");
+    dst.push(0x81);
+    append_str(dst, "token");
+    dst.push(0x86);
+    append_str(dst, "sid");
     append_bin(dst, user_sid);
-    append_str(dst, "authentication_id");
-    append_uint(dst, 42);
-    append_str(dst, "token_id");
-    append_uint(dst, 99);
-    append_str(dst, "token_type");
-    append_uint(dst, 1);
-    append_str(dst, "impersonation_level");
-    append_uint(dst, 3);
-    append_str(dst, "integrity_level");
+    append_str(dst, "integrity");
     append_uint(dst, 512);
+    append_str(dst, "id");
+    append_uint(dst, 99);
+    append_str(dst, "auth-id");
+    append_uint(dst, 42);
+    append_str(dst, "type");
+    append_str(dst, "primary");
+    append_str(dst, "impersonation");
+    append_uint(dst, 0);
 }
 
-fn expected_start_payload(user_sid: &[u8], fd: i32) -> Vec<u8> {
+/// `object: {key: {guid: ...}}`.
+fn append_object_key(dst: &mut Vec<u8>, key_guid: &[u8; 16]) {
+    append_str(dst, "object");
+    dst.push(0x81);
+    append_str(dst, "key");
+    dst.push(0x81);
+    append_str(dst, "guid");
+    append_bin(dst, key_guid);
+}
+
+fn expected_start_payload(user_sid: &[u8], fd: u64) -> Vec<u8> {
     let mut expected = Vec::new();
     expected.push(0x83);
-    append_str(&mut expected, "caller");
     append_caller(&mut expected, user_sid);
-    append_str(&mut expected, "key_guid");
-    append_bin(&mut expected, &[7; 16]);
+    append_object_key(&mut expected, &[7; 16]);
+    append_str(&mut expected, "operation");
+    expected.push(0x81);
     append_str(&mut expected, "fd");
-    append_i32(&mut expected, fd);
+    append_uint(&mut expected, fd);
     expected
 }
 
-fn expected_complete_payload(user_sid: &[u8], result_errno: u32) -> Vec<u8> {
+/// `outcome.errno` is the negated errno, and is absent on success.
+fn expected_complete_payload(user_sid: &[u8], errno: Option<i32>) -> Vec<u8> {
     let mut expected = Vec::new();
     expected.push(0x83);
-    append_str(&mut expected, "caller");
     append_caller(&mut expected, user_sid);
-    append_str(&mut expected, "key_guid");
-    append_bin(&mut expected, &[7; 16]);
-    append_str(&mut expected, "result_errno");
-    append_uint(&mut expected, result_errno as u64);
+    append_object_key(&mut expected, &[7; 16]);
+    append_str(&mut expected, "outcome");
+    match errno {
+        None => {
+            expected.push(0x81);
+            append_str(&mut expected, "success");
+            expected.push(0xc3);
+        }
+        Some(errno) => {
+            expected.push(0x82);
+            append_str(&mut expected, "success");
+            expected.push(0xc2);
+            append_str(&mut expected, "errno");
+            append_i32(&mut expected, errno);
+        }
+    }
     expected
 }
 
+/// `lcs.config.value.rejected`: one `config` map, the same shape as
+/// `kmes.config.value.rejected`.
 fn expected_self_config_payload(
     received_kind: &str,
     received_type: Option<u32>,
-    received_u32: Option<u32>,
+    received_value: Option<u32>,
 ) -> Vec<u8> {
     let mut expected = Vec::new();
-    expected.push(0x89);
-    append_str(&mut expected, "configuration_parent_path");
+    expected.push(0x81);
+    append_str(&mut expected, "config");
+    expected.push(0x85);
+    append_str(&mut expected, "key");
+    expected.push(0x81);
+    append_str(&mut expected, "path");
     append_str(&mut expected, LCS_CONFIG_ROOT_PATH);
-    append_str(&mut expected, "configuration_name");
+    append_str(&mut expected, "name");
     append_str(&mut expected, REQUEST_TIMEOUT_MS.name);
-    append_str(&mut expected, "expected_type");
+    append_str(&mut expected, "expected");
+    expected.push(0x83);
+    append_str(&mut expected, "type");
     append_uint(&mut expected, lcs_core::REG_DWORD as u64);
-    append_str(&mut expected, "expected_min");
+    append_str(&mut expected, "min");
     append_uint(&mut expected, REQUEST_TIMEOUT_MS.min as u64);
-    append_str(&mut expected, "expected_max");
+    append_str(&mut expected, "max");
     append_uint(&mut expected, REQUEST_TIMEOUT_MS.max as u64);
-    append_str(&mut expected, "received_kind");
+    append_str(&mut expected, "received");
+    expected.push(0x81 + u8::from(received_type.is_some()) + u8::from(received_value.is_some()));
+    append_str(&mut expected, "kind");
     append_str(&mut expected, received_kind);
-    append_str(&mut expected, "received_type");
-    match received_type {
-        Some(value) => append_uint(&mut expected, value as u64),
-        None => append_nil(&mut expected),
+    if let Some(value) = received_type {
+        append_str(&mut expected, "type");
+        append_uint(&mut expected, value as u64);
     }
-    append_str(&mut expected, "received_u32");
-    match received_u32 {
-        Some(value) => append_uint(&mut expected, value as u64),
-        None => append_nil(&mut expected),
+    if let Some(value) = received_value {
+        append_str(&mut expected, "value");
+        append_uint(&mut expected, value as u64);
     }
-    append_str(&mut expected, "retained_value");
+    append_str(&mut expected, "value");
     append_uint(&mut expected, 45_000);
     expected
 }
@@ -148,6 +171,7 @@ fn expected_self_config_payload(
 #[test]
 fn backup_and_restore_start_payloads_serialize_caller_key_and_fd() {
     let user = sid(5, &[18]);
+    // operation.fd is a uint, not the int32 the old `fd` key carried.
     let expected = expected_start_payload(&user, 11);
 
     let backup = plan_backup_start_audit_record(caller(&user), [7; 16], 11).unwrap();
@@ -177,10 +201,10 @@ fn backup_and_restore_start_payloads_serialize_caller_key_and_fd() {
 }
 
 #[test]
-fn backup_and_restore_complete_payloads_serialize_result_errno() {
+fn backup_and_restore_complete_payloads_serialize_outcome() {
     let user = sid(5, &[18]);
-    let expected_success = expected_complete_payload(&user, 0);
-    let expected_failure = expected_complete_payload(&user, 5);
+    let expected_success = expected_complete_payload(&user, None);
+    let expected_failure = expected_complete_payload(&user, Some(-5));
     let backup = plan_backup_complete_audit_record(caller(&user), [7; 16], 0).unwrap();
     let restore = plan_restore_complete_audit_record(caller(&user), [7; 16], 5).unwrap();
     let mut backup_output = vec![0; expected_success.len()];
@@ -215,19 +239,26 @@ fn source_validation_failure_payload_serializes_optional_context() {
     )
     .expect("valid source-validation audit record");
     let mut expected = Vec::new();
-    expected.push(0x86);
-    append_str(&mut expected, "source_slot");
+    expected.push(0x84);
+    append_str(&mut expected, "source");
+    expected.push(0x81);
+    append_str(&mut expected, "rsi");
+    expected.push(0x82);
+    append_str(&mut expected, "slot");
     append_uint(&mut expected, 3);
-    append_str(&mut expected, "hive_name");
+    append_str(&mut expected, "hive");
     append_str(&mut expected, "Machine");
-    append_str(&mut expected, "request_id");
+    append_str(&mut expected, "request");
+    expected.push(0x82);
+    append_str(&mut expected, "id");
     append_uint(&mut expected, 44);
-    append_str(&mut expected, "op_code");
+    append_str(&mut expected, "op-code");
     append_uint(&mut expected, 0x1234);
-    append_str(&mut expected, "key_guid");
-    append_bin(&mut expected, &key_guid);
-    append_str(&mut expected, "validation_class");
-    append_str(&mut expected, "malformed_layer_name");
+    append_object_key(&mut expected, &key_guid);
+    append_str(&mut expected, "outcome");
+    expected.push(0x81);
+    append_str(&mut expected, "reason");
+    append_str(&mut expected, "malformed-layer-name");
     let mut output = vec![0; expected.len()];
 
     let plan = write_source_validation_failure_audit_payload(&record, &mut output).unwrap();
@@ -241,7 +272,7 @@ fn source_validation_failure_payload_serializes_optional_context() {
 }
 
 #[test]
-fn source_validation_failure_payload_serializes_absent_context_as_nil() {
+fn source_validation_failure_payload_leaves_absent_context_out() {
     let record = plan_source_validation_failure_audit_record(
         &LcsLimits::default(),
         9,
@@ -252,25 +283,65 @@ fn source_validation_failure_payload_serializes_absent_context_as_nil() {
         RsiSourceDataValidationFailure::FutureSequenceNumber,
     )
     .expect("valid source-validation audit record");
+    // No hive, request or key: those maps are absent, not nil, and the
+    // top-level map counts only `source` and `outcome`.
     let mut expected = Vec::new();
-    expected.push(0x86);
-    append_str(&mut expected, "source_slot");
+    expected.push(0x82);
+    append_str(&mut expected, "source");
+    expected.push(0x81);
+    append_str(&mut expected, "rsi");
+    expected.push(0x81);
+    append_str(&mut expected, "slot");
     append_uint(&mut expected, 9);
-    append_str(&mut expected, "hive_name");
-    append_nil(&mut expected);
-    append_str(&mut expected, "request_id");
-    append_nil(&mut expected);
-    append_str(&mut expected, "op_code");
-    append_nil(&mut expected);
-    append_str(&mut expected, "key_guid");
-    append_nil(&mut expected);
-    append_str(&mut expected, "validation_class");
-    append_str(&mut expected, "future_sequence_number");
+    append_str(&mut expected, "outcome");
+    expected.push(0x81);
+    append_str(&mut expected, "reason");
+    append_str(&mut expected, "future-sequence-number");
     let mut output = vec![0; expected.len()];
 
     let plan = write_source_validation_failure_audit_payload(&record, &mut output).unwrap();
 
     assert_eq!(plan.bytes, expected.len());
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn source_validation_failure_payload_writes_request_with_only_the_op_code() {
+    let record = plan_source_validation_failure_audit_record(
+        &LcsLimits::default(),
+        2,
+        None,
+        None,
+        Some(0x0021),
+        None,
+        RsiSourceDataValidationFailure::MalformedResponsePayload,
+    )
+    .expect("valid source-validation audit record");
+    let mut expected = Vec::new();
+    expected.push(0x83);
+    append_str(&mut expected, "source");
+    expected.push(0x81);
+    append_str(&mut expected, "rsi");
+    expected.push(0x81);
+    append_str(&mut expected, "slot");
+    append_uint(&mut expected, 2);
+    append_str(&mut expected, "request");
+    expected.push(0x81);
+    append_str(&mut expected, "op-code");
+    append_uint(&mut expected, 0x0021);
+    append_str(&mut expected, "outcome");
+    expected.push(0x81);
+    append_str(&mut expected, "reason");
+    append_str(&mut expected, "malformed-response-payload");
+    let mut output = vec![0; expected.len()];
+
+    let plan = write_source_validation_failure_audit_payload(&record, &mut output).unwrap();
+
+    assert_eq!(plan.bytes, expected.len());
+    assert_eq!(
+        source_validation_failure_audit_payload_len(&record),
+        Ok(expected.len())
+    );
     assert_eq!(output, expected);
 }
 
@@ -298,9 +369,8 @@ fn self_config_invalid_payload_serializes_received_value_shapes() {
     .unwrap();
 
     let expected = expected_self_config_payload("missing", None, None);
-    let expected_wrong_type = expected_self_config_payload("wrong_type", Some(REG_SZ), None);
-    let expected_out_of_range =
-        expected_self_config_payload("dword_out_of_range", None, Some(999_999));
+    let expected_wrong_type = expected_self_config_payload("wrong-type", Some(REG_SZ), None);
+    let expected_out_of_range = expected_self_config_payload("out-of-range", None, Some(999_999));
     let mut output = vec![0; expected.len()];
     let mut wrong_type_output = vec![0; expected_wrong_type.len()];
     let mut out_of_range_output = vec![0; expected_out_of_range.len()];
@@ -321,10 +391,10 @@ fn self_config_invalid_payload_serializes_received_value_shapes() {
     assert_eq!(output, expected);
     assert_eq!(wrong_type_output, expected_wrong_type);
     assert_eq!(out_of_range_output, expected_out_of_range);
-    assert_eq!(wrong_type.received_kind(), "wrong_type");
+    assert_eq!(wrong_type.received_kind(), "wrong-type");
     assert_eq!(wrong_type.received_type(), Some(REG_SZ));
     assert_eq!(wrong_type.received_u32(), None);
-    assert_eq!(out_of_range.received_kind(), "dword_out_of_range");
+    assert_eq!(out_of_range.received_kind(), "out-of-range");
     assert_eq!(out_of_range.received_type(), None);
     assert_eq!(out_of_range.received_u32(), Some(999_999));
 }

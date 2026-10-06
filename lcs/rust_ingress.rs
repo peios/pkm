@@ -1438,17 +1438,18 @@ fn audit_caller_summary_from_copy<'a>(
         return Err(LinuxErrno::Einval);
     }
 
+    let token_type =
+        crate::lcs_core::audit_token_type_from_raw(caller.token_type).ok_or(LinuxErrno::Einval)?;
     let user_sid = unsafe { slice::from_raw_parts(caller.user_sid, caller.user_sid_len) };
+    // The three leading GUIDs in the copy are not read: the token and
+    // process GUIDs ride in the KMES event header, never the payload.
     Ok(LcsCallerTokenSummary {
-        effective_token_guid: caller.effective_token_guid,
-        true_token_guid: caller.true_token_guid,
-        process_guid: caller.process_guid,
         user_sid,
-        authentication_id: caller.authentication_id,
-        token_id: caller.token_id,
-        token_type: caller.token_type,
-        impersonation_level: caller.impersonation_level,
         integrity_level: caller.integrity_level,
+        token_id: caller.token_id,
+        authentication_id: caller.authentication_id,
+        token_type,
+        impersonation_level: caller.impersonation_level,
     })
 }
 
@@ -2327,22 +2328,14 @@ pub unsafe extern "C" fn lcs_rust_key_open_audit_payload(
         return LinuxErrno::Einval.negated_return() as c_int;
     }
 
-    let user_sid = unsafe { slice::from_raw_parts(caller.user_sid, caller.user_sid_len) };
+    let caller_summary = match audit_caller_summary_from_copy(caller) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
     let key_guid_bytes = unsafe { slice::from_raw_parts(key_guid, 16) };
     let mut key_guid_copy = [0u8; 16];
     key_guid_copy.copy_from_slice(key_guid_bytes);
 
-    let caller_summary = LcsCallerTokenSummary {
-        effective_token_guid: caller.effective_token_guid,
-        true_token_guid: caller.true_token_guid,
-        process_guid: caller.process_guid,
-        user_sid,
-        authentication_id: caller.authentication_id,
-        token_id: caller.token_id,
-        token_type: caller.token_type,
-        impersonation_level: caller.impersonation_level,
-        integrity_level: caller.integrity_level,
-    };
     let decision = if allowed != 0 {
         LcsKeyOpenAuditDecision::Allowed
     } else {

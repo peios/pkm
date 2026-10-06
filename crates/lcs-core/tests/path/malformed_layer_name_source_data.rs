@@ -92,7 +92,7 @@ fn source_validation_audit_vocabulary_names_malformed_layer_names() {
     let class = LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedLayerName);
 
     assert_eq!(class, LcsSourceValidationClass::MalformedLayerName);
-    assert_eq!(class.as_str(), "malformed_layer_name");
+    assert_eq!(class.as_str(), "malformed-layer-name");
 }
 
 #[test]
@@ -103,9 +103,9 @@ fn source_validation_audit_vocabulary_names_malformed_key_and_value_names() {
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValueName);
 
     assert_eq!(key_class, LcsSourceValidationClass::MalformedKeyName);
-    assert_eq!(key_class.as_str(), "malformed_key_name");
+    assert_eq!(key_class.as_str(), "malformed-key-name");
     assert_eq!(value_class, LcsSourceValidationClass::MalformedValueName);
-    assert_eq!(value_class.as_str(), "malformed_value_name");
+    assert_eq!(value_class.as_str(), "malformed-value-name");
 }
 
 #[test]
@@ -113,24 +113,24 @@ fn source_validation_audit_vocabulary_names_remaining_source_classes() {
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedResponsePayload)
             .as_str(),
-        "malformed_response_payload"
+        "malformed-response-payload"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedKeyMetadata)
             .as_str(),
-        "malformed_key_metadata"
+        "malformed-key-metadata"
     );
     assert_eq!(
         LcsSourceValidationClass::from(RsiSourceDataValidationFailure::MalformedValuePayload)
             .as_str(),
-        "malformed_value_payload"
+        "malformed-value-payload"
     );
     assert_eq!(
         LcsSourceValidationClass::from(
             RsiSourceDataValidationFailure::MalformedDeleteLayerOrphanList,
         )
         .as_str(),
-        "malformed_delete_layer_orphan_list"
+        "malformed-delete-layer-orphan-list"
     );
 }
 
