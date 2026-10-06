@@ -18,12 +18,14 @@
  */
 
 #include <linux/atomic.h>
+#include <linux/bits.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
 #include <linux/mutex.h>
 #include <linux/rcupdate.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #include <pkm/ntfe.h>
 
@@ -81,19 +83,45 @@ out:
 	return ret;
 }
 
+/* Names a refusal publication makes itself, unless the bridge named it. */
+static void peios_ntfe_why_note(struct peios_ntfe_build_why *why,
+				const char *reason)
+{
+	if (why && !why->reason[0])
+		strscpy(why->reason, reason, sizeof(why->reason));
+}
+
 int peios_ntfe_policy_publish(void *packet_forest, void *raw_forest,
 			     void *flow_forest, u8 reporting_level)
 {
+	return peios_ntfe_policy_publish_why(packet_forest, raw_forest,
+					     flow_forest, reporting_level, NULL);
+}
+
+int peios_ntfe_policy_publish_why(void *packet_forest, void *raw_forest,
+				  void *flow_forest, u8 reporting_level,
+				  struct peios_ntfe_build_why *why)
+{
 	struct peios_ntfe_policy *fresh, *old;
+	u64 generation, generation_previous = 0;
+	u8 threshold_previous = 1;	/* the default, with no policy */
+	u8 layers = 0;
 	int ret;
 
-	ret = ntfe_rust_forests_check(packet_forest, raw_forest, flow_forest);
-	if (ret)
+	ret = ntfe_rust_forests_check_why(packet_forest, raw_forest,
+					  flow_forest, why);
+	if (ret) {
+		/* A refusal the bridge has already named. */
+		if (ret == -ENOMEM)
+			peios_ntfe_why_note(why, "out-of-memory");
 		return ret;
+	}
 
 	fresh = kzalloc(sizeof(*fresh), GFP_KERNEL);
-	if (!fresh)
+	if (!fresh) {
+		peios_ntfe_why_note(why, "out-of-memory");
 		return -ENOMEM;
+	}
 	fresh->forests[PEIOS_NTFE_LAYER_PACKET] = packet_forest;
 	fresh->forests[PEIOS_NTFE_LAYER_RAWPACKET] = raw_forest;
 	fresh->forests[PEIOS_NTFE_LAYER_FLOW] = flow_forest;
@@ -104,6 +132,8 @@ int peios_ntfe_policy_publish(void *packet_forest, void *raw_forest,
 	if (ret) {
 		mutex_unlock(&peios_ntfe_publish_lock);
 		kfree(fresh);
+		peios_ntfe_why_note(why, ret == -ENOMEM ? "out-of-memory" :
+							  "counter-store-refused");
 		return ret;
 	}
 	fresh->generation = ntfe_rust_generation_advance();
@@ -111,12 +141,30 @@ int peios_ntfe_policy_publish(void *packet_forest, void *raw_forest,
 		peios_ntfe_active,
 		lockdep_is_held(&peios_ntfe_publish_lock));
 	rcu_assign_pointer(peios_ntfe_active, fresh);
+	/* Taken under the lock: once it drops, a later publication may
+	 * retire fresh.
+	 */
+	generation = fresh->generation;
+	if (old) {
+		generation_previous = old->generation;
+		threshold_previous = old->reporting_level;
+	}
 	mutex_unlock(&peios_ntfe_publish_lock);
 
 	pr_info("ntfe: policy generation %llu active (packet:%s rawpacket:%s flow:%s reporting-level:%u)\n",
-		fresh->generation, packet_forest ? "loaded" : "none",
+		generation, packet_forest ? "loaded" : "none",
 		raw_forest ? "loaded" : "none", flow_forest ? "loaded" : "none",
 		reporting_level);
+	if (packet_forest)
+		layers |= BIT(PEIOS_NTFE_LAYER_PACKET);
+	if (raw_forest)
+		layers |= BIT(PEIOS_NTFE_LAYER_RAWPACKET);
+	if (flow_forest)
+		layers |= BIT(PEIOS_NTFE_LAYER_FLOW);
+	/* Process context, as the mutex above already requires. */
+	peios_ntfe_policy_published_emit(generation, generation_previous,
+					 layers, reporting_level,
+					 threshold_previous);
 
 	if (old)
 		call_rcu(&old->rcu, peios_ntfe_policy_reclaim);

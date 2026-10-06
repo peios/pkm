@@ -70,6 +70,108 @@ impl From<AllocError> for BuildError {
     }
 }
 
+impl BuildError {
+    /// Every reason [`BuildError::reason`] can answer, in variant order.
+    /// These are values of `outcome.reason` on the kernel's
+    /// `ntfe.policy.rejected` event (pkm `evman/ntfe.evman`), so a name
+    /// here is an ABI: add one, never rename one.
+    pub const REASONS: [&'static str; 18] = [
+        "out-of-memory",
+        "unknown-fact",
+        "bad-operator",
+        "bad-pattern",
+        "bad-counter-view",
+        "bad-actions-value",
+        "bad-action",
+        "prompt-chain-too-deep",
+        "bad-priority",
+        "bad-enabled",
+        "bad-rule-name",
+        "tag-hash-collision",
+        "stream-hash-collision",
+        "counter-never-written",
+        "tag-downward-read",
+        "present-never-at-layer",
+        "key-not-at-layer",
+        "action-not-at-layer",
+    ];
+
+    /// Why the forest was refused, as a stable kebab-case name: the
+    /// variant's own name. Pure; allocates nothing.
+    pub fn reason(&self) -> &'static str {
+        let i = match self {
+            BuildError::Alloc => 0,
+            BuildError::UnknownFact { .. } => 1,
+            BuildError::BadOperator { .. } => 2,
+            BuildError::BadPattern { .. } => 3,
+            BuildError::BadCounterView { .. } => 4,
+            BuildError::BadActionsValue { .. } => 5,
+            BuildError::BadAction { .. } => 6,
+            BuildError::PromptChainTooDeep { .. } => 7,
+            BuildError::BadPriority { .. } => 8,
+            BuildError::BadEnabled { .. } => 9,
+            BuildError::BadRuleName { .. } => 10,
+            BuildError::TagHashCollision { .. } => 11,
+            BuildError::StreamHashCollision { .. } => 12,
+            BuildError::CounterNeverWritten { .. } => 13,
+            BuildError::TagDownwardRead { .. } => 14,
+            BuildError::PresentNeverAtLayer { .. } => 15,
+            BuildError::KeyNotAtLayer { .. } => 16,
+            BuildError::ActionNotAtLayer { .. } => 17,
+        };
+        Self::REASONS[i]
+    }
+
+    /// The registry path of the rule the refusal names, relative to its
+    /// layer key; `None` for allocation failure and the two hash
+    /// collisions, which are between names, not rules.
+    pub fn rule(&self) -> Option<&str> {
+        match self {
+            BuildError::Alloc
+            | BuildError::TagHashCollision { .. }
+            | BuildError::StreamHashCollision { .. } => None,
+            BuildError::UnknownFact { rule, .. }
+            | BuildError::BadOperator { rule, .. }
+            | BuildError::BadPattern { rule, .. }
+            | BuildError::BadCounterView { rule, .. }
+            | BuildError::BadActionsValue { rule }
+            | BuildError::BadAction { rule, .. }
+            | BuildError::PromptChainTooDeep { rule }
+            | BuildError::BadPriority { rule }
+            | BuildError::BadEnabled { rule }
+            | BuildError::BadRuleName { rule }
+            | BuildError::CounterNeverWritten { rule, .. }
+            | BuildError::TagDownwardRead { rule, .. }
+            | BuildError::PresentNeverAtLayer { rule, .. }
+            | BuildError::KeyNotAtLayer { rule, .. }
+            | BuildError::ActionNotAtLayer { rule } => Some(rule.as_str()),
+        }
+    }
+
+    /// Why the action expression failed to parse, for [`BuildError::BadAction`]
+    /// alone.
+    pub fn action_error(&self) -> Option<ActionParseError> {
+        match self {
+            BuildError::BadAction { detail, .. } => Some(*detail),
+            _ => None,
+        }
+    }
+}
+
+impl ActionParseError {
+    /// The stable kebab-case name: a value of the catalogue's
+    /// `rule.action-error` field (pkm `evman/ntfe.evman`).
+    pub fn name(self) -> &'static str {
+        match self {
+            ActionParseError::UnknownAction => "unknown-action",
+            ActionParseError::BadArity => "bad-arity",
+            ActionParseError::BadArgument => "bad-argument",
+            ActionParseError::UnknownRejectKind => "unknown-reject-kind",
+            ActionParseError::Malformed => "malformed",
+        }
+    }
+}
+
 /// Why a single action expression failed to parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionParseError {

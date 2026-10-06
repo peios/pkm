@@ -685,3 +685,101 @@ field: flow.state                    optional
   Present when flow tracking applied.
 field: network.length                required
 field: policy.generation             required
+
+--- event ntfe.policy.published
+tier: standard
+gating: none — every generation of rules that goes into force is recorded
+cardinality: once per published generation of rules
+
+The record that a new generation of traffic rules went into force. The
+kernel reads its own policy from `Machine\System\Network\Rules`, a short
+while after the registry changes, and publishes it whole: from this point
+every traversal is judged by these rules, and every flow judged under the
+old ones is judged again on its next packet.
+
+A re-read that finds the policy exactly as it was published publishes
+nothing and writes no record, so writing a rule back unchanged, or netd
+writing its inventory, is silent. A refused policy writes
+`ntfe.policy.rejected` instead, and the generation before it stays.
+
+**Not every generation has one of these.** A change to the network context
+(which network each interface is on, and its trust) advances the same
+generation counter without a new rule set, and writes no record. A verdict
+whose `policy.generation` falls between two of these records was judged by
+the rules of the earlier one.
+
+field: policy.generation             required
+  The generation this policy now runs as. Verdict records carry the same
+  number.
+field: policy.generation-previous    required
+  The generation of the rule set this one replaced, or 0 when this is the
+  first since boot. Context changes advance the counter too, so it can be
+  lower than one less than `policy.generation`.
+field: policy.layers                 required
+field: policy.report-threshold       required
+field: policy.report-threshold-previous  required
+  1, the default, when this is the first generation since boot.
+
+--- event ntfe.policy.rejected
+tier: essential
+gating: a refusal unlike the last one recorded
+cardinality: once per distinct refusal
+
+The record that the kernel read a traffic policy and refused it, so the
+policy an administrator wrote is **not the policy in force**. NTFE accepts
+or refuses a policy whole: one bad rule anywhere refuses every layer, and
+the previous generation goes on judging traffic exactly as before. Nothing
+is half-applied. The registry shows what was written; this shows that it
+did not take.
+
+The kernel reads the policy again whenever anything under
+`Machine\System\Network` changes, including netd's inventory, and a broken
+policy is refused by every read until it is fixed. The same refusal of the
+same policy is recorded once: a new record means the policy or the reason
+changed. A policy that is accepted, or found unchanged, starts the count
+again.
+
+The rule, where there is one, is the place to look: `outcome.reason` says
+what is wrong with it.
+
+field: policy.generation             required
+  The generation still in force, which the refused policy did not replace.
+field: policy.previous-retained      required
+  Always true: NTFE never leaves part of a refused policy in force.
+field: outcome.errno                 when outcome.reason != no-rules-key
+field: outcome.reason                required
+  values: out-of-memory | unknown-fact | bad-operator | bad-pattern | bad-counter-view | bad-actions-value | bad-action | prompt-chain-too-deep | bad-priority | bad-enabled | bad-rule-name | tag-hash-collision | stream-hash-collision | counter-never-written | tag-downward-read | present-never-at-layer | key-not-at-layer | action-not-at-layer | rule-too-deep | too-many-rules | bad-value-type | bad-value-length | not-utf8 | bad-reporting-level | counter-store-refused | registry-read-failed | no-rules-key
+  closed: false
+  Why the policy was refused. A rule's own content: `unknown-fact`
+  (a condition names a fact the language does not have), `bad-operator`
+  (an operator the fact does not support), `bad-pattern` (a match value
+  that does not parse for its fact), `bad-counter-view` (a `Counter.<n>`
+  key that does not parse), `bad-actions-value` (`Actions` missing or not
+  a list of strings), `bad-action` (an action that does not parse;
+  `rule.action-error` says how), `prompt-chain-too-deep`, `bad-priority`
+  (not an integer), `bad-enabled` (not 0 or 1), `bad-rule-name`,
+  `present-never-at-layer` (a `Present` condition on a fact the layer
+  never has), `key-not-at-layer` and `action-not-at-layer` (a condition
+  or action the rule's layer does not speak). How it was stored:
+  `bad-value-type` (a registry type rules do not use), `bad-value-length`
+  (an integer of the wrong size), `not-utf8`. The policy as a whole:
+  `rule-too-deep` (more than 13 levels), `too-many-rules` (more than 4096
+  in a layer), `bad-reporting-level` (`CurrentReportingLevel` not an
+  integer from 1 to 6), `tag-hash-collision` and `stream-hash-collision`
+  (two names that hash alike), `counter-never-written` (a counter no rule
+  writes), `tag-downward-read` (a rule reading a tag a higher layer
+  writes), `counter-store-refused` (the counter tables could not be
+  built). And the read itself: `registry-read-failed`, `out-of-memory`,
+  and `no-rules-key`, which is no policy at all — recorded once each time
+  the key goes missing.
+field: rule.name                     optional
+  The rule the refusal is in, or names, as its path relative to its layer
+  key. Absent when the refusal is not one rule's: two names hashing alike,
+  the reporting level, a registry read that failed outside any rule, or no
+  Rules key. Held to 255 bytes.
+field: rule.name-truncated           optional
+field: rule.layer                    optional
+  The layer the named rule is in. Absent with `rule.name`, and also for the
+  checks that span layers (`counter-never-written`, `tag-downward-read`),
+  which name a rule but not its layer.
+field: rule.action-error             when outcome.reason == bad-action
