@@ -248,6 +248,13 @@ static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(DYNAMIC_LOGON_SESSION_L
 static NEXT_DYNAMIC_LOGON_SESSION_ID: AtomicU64 = AtomicU64::new(DYNAMIC_LOGON_SESSION_LUID_BASE);
 static LOGON_SESSION_LIST_HEAD: AtomicPtr<PkmKacsLogonSession> = AtomicPtr::new(null_mut());
 static LOGON_SESSION_TABLE_LOCK: AtomicBool = AtomicBool::new(false);
+/// Destroyed sessions whose `kacs.session.destroyed` record has not been
+/// written yet: a lock-free stack threaded through `audit_next`, drained by
+/// the session-audit work item. Each entry holds the session reference the
+/// session table used to hold, so the fields the record reads stay alive
+/// until it is written.
+static DESTROYED_SESSION_AUDIT_HEAD: AtomicPtr<PkmKacsLogonSession> =
+    AtomicPtr::new(null_mut());
 const ANONYMOUS_ONLY_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
     SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
     0,
@@ -308,6 +315,7 @@ extern "C" {
     fn pkm_kacs_rcu_read_unlock();
     fn pkm_kacs_free_after_rcu(ptr: *mut c_void);
     fn pkm_kacs_fill_uuid_v4(out: *mut u8);
+    fn pkm_kacs_session_audit_schedule();
 }
 
 #[repr(C)]
@@ -522,6 +530,9 @@ struct PkmKacsLogonSession {
     own_sd_len: usize,
     live_tokens: AtomicUsize,
     destroying: AtomicBool,
+    /// Link in `DESTROYED_SESSION_AUDIT_HEAD`, the sessions whose
+    /// `kacs.session.destroyed` record is waiting for the audit work item.
+    audit_next: AtomicPtr<PkmKacsLogonSession>,
     linked_elevated: *const c_void,
     linked_filtered: *const c_void,
 }
@@ -783,17 +794,9 @@ impl PkmKacsLogonSession {
         linked_elevated: *const c_void,
         linked_filtered: *const c_void,
     ) {
-        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+        if unsafe { Self::from_ptr(ptr.cast()) }.is_none() {
             return;
-        };
-
-        let _ = emit_logon_session_destroyed_to_kmes(
-            session.logon_session_id,
-            session.user_sid.as_bytes(),
-            session.logon_type,
-            session.auth_package_bytes(),
-            session.created_at,
-        );
+        }
 
         if !linked_elevated.is_null() {
             unsafe { PkmKacsBootToken::drop_ref(linked_elevated) };
@@ -802,7 +805,71 @@ impl PkmKacsLogonSession {
             unsafe { PkmKacsBootToken::drop_ref(linked_filtered) };
         }
 
-        unsafe { Self::drop_ref(ptr) };
+        // The last token usually goes from an RCU callback (a cred freed
+        // after a revert or an exit), where the record's encoder cannot
+        // allocate. The record is written from a work item instead, and the
+        // table's reference travels with the session until it has been.
+        Self::defer_destroyed_audit(ptr);
+    }
+
+    /// Queues `ptr`'s `kacs.session.destroyed` record, taking over one
+    /// reference to it. Allocation-free and lock-free, so safe from any
+    /// context the last token drop can run in.
+    fn defer_destroyed_audit(ptr: *const Self) {
+        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+            return;
+        };
+        let node = ptr as *mut Self;
+        let mut head = DESTROYED_SESSION_AUDIT_HEAD.load(Ordering::Relaxed);
+
+        loop {
+            session.audit_next.store(head, Ordering::Relaxed);
+            match DESTROYED_SESSION_AUDIT_HEAD.compare_exchange_weak(
+                head,
+                node,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => head = current,
+            }
+        }
+
+        unsafe { pkm_kacs_session_audit_schedule() };
+    }
+
+    /// Writes every queued `kacs.session.destroyed` record, oldest first,
+    /// and drops the reference each queued session held. Process context.
+    fn drain_destroyed_audit() {
+        let mut list = DESTROYED_SESSION_AUDIT_HEAD.swap(null_mut(), Ordering::Acquire);
+        let mut ordered: *mut Self = null_mut();
+
+        // The stack is newest first; reverse it so records keep the order
+        // the sessions ended in.
+        while !list.is_null() {
+            let session = unsafe { &*list };
+            let next = session.audit_next.load(Ordering::Relaxed);
+
+            session.audit_next.store(ordered, Ordering::Relaxed);
+            ordered = list;
+            list = next;
+        }
+
+        while !ordered.is_null() {
+            let session = unsafe { &*ordered };
+            let next = session.audit_next.load(Ordering::Relaxed);
+
+            session.audit_next.store(null_mut(), Ordering::Relaxed);
+            let _ = emit_logon_session_destroyed_to_kmes(
+                session.logon_session_id,
+                session.user_sid.as_bytes(),
+                session.logon_type,
+                session.auth_package_bytes(),
+                session.created_at,
+            );
+            unsafe { Self::drop_ref(ordered) };
+            ordered = next;
+        }
     }
 
     fn destroy_published_logon_session(ptr: *const Self) {
@@ -2329,6 +2396,7 @@ fn create_logon_session_object(
                 own_sd_len,
                 live_tokens: AtomicUsize::new(0),
                 destroying: AtomicBool::new(false),
+                audit_next: AtomicPtr::new(null_mut()),
                 linked_elevated: null(),
                 linked_filtered: null(),
             },
@@ -9043,6 +9111,13 @@ pub extern "C" fn kacs_rust_create_logon_session(
 /// or in-flight kernel reference.
 pub extern "C" fn kacs_rust_destroy_empty_logon_session(auth_id: u64) -> i32 {
     PkmKacsLogonSession::destroy_empty_published_logon_session(auth_id)
+}
+
+#[no_mangle]
+/// Writes the `kacs.session.destroyed` records queued by session teardown.
+/// Called only from the session-audit work item, in process context.
+pub extern "C" fn kacs_rust_session_audit_drain() {
+    PkmKacsLogonSession::drain_destroyed_audit();
 }
 
 #[no_mangle]

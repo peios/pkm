@@ -919,11 +919,14 @@ void pkm_kunit_reset_kmes(void)
 	/*
 	 * Settle what earlier cases left to RCU first: a cred freed by a
 	 * revert drops its token from an RCU callback, and a token's last
-	 * drop destroys its logon session and emits kacs.session.destroyed
-	 * on whichever CPU runs the callback — into a case that expects its
-	 * own events alone, on one ring (PEI-1313 made those frees real).
+	 * drop destroys its logon session and queues kacs.session.destroyed
+	 * for the session-audit work item, which writes it on whichever CPU
+	 * runs the work — into a case that expects its own events alone, on
+	 * one ring (PEI-1313 made those frees real). The barrier settles the
+	 * callbacks; the flush writes whatever records they queued.
 	 */
 	rcu_barrier();
+	pkm_kacs_session_audit_flush();
 	pkm_kmes_kunit_reset_all();
 	pkm_kmes_kunit_clear_process_override();
 	(void)pkm_kmes_kunit_set_current_process_rate_refill_frozen(false);

@@ -630,6 +630,9 @@ int kacs_rust_create_logon_session(const void *creator_token, const u8 *spec,
 			     size_t spec_len, u64 created_at,
 			     u64 *logon_session_id_out);
 int kacs_rust_destroy_empty_logon_session(u64 auth_id);
+void kacs_rust_session_audit_drain(void);
+void pkm_kacs_session_audit_schedule(void);
+void pkm_kacs_session_audit_flush(void);
 const void *kacs_rust_token_clone(const void *token);
 const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);

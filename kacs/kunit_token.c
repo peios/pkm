@@ -2401,6 +2401,7 @@ static void pkm_kunit_logon_session_destroy_last_token_emits_kmes(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	flush_delayed_fput();
 	kacs_rust_token_drop(token_ptr);
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(logon_session_id, &snapshot),
 			-EACCES);
@@ -2451,6 +2452,101 @@ static void pkm_kunit_logon_session_destroy_last_token_emits_kmes(
 						 view.payload_len,
 							 pkm_kunit_local_service_sid,
 							 sizeof(pkm_kunit_local_service_sid)));
+}
+
+
+/*
+ * A session's last token can go from an RCU callback, where nothing may
+ * sleep or allocate GFP_KERNEL. The drop here runs inside an RCU read-side
+ * section, which is atomic in the same way, so the teardown must queue the
+ * record rather than encode it; the record then arrives from the work item.
+ * Before the work item existed this drop allocated in atomic context.
+ */
+static void pkm_kunit_logon_session_destroyed_deferred_from_atomic(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+	};
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	struct pkm_kacs_logon_session_snapshot snapshot = { };
+	struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	u8 *buffer;
+	const void *subject_token;
+	const void *token_ptr = NULL;
+	u64 logon_session_id = 0;
+	size_t session_spec_len;
+	size_t token_spec_len;
+	size_t written = 0;
+	long fd;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	session_spec_len = pkm_kunit_build_logon_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_logon_session_for_subject(
+				subject_token, session_spec, session_spec_len,
+				&logon_session_id),
+			0L);
+
+	spec_args.logon_session_id = logon_session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	fd = pkm_kacs_kunit_create_token_for_subject(subject_token, token_spec,
+						     token_spec_len);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_token_fd_clone_token((int)fd, &token_ptr,
+						      NULL),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, token_ptr);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+
+	pkm_kunit_reset_kmes();
+	rcu_read_lock();
+	kacs_rust_token_drop(token_ptr);
+	rcu_read_unlock();
+
+	/* The session is gone at once; its record follows from the work. */
+	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(logon_session_id, &snapshot),
+			-EACCES);
+	pkm_kacs_session_audit_flush();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&kmes_snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, kmes_snapshot.last_sequence, 1ULL);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)"kacs.session.destroyed",
+				  sizeof("kacs.session.destroyed") - 1);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)"Kerberos",
+						 sizeof("Kerberos") - 1));
 }
 
 
@@ -2522,6 +2618,7 @@ static void pkm_kunit_logon_session_destroyed_msgpack_schema(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	flush_delayed_fput();
 	kacs_rust_token_drop(token_ptr);
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test,
 			kacs_rust_kunit_logon_session_snapshot(logon_session_id,
@@ -2576,6 +2673,7 @@ static void pkm_kunit_destroy_empty_logon_session_success_emits_kmes(
 			pkm_kacs_kunit_destroy_empty_logon_session_for_subject(
 				subject_token, logon_session_id),
 			0L);
+	pkm_kacs_session_audit_flush();
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(logon_session_id, &snapshot),
 			-EACCES);
 	KUNIT_ASSERT_EQ(test,
@@ -8656,6 +8754,7 @@ static void pkm_kunit_linked_logon_session_destroy_emits_single_kmes_event(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)pair.filtered_fd), 0);
 	flush_delayed_fput();
 	pair.filtered_fd = -1;
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(pair.logon_session_id,
 							       &snapshot),
@@ -8712,6 +8811,7 @@ static void pkm_kunit_linked_logon_session_destroy_waits_for_external_fd(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)pair.filtered_fd), 0);
 	flush_delayed_fput();
 	pair.filtered_fd = -1;
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(pair.logon_session_id,
 							       &snapshot),
@@ -8723,6 +8823,7 @@ static void pkm_kunit_linked_logon_session_destroy_waits_for_external_fd(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)pair.elevated_fd), 0);
 	flush_delayed_fput();
 	pair.elevated_fd = -1;
+	pkm_kacs_session_audit_flush();
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(pair.logon_session_id,
 							       &snapshot),
 			-EACCES);
@@ -13189,6 +13290,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_create_token_max_groups_succeeds),
 	KUNIT_CASE(pkm_kunit_create_token_over_max_groups_fails_closed),
 	KUNIT_CASE(pkm_kunit_logon_session_destroy_last_token_emits_kmes),
+	KUNIT_CASE(pkm_kunit_logon_session_destroyed_deferred_from_atomic),
 	KUNIT_CASE(pkm_kunit_logon_session_destroyed_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_destroy_empty_logon_session_success_emits_kmes),
 	KUNIT_CASE(pkm_kunit_destroy_empty_logon_session_requires_tcb),
