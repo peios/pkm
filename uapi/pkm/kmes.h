@@ -20,7 +20,7 @@
 #define KMES_ORIGIN_KMES	1U
 #define KMES_ORIGIN_KACS	2U
 #define KMES_ORIGIN_LCS		3U
-#define KMES_ORIGIN_NTFE		4U	/* net/ntfe: ntfe.verdict.reported */
+#define KMES_ORIGIN_NTFE		4U	/* net/ntfe: ntfe.verdict.reported, ntfe.policy.published, ntfe.policy.rejected */
 
 /*
  * One descriptor in a SYS_KMES_EMIT_BATCH entry array.
