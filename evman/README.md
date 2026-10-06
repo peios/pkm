@@ -22,7 +22,7 @@ defined in exactly one fragment.
 | File | Defines | Events | Source of truth |
 |---|---|---|---|
 | `kernel.evman` | The platform fragment: the header fields, and every generic root (`subject`, `object`, `source`, `destination`, `emitter`, `event`, `access`, `outcome`, `trigger`, `operation`, `config`, `policy`, `transaction`, `fields`) | none | PGSS §6.4; `pkm/uapi/pkm/kmes.h` for the header |
-| `kacs.evman` | `privilege.*`, `caap.*`, `linux.cap`, `mitigation.*`, `signature.*`, and other things only KACS knows | `kacs.audit.access.checked`, `kacs.audit.handle.used`, `kacs.audit.privilege.used`, `kacs.caap.sacl.skipped`, `kacs.caap.staging.diverged`, `kacs.session.destroyed` | `pkm/kacs/kmes_payload.rs`, `pkm/kacs/file_access.c`, `pkm/crates/kacs-core/src/access_check.rs` |
+| `kacs.evman` | `privilege.*`, `caap.*`, `linux.cap`, `mitigation.*`, `signature.*`, and other things only KACS knows | `kacs.audit.access.checked`, `kacs.audit.handle.used`, `kacs.audit.privilege.used`, `kacs.caap.sacl.skipped`, `kacs.caap.staging.diverged`, `kacs.session.destroyed`, `kacs.descriptor.rejected`, `kacs.signature.crypto.failed` | `pkm/kacs/kmes_payload.rs`, `pkm/kacs/file_access.c`, `pkm/crates/kacs-core/src/access_check.rs` |
 | `kmes.evman` | `buffer.*`, `loss.*` | `kmes.config.value.rejected`, `kmes.buffer.swap.failed` | `pkm/kmes/kmes.c` |
 | `lcs.evman` | `source.rsi.*`, `request.*` | `lcs.audit.key.opened`, `lcs.audit.backup.{started,ended}`, `lcs.audit.restore.{started,ended}`, `lcs.source.response.rejected`, `lcs.config.value.rejected` | `pkm/crates/lcs-core/src/audit.rs` |
 | `ntfe.evman` | `network.*`, `rule.*`, `flow.*`, NTFE's endpoint attribution | `ntfe.verdict.reported` | `pkm/ntfe/report.c` |

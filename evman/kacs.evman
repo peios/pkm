@@ -633,9 +633,7 @@ write it, and the session is destroyed regardless.
 field: object.session.id           required
 field: object.session.user.sid     required
 field: object.session.logon-type   required
-  KACS writes the `KACS_LOGON_TYPE_*` number today rather than its name,
-  which must be converted.
 field: object.session.auth-package required
 field: object.session.logon-time   required
-  When the session was created. KACS writes it today in whole seconds of
-  the realtime clock, not nanoseconds, which must be converted.
+  When the session was created. KACS keeps it to the second, so the
+  nanosecond value is always a whole number of seconds.
