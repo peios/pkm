@@ -24,7 +24,7 @@ long pkm_lcs_publish_open_key_for_token(
 	long audit_ret;
 	long ret;
 
-	ret = pkm_lcs_key_open_access_check_for_token(
+	ret = pkm_lcs_key_open_access_check_recording_privilege_use(
 		token, sd, sd_len, desired_access, &access);
 	if (ret) {
 		trace_lcs_key_open(source_id, key_guid, desired_access, 0, 0,
@@ -47,6 +47,7 @@ long pkm_lcs_publish_open_key_for_token(
 	publish.source_id = source_id;
 	memcpy(publish.key_guid, key_guid, sizeof(publish.key_guid));
 	publish.granted_access = access.fd_granted_access;
+	publish.audit_mask = access.continuous_audit_mask;
 	publish.limits = limits;
 	publish.resolved_path = resolved_path;
 	publish.ancestor_guids = ancestor_guids;

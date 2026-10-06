@@ -22,7 +22,7 @@ use crate::lcs_core::{
     plan_restore_complete_audit_record, plan_restore_start_audit_record,
     plan_source_validation_failure_audit_record, plan_layer_publication,
     plan_layer_target_admission, plan_registry_get_security,
-    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access,
+    plan_registry_ioctl_fixed_fd_access_gate, plan_registry_key_open_access_with_privilege_use,
     plan_registry_open_pre_resolution_access, plan_registry_security_info_fd_access_gate,
     plan_registry_set_security, plan_value_layer_admission,
     plan_rsi_source_read, plan_source_registration_sequence_update,
@@ -90,6 +90,12 @@ use crate::lcs_core::{
     REG_TOMBSTONE,
     RSI_DELETE_LAYER, RSI_ENUM_CHILDREN, RSI_LOOKUP, RSI_QUERY_VALUES, RSI_READ_KEY,
     select_layer_owner, write_watch_event_record,
+    key_audit_payload_len, registry_security_info_required_access,
+    transaction_committed_audit_payload_len, write_key_audit_payload,
+    write_transaction_committed_audit_payload, LcsKeyAuditAccess, LcsKeyAuditDetail,
+    LcsKeyAuditRecord, LcsSdAuditSummary, LcsTransactionAuditReason, LcsTransactionAuditState,
+    LcsTransactionCommittedAuditRecord, LcsValueAuditSummary, RegistrySecurityOperation,
+    LCS_AUDIT_DIGEST_LEN,
 };
 
 const PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE: u32 = 0;
@@ -200,6 +206,7 @@ pub struct PkmLcsKeyOpenAccessPlanCopy {
     pub mapped_desired_access: u32,
     pub access_check_granted: u32,
     pub fd_granted_access: u32,
+    pub continuous_audit_mask: u32,
     pub allowed: u8,
     pub maximum_allowed: u8,
     pub key_open_sacl_audit_required: u8,
@@ -2211,6 +2218,7 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
     pip_type: u32,
     pip_trust: u32,
     caap_cache: *const c_void,
+    record_privilege_use: u8,
     plan_out: *mut PkmLcsKeyOpenAccessPlanCopy,
 ) -> c_int {
     if plan_out.is_null() {
@@ -2223,6 +2231,7 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
             mapped_desired_access: 0,
             access_check_granted: 0,
             fd_granted_access: 0,
+            continuous_audit_mask: 0,
             allowed: 0,
             maximum_allowed: 0,
             key_open_sacl_audit_required: 0,
@@ -2256,17 +2265,19 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
                     device_claims: resolved.device_claims,
                     ..crate::kacs_core::ConditionalContext::default()
                 };
-                let plan = plan_registry_key_open_access(RegistryKeyOpenAccessInput {
-                    key_sd: sd_bytes,
-                    token: resolved.token,
-                    desired_access,
-                    pip,
-                    conditional_context,
-                    object_audit_context: None,
-                    privilege_intent: 0,
-                    caap_policies: resolved.policies,
-                })
-                .map_err(|err| key_open_access_error_return(err) as c_long)?;
+                let outcome =
+                    plan_registry_key_open_access_with_privilege_use(RegistryKeyOpenAccessInput {
+                        key_sd: sd_bytes,
+                        token: resolved.token,
+                        desired_access,
+                        pip,
+                        conditional_context,
+                        object_audit_context: None,
+                        privilege_intent: 0,
+                        caap_policies: resolved.policies,
+                    })
+                    .map_err(|err| key_open_access_error_return(err) as c_long)?;
+                let plan = outcome.plan;
 
                 if !crate::token_runtime::mark_token_privileges_used(
                     subject_token,
@@ -2275,11 +2286,35 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
                     return Err(LinuxErrno::Eacces.negated_return() as c_long);
                 }
 
+                // A registry open that a privilege contributed to is recorded
+                // as kacs.audit.privilege.used, in the shape KACS writes for
+                // its own access checks. The open's only identity the record
+                // can carry is object.kind: KACS has no key object variant.
+                // A record that cannot be built fails the open, as a
+                // key-open audit record does.
+                if record_privilege_use != 0 && !outcome.privilege_use_events.is_empty() {
+                    let target = crate::kmes_payload::AuditTarget {
+                        subject_ids: crate::token_runtime::audit_subject_ids(subject_token),
+                        object: crate::kmes_payload::AuditObject::Kind(b"key"),
+                        asserted: false,
+                    };
+                    crate::kmes_payload::emit_access_check_events_to_kmes(
+                        &[],
+                        outcome.privilege_use_events.as_slice(),
+                        &[],
+                        resolved,
+                        pip,
+                        &target,
+                    )
+                    .map_err(|_| LinuxErrno::Eio.negated_return() as c_long)?;
+                }
+
                 unsafe {
                     (*plan_out).requested_access = plan.requested_access;
                     (*plan_out).mapped_desired_access = plan.mapped_desired_access;
                     (*plan_out).access_check_granted = plan.access_check_granted;
                     (*plan_out).fd_granted_access = plan.fd_granted_access.unwrap_or(0);
+                    (*plan_out).continuous_audit_mask = plan.continuous_audit_mask;
                     (*plan_out).allowed =
                         u8::from(plan.decision == RegistryOpenAccessDecision::Allowed);
                     (*plan_out).maximum_allowed = u8::from(plan.maximum_allowed);
@@ -2373,6 +2408,360 @@ pub unsafe extern "C" fn lcs_rust_key_open_audit_payload(
             0
         }
         Err(err) => key_open_audit_error_return(err),
+    }
+}
+
+/// One registry write record, as `struct pkm_lcs_key_audit_record` in
+/// `source_device.h` lays it out.
+#[repr(C)]
+pub struct PkmLcsKeyAuditRecordCopy {
+    pub key_path: *const u8,
+    pub key_layer_name: *const u8,
+    pub layer_name: *const u8,
+    pub value_name: *const u8,
+    pub sd: *const u8,
+    pub previous_sd: *const u8,
+    pub transaction_id: u64,
+    pub sequence: u64,
+    pub expected_sequence: u64,
+    pub event: u32,
+    pub result_errno: u32,
+    pub key_path_len: u32,
+    pub key_layer_name_len: u32,
+    pub layer_name_len: u32,
+    pub value_name_len: u32,
+    pub sd_len: u32,
+    pub previous_sd_len: u32,
+    pub requested_access: u32,
+    pub granted_access: u32,
+    pub audit_mask: u32,
+    pub value_type: u32,
+    pub value_length: u32,
+    pub previous_type: u32,
+    pub previous_length: u32,
+    pub sd_components: u32,
+    pub key_guid: [u8; 16],
+    pub value_digest: [u8; LCS_AUDIT_DIGEST_LEN],
+    pub previous_digest: [u8; LCS_AUDIT_DIGEST_LEN],
+    pub sd_digest: [u8; LCS_AUDIT_DIGEST_LEN],
+    pub previous_sd_digest: [u8; LCS_AUDIT_DIGEST_LEN],
+    pub transaction_present: u8,
+    pub sequence_present: u8,
+    pub expected_sequence_present: u8,
+    pub timed_out: u8,
+    pub value_name_present: u8,
+    pub value_present: u8,
+    pub previous_present: u8,
+    pub tombstone_set: u8,
+    pub audit_mask_present: u8,
+    pub created_volatile: u8,
+    pub created_volatile_requested: u8,
+    pub created_symlink: u8,
+    pub sd_present: u8,
+    pub previous_sd_present: u8,
+    pub _pad: [u8; 2],
+}
+
+// PKM_LCS_KEY_AUDIT_RECORD_SIZE in source_device.h.
+const _: () = assert!(core::mem::size_of::<PkmLcsKeyAuditRecordCopy>() == 296);
+
+const PKM_LCS_KEY_AUDIT_VALUE_SET: u32 = 1;
+const PKM_LCS_KEY_AUDIT_VALUE_DELETED: u32 = 2;
+const PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED: u32 = 3;
+const PKM_LCS_KEY_AUDIT_KEY_DELETED: u32 = 4;
+const PKM_LCS_KEY_AUDIT_KEY_HIDDEN: u32 = 5;
+const PKM_LCS_KEY_AUDIT_KEY_CREATED: u32 = 6;
+const PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED: u32 = 7;
+
+/// A byte range from C as text: `None` when absent, `Some("")` for an empty
+/// name, which is a legal value name.
+fn key_audit_str<'a>(ptr: *const u8, len: u32, present: bool) -> Result<Option<&'a str>, LinuxErrno> {
+    if !present {
+        return Ok(None);
+    }
+    if len == 0 {
+        return Ok(Some(""));
+    }
+    if ptr.is_null() {
+        return Err(LinuxErrno::Einval);
+    }
+    let bytes = unsafe { slice::from_raw_parts(ptr, len as usize) };
+    str::from_utf8(bytes).map(Some).map_err(|_| LinuxErrno::Eio)
+}
+
+fn key_audit_bytes<'a>(ptr: *const u8, len: u32) -> Result<&'a [u8], LinuxErrno> {
+    if ptr.is_null() || len == 0 {
+        return Err(LinuxErrno::Einval);
+    }
+    Ok(unsafe { slice::from_raw_parts(ptr, len as usize) })
+}
+
+/// The owner SID of a descriptor, read with the same parser the merge
+/// planner uses. A descriptor that does not parse records no owner rather
+/// than losing the record.
+fn key_audit_sd_owner(sd: &[u8]) -> Option<&[u8]> {
+    SecurityDescriptor::parse(sd)
+        .ok()?
+        .owner()
+        .map(|owner| owner.as_bytes())
+}
+
+fn key_audit_sd_summary<'a>(
+    ptr: *const u8,
+    len: u32,
+    digest: [u8; LCS_AUDIT_DIGEST_LEN],
+) -> Result<LcsSdAuditSummary<'a>, LinuxErrno> {
+    let bytes = key_audit_bytes(ptr, len)?;
+    Ok(LcsSdAuditSummary {
+        length: len,
+        digest,
+        owner: key_audit_sd_owner(bytes),
+    })
+}
+
+fn key_audit_record_from_copy<'a>(
+    caller: LcsCallerTokenSummary<'a>,
+    raw: &'a PkmLcsKeyAuditRecordCopy,
+) -> Result<LcsKeyAuditRecord<'a>, LinuxErrno> {
+    let key_path = key_audit_str(raw.key_path, raw.key_path_len, true)?
+        .filter(|path| !path.is_empty())
+        .ok_or(LinuxErrno::Einval)?;
+    let key_layer_name = key_audit_str(
+        raw.key_layer_name,
+        raw.key_layer_name_len,
+        raw.key_layer_name_len != 0,
+    )?;
+    let value_name = key_audit_str(
+        raw.value_name,
+        raw.value_name_len,
+        raw.value_name_present != 0,
+    )?;
+    let value = (raw.value_present != 0).then_some(LcsValueAuditSummary {
+        value_type: raw.value_type,
+        length: raw.value_length,
+        digest: raw.value_digest,
+    });
+    let previous = (raw.previous_present != 0).then_some(LcsValueAuditSummary {
+        value_type: raw.previous_type,
+        length: raw.previous_length,
+        digest: raw.previous_digest,
+    });
+    let sequence = (raw.sequence_present != 0).then_some(raw.sequence);
+
+    let detail = match raw.event {
+        PKM_LCS_KEY_AUDIT_VALUE_SET => LcsKeyAuditDetail::ValueSet {
+            value_name,
+            value,
+            previous,
+            sequence,
+            expected_sequence: (raw.expected_sequence_present != 0)
+                .then_some(raw.expected_sequence),
+        },
+        PKM_LCS_KEY_AUDIT_VALUE_DELETED => LcsKeyAuditDetail::ValueDeleted {
+            value_name,
+            previous,
+        },
+        PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED => LcsKeyAuditDetail::KeyTombstoned {
+            set: match raw.tombstone_set {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            },
+            sequence,
+        },
+        PKM_LCS_KEY_AUDIT_KEY_DELETED => LcsKeyAuditDetail::KeyDeleted {
+            layer_name: key_audit_str(raw.layer_name, raw.layer_name_len, raw.layer_name_len != 0)?,
+        },
+        PKM_LCS_KEY_AUDIT_KEY_HIDDEN => LcsKeyAuditDetail::KeyHidden { sequence },
+        PKM_LCS_KEY_AUDIT_KEY_CREATED => {
+            if raw.sd_present == 0 {
+                return Err(LinuxErrno::Einval);
+            }
+            let sd = key_audit_bytes(raw.sd, raw.sd_len)?;
+            LcsKeyAuditDetail::KeyCreated {
+                volatile: raw.created_volatile != 0,
+                volatile_requested: raw.created_volatile_requested != 0,
+                symlink: raw.created_symlink != 0,
+                sd_owner: key_audit_sd_owner(sd),
+                sd_length: raw.sd_len,
+            }
+        }
+        PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED => LcsKeyAuditDetail::KeyDescriptorChanged {
+            components: raw.sd_components,
+            sd: if raw.sd_present != 0 {
+                Some(key_audit_sd_summary(raw.sd, raw.sd_len, raw.sd_digest)?)
+            } else {
+                None
+            },
+            previous: if raw.previous_sd_present != 0 {
+                Some(key_audit_sd_summary(
+                    raw.previous_sd,
+                    raw.previous_sd_len,
+                    raw.previous_sd_digest,
+                )?)
+            } else {
+                None
+            },
+        },
+        _ => return Err(LinuxErrno::Einval),
+    };
+
+    Ok(LcsKeyAuditRecord {
+        caller,
+        key_guid: raw.key_guid,
+        key_path,
+        key_layer_name,
+        access: LcsKeyAuditAccess {
+            requested: raw.requested_access,
+            granted: raw.granted_access,
+            audit_mask: (raw.audit_mask_present != 0).then_some(raw.audit_mask),
+        },
+        transaction_id: (raw.transaction_present != 0).then_some(raw.transaction_id),
+        result_errno: raw.result_errno,
+        timed_out: raw.timed_out != 0,
+        detail,
+    })
+}
+
+/// Sizes (`output` NULL) or writes one registry write record's payload.
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_key_audit_payload(
+    caller: *const PkmLcsAuditCallerSummaryCopy,
+    record: *const PkmLcsKeyAuditRecordCopy,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    let Some(caller) = (unsafe { caller.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let Some(raw) = (unsafe { record.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let caller_summary = match audit_caller_summary_from_copy(caller) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let record = match key_audit_record_from_copy(caller_summary, raw) {
+        Ok(record) => record,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let required_len = match key_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return key_open_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_key_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => key_open_audit_error_return(err),
+    }
+}
+
+/// Sizes (`output` NULL) or writes an `lcs.audit.transaction.committed`
+/// payload. `reason` is a `PKM_LCS_TXN_AUDIT_REASON_*` code, 0 on success;
+/// `commit_outstanding` is negative when the field is absent.
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_transaction_committed_audit_payload(
+    caller: *const PkmLcsAuditCallerSummaryCopy,
+    transaction_id: u64,
+    state: u32,
+    result_errno: u32,
+    reason: u32,
+    commit_outstanding: i32,
+    output: *mut u8,
+    output_len: usize,
+    written_out: *mut usize,
+) -> c_int {
+    let Some(written_out) = (unsafe { written_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *written_out = 0;
+
+    let Some(caller) = (unsafe { caller.as_ref() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let caller_summary = match audit_caller_summary_from_copy(caller) {
+        Ok(value) => value,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let Some(state) = LcsTransactionAuditState::from_raw(state) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    let reason = match reason {
+        0 => None,
+        raw => match LcsTransactionAuditReason::from_raw(raw) {
+            Some(reason) => Some(reason),
+            None => return LinuxErrno::Einval.negated_return() as c_int,
+        },
+    };
+    let record = LcsTransactionCommittedAuditRecord {
+        caller: caller_summary,
+        transaction_id,
+        state,
+        errno: (result_errno != 0).then_some(result_errno),
+        reason,
+        commit_outstanding: (commit_outstanding >= 0).then_some(commit_outstanding != 0),
+    };
+    let required_len = match transaction_committed_audit_payload_len(&record) {
+        Ok(len) => len,
+        Err(err) => return key_open_audit_error_return(err),
+    };
+    *written_out = required_len;
+
+    if output.is_null() {
+        return if output_len == 0 {
+            0
+        } else {
+            LinuxErrno::Einval.negated_return() as c_int
+        };
+    }
+
+    let output = unsafe { slice::from_raw_parts_mut(output, output_len) };
+    match write_transaction_committed_audit_payload(&record, output) {
+        Ok(plan) => {
+            *written_out = plan.bytes;
+            0
+        }
+        Err(err) => key_open_audit_error_return(err),
+    }
+}
+
+/// The rights `REG_IOC_SET_SECURITY` demands for `security_info`, as the
+/// handle gate computes them: `access.requested` on a descriptor-change
+/// record.
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_registry_set_security_required_access(
+    security_info: u32,
+    required_out: *mut u32,
+) -> c_int {
+    let Some(required_out) = (unsafe { required_out.as_mut() }) else {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    };
+    *required_out = 0;
+    match registry_security_info_required_access(RegistrySecurityOperation::Set, security_info) {
+        Ok(required) => {
+            *required_out = required;
+            0
+        }
+        Err(_) => LinuxErrno::Einval.negated_return() as c_int,
     }
 }
 

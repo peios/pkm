@@ -96,6 +96,11 @@ pub struct RegistryKeyOpenAccessPlan {
     pub key_open_sacl_audit_required: bool,
     pub audit_payload_failure_blocks_completion: bool,
     pub privilege_use_audit_required: bool,
+    /// The continuous-audit mask: the union of the masks of the key's
+    /// `SYSTEM_ALARM*` ACEs that matched the caller. Cached on the published
+    /// key handle; a later operation whose right overlaps it is recorded.
+    /// Zero on a denial, since no handle is published.
+    pub continuous_audit_mask: u32,
     pub updated_privileges: kacs_core::TokenPrivileges,
 }
 
@@ -189,10 +194,27 @@ pub fn plan_registry_key_open_resolution(
     }
 }
 
+/// A key-open plan together with the privilege-use records the check
+/// produced, for an open whose caller records them as
+/// `kacs.audit.privilege.used`.
+pub struct RegistryKeyOpenAccessOutcome {
+    pub plan: RegistryKeyOpenAccessPlan,
+    /// Step 13's privilege-use records. Empty on a denial, and empty unless
+    /// the token's audit policy asked for them.
+    pub privilege_use_events: kacs_core::pkm_alloc::Vec<kacs_core::PrivilegeUseEvent>,
+}
+
 /// Plans key-open authorization using the KACS scalar AccessCheck core.
 pub fn plan_registry_key_open_access(
     input: RegistryKeyOpenAccessInput<'_>,
 ) -> LcsResult<RegistryKeyOpenAccessPlan> {
+    plan_registry_key_open_access_with_privilege_use(input).map(|outcome| outcome.plan)
+}
+
+/// As [`plan_registry_key_open_access`], keeping the privilege-use records.
+pub fn plan_registry_key_open_access_with_privilege_use(
+    input: RegistryKeyOpenAccessInput<'_>,
+) -> LcsResult<RegistryKeyOpenAccessOutcome> {
     let normalized = validate_registry_desired_access(input.desired_access)?;
     let sd = parse_registry_source_security_descriptor(input.key_sd, "registry_open.key_sd")?;
     let mapping = registry_kacs_generic_mapping();
@@ -212,17 +234,21 @@ pub fn plan_registry_key_open_access(
     ) {
         Ok(state) => state,
         Err(kacs_core::KacsError::AccessDenied) => {
-            return Ok(RegistryKeyOpenAccessPlan {
-                decision: RegistryOpenAccessDecision::Denied,
-                requested_access: normalized.requested,
-                mapped_desired_access: normalized.mapped,
-                maximum_allowed: normalized.maximum_allowed,
-                access_check_granted: 0,
-                fd_granted_access: None,
-                key_open_sacl_audit_required: false,
-                audit_payload_failure_blocks_completion: false,
-                privilege_use_audit_required: false,
-                updated_privileges: input.token.privileges,
+            return Ok(RegistryKeyOpenAccessOutcome {
+                plan: RegistryKeyOpenAccessPlan {
+                    decision: RegistryOpenAccessDecision::Denied,
+                    requested_access: normalized.requested,
+                    mapped_desired_access: normalized.mapped,
+                    maximum_allowed: normalized.maximum_allowed,
+                    access_check_granted: 0,
+                    fd_granted_access: None,
+                    key_open_sacl_audit_required: false,
+                    audit_payload_failure_blocks_completion: false,
+                    privilege_use_audit_required: false,
+                    continuous_audit_mask: 0,
+                    updated_privileges: input.token.privileges,
+                },
+                privilege_use_events: kacs_core::pkm_alloc::Vec::new(),
             });
         }
         Err(_) => return Err(LcsError::AccessCheckEvaluationFailed),
@@ -252,7 +278,7 @@ pub fn plan_registry_key_open_access(
     };
     let key_open_sacl_audit_required = state.audit_events.iter().any(|event| !event.policy_forced);
 
-    Ok(RegistryKeyOpenAccessPlan {
+    let plan = RegistryKeyOpenAccessPlan {
         decision: if allowed {
             RegistryOpenAccessDecision::Allowed
         } else {
@@ -266,7 +292,17 @@ pub fn plan_registry_key_open_access(
         key_open_sacl_audit_required,
         audit_payload_failure_blocks_completion: key_open_sacl_audit_required,
         privilege_use_audit_required: !state.privilege_use_events.is_empty(),
+        continuous_audit_mask: if allowed {
+            state.continuous_audit_mask
+        } else {
+            0
+        },
         updated_privileges: state.updated_privileges,
+    };
+
+    Ok(RegistryKeyOpenAccessOutcome {
+        plan,
+        privilege_use_events: state.privilege_use_events,
     })
 }
 

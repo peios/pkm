@@ -271,6 +271,13 @@ pub enum LcsError {
         /// Supplied event kind.
         actual: crate::audit::LcsAuditEventKind,
     },
+    /// A registry write audit record was internally inconsistent: a
+    /// failure-only field on a success, a malformed SID or path, or a
+    /// detail that does not belong to its event.
+    MalformedKeyAuditRecord {
+        /// Logical field or rule the record broke.
+        field: &'static str,
+    },
     /// A denied key-open audit record carried a non-zero granted mask.
     DeniedKeyOpenAuditWithGrantedAccess {
         /// Invalid granted mask.

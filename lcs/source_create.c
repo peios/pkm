@@ -1518,6 +1518,63 @@ long pkm_lcs_create_missing_retry_open_existing_for_token(
 		private_layer_count, -1, udisposition);
 }
 
+/*
+ * lcs.audit.key.created, for a key this create made (PEI-617 gap 1). Gated
+ * as key.opened is, on a matching SACL audit ACE, but on the *parent*: the
+ * KEY_CREATE_SUB_KEY check against the parent is the only access decision
+ * a create makes, and no handle exists yet to carry an audit mask. Written
+ * once the key exists (or, in a transaction, is staged), so a later failure
+ * to publish its fd does not unwrite it. A create that opened an existing
+ * key writes nothing. The record cannot fail the create.
+ */
+static void pkm_lcs_create_missing_emit_created_audit(
+	const void *token,
+	const struct pkm_lcs_key_open_access_plan *parent_plan,
+	const struct pkm_lcs_create_missing_parent_resolution *resolution,
+	const struct pkm_lcs_create_layer_target *target,
+	const u8 child_guid[RSI_GUID_SIZE],
+	const struct pkm_lcs_created_key_sd *created_sd,
+	const struct pkm_lcs_create_preflight_plan *preflight, u64 txn_id)
+{
+	struct pkm_lcs_key_audit_record record = { };
+	char *path = NULL;
+	u32 path_len = 0;
+
+	if (!token || !parent_plan || !parent_plan->key_open_sacl_audit_required)
+		return;
+	if (!resolution || !child_guid || !created_sd || !created_sd->sd ||
+	    !created_sd->sd_len || created_sd->sd_len > U32_MAX || !preflight)
+		return;
+	if (pkm_lcs_audit_join_path(
+		    (const char * const *)resolution->parent.resolved_path,
+		    resolution->parent.component_count, resolution->child_name,
+		    resolution->child_name_len, &path, &path_len))
+		return;
+
+	record.event = PKM_LCS_KEY_AUDIT_KEY_CREATED;
+	memcpy(record.key_guid, child_guid, sizeof(record.key_guid));
+	record.key_path = path;
+	record.key_path_len = path_len;
+	if (target && target->name && target->name_len) {
+		record.key_layer_name = target->name;
+		record.key_layer_name_len = target->name_len;
+	}
+	record.requested_access = KEY_CREATE_SUB_KEY;
+	record.granted_access = parent_plan->fd_granted_access;
+	record.created_volatile = preflight->options.volatile_key ? 1U : 0U;
+	record.created_volatile_requested = record.created_volatile;
+	record.created_symlink = preflight->options.symlink ? 1U : 0U;
+	record.sd = created_sd->sd;
+	record.sd_len = (u32)created_sd->sd_len;
+	record.sd_present = 1;
+	if (txn_id) {
+		record.transaction_id = txn_id;
+		record.transaction_present = 1;
+	}
+	(void)pkm_lcs_emit_key_audit_for_token(token, &record);
+	kfree(path);
+}
+
 static long pkm_lcs_create_missing_runtime_inputs_validate(
 	const struct pkm_lcs_create_missing_runtime_inputs *inputs)
 {
@@ -1616,6 +1673,10 @@ long pkm_lcs_create_missing_user_path_finish_for_token(
 		preflight.options.symlink, &prepared);
 	if (ret)
 		goto out_created_sd;
+	if (prepared.created_new && !prepared.retry_open_existing)
+		pkm_lcs_create_missing_emit_created_audit(
+			token, &parent_plan, &resolution, &target,
+			guid_plan.guid, &created_sd, &preflight, 0);
 
 	if (prepared.retry_open_existing) {
 		ret = pkm_lcs_create_missing_retry_open_existing_for_token(
@@ -1779,6 +1840,10 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 			preflight.options.symlink, &prepared);
 		if (ret)
 			goto out_created_sd;
+		if (prepared.created_new && !prepared.retry_open_existing)
+			pkm_lcs_create_missing_emit_created_audit(
+				token, &parent_plan, &resolution, &target,
+				guid_plan.guid, &created_sd, &preflight, 0);
 	}
 
 	if (prepared.retry_open_existing) {
@@ -1792,10 +1857,18 @@ static long pkm_lcs_create_missing_copied_path_finish_for_token_with_txn(
 			txn_fd, udisposition);
 	} else {
 		if (txn_fd >= 0) {
+			/* A recorded create owes the transaction's end record. */
+			mutation.audited =
+				parent_plan.key_open_sacl_audit_required != 0;
+			mutation.audit_token = token;
 			ret = pkm_lcs_transaction_fd_commit_mutation(
 				&mutation);
 			if (ret)
 				goto out_created_sd;
+			pkm_lcs_create_missing_emit_created_audit(
+				token, &parent_plan, &resolution, &target,
+				guid_plan.guid, &created_sd, &preflight,
+				binding.transaction_id);
 			ret = pkm_lcs_create_missing_publish_created_key_for_token(
 				token, &resolution, guid_plan.guid, &created_sd,
 				desired_access);

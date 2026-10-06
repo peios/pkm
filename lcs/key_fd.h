@@ -21,6 +21,8 @@ struct pkm_lcs_key_fd_publish_input {
 	u32 source_id;
 	u8 key_guid[PKM_LCS_GUID_BYTES];
 	u32 granted_access;
+	/* The open's continuous-audit mask, cached on the handle. */
+	u32 audit_mask;
 	const struct pkm_lcs_runtime_limits *limits;
 	const char * const *resolved_path;
 	const u8 (*ancestor_guids)[PKM_LCS_GUID_BYTES];
@@ -35,6 +37,7 @@ struct pkm_lcs_key_fd_snapshot {
 	u32 last_component_len;
 	u32 watch_filter;
 	u32 watch_pending_events;
+	u32 audit_mask;
 	bool orphaned;
 	bool watch_armed;
 	bool watch_subtree;

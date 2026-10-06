@@ -137,6 +137,13 @@ struct pkm_lcs_transaction_mutation_handle {
 	struct fd held;
 	struct pkm_lcs_transaction_fd *txn;
 	struct pkm_lcs_transaction_log_entry *entry;
+	/*
+	 * Set by the caller before commit_mutation when the staged write was
+	 * recorded: the transaction then owes an
+	 * lcs.audit.transaction.committed record when it ends.
+	 */
+	const void *audit_token;
+	bool audited;
 	bool active;
 };
 

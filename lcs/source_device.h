@@ -309,11 +309,17 @@ struct pkm_lcs_layer_metadata_sd_selection {
 	u32 _pad;
 };
 
+/* Mirrors PkmLcsKeyOpenAccessPlanCopy in rust_ingress.rs. */
 struct pkm_lcs_key_open_access_plan {
 	u32 requested_access;
 	u32 mapped_desired_access;
 	u32 access_check_granted;
 	u32 fd_granted_access;
+	/*
+	 * The continuous-audit mask from the key's matching SYSTEM_ALARM ACEs,
+	 * cached on the published handle; zero on a denial.
+	 */
+	u32 continuous_audit_mask;
 	u8 allowed;
 	u8 maximum_allowed;
 	u8 key_open_sacl_audit_required;
@@ -719,6 +725,15 @@ long pkm_lcs_create_layer_target_prepare_with_limits(
 long pkm_lcs_key_open_access_check_for_token(
 	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
 	struct pkm_lcs_key_open_access_plan *plan);
+/*
+ * As pkm_lcs_key_open_access_check_for_token, for an open that publishes a
+ * key handle: the privilege-use records the check produces are written as
+ * kacs.audit.privilege.used. The layer-write and create-parent checks use
+ * the plain form and record none.
+ */
+long pkm_lcs_key_open_access_check_recording_privilege_use(
+	const void *token, const u8 *sd, size_t sd_len, u32 desired_access,
+	struct pkm_lcs_key_open_access_plan *plan);
 long pkm_lcs_emit_key_open_audit_for_token(
 	const void *token, const u8 key_guid[16],
 	const struct pkm_lcs_key_open_access_plan *plan);
@@ -739,6 +754,126 @@ long pkm_lcs_emit_self_config_invalid_audit(
 	const char *configuration_name, u32 configuration_name_len,
 	u32 received_kind, u32 received_type, u32 received_u32,
 	u32 retained_value);
+
+/* The registry write records, as pkm_lcs_key_audit_record.event. */
+enum pkm_lcs_key_audit_event {
+	PKM_LCS_KEY_AUDIT_VALUE_SET = 1,
+	PKM_LCS_KEY_AUDIT_VALUE_DELETED = 2,
+	PKM_LCS_KEY_AUDIT_KEY_TOMBSTONED = 3,
+	PKM_LCS_KEY_AUDIT_KEY_DELETED = 4,
+	PKM_LCS_KEY_AUDIT_KEY_HIDDEN = 5,
+	PKM_LCS_KEY_AUDIT_KEY_CREATED = 6,
+	PKM_LCS_KEY_AUDIT_DESCRIPTOR_CHANGED = 7,
+};
+
+/* pkm_lcs_key_audit_record.tombstone_set */
+#define PKM_LCS_KEY_AUDIT_TOMBSTONE_UNKNOWN 0U
+#define PKM_LCS_KEY_AUDIT_TOMBSTONE_SET 1U
+#define PKM_LCS_KEY_AUDIT_TOMBSTONE_CLEAR 2U
+
+#define PKM_LCS_AUDIT_DIGEST_BYTES 32U
+
+/*
+ * One registry write record, filled by the operation and serialised by
+ * lcs_rust_key_audit_payload. Mirrors PkmLcsKeyAuditRecordCopy in
+ * rust_ingress.rs field for field; PKM_LCS_KEY_AUDIT_RECORD_SIZE pins the
+ * layout on both sides. Every string is a byte range, not NUL-terminated.
+ * Digests are SHA-256, computed by the operation.
+ */
+struct pkm_lcs_key_audit_record {
+	const char *key_path;
+	const char *key_layer_name;
+	const char *layer_name;
+	const char *value_name;
+	const u8 *sd;
+	const u8 *previous_sd;
+	u64 transaction_id;
+	u64 sequence;
+	u64 expected_sequence;
+	u32 event;
+	u32 result_errno;
+	u32 key_path_len;
+	u32 key_layer_name_len;
+	u32 layer_name_len;
+	u32 value_name_len;
+	u32 sd_len;
+	u32 previous_sd_len;
+	u32 requested_access;
+	u32 granted_access;
+	u32 audit_mask;
+	u32 value_type;
+	u32 value_length;
+	u32 previous_type;
+	u32 previous_length;
+	u32 sd_components;
+	u8 key_guid[16];
+	u8 value_digest[PKM_LCS_AUDIT_DIGEST_BYTES];
+	u8 previous_digest[PKM_LCS_AUDIT_DIGEST_BYTES];
+	u8 sd_digest[PKM_LCS_AUDIT_DIGEST_BYTES];
+	u8 previous_sd_digest[PKM_LCS_AUDIT_DIGEST_BYTES];
+	u8 transaction_present;
+	u8 sequence_present;
+	u8 expected_sequence_present;
+	u8 timed_out;
+	u8 value_name_present;
+	u8 value_present;
+	u8 previous_present;
+	u8 tombstone_set;
+	u8 audit_mask_present;
+	u8 created_volatile;
+	u8 created_volatile_requested;
+	u8 created_symlink;
+	u8 sd_present;
+	u8 previous_sd_present;
+	u8 _pad[2];
+};
+
+#define PKM_LCS_KEY_AUDIT_RECORD_SIZE 296U
+
+/*
+ * The audited identity a transaction keeps from the moment it began, for the
+ * record of a transaction that ends by close or timeout, when no caller is
+ * acting. The SID is a private copy.
+ */
+struct pkm_lcs_audit_caller_snapshot {
+	u8 *user_sid;
+	size_t user_sid_len;
+	u64 authentication_id;
+	u64 token_id;
+	u32 token_type;
+	u32 impersonation_level;
+	u32 integrity_level;
+	u32 _pad;
+};
+
+/* outcome.reason on a failed lcs.audit.transaction.committed. */
+#define PKM_LCS_TXN_AUDIT_REASON_NONE 0U
+#define PKM_LCS_TXN_AUDIT_REASON_ABORTED 1U
+#define PKM_LCS_TXN_AUDIT_REASON_TIMED_OUT 2U
+#define PKM_LCS_TXN_AUDIT_REASON_SOURCE_ERROR 3U
+
+/* Whether an operation needing `right` is recorded on a handle. */
+static inline bool pkm_lcs_key_audit_armed(u32 audit_mask, u32 right)
+{
+	return (audit_mask & right) != 0;
+}
+
+long pkm_lcs_emit_key_audit_for_token(
+	const void *token, const struct pkm_lcs_key_audit_record *record);
+long pkm_lcs_audit_join_path(const char * const *components, u32 count,
+			     const char *child, u32 child_len, char **out,
+			     u32 *out_len);
+void pkm_lcs_audit_digest(const void *data, size_t len,
+			  u8 out[PKM_LCS_AUDIT_DIGEST_BYTES]);
+long pkm_lcs_audit_caller_snapshot_take(
+	const void *token, struct pkm_lcs_audit_caller_snapshot *out);
+void pkm_lcs_audit_caller_snapshot_destroy(
+	struct pkm_lcs_audit_caller_snapshot *snapshot);
+long pkm_lcs_emit_transaction_committed_audit(
+	const struct pkm_lcs_audit_caller_snapshot *caller, u64 transaction_id,
+	u32 state, u32 result_errno, u32 reason, int commit_outstanding);
+long pkm_lcs_registry_set_security_required_access(u32 security_info,
+						   u32 *required);
 long pkm_lcs_runtime_limits_defaults(struct pkm_lcs_runtime_limits *limits);
 long pkm_lcs_runtime_limits_validate(
 	const struct pkm_lcs_runtime_limits *limits);

@@ -55,21 +55,24 @@ pub use access::{
     validate_registry_granted_access, validate_registry_source_security_descriptor,
 };
 pub use audit::{
-    LCS_CONFIG_ROOT_PATH, LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS,
+    LCS_AUDIT_DIGEST_LEN, LCS_CONFIG_ROOT_PATH, LCS_SACL_MATCH_FAILURE, LCS_SACL_MATCH_SUCCESS,
     LCS_SACL_MATCH_VALID_MASK, LcsAuditEmissionFailurePolicy, LcsAuditEventKind,
     LcsAuditPayloadWritePlan, LcsBackupRestoreCompleteAuditRecord,
-    LcsBackupRestoreStartAuditRecord, LcsCallerTokenSummary, LcsKeyOpenAuditDecision,
-    LcsKeyOpenAuditRecord, LcsSelfConfigInvalidAuditRecord, LcsSelfConfigReceivedValue,
-    LcsSourceValidationClass, LcsSourceValidationFailureAuditRecord, audit_token_type_from_raw,
+    LcsBackupRestoreStartAuditRecord, LcsCallerTokenSummary, LcsKeyAuditAccess, LcsKeyAuditDetail,
+    LcsKeyAuditRecord, LcsKeyOpenAuditDecision, LcsKeyOpenAuditRecord, LcsSdAuditSummary,
+    LcsSelfConfigInvalidAuditRecord, LcsSelfConfigReceivedValue, LcsSourceValidationClass,
+    LcsSourceValidationFailureAuditRecord, LcsTransactionAuditReason, LcsTransactionAuditState,
+    LcsTransactionCommittedAuditRecord, LcsValueAuditSummary, audit_token_type_from_raw,
     backup_restore_complete_audit_payload_len, backup_restore_start_audit_payload_len,
-    key_open_audit_payload_len, lcs_audit_emission_failure_policy,
+    key_audit_payload_len, key_open_audit_payload_len, lcs_audit_emission_failure_policy,
     plan_backup_complete_audit_record, plan_backup_start_audit_record, plan_key_open_audit_record,
     plan_restore_complete_audit_record, plan_restore_start_audit_record,
     plan_self_config_invalid_audit_record, plan_source_validation_failure_audit_record,
     self_config_invalid_audit_payload_len, source_validation_failure_audit_payload_len,
-    validate_sacl_match_flags, write_backup_restore_complete_audit_payload,
-    write_backup_restore_start_audit_payload, write_key_open_audit_payload,
-    write_self_config_invalid_audit_payload, write_source_validation_failure_audit_payload,
+    transaction_committed_audit_payload_len, validate_sacl_match_flags,
+    write_backup_restore_complete_audit_payload, write_backup_restore_start_audit_payload,
+    write_key_audit_payload, write_key_open_audit_payload, write_self_config_invalid_audit_payload,
+    write_source_validation_failure_audit_payload, write_transaction_committed_audit_payload,
 };
 pub use backup::{
     BACKUP_RECORD_HEADER_LEN, BACKUP_TRAILER_CHECKSUM_LEN, BACKUP_TRAILER_PAYLOAD_LEN,
@@ -201,12 +204,13 @@ pub use metadata::{
     record_transaction_replay_generation, validate_query_key_info_output_buffer,
 };
 pub use open::{
-    RegistryKeyOpenAccessInput, RegistryKeyOpenAccessPlan, RegistryKeyOpenResolutionInput,
-    RegistryKeyOpenResolutionPlan, RegistryOpenAccessDecision, RegistryOpenAccessTarget,
-    RegistryOpenPreResolutionAccessPlan, RegistryOpenPreResolutionErrno,
-    plan_registry_key_open_access, plan_registry_key_open_resolution,
-    plan_registry_open_pre_resolution_access, registry_open_pre_resolution_linux_errno,
-    select_registry_open_access_target, validate_registry_open_flags,
+    RegistryKeyOpenAccessInput, RegistryKeyOpenAccessOutcome, RegistryKeyOpenAccessPlan,
+    RegistryKeyOpenResolutionInput, RegistryKeyOpenResolutionPlan, RegistryOpenAccessDecision,
+    RegistryOpenAccessTarget, RegistryOpenPreResolutionAccessPlan, RegistryOpenPreResolutionErrno,
+    plan_registry_key_open_access, plan_registry_key_open_access_with_privilege_use,
+    plan_registry_key_open_resolution, plan_registry_open_pre_resolution_access,
+    registry_open_pre_resolution_linux_errno, select_registry_open_access_target,
+    validate_registry_open_flags,
 };
 pub use output_buffer::{
     OutputBufferAggregate, OutputBufferCopyPlan, OutputBufferDecision, OutputBufferRequest,
