@@ -21,7 +21,7 @@ format = "peipkg"
 [package]
 # The family revision. Every package here shares it, and same-family
 # relations pin it through {{release}}, so it is written once.
-version      = "{{version}}-2"
+version      = "{{version}}-1"
 architecture = "x86_64"
 license      = "GPL-2.0-only"
 license_class = "free"
