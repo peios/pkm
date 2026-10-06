@@ -3975,7 +3975,13 @@ static void pkm_kunit_file_open_sacl_audit_emits_kmes(struct kunit *test)
 			0);
 	KUNIT_ASSERT_TRUE(test,
 			  pkm_kunit_parse_kmes_event(buffer, written, &view));
-	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 1ULL);
+	/*
+	 * Two records: the SACL's, and SYSTEM's privilege use. A legacy open
+	 * asks for WRITE_OWNER among its compatibility rights, this DACL does
+	 * not grant it, and SeTakeOwnershipPrivilege does; the boot SYSTEM
+	 * token records successful privilege use.
+	 */
+	KUNIT_EXPECT_EQ(test, snapshot.last_sequence, 2ULL);
 	KUNIT_EXPECT_EQ(test, snapshot.dropped_events, 0ULL);
 	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
 				  (const u8 *)"kacs.audit.access.checked",
@@ -3997,6 +4003,30 @@ static void pkm_kunit_file_open_sacl_audit_emits_kmes(struct kunit *test)
 						 view.payload_len,
 						 (const u8 *)PKM_KUNIT_KMES_PROCESS_PATH,
 						 sizeof(PKM_KUNIT_KMES_PROCESS_PATH) - 1));
+
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.audit.privilege.used", buffer,
+				  &view));
+	/* subject, emitter, object, operation, privilege, access, outcome */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 7));
+	{
+		struct pkm_kunit_msgpack_view map = { };
+
+		KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_key(
+						test, &root, "operation",
+						PKM_KUNIT_MSGPACK_MAP, &map));
+		KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+						test, &map, "name",
+						"access-check"));
+		KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_key(
+						test, &root, "privilege",
+						PKM_KUNIT_MSGPACK_MAP, &map));
+		KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+						test, &map, "name",
+						"SeTakeOwnershipPrivilege"));
+	}
 }
 
 
