@@ -824,6 +824,76 @@ static void pkm_kunit_stratafs_audit_emission_is_best_effort(struct kunit *test)
 }
 
 /*
+ * Section 3.C: a StrataFS record whose allocation fails is not dropped. A
+ * reduced record without the paths is written in its place, keeping the
+ * stratum indices, the operation and the outcome.
+ */
+static void pkm_kunit_stratafs_audit_reduced_record_on_alloc_failure(
+	struct kunit *test)
+{
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view role = { };
+	struct pkm_kunit_msgpack_view stratum = { };
+	struct pkm_kunit_msgpack_view operation = { };
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	pkm_kunit_reset_kmes();
+	pkm_kacs_kunit_stratafs_fail_next_alloc(true);
+	pkm_kacs_stratafs_audit_copy_up("/f", 1, "lo", 0, "up", -ENOSPC);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "stratafs.file.copied-up", buffer,
+				  &view));
+	/* source, destination, outcome: no object, no stratum paths. */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 3));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "object"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "source", 1U, &role));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &role, "stratum", 1U, &stratum));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &stratum, "index", 1));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "destination", 1U, &role));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &role, "stratum", 1U, &stratum));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &stratum, "index", 0));
+
+	pkm_kunit_reset_kmes();
+	pkm_kacs_kunit_stratafs_fail_next_alloc(true);
+	pkm_kacs_stratafs_audit_mutation_refused("/f", "write", 2, "lo",
+						 -EROFS, false);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "stratafs.mutation.refused", buffer,
+				  &view));
+	/* operation, source, outcome */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 3));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "object"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "operation", 1U, &operation));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &operation, "name", "write"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "source", 1U, &role));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &role, "stratum", 1U, &stratum));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &stratum, "index", 2));
+	pkm_kacs_kunit_stratafs_fail_next_alloc(false);
+	pkm_kunit_reset_kmes();
+}
+
+/*
  * Section 3.C: kacs.session.destroyed is best-effort where the package name
  * is not valid UTF-8.  No live session can carry such a name -- creation
  * validates it -- so the encoder is probed directly: it refuses the payload,
@@ -860,6 +930,7 @@ static struct kunit_case pkm_kunit_misc_cases[] = {
 	KUNIT_CASE(pkm_kunit_privilege_use_record_failure_fails_the_gate),
 	KUNIT_CASE(pkm_kunit_security_capable_marks_privilege_use_twice),
 	KUNIT_CASE(pkm_kunit_stratafs_audit_emission_is_best_effort),
+	KUNIT_CASE(pkm_kunit_stratafs_audit_reduced_record_on_alloc_failure),
 	KUNIT_CASE(pkm_kunit_logon_session_destroyed_encoder_drops_non_utf8),
 	{}
 };

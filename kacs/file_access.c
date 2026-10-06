@@ -156,6 +156,81 @@ static void pkm_kacs_mp_stratum(struct pkm_kacs_mp *mp, const char *role,
 	pkm_kacs_mp_str(mp, path, path_len);
 }
 
+/* <role>: {stratum: {index: <index>}}, a reduced record's stratum. */
+static void pkm_kacs_mp_stratum_index(struct pkm_kacs_mp *mp, const char *role,
+				      u32 index)
+{
+	pkm_kacs_mp_key(mp, role);
+	pkm_kacs_mp_map(mp, 1);
+	pkm_kacs_mp_key(mp, "stratum");
+	pkm_kacs_mp_map(mp, 1);
+	pkm_kacs_mp_key(mp, "index");
+	pkm_kacs_mp_u32(mp, index);
+}
+
+/*
+ * The StrataFS records are never dropped for want of memory. A full record
+ * carries up to three paths and is sized and allocated per event; when that
+ * allocation fails, a reduced record without the paths -- the file's
+ * relative path and each stratum's -- is built in this much stack instead.
+ * Indices, the operation, and the outcome all fit, so the reader still learns
+ * what happened and in which strata, and the absent paths say which kind of
+ * record it is.
+ */
+#define PKM_KACS_STRATAFS_REDUCED_MAX 192
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+/* KUnit: make the next full-record allocation fail. */
+static bool pkm_kacs_kunit_stratafs_fail_alloc;
+
+void pkm_kacs_kunit_stratafs_fail_next_alloc(bool fail)
+{
+	WRITE_ONCE(pkm_kacs_kunit_stratafs_fail_alloc, fail);
+}
+#endif
+
+static void *pkm_kacs_stratafs_record_alloc(size_t len)
+{
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+	if (READ_ONCE(pkm_kacs_kunit_stratafs_fail_alloc)) {
+		WRITE_ONCE(pkm_kacs_kunit_stratafs_fail_alloc, false);
+		return NULL;
+	}
+#endif
+	return kmalloc(len, GFP_KERNEL);
+}
+
+static void pkm_kacs_stratafs_copy_up_fields(
+	struct pkm_kacs_mp *mp, const char *relative, size_t relative_len,
+	u32 provider_index, const char *provider, size_t provider_len,
+	u32 create_index, const char *create, size_t create_len, int result,
+	bool reduced)
+{
+	bool success = result >= 0;
+
+	pkm_kacs_mp_map(mp, reduced ? 3 : 4);
+	if (!reduced)
+		pkm_kacs_mp_relative_path_object(mp, relative, relative_len);
+	/* The stratum read from, and the one written into. */
+	if (reduced) {
+		pkm_kacs_mp_stratum_index(mp, "source", provider_index);
+		pkm_kacs_mp_stratum_index(mp, "destination", create_index);
+	} else {
+		pkm_kacs_mp_stratum(mp, "source", provider_index, provider,
+				    provider_len);
+		pkm_kacs_mp_stratum(mp, "destination", create_index, create,
+				    create_len);
+	}
+	pkm_kacs_mp_key(mp, "outcome");
+	pkm_kacs_mp_map(mp, success ? 1 : 2);
+	pkm_kacs_mp_key(mp, "success");
+	pkm_kacs_mp_bool(mp, success);
+	if (!success) {
+		pkm_kacs_mp_key(mp, "errno");
+		pkm_kacs_mp_s32(mp, result);
+	}
+}
+
 void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 				     u32 provider_index,
 				     const char *provider_stratum,
@@ -166,11 +241,10 @@ void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 	static const char event_type[] = "stratafs.file.copied-up";
 	const char *relative = relative_path ? relative_path : "";
 	size_t relative_len = strnlen(relative, PATH_MAX);
+	u8 reduced[PKM_KACS_STRATAFS_REDUCED_MAX];
 	size_t provider_len;
 	size_t create_len;
-	bool success = result >= 0;
 	struct pkm_kacs_mp mp = { };
-	int pass;
 
 	if (!provider_stratum || !create_stratum || relative_len == PATH_MAX)
 		return;
@@ -179,49 +253,61 @@ void pkm_kacs_stratafs_audit_copy_up(const char *relative_path,
 	if (provider_len == PATH_MAX || create_len == PATH_MAX)
 		return;
 
-	/* Pass 0 measures, pass 1 writes: see struct pkm_kacs_mp. */
-	for (pass = 0; pass < 2; pass++) {
-		if (pass) {
-			mp.out = kmalloc(mp.len, GFP_KERNEL);
-			if (!mp.out)
-				return;
-			mp.len = 0;
-		}
-		pkm_kacs_mp_map(&mp, 4);
-		pkm_kacs_mp_relative_path_object(&mp, relative, relative_len);
-		/* The stratum read from, and the one written into. */
-		pkm_kacs_mp_stratum(&mp, "source", provider_index,
-				    provider_stratum, provider_len);
-		pkm_kacs_mp_stratum(&mp, "destination", create_index,
-				    create_stratum, create_len);
-		pkm_kacs_mp_key(&mp, "outcome");
-		pkm_kacs_mp_map(&mp, success ? 1 : 2);
-		pkm_kacs_mp_key(&mp, "success");
-		pkm_kacs_mp_bool(&mp, success);
-		if (!success) {
-			pkm_kacs_mp_key(&mp, "errno");
-			pkm_kacs_mp_s32(&mp, result);
-		}
+	/* Measure, then write: see struct pkm_kacs_mp. */
+	pkm_kacs_stratafs_copy_up_fields(&mp, relative, relative_len,
+					 provider_index, provider_stratum,
+					 provider_len, create_index,
+					 create_stratum, create_len, result,
+					 false);
+	mp.out = pkm_kacs_stratafs_record_alloc(mp.len);
+	if (mp.out) {
+		mp.len = 0;
+		pkm_kacs_stratafs_copy_up_fields(
+			&mp, relative, relative_len, provider_index,
+			provider_stratum, provider_len, create_index,
+			create_stratum, create_len, result, false);
+		pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
+				     sizeof(event_type) - 1, mp.out, mp.len);
+		kfree(mp.out);
+		return;
 	}
 
+	/* The reduced record: fixed size, well within the stack buffer. */
+	mp.len = 0;
+	pkm_kacs_stratafs_copy_up_fields(&mp, relative, relative_len,
+					 provider_index, provider_stratum,
+					 provider_len, create_index,
+					 create_stratum, create_len, result,
+					 true);
+	if (WARN_ON_ONCE(mp.len > sizeof(reduced)))
+		return;
+	mp.out = reduced;
+	mp.len = 0;
+	pkm_kacs_stratafs_copy_up_fields(&mp, relative, relative_len,
+					 provider_index, provider_stratum,
+					 provider_len, create_index,
+					 create_stratum, create_len, result,
+					 true);
 	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
 			     sizeof(event_type) - 1, mp.out, mp.len);
-	kfree(mp.out);
 }
 
 static void pkm_kacs_stratafs_refusal_fields(
 	struct pkm_kacs_mp *mp, const char *relative, size_t relative_len,
 	const char *operation, size_t operation_len, s32 provider_index,
 	const char *provider, size_t provider_len, bool provider_known,
-	int result, bool deferred)
+	int result, bool deferred, bool reduced)
 {
-	pkm_kacs_mp_map(mp, provider_known ? 4 : 3);
-	pkm_kacs_mp_relative_path_object(mp, relative, relative_len);
+	pkm_kacs_mp_map(mp, (provider_known ? 3 : 2) + (reduced ? 0 : 1));
+	if (!reduced)
+		pkm_kacs_mp_relative_path_object(mp, relative, relative_len);
 	pkm_kacs_mp_key(mp, "operation");
 	pkm_kacs_mp_map(mp, 1);
 	pkm_kacs_mp_key(mp, "name");
 	pkm_kacs_mp_str(mp, operation, operation_len);
-	if (provider_known)
+	if (provider_known && reduced)
+		pkm_kacs_mp_stratum_index(mp, "source", (u32)provider_index);
+	else if (provider_known)
 		pkm_kacs_mp_stratum(mp, "source", (u32)provider_index, provider,
 				    provider_len);
 	pkm_kacs_mp_key(mp, "outcome");
@@ -242,7 +328,7 @@ static void pkm_kacs_stratafs_refusal_fields(
 static size_t pkm_kacs_stratafs_refusal_payload(
 	u8 *out, size_t capacity, const char *relative_path,
 	const char *operation, s32 provider_index,
-	const char *provider_stratum, int result, bool deferred)
+	const char *provider_stratum, int result, bool deferred, bool reduced)
 {
 	const char *relative = relative_path ? relative_path : "";
 	size_t relative_len = strnlen(relative, PATH_MAX);
@@ -270,7 +356,8 @@ static size_t pkm_kacs_stratafs_refusal_payload(
 	pkm_kacs_stratafs_refusal_fields(&mp, relative, relative_len, operation,
 					 operation_len, provider_index,
 					 provider_stratum, provider_len,
-					 provider_known, result, deferred);
+					 provider_known, result, deferred,
+					 reduced);
 	if (!out)
 		return mp.len;
 	if (capacity < mp.len)
@@ -281,7 +368,8 @@ static size_t pkm_kacs_stratafs_refusal_payload(
 	pkm_kacs_stratafs_refusal_fields(&mp, relative, relative_len, operation,
 					 operation_len, provider_index,
 					 provider_stratum, provider_len,
-					 provider_known, result, deferred);
+					 provider_known, result, deferred,
+					 reduced);
 	return mp.len;
 }
 
@@ -290,25 +378,37 @@ void pkm_kacs_stratafs_audit_mutation_refused(
 	const char *provider_stratum, int result, bool deferred)
 {
 	static const char event_type[] = "stratafs.mutation.refused";
+	u8 reduced[PKM_KACS_STRATAFS_REDUCED_MAX];
 	size_t size;
 	size_t len;
 	u8 *payload;
 
 	size = pkm_kacs_stratafs_refusal_payload(
 		NULL, 0, relative_path, operation, provider_index,
-		provider_stratum, result, deferred);
+		provider_stratum, result, deferred, false);
 	if (!size)
 		return;
-	payload = kmalloc(size, GFP_KERNEL);
-	if (!payload)
-		return;
-
-	len = pkm_kacs_stratafs_refusal_payload(
-		payload, size, relative_path, operation, provider_index,
-		provider_stratum, result, deferred);
+	payload = pkm_kacs_stratafs_record_alloc(size);
+	if (payload) {
+		len = pkm_kacs_stratafs_refusal_payload(
+			payload, size, relative_path, operation,
+			provider_index, provider_stratum, result, deferred,
+			false);
+	} else {
+		/*
+		 * The reduced record, without paths. The operation is bounded
+		 * to 63 bytes, so it always fits; a refusal is never lost.
+		 */
+		len = pkm_kacs_stratafs_refusal_payload(
+			reduced, sizeof(reduced), relative_path, operation,
+			provider_index, provider_stratum, result, deferred,
+			true);
+		WARN_ON_ONCE(!len);
+	}
 	if (len)
 		pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-				     sizeof(event_type) - 1, payload, len);
+				     sizeof(event_type) - 1,
+				     payload ? payload : reduced, len);
 	kfree(payload);
 }
 
@@ -320,7 +420,7 @@ size_t pkm_kacs_kunit_stratafs_refusal_payload(
 {
 	return pkm_kacs_stratafs_refusal_payload(
 		out, capacity, relative_path, operation, provider_index,
-		provider_stratum, result, deferred);
+		provider_stratum, result, deferred, false);
 }
 #endif
 

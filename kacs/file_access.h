@@ -72,6 +72,8 @@ size_t pkm_kacs_kunit_stratafs_refusal_payload(
 	u8 *out, size_t capacity, const char *relative_path,
 	const char *operation, s32 provider_index,
 	const char *provider_stratum, int result, bool deferred);
+/* Make the next StrataFS record's allocation fail, once. */
+void pkm_kacs_kunit_stratafs_fail_next_alloc(bool fail);
 #endif
 
 #endif /* _SECURITY_PKM_KACS_FILE_ACCESS_H */
