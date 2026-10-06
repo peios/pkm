@@ -2421,15 +2421,25 @@ static int pkm_kmes_load_live_process_view(struct pkm_kmes_process_view *view,
 	view->name = (const u8 *)name_buf;
 	view->name_len = (size_t)copied;
 	view->pid = (u64)task_tgid_vnr(current);
+	view->path = NULL;
+	view->path_len = 0;
 
+	/*
+	 * A kernel thread, or a task whose mm is already gone, has no
+	 * executable, and a path d_path cannot render is one the emitter does
+	 * not have. Either way the view carries no path and the record leaves
+	 * emitter.process.executable out. Refusing instead would fail every
+	 * fail-closed audited check such a task makes: a kworker or an early
+	 * boot thread under the SYSTEM token, whose privilege use is recorded.
+	 */
 	exe_file = get_task_exe_file(current);
 	if (!exe_file)
-		return -EIO;
+		return 0;
 
 	resolved = d_path(&exe_file->f_path, path_buf, path_buf_len);
 	fput(exe_file);
 	if (IS_ERR(resolved))
-		return PTR_ERR(resolved);
+		return 0;
 
 	view->path = (const u8 *)resolved;
 	view->path_len = strnlen(resolved, path_buf + path_buf_len - resolved);

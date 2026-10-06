@@ -186,7 +186,28 @@ impl MsgpackWriter {
 struct ProcessInfo {
     pid: u64,
     name: Vec<u8>,
+    /// Empty when the process has no executable the kernel can name — a
+    /// kernel thread — and `emitter.process.executable` is then left out.
     executable_path: Vec<u8>,
+}
+
+impl ProcessInfo {
+    /// The `emitter.process` map: `pid`, `name` and, when known,
+    /// `executable`.
+    fn write_process_map(&self, writer: &mut MsgpackWriter) -> Result<(), c_long> {
+        let has_executable = !self.executable_path.is_empty();
+
+        writer.write_map_len(2 + usize::from(has_executable))?;
+        writer.write_key(b"pid")?;
+        writer.write_u64(self.pid)?;
+        writer.write_key(b"name")?;
+        writer.write_str(self.name.as_slice())?;
+        if has_executable {
+            writer.write_key(b"executable")?;
+            writer.write_str(self.executable_path.as_slice())?;
+        }
+        Ok(())
+    }
 }
 
 /// The parts of the subject token's identity that live on the kernel token
@@ -624,13 +645,7 @@ fn encode_emitter_map(process: &ProcessInfo) -> Result<Vec<u8>, c_long> {
 
     writer.write_map_len(1)?;
     writer.write_key(b"process")?;
-    writer.write_map_len(3)?;
-    writer.write_key(b"pid")?;
-    writer.write_u64(process.pid)?;
-    writer.write_key(b"name")?;
-    writer.write_str(process.name.as_slice())?;
-    writer.write_key(b"executable")?;
-    writer.write_str(process.executable_path.as_slice())?;
+    process.write_process_map(&mut writer)?;
 
     Ok(writer.into_vec())
 }
@@ -956,13 +971,7 @@ fn encode_emitter_thread_map(process: &ProcessInfo, tid: u64) -> Result<Vec<u8>,
 
     writer.write_map_len(2)?;
     writer.write_key(b"process")?;
-    writer.write_map_len(3)?;
-    writer.write_key(b"pid")?;
-    writer.write_u64(process.pid)?;
-    writer.write_key(b"name")?;
-    writer.write_str(process.name.as_slice())?;
-    writer.write_key(b"executable")?;
-    writer.write_str(process.executable_path.as_slice())?;
+    process.write_process_map(&mut writer)?;
     writer.write_key(b"thread")?;
     writer.write_map_len(1)?;
     writer.write_key(b"tid")?;

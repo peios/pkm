@@ -95,7 +95,8 @@ here. Lossy: two processes can share a name.
 type: str.path
 
 The path the emitting process was executed from, resolved at exec with
-symbolic links already followed.
+symbolic links already followed. Left out when the process has no
+executable, as a kernel thread has none.
 
 --- field emitter.process.init-ns-admin
 type: bool
