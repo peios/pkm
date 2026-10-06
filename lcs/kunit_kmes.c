@@ -799,7 +799,10 @@ static void pkm_lcs_kunit_kmes_config_applied_after_failed_swap(
 	pkm_kmes_kunit_reset_all();
 }
 
-/* {config: {key: {path}}, outcome: {errno}} for an errno in -32..-1. */
+/*
+ * {config: {key: {path}}, outcome: {errno}} for an errno in -128..-1: a
+ * negative fixint down to -32, an int 8 below it, as KMES writes them.
+ */
 static size_t pkm_lcs_kunit_refresh_failed_payload(u8 *out, size_t out_len,
 						   const char *path, long error)
 {
@@ -809,8 +812,8 @@ static size_t pkm_lcs_kunit_refresh_failed_payload(u8 *out, size_t out_len,
 	size_t path_len = strlen(path);
 	size_t len = 0;
 
-	if (path_len > 31 || error < -32 || error >= 0 ||
-	    out_len < sizeof(head) + path_len + sizeof(tail) + 2)
+	if (path_len > 31 || error < -128 || error >= 0 ||
+	    out_len < sizeof(head) + path_len + sizeof(tail) + 3)
 		return 0;
 	memcpy(out, head, sizeof(head) - 1);
 	len = sizeof(head) - 1;
@@ -819,6 +822,8 @@ static size_t pkm_lcs_kunit_refresh_failed_payload(u8 *out, size_t out_len,
 	len += path_len;
 	memcpy(out + len, tail, sizeof(tail) - 1);
 	len += sizeof(tail) - 1;
+	if (error < -32)
+		out[len++] = 0xd0;
 	out[len++] = (u8)(s8)error;
 	return len;
 }

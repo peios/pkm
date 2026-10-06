@@ -29,7 +29,7 @@
     "Authenticated Users read), which is what §6.9 asks for. The batch",
     "document reg apply reads has no field for a key's descriptor, so the",
     "SACL has to be set some other way until it gains one (for example",
-    "`reg sd Machine\\Generic\\Events --sacl --set 'S:(AL;CI;0x10002;;;WD)'`",
+    "`reg sd Machine\\Generic\\Events --set 'S:(AL;CI;0x10002;;;WD)' --sacl`",
     "as SYSTEM).",
     "",
     "Shipped by the kernel package into /usr/share/regim/; inert until an",
