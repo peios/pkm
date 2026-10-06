@@ -5,7 +5,29 @@ The policy rule that produced this record, by name. Rules are the unit an
 administrator writes and edits, so this is the field that connects a record
 back to something a person can change.
 
---- field rule.report_level
+--- field rule.name-truncated
+type: bool
+
+Whether `rule.name` was cut short because the rule's path did not fit in
+the record. The cut falls at a character boundary, so the name is valid
+text, but it is not the whole path: do not search for it exactly.
+`rule.hash` still identifies the whole path, and is the value to resolve
+the rule by.
+
+Absent when the name was carried in full.
+
+--- field rule.hash
+type: uint
+
+The FNV-1a-64 hash of the rule's whole registry path. Always carried, even
+when `rule.name` was cut short, so a reader can resolve a rule the record
+could not name in full. Resolve it against the policy generation the
+record names, because a later generation may name its rules differently.
+
+A 64-bit integer rather than a `digest`: it identifies a path, and is not
+a cryptographic summary of anything.
+
+--- field rule.report-level
 type: uint
 
 The reporting level the matching rule asked for. Records exist only because
@@ -15,6 +37,7 @@ named.
 --- field rule.layer
 type: str.enum
 values: raw-packet | packet | flow
+closed: true
 
 Which evaluation layer the rule sat in. The layers see progressively more
 context — a raw frame, a parsed packet, a tracked connection — so the layer
@@ -23,6 +46,7 @@ bounds what the rule could possibly have matched on.
 --- field rule.seat
 type: str.enum
 values: ingress | egress | local-in | local-out
+closed: true
 
 Where in the path evaluation happened. Distinguishes traffic entering or
 leaving the machine from traffic terminating at or originating from a local
@@ -31,6 +55,7 @@ socket, which is the difference between forwarding policy and host policy.
 --- field network.direction
 type: str.enum
 values: in | out
+closed: true
 
 Which way the traffic was moving relative to this machine.
 
@@ -46,22 +71,27 @@ The kernel's index for that interface. Zero when no interface was
 determined. Indexes are reused across interface teardown, so
 `network.interface.name` is the durable one.
 
---- field network.ether_type
+--- field network.ether-type
 type: uint
 
 The link-layer protocol number of the frame.
 
 --- field network.family
 type: uint.enum
+values: 0 AF_UNSPEC | 2 AF_INET | 10 AF_INET6
+closed: false
 
-The address family of the addresses in this record. Zero when the traffic
-was evaluated below the layer where addresses exist, in which case no
-address, port or protocol field is present.
+The address family of the addresses in this record. `AF_UNSPEC` when the
+traffic was evaluated below the layer where addresses exist, in which case
+no address, port or protocol field is present.
 
 --- field network.protocol
 type: uint.enum
+values: 1 ICMP | 2 IGMP | 6 TCP | 17 UDP | 47 GRE | 50 ESP | 51 AH | 58 IPv6-ICMP | 132 SCTP | 136 UDPLite
+closed: false
 
-The transport protocol number.
+The transport protocol number, from the IANA protocol numbers registry. A
+number not listed is still a protocol, rendered as its number.
 
 --- field network.length
 type: uint.bytes
@@ -95,25 +125,515 @@ that have ports.
 --- field flow.state
 type: str.enum
 values: new | established | related | invalid | untracked
+closed: true
 
-How connection tracking classified this traffic. `untracked` means tracking
-was not applied rather than that tracking failed; `invalid` means it was
-applied and the traffic did not fit any known flow.
+How connection tracking classified this traffic. `untracked` means
+connection tracking gave the traffic no flow state NTFE recognises:
+tracking was not applied, or conntrack judged the packet incoherent. Absent
+at the ingress seat, which stands before connection tracking.
 
---- field policy.generation
+**`invalid` is not produced today.** It is reserved for traffic that
+tracking applied to and found fitting no known flow, but telling that apart
+needs conntrack's own verdict, which NTFE does not read yet, so incoherent
+traffic reports `untracked`. The value stays listed because the enumeration
+is closed and its values are part of the ABI.
+
+--- field rule.priority
+type: int
+
+The effective priority of a rule, with any priority it inherits from its
+ancestors in the rule tree already resolved. When several rules in one
+layer yield a verdict, the highest priority wins and a tie goes to the
+stricter verdict, so this is the number that explains why one rule beat
+another. It is a signed 64-bit integer, as the rules language holds it, and
+negative values are legal: a lower value means a rule loses to any rule
+with a higher one.
+
+--- field rule.match-value
+type: str
+
+The literal match value written in a rule, exactly as its author wrote it
+in the registry. It is the text the rule compares a fact against, such as
+`10.0.0.0/8` or `22`, before NTFE parsed it. It matters most where the value
+would not parse, because then the rule key alone does not say what was
+wrong.
+
+--- field rule.contender.name
+type: str
+
+A second rule named on the same record as `rule.name`: the rule that lost a
+contest to it, or a rule that collided with it, such as one reading a tag
+that a higher layer writes. Like `rule.name`, it is the rule's registry path
+relative to its layer key.
+
+--- field rule.action-error
+type: str.enum
+values: unknown-action | bad-arity | bad-argument | unknown-reject-kind | malformed
+closed: false
+
+Why one action expression in a rule's `Actions` value failed to parse.
+`unknown-action` is a name the language does not have; `bad-arity` is the
+wrong number of arguments; `bad-argument` is an argument of the wrong
+shape, such as a `REPORT` level outside 1 to 5; `unknown-reject-kind` is a
+`REJECT` story that is not minted; `malformed` is unbalanced parentheses or
+trailing text. A rule with a bad action refuses the whole generation, not
+just itself.
+
+--- field rule.lint
+type: str.enum
+values: fact-never-present-at-layer
+closed: false
+
+A non-fatal finding about a rule that ingested but is almost certainly
+wrong. `fact-never-present-at-layer` is a condition on a fact that never
+exists at the rule's layer, which the absent-fact law makes permanently
+false, so the rule occupies its place in the tree and never matches. A lint
+never blocks ingestion and never appears beside a failure.
+
+--- field network.hop-limit
 type: uint
 
-The generation counter of the rule set in force when the decision was made.
-Increments on every policy load, so a record can be tied to the exact rule
-set that produced it rather than to whatever is loaded when the record is
-read.
+The packet's remaining hop count: the IPv4 TTL or the IPv6 hop limit, as
+the packet carried it at the seat that judged it. Absent below the layer
+where an IP header exists.
 
---- event ntfe.report
-origin: ntfe
+--- field network.tcp-flags
+type: uint.flags
+values: 0x1 FIN | 0x2 SYN | 0x4 RST | 0x8 PSH | 0x10 ACK | 0x20 URG | 0x40 ECE | 0x80 CWR
+
+The flag bits of the TCP header, taken whole from the flags byte at offset
+13.
+Absent on any protocol other than TCP, and also absent on a TCP packet
+whose header NTFE could not read, which a reader cannot otherwise tell from
+a protocol without flags.
+
+--- field network.vlan
+type: uint
+
+The VLAN id the traffic belongs to. At the device seats it is the tag on
+the frame; at the IP seats the tag has already been stripped and it is the
+id of the VLAN device the packet arrived on or leaves by. Absent when the
+traffic is not on a VLAN.
+
+--- field network.namespace
+type: uint
+
+The network namespace a device or flow belongs to, by the kernel's
+namespace number. NTFE polices only the initial namespace, so today this
+field exists to say that something was in a different one and was not
+judged at all.
+
+--- field network.bridge.name
+type: str
+
+The name of the bridge device an interface was enslaved to or released
+from. Enslaving an interface to a bridge moves its traffic off the IP seats
+and onto its device seats alone, which changes which rules can apply to it.
+
+--- field network.interface.disposition
+type: str.enum
+values: policed | bridge-port | seats-failed | other-namespace
+closed: false
+
+How NTFE stands towards a network device. `policed` has its device seats in
+place, and its IP traffic also reaches the IP seats, where the flow layer
+and conntrack facts exist. `bridge-port` has its device seats, but its
+frames are switched at the link layer and never reach the IP seats, so only
+the device seats judge them and no flow-state or identity rule applies.
+`seats-failed` is a device that registered but whose seats could not be
+attached: its raw-packet traffic is never judged. `other-namespace` is
+outside the initial network namespace and is not policed at all.
+
+--- field network.interface.disposition-previous
+type: str.enum
+values: policed | bridge-port | seats-failed | other-namespace
+closed: false
+
+The disposition a network device had before the change a record reports,
+in the terms of `network.interface.disposition`. A change from `policed` to
+`bridge-port` is the one that quietly withdraws every flow-layer rule from
+the device.
+
+--- field source.mac
+type: str
+
+The link-layer address the traffic came from, written as six colon-separated
+lowercase hexadecimal octets. Known only where an Ethernet header exists:
+from the frame at the device seats, and, for outbound traffic at the IP
+seats, the sending device's own address. Absent on a device with no
+Ethernet header.
+
+--- field destination.mac
+type: str
+
+The link-layer address the traffic was going to, written as six
+colon-separated lowercase hexadecimal octets. Known only from a frame's
+Ethernet header, so it is absent for outbound traffic judged at the IP
+seats, where the frame has not been built yet, even when `source.mac` is
+present.
+
+--- field source.endpoint
+type: str.enum
+values: program | kernel | shared | none
+closed: true
+
+What stands at the source end of the traffic, when that end is on this
+machine. `program` is a process's socket, and the `source.socket.*` fields
+then say whose. `kernel` is the network stack itself: a reset, an ICMP
+error, a protocol the stack consumes, or a socket nobody could attribute.
+`shared` and `none` arise only at a receiving end, as `destination.endpoint`
+describes. Present only on flow-layer records, and absent when the source is a remote
+machine. Read `source.unattributed` before taking `kernel` at its word.
+
+--- field destination.endpoint
+type: str.enum
+values: program | kernel | shared | none
+closed: true
+
+What stands at the destination end of the traffic, when that end is on this
+machine. `program` is a process's socket, and the `destination.socket.*`
+fields then say whose. `kernel` is the network stack itself. `shared` is
+inbound multicast or broadcast, delivered to every socket bound to the
+port and so attributable to none of them. `none` means nothing on the
+machine will receive the traffic: a port nobody is listening on, which is
+the signature of a port scan. Present only on flow-layer records, and absent
+when the destination is a remote machine.
+
+--- field source.unattributed
+type: bool
+
+Whether NTFE confessed that it could not attribute the source endpoint to a
+principal. When true, every rule condition on that endpoint's identity was
+false for this traffic rather than evaluated. **False does not prove the
+endpoint was attributed**: a `program` endpoint whose token could not be
+read still reads false here, and its identity conditions failed just the
+same.
+
+--- field destination.unattributed
+type: bool
+
+Whether NTFE confessed that it could not attribute the destination endpoint
+to a principal. When true, every rule condition on that endpoint's identity
+was false for this traffic rather than evaluated. **False does not prove
+the endpoint was attributed**: a `program` endpoint whose token could not
+be read still reads false here.
+
+--- field source.attribution
+type: str.enum
+values: socket-stamp | no-kacs-state | unstamped | no-namespace | loopback-sender-lost | time-wait | stack-handled | no-sending-socket | multicast-or-broadcast | no-receiver | principal-unreadable
+closed: false
+
+Why the source endpoint was given the attribution it has. **Not emitted
+today**: NTFE decides it on every flow and encodes it nowhere, so
+`source.endpoint` and `source.unattributed` are all a record carries. The
+values name the paths the attribution can take: `socket-stamp` is the
+principal KACS stamped on the socket; `no-kacs-state`, `unstamped` and
+`no-namespace` fell back to the kernel because no stamp could be read;
+`loopback-sender-lost` is the sender of a loopback flow that the inbound
+seat cannot see; `time-wait`, `stack-handled` and `no-sending-socket` are
+the stack answering for itself; `principal-unreadable` is a program
+endpoint whose token could not be read.
+
+--- field destination.attribution
+type: str.enum
+values: socket-stamp | no-kacs-state | unstamped | no-namespace | loopback-sender-lost | time-wait | stack-handled | no-sending-socket | multicast-or-broadcast | no-receiver | principal-unreadable
+closed: false
+
+Why the destination endpoint was given the attribution it has. **Not
+emitted today**: NTFE decides it on every flow and encodes it nowhere, so
+`destination.endpoint` and `destination.unattributed` are all a record
+carries. The values are those of `source.attribution`;
+`multicast-or-broadcast` and `no-receiver` are the inbound paths that give
+`shared` and `none`.
+
+--- field source.socket.token.sid
+type: bin.sid
+
+The user SID of the token KACS stamped on the source endpoint's socket. It
+is the identity the socket was stamped with, not necessarily the identity
+of whoever writes to it now. Present only when `source.endpoint` is
+`program`.
+
+--- field destination.socket.token.sid
+type: bin.sid
+
+The user SID of the token KACS stamped on the destination endpoint's
+socket. It is the identity the socket was stamped with, not necessarily the
+identity of whoever reads from it now. Present only when
+`destination.endpoint` is `program`.
+
+--- field source.socket.token.service-sid
+type: bin.sid
+
+The per-service SID of the token stamped on the source endpoint's socket,
+when that token belongs to a service. It is found among the token's enabled
+groups and is always the 32-byte S-1-5-80 form. Absent for a socket that no
+service stands behind.
+
+--- field destination.socket.token.service-sid
+type: bin.sid
+
+The per-service SID of the token stamped on the destination endpoint's
+socket, when that token belongs to a service. It is found among the token's
+enabled groups and is always the 32-byte S-1-5-80 form. Absent for a socket
+that no service stands behind.
+
+--- field source.socket.process.pid
+type: uint
+
+The process ID recorded on the source endpoint's socket when it was
+stamped. A socket can outlive the process that created it, so this process
+may have exited and its ID been reused; `source.socket.process.guid` is the
+identity that survives that.
+
+--- field destination.socket.process.pid
+type: uint
+
+The process ID recorded on the destination endpoint's socket when it was
+stamped. A socket can outlive the process that created it, so this process
+may have exited and its ID been reused; `destination.socket.process.guid`
+is the identity that survives that.
+
+--- field source.socket.process.guid
+type: bin.guid
+
+The durable GUID of the process recorded on the source endpoint's socket
+when it was stamped. Unlike the process ID it is never reused, so it still
+names the right process after that process has exited.
+
+--- field destination.socket.process.guid
+type: bin.guid
+
+The durable GUID of the process recorded on the destination endpoint's
+socket when it was stamped. Unlike the process ID it is never reused, so it
+still names the right process after that process has exited.
+
+--- field source.socket.process.name
+type: str
+
+The short name of the process recorded on the source endpoint's socket when
+it was stamped. It is the kernel's command name, at most 15 characters and
+lossily sanitised, so two different programs can share it; it is a hint for
+a person, not an identity.
+
+--- field destination.socket.process.name
+type: str
+
+The short name of the process recorded on the destination endpoint's
+socket when it was stamped. It is the kernel's command name, at most 15
+characters and lossily sanitised, so two different programs can share it;
+it is a hint for a person, not an identity.
+
+--- field flow.endpoint
+type: str.enum
+values: source | destination
+closed: true
+
+Which end of the flow the record concerns: the local endpoint the flow
+layer judged. Outbound traffic is judged for its source and inbound traffic
+for its destination; a loopback flow has two local ends and is judged once
+for each, and this field is what tells those two records apart.
+
+--- field flow.id
+type: uint
+
+Conntrack's identifier for the flow. **Not emitted today**: the flows dump
+carries it but the verdict record does not, so a verdict cannot be joined
+to the flow it was passed on. Unique only among flows alive at the same
+time.
+
+--- field flow.rule.hash
+type: uint
+
+The hash of the path of the rule behind a flow's cached verdict: the
+FNV-1a-64 hash of the whole registry path, kept in the flow's sentence. The
+sentence keeps no path, so after a re-judgment this is the only thing that
+survives about the rule that previously decided the flow. Resolve it
+against the generation that wrote the sentence, because a later generation
+may name its rules differently. It is the same value a report carries as
+`rule.hash`.
+
+--- field flow.verdict-expiry
+type: uint.time
+
+When a flow's cached verdict stops being valid, because a time condition
+the judgment consulted will next change its answer. The flow is re-judged
+on its first packet after this time. Absent when the verdict has no time
+edge, though it is still re-judged when a new generation lands. The kernel
+holds this to the whole second.
+
+--- field evaluation.flags
+type: uint.flags
+values: 0x1 backstop | 0x2 fail-closed | 0x4 reject-degraded | 0x8 rejudged | 0x10 identity-unresolved
+
+How an evaluation reached its result. `backstop` means no rule yielded and
+the compiled-in DROP answered. `fail-closed` means evaluation could not
+finish, usually for want of atomic memory, and the packet was dropped
+regardless of policy. `reject-degraded` means a REJECT went out as a DROP
+because no answer could be built or sent. `rejudged` means a flow's cached
+verdict was stale, by generation or by time, and was judged again.
+`identity-unresolved` means an endpoint could not be attributed.
+
+--- field reject.packet
+type: str.enum
+values: tcp-reset | icmp-port-unreachable | icmp-admin-prohibited
+closed: true
+
+The packet NTFE built to deliver a refusal: a TCP reset for refused TCP,
+an ICMP or ICMPv6 port-unreachable for refused anything else, or an ICMP or
+ICMPv6 administratively-prohibited for every prohibited refusal. It decides
+what the refused program sees: `ECONNREFUSED` for a reset or a
+port-unreachable, `EHOSTUNREACH` for an IPv4 prohibition, and `EACCES` for
+an IPv6 one. Absent when the REJECT degraded to a DROP.
+
+--- field reject.delivered-to
+type: str.enum
+values: wire | self
+closed: true
+
+Where NTFE sent a refusal. `wire` answers the remote peer on the link, from
+the ingress seat. `self` routes the answer back into this machine, from
+every other seat, so the stack fails the local socket at once rather than
+leaving it to time out.
+
+--- field counter.name
+type: str
+
+The name of a counter stream, as the policy author wrote it in `COUNT` and
+`Counter.<name>`. At most 63 bytes.
+
+--- field counter.partition
+type: uint.flags
+values: 0x1 source-address | 0x2 destination-address | 0x4 interface
+
+Which packet facts a counter view is partitioned by: one cell per distinct
+value of the facts set here. Zero is a single cell for the whole machine. A
+packet that lacks a partitioning fact, such as non-IP traffic in a view
+partitioned by address, counts nowhere.
+
+--- field counter.windows
+type: uint.duration[]
+
+The sliding-window lengths a counter table answers, at most eight. The
+kernel holds them to the whole second and approximates each window with
+eight buckets of an eighth of its length, so a window's value is accurate
+only to that bucket.
+
+--- field counter.value
+type: uint
+
+The value held in a counter cell for the window a rule read. Its unit is
+whatever the stream counts: emissions of `COUNT`, or bytes where the rule
+counts `Length`, which is the length the stack saw and not the wire's.
+
+--- field counter.threshold
+type: uint
+
+The threshold a rule's counter condition compared `counter.value` against.
+The two together are the whole content of a crossing.
+
+--- field tag.name
+type: str
+
+The name of a flow tag, as the policy author wrote it. **Not emitted
+today**: the tag store is passed only the tag's hash, `machinery.hash`, and
+the name lives in the published policy. A hash names the same tag only
+within one generation.
+
+--- field tag.operation
+type: str.enum
+values: set | clear | add
+closed: true
+
+Which operation a `TAG` action applied to a flow tag. `clear` removes the
+tag so that it reads as absent; clearing an absent tag does nothing.
+
+--- field tag.amount
+type: uint
+
+The amount a tag operation applied: the value a `set` wrote, or the amount
+an `add` added. Both default to 1 when the rule names none. Absent for
+`clear`.
+
+--- field tag.value
+type: uint
+
+The value a flow tag holds. An `add` that would overflow leaves it at the
+largest representable value, where it stays.
+
+--- field machinery.hash
+type: uint
+
+The FNV-1a-64 hash by which the tag and counter stores know a tag name or a
+counter stream name. Tags and streams are hashed by the same function into
+separate namespaces, so one hash can name both a tag and a stream: read it
+with the record's event type. A hash maps to a name only within the
+generation that published it.
+
+--- field machinery.collision.name
+type: str
+
+The other name in a hash collision: a second tag or stream name whose hash
+equals that of the name the record carries. NTFE refuses a generation in
+which this happens, so that a hash stays a single identity while the policy
+runs.
+
+--- field prompt.handler
+type: str
+
+The name of the handler a `PROMPT` action addressed. NTFE has no handler
+transport yet, so every prompt falls back at once; the handler's name is
+the operator's only clue to which integration is missing.
+
+--- field prompt.handler-fallback
+type: str
+
+What a `PROMPT` fell back to when its handler did not answer: the action
+its fallback resolved to, as the rule wrote it. Fallbacks can themselves
+be prompts, up to four deep, and this is the action at the end of the
+chain.
+
+--- field engine.abi-version
+type: uint
+
+The version of the NTFE device interface the running kernel implements.
+The interface is experimental and carries no stability promise, so a tool
+reading the device checks this before trusting anything else.
+
+--- field engine.enforcing
+type: bool
+
+Whether NTFE enforces anything at all: true when at least one rules layer
+has a published forest. False from boot until the first generation
+ingests, and whenever no layer has policy, in which case every traversal
+is waved through.
+
+--- field verdict-log.sequence
+type: uint
+
+The sequence number of a verdict record on NTFE's private ring. It rises
+by one per record from boot, so a gap is the confessed evidence of
+records lost to overrun, visible only to a reader that was present to see
+it.
+
+--- field verdict-log.lost
+type: uint
+
+How many verdict records the private ring has destroyed by overrun since
+boot. With no reader attached the ring wraps within moments under real
+traffic, so a large count usually means nothing was reading rather than
+that something was slow.
+
+--- field verdict-log.capacity
+type: uint
+
+How many verdict records NTFE's private ring holds before the oldest is
+overwritten.
+
+--- event ntfe.verdict.reported
 tier: standard
 gating: an explicit report directive in the matching rule
 cardinality: once per matching evaluation
-emitters: ntfe/report.c
 
 The record of a traffic policy decision that a rule explicitly asked to be
 reported. Not a record of every decision — the engine evaluates constantly
@@ -134,23 +654,34 @@ evaluation reached: traffic matched at the raw-packet layer has no
 addresses to record.
 
 field: rule.name                     required
-field: rule.report_level             required
+field: rule.hash                     required
+field: rule.name-truncated           optional
+field: rule.report-level             required
 field: rule.layer                    required
 field: rule.seat                     required
 field: outcome.verdict               required
 field: outcome.reason                when outcome.verdict == reject
-  Whether the refusal was prohibited or refused — the two flavours of an
-  explicit rejection.
+  values: prohibited | refused
+  closed: true
+  Which flavour of explicit rejection the rule asked for: the story the
+  REJECT tells the sender. `refused` says nothing is listening and reveals
+  no policy; `prohibited` says policy refused the traffic. When two REJECTs
+  tie on priority, `refused` wins.
 field: network.direction             required
-field: network.interface.name        required
+field: network.interface.name        optional
+  Absent when the traffic was evaluated with no device attached, in which
+  case `network.interface.index` is 0.
 field: network.interface.index       required
-field: network.ether_type            required
+field: network.ether-type            required
 field: network.family                required
 field: network.protocol              when network.family != 0
 field: source.address                when network.family != 0
 field: destination.address           when network.family != 0
-field: source.port                   when the protocol has ports
-field: destination.port              when the protocol has ports
-field: flow.state                    when flow tracking applied
+field: source.port                   optional
+  Present when the protocol has ports.
+field: destination.port              optional
+  Present when the protocol has ports.
+field: flow.state                    optional
+  Present when flow tracking applied.
 field: network.length                required
 field: policy.generation             required

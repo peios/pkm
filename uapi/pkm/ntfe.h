@@ -178,7 +178,7 @@ struct peios_ntfe_status {
 	__u64 count_writes;	/* stream emissions applied */
 	__u64 count_key_absent;	/* packet lacked a view's key fact: no-op */
 	__u64 count_refused;	/* table at its key cap / alloc failed */
-	__u64 reports_emitted;	/* KMES network-report events */
+	__u64 reports_emitted;	/* KMES ntfe.verdict.reported events */
 	__u64 counter_cells;	/* live counter cells across all tables */
 	__u64 reporting_level;	/* the active CurrentReportingLevel */
 	/* The Flow layer (ABI 3). */

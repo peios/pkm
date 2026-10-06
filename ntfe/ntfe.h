@@ -281,7 +281,7 @@ struct peios_ntfe_stats {
 	atomic64_t count_writes;	/* stream emissions applied */
 	atomic64_t count_key_absent;	/* packet lacked a view's key fact */
 	atomic64_t count_refused;	/* table at its key cap / alloc failed */
-	atomic64_t reports_emitted;	/* KMES network-report events */
+	atomic64_t reports_emitted;	/* KMES ntfe.verdict.reported events */
 	/* The Flow layer (rung 2). */
 	atomic64_t seen_local_out;	/* traversals at the outbound IP seat */
 	atomic64_t flow_judged;		/* Flow evaluations (sentences written) */
@@ -479,8 +479,8 @@ u64 peios_ntfe_counters_cells(void);
  */
 
 /*
- * REPORT emission (report.c): one KMES `network-report` event, origin
- * class NTFE, msgpack payload built on the stack (softirq-safe).
+ * REPORT emission (report.c): one KMES `ntfe.verdict.reported` event,
+ * origin class NTFE, msgpack payload built on the stack (softirq-safe).
  */
 void peios_ntfe_report_emit(const struct peios_ntfe_snapshot *snap,
 			   const char *rule, size_t rule_len, u8 level,

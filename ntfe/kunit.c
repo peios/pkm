@@ -510,7 +510,7 @@ static void ntfe_kunit_event_stream(struct kunit *test)
  * on a real conntrack entry (set/add/clear/lookup, the per-flow tripwire,
  * the destructor), the counter store (materialized views, keyed cells,
  * windows, the absent-key law, re-publication), and REPORT landing in
- * KMES as a network-report event.
+ * KMES as an ntfe.verdict.reported event.
  */
 static void ntfe_kunit_reject_kinds_cross_the_bridge(struct kunit *test)
 {
@@ -735,6 +735,71 @@ static void ntfe_kunit_counter_store(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, peios_ntfe_counters_cells(), cells_before);
 }
 
+/* The kernel has no memmem, and a msgpack payload is binary. */
+static const u8 *ntfe_test_find(const u8 *hay, size_t n, const void *needle,
+				size_t len)
+{
+	size_t i;
+
+	for (i = 0; len <= n && i <= n - len; i++)
+		if (!memcmp(hay + i, needle, len))
+			return hay + i;
+	return NULL;
+}
+
+/* Whether @lit, a string literal of exact msgpack bytes, is in @p. */
+#define NTFE_TEST_HAS(p, n, lit) \
+	(ntfe_test_find(p, n, lit, sizeof(lit) - 1) != NULL)
+
+#define NTFE_TEST_REPORT_TYPE	"ntfe.verdict.reported"
+
+/*
+ * The `rule` map's opening for @path: its key, a fixmap of @keys entries,
+ * and the hash of the whole path. Both paths hashed here hash past
+ * U32_MAX, so the value is a uint64 (0xcf).
+ */
+static size_t ntfe_test_rule_head(u8 *out, u8 keys, const char *path,
+				  size_t len)
+{
+	static const char rule_key[] = "\xa4" "rule";
+	static const char hash_key[] = "\xa4" "hash" "\xcf";
+	__be64 hash = cpu_to_be64(peios_ntfe_path_hash(path, len));
+	size_t at = 0;
+
+	memcpy(out, rule_key, sizeof(rule_key) - 1);
+	at += sizeof(rule_key) - 1;
+	out[at++] = 0x80 | keys;
+	memcpy(out + at, hash_key, sizeof(hash_key) - 1);
+	at += sizeof(hash_key) - 1;
+	memcpy(out + at, &hash, 8);
+	return at + 8;
+}
+
+/* The latest report in @buf; returns its payload and sets @len. */
+static const u8 *ntfe_test_latest_report(struct kunit *test, u8 *buf,
+					 size_t *len)
+{
+	const size_t head = KMES_EVENT_HEADER_BASE_SIZE +
+			    sizeof(NTFE_TEST_REPORT_TYPE) - 1;
+	struct pkm_kmes_kunit_snapshot ring;
+	size_t written = 0;
+	int ret;
+
+	ret = pkm_kmes_kunit_copy_latest_matching_event(
+		KMES_ORIGIN_NTFE, NTFE_TEST_REPORT_TYPE,
+		sizeof(NTFE_TEST_REPORT_TYPE) - 1, buf, 4096, &written, &ring);
+	if (ret == -ENODEV || ret == -ENOENT)
+		kunit_skip(test, "KMES ring not available in this run (%d)",
+			   ret);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	/* A kernel emit's header is the base and the type, unpadded, and
+	 * the payload runs to the end of the event.
+	 */
+	KUNIT_ASSERT_GT(test, written, head);
+	*len = written - head;
+	return buf + head;
+}
+
 static void ntfe_kunit_report_lands_in_kmes(struct kunit *test)
 {
 	struct peios_ntfe_snapshot snap = {
@@ -751,12 +816,22 @@ static void ntfe_kunit_report_lands_in_kmes(struct kunit *test)
 		.length = 60,
 		.ifindex = 7,
 		.ifname = "eth0",
+		.ether_type = ETH_P_IP,
 	};
-	struct pkm_kmes_kunit_snapshot ring;
+	/* The rule map's tail after the hash; the name closes it. */
+	static const char rule_tail[] =
+		"\xac" "report-level" "\x04"
+		"\xa5" "layer" "\xa6" "packet"
+		"\xa4" "seat" "\xa8" "local-in"
+		"\xa4" "name" "\xae" "no-inbound/ssh";
+	static const char name_cut[] = "\xae" "name-truncated" "\xc3";
+	static const char name_head[] = "\xa4" "name" "\xd9";
+	u8 want[96];
 	u64 emitted_before = atomic64_read(&peios_ntfe_stats.reports_emitted);
-	size_t written = 0;
+	const u8 *p, *name;
+	size_t len = 0, want_len, cut, i;
+	char *long_rule;
 	u8 *buf;
-	int ret;
 
 	buf = kunit_kzalloc(test, 4096, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, buf);
@@ -767,19 +842,82 @@ static void ntfe_kunit_report_lands_in_kmes(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.reports_emitted),
 			emitted_before + 1);
 
-	ret = pkm_kmes_kunit_copy_latest_matching_event(
-		KMES_ORIGIN_NTFE, "network-report", 14, buf, 4096, &written,
-		&ring);
-	if (ret == -ENODEV || ret == -ENOENT)
-		kunit_skip(test, "KMES ring not available in this run (%d)",
-			   ret);
-	KUNIT_ASSERT_EQ(test, ret, 0);
-	KUNIT_EXPECT_GT(test, written, (size_t)0);
-	/* The msgpack payload carries the attribution and the story. */
-	KUNIT_EXPECT_NOT_NULL(test,
-			      strnstr(buf, "no-inbound/ssh", written));
-	KUNIT_EXPECT_NOT_NULL(test, strnstr(buf, "Prohibited", written));
-	KUNIT_EXPECT_NOT_NULL(test, strnstr(buf, "192.0.2.9", written));
+	p = ntfe_test_latest_report(test, buf, &len);
+	/*
+	 * Each path segment is a map (PGSS §6.4), checked byte for byte with
+	 * its exact size: outcome, network, source, destination, flow,
+	 * policy and rule, seven keys at the top.
+	 */
+	KUNIT_EXPECT_EQ(test, p[0], (u8)0x87);
+	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
+		"\x87" "\xa7" "outcome" "\x82"
+		"\xa7" "verdict" "\xa6" "reject"
+		"\xa6" "reason" "\xaa" "prohibited"));
+	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
+		"\xa7" "network" "\x86"
+		"\xa9" "direction" "\xa2" "in"
+		"\xa9" "interface" "\x82"
+			"\xa4" "name" "\xa4" "eth0"
+			"\xa5" "index" "\x07"
+		"\xaa" "ether-type" "\xcd\x08\x00"
+		"\xa6" "family" "\x02"		/* AF_INET */
+		"\xa8" "protocol" "\x06"
+		"\xa6" "length" "\x3c"));
+	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
+		"\xa6" "source" "\x82"
+		"\xa7" "address" "\xa9" "192.0.2.9"
+		"\xa4" "port" "\xcd\x11\x5c"));
+	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
+		"\xab" "destination" "\x82"
+		"\xa7" "address" "\xa8" "10.0.0.5"
+		"\xa4" "port" "\x16"));
+	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
+		"\xa4" "flow" "\x81" "\xa5" "state" "\xa3" "new"));
+	KUNIT_EXPECT_TRUE(test, NTFE_TEST_HAS(p, len,
+		"\xa6" "policy" "\x81" "\xaa" "generation"));
+	/* The rule map closes the payload, five keys: no truncation flag. */
+	want_len = ntfe_test_rule_head(want, 5, "no-inbound/ssh", 14);
+	memcpy(want + want_len, rule_tail, sizeof(rule_tail) - 1);
+	want_len += sizeof(rule_tail) - 1;
+	KUNIT_ASSERT_GE(test, len, want_len);
+	KUNIT_EXPECT_EQ(test, memcmp(p + len - want_len, want, want_len), 0);
+	/* The time is the header's; the old t_ns key is gone. */
+	KUNIT_EXPECT_FALSE(test, NTFE_TEST_HAS(p, len, "\xa4" "t_ns"));
+
+	/*
+	 * PEI-1310: a name too long for the payload is cut at a character
+	 * boundary and the cut is said; the event still goes, and the hash
+	 * is of the whole path. Two-byte characters throughout, so a
+	 * boundary is an even length.
+	 */
+	long_rule = kunit_kzalloc(test, 600, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, long_rule);
+	for (i = 0; i < 600; i += 2) {
+		long_rule[i] = (char)0xc3;
+		long_rule[i + 1] = (char)0xa9;
+	}
+	peios_ntfe_report_emit(&snap, long_rule, 600, 4,
+			      PEIOS_NTFE_LAYER_PACKET, PEIOS_NTFE_VERDICT_REJECT,
+			      PEIOS_NTFE_REJECT_PROHIBITED);
+	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.reports_emitted),
+			emitted_before + 2);
+
+	p = ntfe_test_latest_report(test, buf, &len);
+	KUNIT_EXPECT_LE(test, len, (size_t)512);
+	want_len = ntfe_test_rule_head(want, 6, long_rule, 600);
+	KUNIT_EXPECT_TRUE(test, ntfe_test_find(p, len, want, want_len) != NULL);
+	name = ntfe_test_find(p, len, name_head, sizeof(name_head) - 1);
+	KUNIT_ASSERT_NOT_NULL(test, name);
+	name += sizeof(name_head) - 1;
+	cut = *name++;
+	KUNIT_EXPECT_GT(test, cut, (size_t)0);
+	KUNIT_EXPECT_EQ(test, cut % 2, (size_t)0);
+	KUNIT_EXPECT_EQ(test, memcmp(name, long_rule, cut), 0);
+	/* The flag follows the name and ends the payload. */
+	KUNIT_ASSERT_EQ(test, (size_t)(name - p) + cut + sizeof(name_cut) - 1,
+			len);
+	KUNIT_EXPECT_EQ(test, memcmp(name + cut, name_cut,
+				     sizeof(name_cut) - 1), 0);
 }
 
 /*

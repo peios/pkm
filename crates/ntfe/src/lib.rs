@@ -382,7 +382,7 @@ impl Status {
         )
     }
 
-    /// `network-report` events emitted.
+    /// `ntfe.verdict.reported` events emitted.
     pub fn reports(&self) -> u64 {
         self.0.reports_emitted
     }
