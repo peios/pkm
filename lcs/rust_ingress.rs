@@ -2297,6 +2297,11 @@ pub unsafe extern "C" fn lcs_rust_key_open_access_plan(
                         subject_ids: crate::token_runtime::audit_subject_ids(subject_token),
                         object: crate::kmes_payload::AuditObject::Kind(b"key"),
                         asserted: false,
+                        // Only privilege-use records are written here: the
+                        // SACL gate and the mandatory-check denials concern
+                        // kacs.audit.access.checked alone.
+                        sacl_audit_suppressed: false,
+                        denials: crate::kmes_payload::AccessDenials::default(),
                     };
                     crate::kmes_payload::emit_access_check_events_to_kmes(
                         &[],
