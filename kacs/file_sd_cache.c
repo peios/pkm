@@ -19,6 +19,7 @@
 #include <linux/xattr.h>
 
 #include "../kmes/kmes.h"
+#include "access_check.h"
 #include "file_access.h"
 #include "file_sd_cache.h"
 #include "lsm_internal.h"
@@ -264,34 +265,34 @@ long pkm_kacs_kunit_fake_setxattr_locked(
 #endif
 
 /*
- * kacs.descriptor.rejected: {object: {kind: "file"}, outcome: {reason:
- * "corrupt"}}.
+ * kacs.descriptor.rejected: the subject whose access made KACS read the
+ * descriptor, the file by inode and device, the stored attribute's length,
+ * and outcome.reason "corrupt".
  *
  * object.file.path is left out. The descriptor read is reached through
  * path-anchor files, and the inode_getsecurity route builds its anchor on a
  * stack vfsmount that is not part of any mount tree, so d_path here could
- * walk a struct mount that does not exist.
+ * walk a struct mount that does not exist. The inode and device name the
+ * file instead, for as long as its filesystem stays mounted.
  */
-static void pkm_kacs_emit_corrupt_sd_event(void)
+static void pkm_kacs_emit_corrupt_sd_event(const struct inode *inode,
+					   ssize_t sd_len)
 {
-	static const char event_type[] = "kacs.descriptor.rejected";
-	static const u8 payload[] = {
-		0x82, /* map(2) */
-		0xa6, 'o', 'b', 'j', 'e', 'c', 't',
-		0x81, /* map(1) */
-		0xa4, 'k', 'i', 'n', 'd',
-		0xa4, 'f', 'i', 'l', 'e',
-		0xa7, 'o', 'u', 't', 'c', 'o', 'm', 'e',
-		0x81, /* map(1) */
-		0xa6, 'r', 'e', 'a', 's', 'o', 'n',
-		0xa7, 'c', 'o', 'r', 'r', 'u', 'p', 't',
-	};
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
 
-	pkm_kmes_emit_kernel(KMES_ORIGIN_KACS, event_type,
-			     sizeof(event_type) - 1, payload, sizeof(payload));
+	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
+		pip_type = 0;
+		pip_trust = 0;
+	}
+	(void)kacs_rust_emit_descriptor_rejected(
+		pkm_kacs_current_effective_token_ptr(), (u64)inode->i_ino,
+		(u64)new_encode_dev(inode->i_sb->s_dev),
+		sd_len > 0 ? (u64)sd_len : 0, pip_type, pip_trust);
 }
 
 static long pkm_kacs_inode_alloc_corrupt_sd_cache(
+	const struct inode *inode, ssize_t sd_len,
 	struct pkm_kacs_inode_sd_cache **cache_out)
 {
 	struct pkm_kacs_inode_sd_cache *cache;
@@ -304,7 +305,7 @@ static long pkm_kacs_inode_alloc_corrupt_sd_cache(
 	if (!cache)
 		return -ENOMEM;
 
-	pkm_kacs_emit_corrupt_sd_event();
+	pkm_kacs_emit_corrupt_sd_event(inode, sd_len);
 	*cache_out = cache;
 	return 0;
 }
@@ -364,7 +365,8 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 		trace_kacs_sd_cache_corrupt(inode,
 					    KACS_SDC_CORRUPT_EMPTY_OR_OVERSIZE,
 					    (u32)len);
-		return pkm_kacs_inode_alloc_corrupt_sd_cache(cache_out);
+		return pkm_kacs_inode_alloc_corrupt_sd_cache(inode, len,
+							     cache_out);
 	}
 
 	bytes = pkm_kacs_zalloc(len);
@@ -391,7 +393,8 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 		pkm_kacs_free(bytes);
 		trace_kacs_sd_cache_corrupt(inode, KACS_SDC_CORRUPT_VALIDATE_FAIL,
 					    (u32)len);
-		return pkm_kacs_inode_alloc_corrupt_sd_cache(cache_out);
+		return pkm_kacs_inode_alloc_corrupt_sd_cache(inode, len,
+							     cache_out);
 	}
 
 	cache = pkm_kacs_inode_sd_cache_alloc(PKM_KACS_INODE_SD_VALID, bytes,

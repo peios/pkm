@@ -11,7 +11,7 @@ use crate::access_check_abi::{
     KACS_ACCESS_CHECK_ARGS_SIZE,
 };
 use crate::error::KacsError;
-use crate::kmes_payload::{AuditObject, AuditTarget};
+use crate::kmes_payload::{AccessDenials, AuditObject, AuditTarget};
 use crate::mic::{IntegrityLevel, TOKEN_MANDATORY_POLICY_NO_WRITE_UP};
 use crate::pip::PipContext;
 use crate::pkm_alloc::Vec;
@@ -31,6 +31,10 @@ const EOPNOTSUPP: c_long = -95;
 
 const PKM_KACS_RESOLVED_CTX_KUNIT: u32 = 0;
 const PKM_KACS_RESOLVED_CTX_TOKEN: u32 = 1;
+/// The AccessCheck syscall's caller lacks SeAuditPrivilege: run the check,
+/// but write none of the records the supplied SACL generates.
+const PKM_KACS_RESOLVED_CTX_F_SACL_AUDIT_SUPPRESSED: u32 = 0x1;
+const PKM_KACS_RESOLVED_CTX_KNOWN_FLAGS: u32 = PKM_KACS_RESOLVED_CTX_F_SACL_AUDIT_SUPPRESSED;
 const KUNIT_USER_SID_BYTES: &[u8] = &[1, 2, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 160, 15, 0, 0];
 const KUNIT_GROUPS: &[crate::token::SidAndAttributes<'static>] = &[];
 const KUNIT_DEVICE_GROUPS: &[crate::token::SidAndAttributes<'static>] = &[];
@@ -43,8 +47,8 @@ const KUNIT_POLICIES: &[crate::caap::CaapPolicyEntry<'static>] = &[];
 pub struct PkmKacsResolvedCtx {
     /// Context kind discriminator.
     pub kind: u32,
-    /// Reserved for future expansion and must be zero in v0.20.
-    pub _reserved: u32,
+    /// `PKM_KACS_RESOLVED_CTX_F_*` bits; any other bit is refused.
+    pub flags: u32,
     /// Optional live token pointer used by real kernel callers.
     pub token: *const c_void,
     /// Optional locked CAAP cache pointer visible during this evaluation.
@@ -180,7 +184,7 @@ impl AccessCheckAbiMemory for CallbackMemory<'_> {
 pub extern "C" fn kacs_rust_kunit_access_check_context() -> *const PkmKacsResolvedCtx {
     static KUNIT_CONTEXT: PkmKacsResolvedCtx = PkmKacsResolvedCtx {
         kind: PKM_KACS_RESOLVED_CTX_KUNIT,
-        _reserved: 0,
+        flags: 0,
         token: core::ptr::null(),
         caap_cache: core::ptr::null(),
         default_pip_type: 0,
@@ -199,6 +203,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
     event_sinks: *const PkmKacsEventSinkOps,
     summary_out: *mut PkmKacsIngressSummary,
 ) -> c_long {
+    let suppressed = sacl_audit_suppressed(resolved_ctx);
     match with_resolved_context(resolved_ctx, |resolved, live_token| {
         let ops = validate_usercopy_ops(ops)?;
         zero_summary(summary_out);
@@ -206,9 +211,10 @@ pub extern "C" fn kacs_rust_access_check_ingress_scalar(
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
         validate_audit_context_encoding(&request)?;
-        let target = audit_target(&request, live_token)?;
+        let mut target = audit_target(&request, live_token, suppressed)?;
         let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_abi(&request, &resolved).map_err(map_kacs_error)?;
+        target.denials = denials_of(&execution);
         finalize_execution(
             ops,
             event_sinks,
@@ -237,6 +243,7 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
     event_sinks: *const PkmKacsEventSinkOps,
     summary_out: *mut PkmKacsIngressSummary,
 ) -> c_long {
+    let suppressed = sacl_audit_suppressed(resolved_ctx);
     match with_resolved_context(resolved_ctx, |resolved, live_token| {
         let ops = validate_usercopy_ops(ops)?;
         zero_summary(summary_out);
@@ -244,10 +251,11 @@ pub extern "C" fn kacs_rust_access_check_ingress_list(
         let request = parse_access_check_abi_request(&args_bytes, &CallbackMemory { ops })
             .map_err(map_kacs_error)?;
         validate_audit_context_encoding(&request)?;
-        let target = audit_target(&request, live_token)?;
+        let mut target = audit_target(&request, live_token, suppressed)?;
         let effective_pip = effective_pip(request.pip, resolved.default_pip);
         let execution = execute_access_check_list_abi(&request, results_count, &resolved)
             .map_err(map_kacs_error)?;
+        target.denials = denials_of(&execution);
         finalize_execution(
             ops,
             event_sinks,
@@ -289,19 +297,39 @@ fn validate_audit_context_encoding(request: &AccessCheckAbiRequest) -> Result<()
     Ok(())
 }
 
-/// What the records of an ioctl-originated check say about their subject
-/// and object. A caller-supplied audit context or PIP state is the caller's
-/// claim, so either marks the records `fields.attestation.userspace`.
+/// What the mandatory checks withheld from the request, for the access
+/// records (`access.denied-integrity`, `access.denied-trust`).
+fn denials_of(execution: &AccessCheckAbiExecution) -> AccessDenials {
+    AccessDenials {
+        integrity: execution.denied_integrity,
+        trust: execution.denied_trust,
+    }
+}
+
+/// Whether the caller of the AccessCheck syscall was found not to hold
+/// SeAuditPrivilege, so the records its SACL generates are not written.
+fn sacl_audit_suppressed(resolved_ctx: *const PkmKacsResolvedCtx) -> bool {
+    unsafe { resolved_ctx.as_ref() }.is_some_and(|ctx| {
+        ctx.flags & PKM_KACS_RESOLVED_CTX_F_SACL_AUDIT_SUPPRESSED != 0
+    })
+}
+
+/// What the records of a syscall-originated check say about their subject
+/// and object. Every such record is marked `fields.attestation.userspace`:
+/// the descriptor, and with it `trigger.ace`, is always the caller's, as
+/// are any audit context and PIP state it passes (PGSS §6.7).
 fn audit_target<'a>(
     request: &'a AccessCheckAbiRequest,
     live_token: Option<*const c_void>,
+    sacl_audit_suppressed: bool,
 ) -> Result<AuditTarget<'a>, c_long> {
     Ok(AuditTarget {
         subject_ids: live_token.and_then(crate::token_runtime::audit_subject_ids),
         object: AuditObject::from_audit_context(request.audit_context.as_deref())?,
-        asserted: request.audit_context.is_some()
-            || request.pip.pip_type != 0
-            || request.pip.pip_trust != 0,
+        asserted: true,
+        sacl_audit_suppressed,
+        // Filled in once the check has run.
+        denials: AccessDenials::default(),
     })
 }
 
@@ -310,7 +338,7 @@ fn with_resolved_context<T>(
     f: impl FnOnce(AccessCheckAbiResolved<'_>, Option<*const c_void>) -> Result<T, c_long>,
 ) -> Result<T, c_long> {
     let resolved_ctx = unsafe { resolved_ctx.as_ref() }.ok_or(EINVAL)?;
-    if resolved_ctx._reserved != 0 {
+    if resolved_ctx.flags & !PKM_KACS_RESOLVED_CTX_KNOWN_FLAGS != 0 {
         return Err(EINVAL);
     }
 
@@ -450,7 +478,7 @@ fn finalize_execution(
     target: &AuditTarget<'_>,
 ) -> Result<c_long, c_long> {
     persist_live_privilege_state(live_token, &execution)?;
-    write_summary(summary_out, &execution);
+    write_summary(summary_out, &execution, target.sacl_audit_suppressed);
 
     // Generated audit events must not be suppressible by bad user output
     // pointers, so delivery is attempted before any caller writeback.
@@ -592,6 +620,9 @@ fn emit_events(
             return Err(EOPNOTSUPP);
         };
         for event in audit_events {
+            if !audit_event_written(event, target.sacl_audit_suppressed) {
+                continue;
+            }
             let (ace_bytes_ptr, ace_bytes_len) = match event.ace_bytes.as_ref() {
                 Some(bytes) => (bytes.as_slice().as_ptr(), bytes.len()),
                 None => (core::ptr::null(), 0),
@@ -632,7 +663,11 @@ fn emit_events(
     Ok(())
 }
 
-fn write_summary(summary_out: *mut PkmKacsIngressSummary, execution: &AccessCheckAbiExecution) {
+fn write_summary(
+    summary_out: *mut PkmKacsIngressSummary,
+    execution: &AccessCheckAbiExecution,
+    sacl_audit_suppressed: bool,
+) {
     let Some(summary) = (unsafe { summary_out.as_mut() }) else {
         return;
     };
@@ -643,8 +678,19 @@ fn write_summary(summary_out: *mut PkmKacsIngressSummary, execution: &AccessChec
         enabled_by_default: execution.updated_privileges.enabled_by_default,
         used: execution.updated_privileges.used,
     };
-    summary.audit_event_count = execution.audit_events.len() as u32;
+    // The count is of the records written: a suppressed SACL record is not.
+    summary.audit_event_count = execution
+        .audit_events
+        .iter()
+        .filter(|event| audit_event_written(event, sacl_audit_suppressed))
+        .count() as u32;
     summary.privilege_use_event_count = execution.privilege_use_events.len() as u32;
+}
+
+/// Whether `event` is written. With SACL audit suppressed only the records
+/// the checked token's own audit policy forces survive.
+pub(crate) fn audit_event_written(event: &OwnedAuditEvent, sacl_audit_suppressed: bool) -> bool {
+    !sacl_audit_suppressed || event.policy_forced
 }
 
 fn zero_summary(summary_out: *mut PkmKacsIngressSummary) {

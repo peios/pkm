@@ -165,6 +165,10 @@ pub struct AccessCheckAbiExecution {
     pub caap_diagnostic_events: Vec<CaapDiagnosticEvent>,
     /// Updated privilege state after successful privilege-use marking.
     pub updated_privileges: TokenPrivileges,
+    /// Requested bits mandatory integrity control denied.
+    pub denied_integrity: u32,
+    /// Requested bits the process-trust label denied.
+    pub denied_trust: u32,
 }
 
 /// Parses a raw `kacs_access_check_args` buffer and all pointer-referenced
@@ -339,6 +343,8 @@ pub fn execute_access_check_abi<'a>(
         privilege_use_events: state.privilege_use_events,
         caap_diagnostic_events: state.caap_diagnostic_events,
         updated_privileges: state.updated_privileges,
+        denied_integrity: state.denied_integrity,
+        denied_trust: state.denied_trust,
     })
 }
 
@@ -434,6 +440,8 @@ pub fn execute_access_check_list_abi<'a>(
         privilege_use_events: state.privilege_use_events,
         caap_diagnostic_events: state.caap_diagnostic_events,
         updated_privileges: state.updated_privileges,
+        denied_integrity: state.denied_integrity,
+        denied_trust: state.denied_trust,
     })
 }
 

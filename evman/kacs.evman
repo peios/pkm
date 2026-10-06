@@ -1,12 +1,16 @@
 --- field privilege.name
 type: str.enum
-values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege
+values: SeSecurityPrivilege | SeTakeOwnershipPrivilege | SeBackupPrivilege | SeRestorePrivilege | SeRelabelPrivilege | SeCreateTokenPrivilege | SeAssignPrimaryTokenPrivilege | SeLockMemoryPrivilege | SeIncreaseQuotaPrivilege | SeTcbPrivilege | SeLoadDriverPrivilege | SeSystemProfilePrivilege | SeSystemtimePrivilege | SeProfileSingleProcessPrivilege | SeIncreaseBasePriorityPrivilege | SeShutdownPrivilege | SeDebugPrivilege | SeAuditPrivilege | SeChangeNotifyPrivilege | SeRemoteShutdownPrivilege | SeManageVolumePrivilege | SeImpersonatePrivilege | SeCreateSymbolicLinkPrivilege
 closed: false
 
-The privilege that contributed access. Only these five can influence an
-access check today, so only these five appear. The set is open because a
-privilege used to satisfy a Linux capability gate is a privilege use too,
-and will be recorded with `linux.cap` as its context.
+The privilege a record is about, by its Windows name. On an access check
+it is the privilege that contributed access, and only the first five can
+influence an access check. At a Linux capability gate it is the privilege
+the capability maps to — `SeTcbPrivilege` for most, `SeDebugPrivilege` for
+`sys-ptrace`, `SeShutdownPrivilege` for `sys-boot` and so on — and
+`SeManageVolumePrivilege` or `SeTcbPrivilege` at the volume gate.
+`SeImpersonatePrivilege` appears on an impersonation that needed it. The set
+is open because new privileges may be defined.
 
 --- field privilege.contributed
 type: uint.mask
@@ -354,11 +358,20 @@ different key.
 
 --- event kacs.audit.access.checked
 tier: essential
-gating: a matching SACL audit ACE, or the token's audit policy
+gating: a matching SACL audit ACE, or the token's audit policy; on the AccessCheck syscall a SACL record also needs the caller to hold SeAuditPrivilege, enabled
 cardinality: once per matching audit ACE, not once per access
 
 The record that an access check completed, and what it decided. The most
 common event on the system, and the one most investigations start from.
+
+**A daemon's own checks need SeAuditPrivilege.** A userspace component that
+guards its objects with the AccessCheck syscall supplies the descriptor
+itself, SACL included. Its records are written only if the calling process
+holds SeAuditPrivilege, enabled, on its effective token, as Windows asks of
+`AccessCheckAndAuditAlarm`; without it the check is answered and its SACL
+records are silently withheld. The privilege is the caller's, not the
+checked client's. Records the checked token's own audit policy forces are
+written either way.
 
 It fires against every kind of object KACS protects — files, processes,
 tokens, sockets and SysV IPC objects — which is why `object.kind` is
@@ -384,6 +397,14 @@ field: object.token.guid        when object.kind == token
 field: access.requested         required
 field: access.granted           required
   The mask this check granted.
+field: access.denied-integrity  optional
+  The requested bits the object's mandatory label withheld — every bit it
+  withheld, for `MAXIMUM_ALLOWED`. Absent when it withheld none. With
+  `access.denied-trust`, often the whole explanation of a denial the DACL
+  alone would have allowed.
+field: access.denied-trust      optional
+  The requested bits the object's process-trust label withheld, read the
+  same way.
 field: outcome.success          required
   True when every requested bit is in `access.granted`. A `MAXIMUM_ALLOWED`
   request always reports true, because such a request returns whatever is
@@ -392,8 +413,9 @@ field: outcome.success          required
 field: trigger.kind             required
 field: trigger.ace              when trigger.kind == sacl
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
 
 --- event kacs.audit.handle.used
 tier: essential
@@ -446,47 +468,137 @@ field: outcome.reason           when outcome.success == false
 
 --- event kacs.audit.privilege.used
 tier: essential
-gating: the token's audit policy, success and failure flavours independently
-cardinality: once per privilege that contributed access
+gating: the token's audit policy, success and failure flavours independently; at a capability or volume gate, also the first use of that gate by the process under its current token, and never a CAP_OPT_NOAUDIT check
+cardinality: once per privilege that contributed access; at a gate, once per process, token and gate
 
-The record that a privilege contributed access to a check, and whether that
-contribution survived. Purely token-policy driven — no SACL is involved, so
-there is no trigger to record.
+The record that a privilege was spent. Purely token-policy driven — no SACL
+is involved, so there is no trigger to record. `operation.name` says where
+it was spent, and the rest of the record follows from it.
 
-**Success here means the privilege worked, not that it fired.** This is the
-field most often misread. A false outcome is not a failed attempt to use a
-privilege; it is a privilege that fired and was then overridden by a
-confinement, a CAAP rule, or PIP non-dominance — usually the more
-interesting of the two records, because it shows a boundary holding.
+`access-check` is a privilege that contributed access to an access check,
+with whether that contribution survived. **Success there means the
+privilege worked, not that it fired.** This is the field most often
+misread. A false outcome is not a failed attempt to use a privilege; it is
+a privilege that fired and was then overridden by a confinement, a CAAP
+rule, or PIP non-dominance — usually the more interesting of the two
+records, because it shows a boundary holding. **`MAXIMUM_ALLOWED` requests
+produce nothing here.** Privilege-use auditing short-circuits on them, even
+though SACL auditing was deliberately changed not to — a probing enumerator
+therefore trips one and slips the other.
+
+`linux-cap` is a privilege that satisfied a Linux capability check: KACS
+answers every capability check with a privilege, and `linux.cap` names the
+check. `volume-mount` is a privilege that satisfied the volume-management
+gate the mount paths ask instead of `CAP_SYS_ADMIN`. **Each is recorded once
+per process, token and gate**, not once per check: a TCB process makes
+thousands of `CAP_SYS_ADMIN` checks a second, and the first answers who used
+the privilege and for what. The set starts again when the process acts under
+another token. Only successful uses are recorded, and only those of a user
+process's own checks: a probe with `CAP_OPT_NOAUDIT`, a kernel thread's
+check and a check against another process's credentials record nothing.
+The record is written as the process returns to user space, so it follows
+the system call that spent the privilege.
 
 A token can carry either audit policy flavour, both, or neither, and each
-governs its own outcome independently.
-
-**`MAXIMUM_ALLOWED` requests produce nothing here.** Privilege-use auditing
-short-circuits on them, even though SACL auditing was deliberately changed
-not to — a probing enumerator therefore trips one and slips the other.
+governs its own outcome independently. **The boot SYSTEM token carries
+`PRIVILEGE_USE_SUCCESS`**, so on a stock machine the records come from
+SYSTEM and the services that inherit its token.
 
 include: subject
-field: object.kind              required
+field: operation.name           required
+  values: access-check | linux-cap | volume-mount
+  closed: false
+field: object.kind              optional
+  On an access check, the object checked. Absent at a gate, and on a check
+  made through the AccessCheck syscall with no audit context: the kernel
+  does not know what was checked.
 field: object.file.path         when object.kind == file
 field: object.process.pid       when object.kind == process
 field: object.process.guid      when object.kind == process
 field: object.token.id          when object.kind == token
 field: object.token.guid        when object.kind == token
 field: privilege.name           required
-field: privilege.contributed    required
-field: privilege.surviving      required
-field: access.requested         required
+field: privilege.contributed    when operation.name == access-check
+field: privilege.surviving      when operation.name == access-check
+field: linux.cap                when operation.name == linux-cap
+field: access.requested         when operation.name == access-check
   The whole check's requested mask, not this privilege's share of it.
-field: access.granted           required
+field: access.granted           when operation.name == access-check
   The whole check's final granted mask.
 field: outcome.success          required
-  True when `privilege.surviving` is non-empty. Derived rather than
-  independently decided, and kept so that a single query for failed
-  outcomes works across every event type.
+  On an access check, true when `privilege.surviving` is non-empty: derived
+  rather than independently decided, and kept so that a single query for
+  failed outcomes works across every event type. At a gate, always true.
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
+
+--- event kacs.audit.descriptor.changed
+tier: essential
+gating: a change that includes the SACL, always; any other change when the rights it needed overlap the alarm mask on the handle it was made through
+cardinality: once per authorised change
+
+The record that a caller changed, or was authorised to change and failed to
+change, the security descriptor of a file, a token, a process or a System V
+IPC object. Registry keys have their own record of the same shape,
+`lcs.audit.key.descriptor.changed`.
+
+**A change to a SACL is always recorded**, whatever the old or new
+descriptor says. Changing a SACL needs `ACCESS_SYSTEM_SECURITY`, which needs
+SeSecurityPrivilege; it is rare; and removing one is how an intruder stops
+being watched. Before this record existed a file's SACL could be removed in
+silence, because the only audit of a descriptor change was evaluated
+against the new SACL, which then had nothing in it.
+
+Any other change — the owner, the group, the DACL, the integrity label — is
+recorded when the rights it needed overlap the alarm mask on the handle it
+was made through: the rule `kacs.audit.handle.used` follows. Only a file
+handle carries such a mask, so for a token, a process or an IPC object only
+a SACL change is recorded.
+
+The descriptors themselves are not carried, only their SHA-256 digests,
+lengths and owners. Equal digests mean the change rewrote the descriptor
+without altering it.
+
+include: subject
+field: object.kind                 required
+  `file`, `token`, `process` or `ipc`.
+field: object.file.path            optional
+  On a file, its absolute path, when the handle's path could be resolved.
+field: object.token.id             when object.kind == token
+field: object.token.guid           when object.kind == token
+field: object.process.guid         when object.kind == process
+field: object.ipc.type             when object.kind == ipc
+field: object.ipc.id               when object.kind == ipc
+field: object.sd.components        required
+  The parts the caller set. A `SACL` bit means the record was not
+  discretionary: such a change is always recorded.
+field: object.sd.length            when outcome.success == true
+field: object.sd.digest            when outcome.success == true
+  SHA-256 of the descriptor as written.
+field: object.sd.owner             optional
+  The owner of the descriptor written, when it has one.
+field: object.sd.length-previous   optional
+field: object.sd.digest-previous   optional
+  SHA-256 of the descriptor replaced. Absent, with its length and owner,
+  where the object had no stored descriptor to replace.
+field: object.sd.owner-previous    optional
+field: access.requested            required
+  The rights the change needed: `WRITE_OWNER`, `WRITE_DAC`,
+  `ACCESS_SYSTEM_SECURITY`, as the parts set ask.
+field: access.granted              optional
+  What the handle the change was made through was opened with. Absent on a
+  change made without one.
+field: access.audit-mask           optional
+  The alarm mask on that handle.
+field: access.matched              optional
+  The part of `access.requested` the alarm mask matched, on a change made
+  through a handle: zero when only the SACL made the record exist.
+field: outcome.success             required
+  Whether the new descriptor was written. A refused change — one the caller
+  had no right to make — is not this record; it is the access check's.
+field: outcome.errno               when outcome.success == false
 
 --- event kacs.caap.sacl.skipped
 tier: standard
@@ -527,8 +639,9 @@ field: access.granted           required
   The effective grant of the check the rule was evaluated in.
 field: access.granted-staged    required
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
 
 --- event kacs.caap.staging.diverged
 tier: standard
@@ -563,8 +676,110 @@ field: access.granted           required
 field: access.granted-staged    required
   What the staged policy would have granted instead.
 field: fields.attestation.userspace  optional
-  Set when the check came through the access-check ioctl and its caller
-  supplied the PIP state.
+  Set on every record of the AccessCheck syscall, and on no other. There
+  the descriptor, and with it `trigger.ace`, is always the caller's, as are
+  any audit context and PIP state it passes.
+
+--- event kacs.config.value.rejected
+tier: essential
+gating: none — every rejected table is recorded
+cardinality: once per rejected read of the key
+
+The record that KACS read one of its registry-held tables, rejected it, and
+carried on with what it had. Today that is the port reservation table under
+`Machine\System\Network\TcpIp\PortReservations`, read whenever the key
+changes.
+
+The table is validated whole and is **reject-or-keep, never merge**: one bad
+value refuses all of them, and whatever was in force before — the last good
+table from the registry, or the compiled-in fallback — stays in force. That
+makes this the only place the divergence is visible: the registry shows what
+an administrator wrote, and this record shows that KACS is not using it. The
+same reject-or-keep rule as `kmes.config.value.rejected` and
+`lcs.config.value.rejected`, for a table rather than a single value.
+
+field: config.key.path            required
+field: config.name                optional
+  The value at fault, by its registry name: a selector such as `tcp:80`, or
+  `@` for the default reservation. Absent when no single value is at fault.
+field: outcome.reason             required
+  values: empty | too-large | malformed | bad-selector | bad-descriptor | duplicate-default | missing-default | overlap
+  closed: false
+  `empty`: the key has no values. `too-large`: the table exceeds the kernel's
+  bound. `malformed`: the serialised table broke, which is the kernel's fault
+  rather than a value's. `bad-selector`: a value's name does not parse as a
+  selector. `bad-descriptor`: a value's data is not a self-relative security
+  descriptor. `duplicate-default`: the default reservation is given twice.
+  `missing-default`: there is no default reservation. `overlap`: two
+  selectors of the same width cover a port, so the most specific is
+  ambiguous.
+field: outcome.errno              required
+field: policy.previous-retained   required
+  Always true: a rejected table leaves the one in force in place.
+field: policy.fallback            required
+  Whether what stays in force is the compiled-in fallback, because no table
+  from the registry was ever accepted this boot. The fallback lets SYSTEM
+  alone bind a port, so a rejected first table leaves every service that
+  binds a port without one.
+
+--- event kacs.caap.policy.changed
+tier: essential
+gating: none — every change a caller holding SeTcbPrivilege makes is recorded
+cardinality: once per kacs_set_caap call that passed the privilege gate
+
+The record that a central access policy was installed, replaced or removed.
+A policy decides access to every object whose SACL names it, alongside that
+object's own DACL, so one change here can widen or narrow access across the
+whole system without touching any object.
+
+Only a caller holding SeTcbPrivilege, enabled, may change a policy; a call
+refused for want of it is not recorded. A call that passed the gate is
+recorded whether or not it applied: a malformed specification leaves the
+old policy in force and the record says so.
+
+The record names the policy, not its rules. Compare two records' effects by
+the access records that follow them.
+
+include: subject
+field: caap.policy.sid          required
+field: operation.name           required
+  values: set | remove
+  closed: true
+  `set` installs a policy, or replaces the one of the same SID whole;
+  `remove` takes it away, after which objects naming it are decided by the
+  recovery policy.
+field: outcome.success          required
+field: outcome.errno            when outcome.success == false
+
+--- event kacs.mount.policy.changed
+tier: essential
+gating: none — every change a caller admitted by the volume-management gate makes is recorded
+cardinality: once per change
+
+The record that a filesystem's KACS mount policy was set: what happens to an
+object on it that has no stored descriptor. `unmanaged` turns access control
+off for the whole filesystem; `deny-missing` refuses such objects; the two
+`synthesize` policies build a descriptor from the parent and the template
+the caller supplies.
+
+Setting a policy needs SeManageVolumePrivilege or SeTcbPrivilege. Every
+other refusal comes before that check, so a record is always of a change
+made.
+
+**The record does not carry the template.** A synthesising policy's template
+descriptor decides what every unlabelled object on the filesystem grants;
+read it back with `kacs_get_mount_policy`.
+
+include: subject
+field: object.mount.fs-type             optional
+  The filesystem's type, when the kernel knows it.
+field: object.mount.policy              required
+field: object.mount.policy-previous     required
+field: object.mount.policy-generation   required
+  The generation the change began. Every descriptor cached under an older
+  one is discarded on its next use.
+field: outcome.success                  required
+  Always true: every refusal is decided before anything changes.
 
 --- event kacs.descriptor.rejected
 tier: standard
@@ -582,14 +797,24 @@ longer parse, whether from disk corruption, a tool writing the extended
 attribute directly, or an interrupted write.
 
 KACS records the event once per descriptor read, when the object's
-descriptor cache is filled, not on every denied access that follows.
+descriptor cache is filled, not on every denied access that follows. The
+subject is whoever's access made KACS read the descriptor: the first to
+touch the file after it was cached, not whoever corrupted it.
 
+include: subject
 field: object.kind              required
   Always `file` today: file descriptors are the only stored descriptors KACS
   reads this way.
 field: object.file.path         optional
   Not carried today. The descriptor is read through an anchor that has no
   mount, so no absolute path can be resolved at that point.
+field: object.file.inode        required
+field: object.file.device       required
+  With `object.file.inode`, what names the file in place of a path: find it
+  with `find <mount> -xdev -inum <inode>` on the filesystem of that device.
+field: object.sd.length         required
+  The length of the stored attribute that failed: 0 when it was empty, and
+  more than 65,535 when it was too long to be a descriptor at all.
 field: outcome.reason           required
   values: corrupt
   closed: false
@@ -631,6 +856,13 @@ and the same record is written.
 no record.** KACS cannot encode the name and skips the event rather than
 write it, and the session is destroyed regardless.
 
+**The record follows the teardown, written by a kernel worker.** A session
+usually ends when a freed credential drops its last token, at a point where
+the record cannot be built, so KACS queues it and a kernel work item writes
+it moments later. Its header therefore names that kernel worker rather than
+the process whose exit or revert ended the session, and it can arrive after
+records that process wrote later.
+
 field: object.session.id           required
 field: object.session.user.sid     required
 field: object.session.logon-type   required
@@ -638,3 +870,105 @@ field: object.session.auth-package required
 field: object.session.logon-time   required
   When the session was created. KACS keeps it to the second, so the
   nanosecond value is always a whole number of seconds.
+
+--- event kacs.impersonation.started
+tier: standard
+gating: none — every impersonation attempt that names a client token is recorded
+cardinality: once per attempt
+
+The record that a thread took on, or tried to take on, a client's identity
+by impersonating its token. The subject is the server — the token that
+acted, as it stood before the switch — and the object is the client token.
+Successes and refusals are both recorded.
+
+Impersonation is per thread, so `emitter.thread.tid` names the thread that
+changed identity, not `emitter.process.pid`. Records the thread writes
+afterwards carry the client's token in their header, until a
+`kacs.impersonation.reverted` record ends it.
+
+**The level can be lowered without the attempt failing.**
+`object.token.impersonation` is the level the client token offered, and
+`object.token.impersonation-permitted` the level KACS let the server have.
+Where the second is lower — the server lacked SeImpersonatePrivilege for a
+different user, or the client's integrity was above the server's — the
+impersonation succeeded at Identification, which can query the client's
+identity but not act as it.
+
+**The GUID is the installed token's.** A lowered level installs a new token,
+so `object.token.guid` and `object.token.id` on a success are that token's,
+and they match the `emitter.token.guid` of the thread's later records.
+Exactly when the level was lowered they differ from the GUID of the token
+the client handed over.
+
+include: subject
+field: emitter.thread.tid               required
+field: object.kind                      required
+  Always `token`.
+field: object.token.guid                required
+field: object.token.id                  required
+field: object.token.sid                 required
+  The client: whose identity the server took on or asked for.
+field: object.token.type                required
+  `primary` only on a refusal: a primary token cannot be impersonated.
+field: object.token.integrity           required
+field: object.token.auth-id             optional
+  Absent only for a token with no logon session.
+field: object.token.restricted          required
+field: object.token.impersonation       required
+  The level the client token offered: the level asked for.
+field: object.token.impersonation-permitted  optional
+  The level the gate allowed. Absent when the attempt was refused before
+  the gate answered.
+field: privilege.name                   optional
+  `SeImpersonatePrivilege`, present when the server impersonated a different
+  user, or across a restriction difference, and needed the privilege to do
+  it at the level asked. The privilege is then marked used.
+field: privilege.held                   when privilege.name == SeImpersonatePrivilege
+  Always true where present: a server without the privilege is not refused
+  but lowered to Identification, which `impersonation-permitted` shows.
+field: outcome.success                  required
+field: outcome.errno                    when outcome.success == false
+field: outcome.reason                   optional
+  values: primary-token | restriction-escape | no-impersonate-access | projection-failed
+  closed: false
+  On a refusal, where KACS knows why: the token handed over was a primary
+  token (`EINVAL`); a restricted server tried to impersonate an unrestricted
+  token of its own user, which would escape its restriction (`EPERM`); the
+  token handle lacked `TOKEN_IMPERSONATE` (`EACCES`); or the identity could
+  not be projected onto the thread's Linux credentials. Absent on a refusal
+  for want of memory.
+
+--- event kacs.impersonation.reverted
+tier: verbose
+gating: none — every impersonation that ends is recorded
+cardinality: once per impersonation ended
+
+The record that a thread stopped impersonating and acts as its own token
+again. The subject is the thread's token after the revert; the object is
+the impersonation token it gave up, which a `kacs.impersonation.started`
+record named.
+
+**Verbose, because it is bookkeeping.** An API that impersonates per
+request reverts once per request too, and the start already carries the
+security decision.
+
+**Not every end is recorded.** A thread that exits while impersonating
+writes nothing: its credentials are released where no record can be built.
+And installing a new primary token does not end an impersonation — the
+impersonation is put back over the new token — so it writes nothing either.
+
+include: subject
+field: emitter.thread.tid               required
+field: object.kind                      required
+  Always `token`.
+field: object.token.guid                required
+  The impersonation token given up.
+field: object.token.sid                 required
+field: operation.name                   required
+  values: revert | exec | replaced
+  closed: false
+  `revert` is an explicit `kacs_revert`; `exec` the revert every exec
+  performs before the new image runs; `replaced` the implicit end of one
+  impersonation when the thread starts another.
+field: outcome.success                  required
+field: outcome.errno                    when outcome.success == false

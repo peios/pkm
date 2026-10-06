@@ -48,9 +48,10 @@ use crate::error::KacsError;
 use crate::lcs_core::casefold_eq;
 use crate::inheritance::{inherit_registry_container_child_sd, RegistryContainerChildInheritance};
 use crate::kmes_payload::{
-    emit_access_check_events_to_kmes, emit_handle_used_to_kmes,
+    emit_access_check_events_to_kmes, emit_gate_privilege_use_to_kmes, emit_handle_used_to_kmes,
+    emit_impersonation_reverted_to_kmes, emit_impersonation_started_to_kmes,
     encode_logon_session_destroyed_payload, emit_logon_session_destroyed_to_kmes, AuditObject,
-    AuditSubjectIds, AuditTarget, HandleUse,
+    AuditSubjectIds, AuditTarget, HandleUse, ImpersonationClient, PrivilegeGate,
 };
 use crate::mic::{
     IntegrityLevel, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, TOKEN_MANDATORY_POLICY_NEW_PROCESS_MIN,
@@ -248,6 +249,13 @@ static NEXT_DYNAMIC_TOKEN_ID: AtomicU64 = AtomicU64::new(DYNAMIC_LOGON_SESSION_L
 static NEXT_DYNAMIC_LOGON_SESSION_ID: AtomicU64 = AtomicU64::new(DYNAMIC_LOGON_SESSION_LUID_BASE);
 static LOGON_SESSION_LIST_HEAD: AtomicPtr<PkmKacsLogonSession> = AtomicPtr::new(null_mut());
 static LOGON_SESSION_TABLE_LOCK: AtomicBool = AtomicBool::new(false);
+/// Destroyed sessions whose `kacs.session.destroyed` record has not been
+/// written yet: a lock-free stack threaded through `audit_next`, drained by
+/// the session-audit work item. Each entry holds the session reference the
+/// session table used to hold, so the fields the record reads stay alive
+/// until it is written.
+static DESTROYED_SESSION_AUDIT_HEAD: AtomicPtr<PkmKacsLogonSession> =
+    AtomicPtr::new(null_mut());
 const ANONYMOUS_ONLY_GROUP_ATTRIBUTES: [u32; MAX_BOOT_GROUPS] = [
     SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED,
     0,
@@ -308,6 +316,7 @@ extern "C" {
     fn pkm_kacs_rcu_read_unlock();
     fn pkm_kacs_free_after_rcu(ptr: *mut c_void);
     fn pkm_kacs_fill_uuid_v4(out: *mut u8);
+    fn pkm_kacs_session_audit_schedule();
 }
 
 #[repr(C)]
@@ -522,6 +531,9 @@ struct PkmKacsLogonSession {
     own_sd_len: usize,
     live_tokens: AtomicUsize,
     destroying: AtomicBool,
+    /// Link in `DESTROYED_SESSION_AUDIT_HEAD`, the sessions whose
+    /// `kacs.session.destroyed` record is waiting for the audit work item.
+    audit_next: AtomicPtr<PkmKacsLogonSession>,
     linked_elevated: *const c_void,
     linked_filtered: *const c_void,
 }
@@ -783,17 +795,9 @@ impl PkmKacsLogonSession {
         linked_elevated: *const c_void,
         linked_filtered: *const c_void,
     ) {
-        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+        if unsafe { Self::from_ptr(ptr.cast()) }.is_none() {
             return;
-        };
-
-        let _ = emit_logon_session_destroyed_to_kmes(
-            session.logon_session_id,
-            session.user_sid.as_bytes(),
-            session.logon_type,
-            session.auth_package_bytes(),
-            session.created_at,
-        );
+        }
 
         if !linked_elevated.is_null() {
             unsafe { PkmKacsBootToken::drop_ref(linked_elevated) };
@@ -802,7 +806,71 @@ impl PkmKacsLogonSession {
             unsafe { PkmKacsBootToken::drop_ref(linked_filtered) };
         }
 
-        unsafe { Self::drop_ref(ptr) };
+        // The last token usually goes from an RCU callback (a cred freed
+        // after a revert or an exit), where the record's encoder cannot
+        // allocate. The record is written from a work item instead, and the
+        // table's reference travels with the session until it has been.
+        Self::defer_destroyed_audit(ptr);
+    }
+
+    /// Queues `ptr`'s `kacs.session.destroyed` record, taking over one
+    /// reference to it. Allocation-free and lock-free, so safe from any
+    /// context the last token drop can run in.
+    fn defer_destroyed_audit(ptr: *const Self) {
+        let Some(session) = (unsafe { Self::from_ptr(ptr.cast()) }) else {
+            return;
+        };
+        let node = ptr as *mut Self;
+        let mut head = DESTROYED_SESSION_AUDIT_HEAD.load(Ordering::Relaxed);
+
+        loop {
+            session.audit_next.store(head, Ordering::Relaxed);
+            match DESTROYED_SESSION_AUDIT_HEAD.compare_exchange_weak(
+                head,
+                node,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => head = current,
+            }
+        }
+
+        unsafe { pkm_kacs_session_audit_schedule() };
+    }
+
+    /// Writes every queued `kacs.session.destroyed` record, oldest first,
+    /// and drops the reference each queued session held. Process context.
+    fn drain_destroyed_audit() {
+        let mut list = DESTROYED_SESSION_AUDIT_HEAD.swap(null_mut(), Ordering::Acquire);
+        let mut ordered: *mut Self = null_mut();
+
+        // The stack is newest first; reverse it so records keep the order
+        // the sessions ended in.
+        while !list.is_null() {
+            let session = unsafe { &*list };
+            let next = session.audit_next.load(Ordering::Relaxed);
+
+            session.audit_next.store(ordered, Ordering::Relaxed);
+            ordered = list;
+            list = next;
+        }
+
+        while !ordered.is_null() {
+            let session = unsafe { &*ordered };
+            let next = session.audit_next.load(Ordering::Relaxed);
+
+            session.audit_next.store(null_mut(), Ordering::Relaxed);
+            let _ = emit_logon_session_destroyed_to_kmes(
+                session.logon_session_id,
+                session.user_sid.as_bytes(),
+                session.logon_type,
+                session.auth_package_bytes(),
+                session.created_at,
+            );
+            unsafe { Self::drop_ref(ordered) };
+            ordered = next;
+        }
     }
 
     fn destroy_published_logon_session(ptr: *const Self) {
@@ -2329,6 +2397,7 @@ fn create_logon_session_object(
                 own_sd_len,
                 live_tokens: AtomicUsize::new(0),
                 destroying: AtomicBool::new(false),
+                audit_next: AtomicPtr::new(null_mut()),
                 linked_elevated: null(),
                 linked_filtered: null(),
             },
@@ -5136,7 +5205,13 @@ impl PkmKacsBootToken {
             None,
             false,
             true,
-            0,
+            // SYSTEM's services are where SeTcbPrivilege is spent, so the
+            // boot SYSTEM token records successful privilege use: without
+            // it "who used SeTcbPrivilege, and for what" is unanswerable on
+            // a stock machine. Every privilege use is recorded — at a Linux
+            // capability gate once per process and gate, and in an access
+            // check (SeBackup, SeSecurity and the like) once per check.
+            AUDIT_POLICY_PRIVILEGE_USE_SUCCESS,
         )
     }
 
@@ -7988,6 +8063,11 @@ fn emit_internal_access_check_events(
         subject_ids: Some(subject.audit_subject_ids()),
         object,
         asserted: false,
+        sacl_audit_suppressed: false,
+        denials: crate::kmes_payload::AccessDenials {
+            integrity: state.denied_integrity,
+            trust: state.denied_trust,
+        },
     };
 
     emit_access_check_events_to_kmes(
@@ -8737,6 +8817,9 @@ fn emit_file_set_sd_audit_events(
             subject_ids: Some(subject.audit_subject_ids()),
             object: AuditObject::Kind(b"file"),
             asserted: false,
+            sacl_audit_suppressed: false,
+            // Only the new SACL is walked here: no check, so no denial.
+            denials: crate::kmes_payload::AccessDenials::default(),
         };
 
         emit_access_check_events_to_kmes(audit_events.as_slice(), &[], &[], resolved, pip, &target)
@@ -8895,15 +8978,15 @@ fn mnt_ns_sd_access_check_errno(
     desired: u32,
     pip: PipContext,
 ) -> Result<u32, i32> {
-    // `object.kind` has no value for a mount namespace, so its records name
-    // no object rather than a wrong one.
+    // The namespace has no identity a record could carry, so its records
+    // name the kind alone.
     object_sd_access_check_errno(
         subject_token,
         sd_bytes,
         desired,
         &MNTNS_GENERIC_MAPPING,
         pip,
-        AuditObject::Unknown,
+        AuditObject::Kind(b"mount-namespace"),
     )
 }
 
@@ -9043,6 +9126,13 @@ pub extern "C" fn kacs_rust_create_logon_session(
 /// or in-flight kernel reference.
 pub extern "C" fn kacs_rust_destroy_empty_logon_session(auth_id: u64) -> i32 {
     PkmKacsLogonSession::destroy_empty_published_logon_session(auth_id)
+}
+
+#[no_mangle]
+/// Writes the `kacs.session.destroyed` records queued by session teardown.
+/// Called only from the session-audit work item, in process context.
+pub extern "C" fn kacs_rust_session_audit_drain() {
+    PkmKacsLogonSession::drain_destroyed_audit();
 }
 
 #[no_mangle]
@@ -9580,6 +9670,436 @@ pub extern "C" fn kacs_rust_token_impersonation_gate(
         }
         Err(err) => err,
     }
+}
+
+/// `outcome.reason` values of `kacs.impersonation.started`, by the code the
+/// C caller passes (`PKM_KACS_IMP_REASON_*` in token_fd.c).
+fn impersonation_reason(reason: u32) -> Option<&'static [u8]> {
+    match reason {
+        1 => Some(b"primary-token"),
+        2 => Some(b"restriction-escape"),
+        3 => Some(b"no-impersonate-access"),
+        4 => Some(b"projection-failed"),
+        _ => None,
+    }
+}
+
+#[no_mangle]
+/// Writes `kacs.impersonation.started` for one impersonation attempt by
+/// `server_token` with `client_token`. `installed_token` is the token put on
+/// the thread, or null when the attempt failed; on success its GUID and LUID
+/// are the record's, since a clamped level mints a new token.
+/// `permitted_level` is the gate's answer, or `u32::MAX` when the gate did
+/// not answer. Best effort: the result does not change the impersonation.
+pub extern "C" fn kacs_rust_emit_impersonation_started(
+    server_token: *const c_void,
+    client_token: *const c_void,
+    installed_token: *const c_void,
+    permitted_level: u32,
+    used_impersonate: bool,
+    errno: i32,
+    reason: u32,
+    tid: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(server) = (unsafe { PkmKacsBootToken::from_ptr(server_token) }) else {
+        return -EINVAL;
+    };
+    let Some(client) = (unsafe { PkmKacsBootToken::from_ptr(client_token) }) else {
+        return -EINVAL;
+    };
+    let installed = unsafe { PkmKacsBootToken::from_ptr(installed_token) }.unwrap_or(client);
+    let record = ImpersonationClient {
+        guid: installed.token_guid,
+        id: installed.token_id,
+        sid: client.user_sid.as_bytes(),
+        token_type: client.token_type,
+        integrity: client.integrity_level.0,
+        auth_id: client.audit_subject_ids().auth_id,
+        restricted: client.restricted,
+        requested: client.impersonation_level,
+        permitted: (permitted_level != u32::MAX).then_some(permitted_level),
+        used_impersonate,
+    };
+    let ids = server.audit_subject_ids();
+
+    server.with_access_token(|access_token| {
+        match emit_impersonation_started_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            tid,
+            &record,
+            errno,
+            impersonation_reason(reason),
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+/// `operation.name` values of `kacs.impersonation.reverted`, by the code the
+/// C caller passes (`PKM_KACS_REVERT_*` in primary_token.c).
+fn impersonation_revert_operation(cause: u32) -> Option<&'static [u8]> {
+    match cause {
+        1 => Some(b"revert"),
+        2 => Some(b"exec"),
+        3 => Some(b"replaced"),
+        _ => None,
+    }
+}
+
+#[repr(C)]
+/// `struct pkm_kacs_sd_change_view` (sd_access.h): one descriptor change for
+/// `kacs.audit.descriptor.changed`. Field for field the C layout.
+pub struct PkmKacsSdChangeView {
+    pub subject_token: *const c_void,
+    pub object_token: *const c_void,
+    pub file_path: *const u8,
+    pub file_path_len: usize,
+    pub process_guid: *const u8,
+    pub old_sd: *const u8,
+    pub old_sd_len: usize,
+    pub new_sd: *const u8,
+    pub new_sd_len: usize,
+    pub ipc_id: i64,
+    pub old_digest: [u8; 32],
+    pub new_digest: [u8; 32],
+    pub kind: u32,
+    pub ipc_type: u32,
+    pub security_info: u32,
+    pub requested: u32,
+    pub granted: u32,
+    pub audit_mask: u32,
+    pub has_handle: u32,
+    pub pip_type: u32,
+    pub pip_trust: u32,
+    pub err: i32,
+}
+
+/// One side of a descriptor change, from its bytes and digest.
+fn descriptor_facts<'a>(
+    bytes: *const u8,
+    len: usize,
+    digest: &[u8; 32],
+) -> Option<crate::kmes_payload::DescriptorFacts<'a>> {
+    if bytes.is_null() || len == 0 {
+        return None;
+    }
+    let bytes: &'a [u8] = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let owner = SecurityDescriptor::parse(bytes)
+        .ok()
+        .and_then(|sd| sd.owner())
+        .map(|owner| owner.as_bytes());
+    Some(crate::kmes_payload::DescriptorFacts {
+        len,
+        digest: *digest,
+        owner,
+    })
+}
+
+#[no_mangle]
+/// Writes `kacs.audit.descriptor.changed` for one descriptor change; see
+/// `pkm_kacs_audit_descriptor_changed()`. Best effort.
+pub extern "C" fn kacs_rust_emit_descriptor_changed(chg: *const PkmKacsSdChangeView) -> i32 {
+    use crate::kmes_payload::{DescriptorChange, DescriptorObject};
+
+    let Some(chg) = (unsafe { chg.as_ref() }) else {
+        return -EINVAL;
+    };
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(chg.subject_token) }) else {
+        return -EINVAL;
+    };
+    let object = match chg.kind {
+        1 => DescriptorObject::File {
+            path: (!chg.file_path.is_null() && chg.file_path_len != 0).then(|| unsafe {
+                core::slice::from_raw_parts(chg.file_path, chg.file_path_len)
+            }),
+        },
+        2 => {
+            let Some(target) = (unsafe { PkmKacsBootToken::from_ptr(chg.object_token) }) else {
+                return -EINVAL;
+            };
+            DescriptorObject::Token {
+                id: target.token_id,
+                guid: target.token_guid,
+            }
+        }
+        3 => {
+            if chg.process_guid.is_null() {
+                return -EINVAL;
+            }
+            let mut guid = [0u8; KACS_UUID_BYTES];
+            unsafe { copy_nonoverlapping(chg.process_guid, guid.as_mut_ptr(), KACS_UUID_BYTES) };
+            DescriptorObject::Process { guid }
+        }
+        4 => DescriptorObject::Ipc {
+            kind: match chg.ipc_type {
+                1 => b"sem",
+                2 => b"shm",
+                3 => b"msg",
+                _ => return -EINVAL,
+            },
+            id: chg.ipc_id,
+        },
+        _ => return -EINVAL,
+    };
+    let change = DescriptorChange {
+        object,
+        components: chg.security_info,
+        previous: descriptor_facts(chg.old_sd, chg.old_sd_len, &chg.old_digest),
+        current: if chg.err == 0 {
+            descriptor_facts(chg.new_sd, chg.new_sd_len, &chg.new_digest)
+        } else {
+            None
+        },
+        requested: chg.requested,
+        handle: (chg.has_handle != 0).then_some((chg.granted, chg.audit_mask)),
+        errno: chg.err,
+    };
+    let ids = subject.audit_subject_ids();
+
+    subject.with_access_token(|access_token| {
+        match crate::kmes_payload::emit_descriptor_changed_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(chg.pip_type, chg.pip_trust),
+            &change,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+#[no_mangle]
+/// Writes `kacs.caap.policy.changed`: `token` installed or replaced
+/// (`removed` false) or removed the central access policy `policy_sid`, with
+/// `errno` 0 on success. Best effort.
+pub extern "C" fn kacs_rust_emit_caap_policy_changed(
+    token: *const c_void,
+    policy_sid_ptr: *const u8,
+    policy_sid_len: usize,
+    removed: bool,
+    errno: i32,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    if policy_sid_ptr.is_null() || policy_sid_len == 0 {
+        return -EINVAL;
+    }
+    let policy_sid = unsafe { core::slice::from_raw_parts(policy_sid_ptr, policy_sid_len) };
+    let ids = token.audit_subject_ids();
+
+    token.with_access_token(|access_token| {
+        match crate::kmes_payload::emit_caap_policy_changed_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            policy_sid,
+            removed,
+            errno,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+#[no_mangle]
+/// Writes `kacs.mount.policy.changed`: `token` set the mount policy of a
+/// filesystem of type `fs_type` from `previous` to `policy`, now at
+/// `generation`. Best effort.
+pub extern "C" fn kacs_rust_emit_mount_policy_changed(
+    token: *const c_void,
+    fs_type_ptr: *const u8,
+    fs_type_len: usize,
+    policy: u32,
+    previous: u32,
+    generation: u32,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    let fs_type: &[u8] = if fs_type_ptr.is_null() {
+        b""
+    } else {
+        unsafe { core::slice::from_raw_parts(fs_type_ptr, fs_type_len) }
+    };
+    let ids = token.audit_subject_ids();
+
+    token.with_access_token(|access_token| {
+        match crate::kmes_payload::emit_mount_policy_changed_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            fs_type,
+            policy,
+            previous,
+            generation,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+#[no_mangle]
+/// Writes `kacs.descriptor.rejected` for a file whose stored descriptor,
+/// `sd_len` bytes, failed validation. `token` is the effective token of the
+/// task that read it, or null to write the record without a subject.
+pub extern "C" fn kacs_rust_emit_descriptor_rejected(
+    token: *const c_void,
+    inode: u64,
+    device: u64,
+    sd_len: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let result = match unsafe { PkmKacsBootToken::from_ptr(token) } {
+        Some(token) => {
+            let ids = token.audit_subject_ids();
+            token.with_access_token(|access_token| {
+                crate::kmes_payload::emit_descriptor_rejected_to_kmes(
+                    Some((&access_token, &ids, pip_context_from_abi(pip_type, pip_trust))),
+                    inode,
+                    device,
+                    sd_len,
+                )
+            })
+        }
+        None => crate::kmes_payload::emit_descriptor_rejected_to_kmes(None, inode, device, sd_len),
+    };
+    match result {
+        Ok(()) => 0,
+        Err(err) => err as i32,
+    }
+}
+
+#[no_mangle]
+/// An allocated copy of the token's own descriptor, for the caller to free
+/// with `pkm_kacs_free`. `*out_sd_ptr` is null on failure.
+pub extern "C" fn kacs_rust_token_own_sd_copy(
+    token: *const c_void,
+    out_sd_ptr: *mut *const u8,
+    out_sd_len: *mut usize,
+) -> i32 {
+    let (Some(out_sd_ptr), Some(out_sd_len)) =
+        (unsafe { out_sd_ptr.as_mut() }, unsafe { out_sd_len.as_mut() })
+    else {
+        return -EINVAL;
+    };
+    *out_sd_ptr = null();
+    *out_sd_len = 0;
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EACCES;
+    };
+    let copy = match token.own_sd_rcu_copy() {
+        Ok(copy) => copy,
+        Err(err) => return err,
+    };
+    if copy.is_empty() {
+        return -ENODATA;
+    }
+    *out_sd_ptr = copy.ptr.cast_const();
+    *out_sd_len = copy.len;
+    // Ownership of the allocation passes to the caller.
+    core::mem::forget(copy);
+    0
+}
+
+#[no_mangle]
+/// The token's audit policy (`KACS_AUDIT_POLICY_*`), fixed at creation, or 0
+/// for a null token. Lock-free: the field never changes.
+pub extern "C" fn kacs_rust_token_audit_policy(token: *const c_void) -> u32 {
+    unsafe { PkmKacsBootToken::from_ptr(token) }.map_or(0, |token| token.audit_policy)
+}
+
+#[no_mangle]
+/// Writes `kacs.audit.privilege.used` for `privilege`, one privilege bit,
+/// spent by `token` at a Linux capability gate (`operation` 1, `cap` the
+/// capability) or the volume-management gate (`operation` 2). The caller
+/// has applied the gating; this only builds and writes. Process context.
+pub extern "C" fn kacs_rust_emit_privilege_use(
+    token: *const c_void,
+    operation: u32,
+    cap: i32,
+    privilege: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    let gate = match operation {
+        1 => match u32::try_from(cap) {
+            Ok(cap) => PrivilegeGate::LinuxCap(cap),
+            Err(_) => return -EINVAL,
+        },
+        2 => PrivilegeGate::VolumeMount,
+        _ => return -EINVAL,
+    };
+    let ids = token.audit_subject_ids();
+
+    token.with_access_token(|access_token| {
+        match emit_gate_privilege_use_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            gate,
+            privilege,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+#[no_mangle]
+/// Writes `kacs.impersonation.reverted`: the thread now acts as
+/// `subject_token` and gave up `dropped_token` for `cause`. Best effort.
+pub extern "C" fn kacs_rust_emit_impersonation_reverted(
+    subject_token: *const c_void,
+    dropped_token: *const c_void,
+    cause: u32,
+    errno: i32,
+    tid: u64,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token) }) else {
+        return -EINVAL;
+    };
+    let Some(dropped) = (unsafe { PkmKacsBootToken::from_ptr(dropped_token) }) else {
+        return -EINVAL;
+    };
+    let Some(operation) = impersonation_revert_operation(cause) else {
+        return -EINVAL;
+    };
+    let ids = subject.audit_subject_ids();
+
+    subject.with_access_token(|access_token| {
+        match emit_impersonation_reverted_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            tid,
+            &dropped.token_guid,
+            dropped.user_sid.as_bytes(),
+            operation,
+            errno,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
 }
 
 #[no_mangle]
@@ -12231,19 +12751,51 @@ impl<'a> Iterator for PortTableBlobIter<'a> {
 }
 
 /// Parses and validates a serialised table blob into a table borrowing it.
+/// The registry key the port reservation table is read from, as
+/// `config.key.path` names it.
+const PORT_TABLE_KEY_PATH: &[u8] = b"Machine\\System\\Network\\TcpIp\\PortReservations";
+
+/// `kacs.config.value.rejected` for a port reservation table refused whole.
+/// Best effort: the table in force stays whatever becomes of the record.
+fn emit_port_table_rejected(name: Option<&[u8]>, reason: &[u8], errno: i32) {
+    let _ = crate::kmes_payload::emit_config_value_rejected_to_kmes(
+        PORT_TABLE_KEY_PATH,
+        name,
+        reason,
+        errno,
+        PORT_TABLE_PTR.load(Ordering::Acquire).is_null(),
+    );
+}
+
+/// Validates a serialised table, recording why when it is refused.
 fn port_table_from_blob(blob: &[u8]) -> Result<PortReservationTable<'_>, i32> {
     let mut iter = PortTableBlobIter {
         rest: blob,
         failed: false,
     };
-    let table = PortReservationTable::from_values(&mut iter).map_err(|err| match err {
-        KacsError::AllocationFailure => -ENOMEM,
-        _ => -EINVAL,
-    })?;
+    let result = PortReservationTable::from_values_explained(&mut iter);
     if iter.failed {
+        // The blob's own framing broke: the serialiser's fault, not a value's.
+        emit_port_table_rejected(None, b"malformed", -EINVAL);
         return Err(-EINVAL);
     }
-    Ok(table)
+    match result {
+        Ok(table) => Ok(table),
+        Err(rejection) => match rejection.reason() {
+            Some(reason) => {
+                emit_port_table_rejected(rejection.name, reason.as_bytes(), -EINVAL);
+                Err(-EINVAL)
+            }
+            None => Err(-ENOMEM),
+        },
+    }
+}
+
+#[no_mangle]
+/// Records a port reservation key with no values at all: not a table, so
+/// the one in force stays. Called by the C refresh, which finds the key empty.
+pub extern "C" fn kacs_rust_port_table_reject_empty() {
+    emit_port_table_rejected(None, b"empty", -EINVAL);
 }
 
 fn port_protocol_from_abi(protocol: u32) -> Option<PortProtocol> {
@@ -12401,6 +12953,7 @@ pub extern "C" fn kacs_rust_port_table_replace(blob_ptr: *const u8, blob_len: us
         return err;
     }
     if blob_len > PORT_TABLE_MAX_BLOB_BYTES {
+        emit_port_table_rejected(None, b"too-large", -E2BIG);
         return -E2BIG;
     }
     let new_ptr = unsafe { pkm_kacs_zalloc(blob_len) } as *mut u8;

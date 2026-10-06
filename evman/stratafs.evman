@@ -147,11 +147,16 @@ but cannot say who the actor was.
 `stratafs.mutation.refused` for it finds nothing; the record exists under
 this type with every field present.
 
-field: object.file.path-relative    required
+field: object.file.path-relative    optional
+  Absent only from a reduced record: when the memory for the full record
+  could not be had, the kernel writes the record without its paths rather
+  than lose it.
 field: source.stratum.index         required
-field: source.stratum.path          required
+field: source.stratum.path          optional
+  Absent only from a reduced record, with the other paths.
 field: destination.stratum.index    required
-field: destination.stratum.path     required
+field: destination.stratum.path     optional
+  Absent only from a reduced record, with the other paths.
 field: outcome.success              required
 field: outcome.errno                when outcome.success == false
 
@@ -189,7 +194,10 @@ on every path operation, reveal nothing the resulting access check does
 not, and recording them would produce volume out of all proportion to their
 significance.
 
-field: object.file.path-relative    required
+field: object.file.path-relative    optional
+  Absent only from a reduced record: when the memory for the full record
+  could not be had, the kernel writes the record without its paths rather
+  than lose it.
 field: operation.name               required
   values: copy-file-range | copy-up-publication-rollback | create | create-rollback | fallocate | link | link-rollback | mmap | remap-file-range | removexattr | rename | rmdir | setattr | setxattr | splice-write | supersede | supersede-publication | tmpfile | truncate | unlink | write
   closed: false
@@ -198,7 +206,8 @@ field: operation.name               required
 field: source.stratum.index         optional
   Absent when the refusal was raised before any provider was determined.
 field: source.stratum.path          optional
-  Present exactly when `source.stratum.index` is.
+  Present exactly when `source.stratum.index` is, except in a reduced
+  record, which carries no paths.
 field: outcome.errno                required
 field: outcome.deferred             required
   Whether the refusal was deferred — set on rollbacks and on deferred

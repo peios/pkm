@@ -43,6 +43,8 @@ pub struct EvaluateSecurityDescriptorState<'a> {
     pub policy_sids: Vec<Sid<'a>>,
     /// Bits decided specifically by PIP.
     pub pip_decided: u32,
+    /// Bits decided specifically by MIC.
+    pub mic_decided: u32,
     /// Final privilege provenance.
     pub provenance: PrivilegeProvenance,
     /// Final per-node granted list when object-tree mode is active.
@@ -275,6 +277,7 @@ pub fn evaluate_security_descriptor<'a>(
         resource_attributes: pre_sacl.resource_attributes,
         policy_sids: pre_sacl.policy_sids,
         pip_decided: pre_sacl.pip_decided,
+        mic_decided: pre_sacl.mic_decided,
         provenance,
         object_granted_list,
     })

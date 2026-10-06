@@ -2401,6 +2401,7 @@ static void pkm_kunit_logon_session_destroy_last_token_emits_kmes(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	flush_delayed_fput();
 	kacs_rust_token_drop(token_ptr);
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(logon_session_id, &snapshot),
 			-EACCES);
@@ -2451,6 +2452,315 @@ static void pkm_kunit_logon_session_destroy_last_token_emits_kmes(
 						 view.payload_len,
 							 pkm_kunit_local_service_sid,
 							 sizeof(pkm_kunit_local_service_sid)));
+}
+
+
+/*
+ * Mint a SYSTEM-SID token of `token_type` in a fresh network session and
+ * return an fd on it.
+ */
+static long pkm_kunit_mint_system_sid_token_fd(struct kunit *test,
+					       u32 token_type, u32 level)
+{
+	static const u8 source_name[8] = {
+		'I', 'm', 'p', 'A', 'u', 'd', 0, 0,
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = token_type,
+		.impersonation_level = level,
+		.integrity_level = PKM_KUNIT_IL_SYSTEM,
+		.mandatory_policy = 0x00000003U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_system_sid,
+		.user_sid_len = sizeof(pkm_kunit_system_sid),
+	};
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	const void *primary_token = pkm_kacs_current_primary_token_ptr();
+	size_t session_spec_len;
+	size_t token_spec_len;
+	u64 logon_session_id = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+	session_spec_len = pkm_kunit_build_logon_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_system_sid, sizeof(pkm_kunit_system_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_logon_session_for_subject(
+				primary_token, session_spec, session_spec_len,
+				&logon_session_id),
+			0L);
+	spec_args.logon_session_id = logon_session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	return pkm_kacs_kunit_create_token_for_subject(primary_token, token_spec,
+						       token_spec_len);
+}
+
+/*
+ * PKM §3.5: an impersonation writes kacs.impersonation.started, naming the
+ * server as subject and the client token as object, with the level asked
+ * for and the level the gate permitted; the thread that took the identity
+ * on is emitter.thread.tid. Reverting writes kacs.impersonation.reverted,
+ * naming the token given up and why.
+ */
+static void pkm_kunit_impersonation_started_and_reverted_records(
+	struct kunit *test)
+{
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view emitter = { };
+	struct pkm_kunit_msgpack_view thread = { };
+	struct pkm_kunit_msgpack_view object = { };
+	struct pkm_kunit_msgpack_view token = { };
+	struct pkm_kunit_msgpack_view guid = { };
+	struct pkm_kunit_msgpack_view operation = { };
+	struct pkm_kunit_msgpack_view outcome = { };
+	const void *primary_token;
+	u8 started_guid[16] = { };
+	u8 *buffer;
+	long fd;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	fd = pkm_kunit_mint_system_sid_token_fd(test,
+						KACS_TOKEN_TYPE_IMPERSONATION,
+						KACS_IMLEVEL_IMPERSONATION);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			0L);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.impersonation.started", buffer,
+				  &view));
+	/* Same user, same restriction: no privilege was needed. */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 4));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "privilege"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "emitter", 2U, &emitter));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &emitter, "thread", 1U, &thread));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &thread, "tid",
+					(u64)task_pid_nr(current)));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "object", 2U, &object));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &object, "kind", "token"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &object, "token", 9U, &token));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &token, "type", "impersonation"));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bin_key(
+					test, &token, "sid", pkm_kunit_system_sid,
+					sizeof(pkm_kunit_system_sid)));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &token, "impersonation",
+					KACS_IMLEVEL_IMPERSONATION));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &token, "impersonation-permitted",
+					KACS_IMLEVEL_IMPERSONATION));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &token, "restricted", false));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_key(
+					test, &token, "guid",
+					PKM_KUNIT_MSGPACK_BIN, &guid));
+	KUNIT_ASSERT_EQ(test, guid.data_len, sizeof(started_guid));
+	memcpy(started_guid, guid.data_ptr, sizeof(started_guid));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "outcome", 1U, &outcome));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &outcome, "success", true));
+
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.impersonation.reverted", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 5));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "operation", 1U,
+					&operation));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &operation, "name", "revert"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "object", 2U, &object));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &object, "token", 2U, &token));
+	/* The token given up is the one the started record named. */
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bin_key(
+					test, &token, "guid", started_guid,
+					sizeof(started_guid)));
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kunit_reset_kmes();
+}
+
+/*
+ * A refused impersonation is recorded too: a primary token cannot be
+ * impersonated, and the record says so with its errno and reason.
+ */
+static void pkm_kunit_impersonation_started_records_refusal(
+	struct kunit *test)
+{
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view outcome = { };
+	struct pkm_kunit_msgpack_view object = { };
+	struct pkm_kunit_msgpack_view token = { };
+	const void *primary_token;
+	u8 *buffer;
+	long fd;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_EQ(test, pkm_kacs_revert_impersonation(), 0);
+	primary_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, primary_token);
+
+	fd = pkm_kunit_mint_system_sid_token_fd(test, KACS_TOKEN_TYPE_PRIMARY,
+						KACS_IMLEVEL_DELEGATION);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test,
+			pkm_kacs_kunit_token_fd_impersonate((int)fd,
+							   primary_token),
+			(long)-EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.impersonation.started", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 4));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "object", 2U, &object));
+	/* The gate never answered, so there is no permitted level. */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &object, "token", 8U, &token));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &token, "type", "primary"));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &token, "impersonation-permitted"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "outcome", 3U, &outcome));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &outcome, "success", false));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_int_key(
+					test, &outcome, "errno", -EINVAL));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &outcome, "reason", "primary-token"));
+
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_kunit_reset_kmes();
+}
+
+/*
+ * A session's last token can go from an RCU callback, where nothing may
+ * sleep or allocate GFP_KERNEL. The drop here runs inside an RCU read-side
+ * section, which is atomic in the same way, so the teardown must queue the
+ * record rather than encode it; the record then arrives from the work item.
+ * Before the work item existed this drop allocated in atomic context.
+ */
+static void pkm_kunit_logon_session_destroyed_deferred_from_atomic(
+	struct kunit *test)
+{
+	static const u8 source_name[8] = {
+		'A', 'u', 't', 'h', 'd', 0, 0, 0,
+	};
+	struct pkm_kunit_token_spec_args spec_args = {
+		.token_type = KACS_TOKEN_TYPE_PRIMARY,
+		.impersonation_level = KACS_IMLEVEL_DELEGATION,
+		.integrity_level = PKM_KUNIT_IL_MEDIUM,
+		.mandatory_policy = 0x00000003U,
+		.source_name = source_name,
+		.user_sid = pkm_kunit_local_service_sid,
+		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
+	};
+	u8 session_spec[64] = { };
+	u8 token_spec[256] = { };
+	struct pkm_kacs_logon_session_snapshot snapshot = { };
+	struct pkm_kmes_kunit_snapshot kmes_snapshot = { };
+	struct pkm_kunit_kmes_event_view view = { };
+	u8 *buffer;
+	const void *subject_token;
+	const void *token_ptr = NULL;
+	u64 logon_session_id = 0;
+	size_t session_spec_len;
+	size_t token_spec_len;
+	size_t written = 0;
+	long fd;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	subject_token = pkm_kacs_current_primary_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	session_spec_len = pkm_kunit_build_logon_session_spec(
+		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
+		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
+	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_create_logon_session_for_subject(
+				subject_token, session_spec, session_spec_len,
+				&logon_session_id),
+			0L);
+
+	spec_args.logon_session_id = logon_session_id;
+	token_spec_len = pkm_kunit_build_token_spec(token_spec,
+						    sizeof(token_spec),
+						    &spec_args);
+	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
+	fd = pkm_kacs_kunit_create_token_for_subject(subject_token, token_spec,
+						     token_spec_len);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_token_fd_clone_token((int)fd, &token_ptr,
+						      NULL),
+			0);
+	KUNIT_ASSERT_NOT_NULL(test, token_ptr);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	flush_delayed_fput();
+
+	pkm_kunit_reset_kmes();
+	rcu_read_lock();
+	kacs_rust_token_drop(token_ptr);
+	rcu_read_unlock();
+
+	/* The session is gone at once; its record follows from the work. */
+	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(logon_session_id, &snapshot),
+			-EACCES);
+	pkm_kacs_session_audit_flush();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_single_buffer(
+				buffer, PKM_KUNIT_KMES_CAPTURE_BYTES, &written,
+				&kmes_snapshot),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_parse_kmes_event(buffer, written, &view));
+	KUNIT_EXPECT_EQ(test, kmes_snapshot.last_sequence, 1ULL);
+	pkm_kunit_expect_bytes_eq(test, view.type_ptr, view.type_len,
+				  (const u8 *)"kacs.session.destroyed",
+				  sizeof("kacs.session.destroyed") - 1);
+	KUNIT_EXPECT_TRUE(test,
+			  pkm_kunit_contains_bytes(view.payload_ptr,
+						 view.payload_len,
+						 (const u8 *)"Kerberos",
+						 sizeof("Kerberos") - 1));
 }
 
 
@@ -2522,6 +2832,7 @@ static void pkm_kunit_logon_session_destroyed_msgpack_schema(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	flush_delayed_fput();
 	kacs_rust_token_drop(token_ptr);
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test,
 			kacs_rust_kunit_logon_session_snapshot(logon_session_id,
@@ -2576,6 +2887,7 @@ static void pkm_kunit_destroy_empty_logon_session_success_emits_kmes(
 			pkm_kacs_kunit_destroy_empty_logon_session_for_subject(
 				subject_token, logon_session_id),
 			0L);
+	pkm_kacs_session_audit_flush();
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(logon_session_id, &snapshot),
 			-EACCES);
 	KUNIT_ASSERT_EQ(test,
@@ -2735,7 +3047,7 @@ static void pkm_kunit_current_token_resolution(struct kunit *test)
 	ret = pkm_kacs_resolve_current_effective_ctx(&effective);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, effective.kind, PKM_KACS_RESOLVED_CTX_TOKEN);
-	KUNIT_EXPECT_EQ(test, effective._reserved, 0U);
+	KUNIT_EXPECT_EQ(test, effective.flags, 0U);
 	KUNIT_EXPECT_PTR_EQ(test, effective.token, effective_token);
 	KUNIT_EXPECT_PTR_EQ(test, effective.caap_cache, NULL);
 	KUNIT_EXPECT_EQ(test, effective.default_pip_type, 0U);
@@ -2744,7 +3056,7 @@ static void pkm_kunit_current_token_resolution(struct kunit *test)
 	ret = pkm_kacs_resolve_current_primary_ctx(&primary);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
 	KUNIT_EXPECT_EQ(test, primary.kind, PKM_KACS_RESOLVED_CTX_TOKEN);
-	KUNIT_EXPECT_EQ(test, primary._reserved, 0U);
+	KUNIT_EXPECT_EQ(test, primary.flags, 0U);
 	KUNIT_EXPECT_PTR_EQ(test, primary.token, primary_token);
 	KUNIT_EXPECT_PTR_EQ(test, primary.caap_cache, NULL);
 	KUNIT_EXPECT_EQ(test, primary.default_pip_type, 0U);
@@ -8656,6 +8968,7 @@ static void pkm_kunit_linked_logon_session_destroy_emits_single_kmes_event(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)pair.filtered_fd), 0);
 	flush_delayed_fput();
 	pair.filtered_fd = -1;
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(pair.logon_session_id,
 							       &snapshot),
@@ -8712,6 +9025,7 @@ static void pkm_kunit_linked_logon_session_destroy_waits_for_external_fd(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)pair.filtered_fd), 0);
 	flush_delayed_fput();
 	pair.filtered_fd = -1;
+	pkm_kacs_session_audit_flush();
 
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(pair.logon_session_id,
 							       &snapshot),
@@ -8723,6 +9037,7 @@ static void pkm_kunit_linked_logon_session_destroy_waits_for_external_fd(
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)pair.elevated_fd), 0);
 	flush_delayed_fput();
 	pair.elevated_fd = -1;
+	pkm_kacs_session_audit_flush();
 	KUNIT_EXPECT_EQ(test, kacs_rust_kunit_logon_session_snapshot(pair.logon_session_id,
 							       &snapshot),
 			-EACCES);
@@ -12840,7 +13155,7 @@ static void pkm_kunit_privilege_use_msgpack_schema(struct kunit *test)
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
 				  KACS_ACCESS_ACCESS_SYSTEM_SECURITY,
 				  PKM_KUNIT_SYSTEM_READ_CONTROL_GRANT, true,
-				  NULL));
+				  NULL, true));
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	kacs_rust_token_drop(target_token);
@@ -13189,6 +13504,9 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_create_token_max_groups_succeeds),
 	KUNIT_CASE(pkm_kunit_create_token_over_max_groups_fails_closed),
 	KUNIT_CASE(pkm_kunit_logon_session_destroy_last_token_emits_kmes),
+	KUNIT_CASE(pkm_kunit_logon_session_destroyed_deferred_from_atomic),
+	KUNIT_CASE(pkm_kunit_impersonation_started_and_reverted_records),
+	KUNIT_CASE(pkm_kunit_impersonation_started_records_refusal),
 	KUNIT_CASE(pkm_kunit_logon_session_destroyed_msgpack_schema),
 	KUNIT_CASE(pkm_kunit_destroy_empty_logon_session_success_emits_kmes),
 	KUNIT_CASE(pkm_kunit_destroy_empty_logon_session_requires_tcb),

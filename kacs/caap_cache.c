@@ -16,6 +16,7 @@
 
 #include <pkm/token.h>
 
+#include "access_check.h"
 #include "caap_cache.h"
 #include "token_runtime.h"
 
@@ -171,6 +172,31 @@ out:
 	return ret;
 }
 
+/*
+ * kacs.caap.policy.changed (PKM §3.8.8): a central access policy installed,
+ * replaced or removed by a caller the TCB gate admitted, whether or not the
+ * change then applied. A policy changes the access decisions of every
+ * object that names it, so the record is essential. Best effort.
+ */
+static void pkm_kacs_audit_caap_policy_changed(const void *token,
+					       const void *policy_sid,
+					       u32 policy_sid_len, bool removed,
+					       int ret)
+{
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+
+	if (!token || !policy_sid || !policy_sid_len)
+		return;
+	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
+		pip_type = 0;
+		pip_trust = 0;
+	}
+	(void)kacs_rust_emit_caap_policy_changed(token, policy_sid,
+						 policy_sid_len, removed,
+						 (s32)ret, pip_type, pip_trust);
+}
+
 static __maybe_unused int pkm_kacs_set_caap_for_token(const void *token, const void *policy_sid,
 				       u32 policy_sid_len, const void *spec,
 				       u32 spec_len)
@@ -181,8 +207,11 @@ static __maybe_unused int pkm_kacs_set_caap_for_token(const void *token, const v
 	if (ret)
 		return ret;
 
-	return pkm_kacs_set_caap_internal(policy_sid, policy_sid_len, spec,
-					  spec_len);
+	ret = pkm_kacs_set_caap_internal(policy_sid, policy_sid_len, spec,
+					 spec_len);
+	pkm_kacs_audit_caap_policy_changed(token, policy_sid, policy_sid_len,
+					   !spec || !spec_len, ret);
+	return ret;
 }
 
 static long pkm_kacs_set_caap_user_for_token(
@@ -214,6 +243,10 @@ static long pkm_kacs_set_caap_user_for_token(
 
 	ret = pkm_kacs_set_caap_internal(policy_sid_copy, policy_sid_len,
 					 spec_copy, copied_spec_len);
+	pkm_kacs_audit_caap_policy_changed(token, policy_sid_copy,
+					   policy_sid_len,
+					   !spec_copy || !copied_spec_len,
+					   (int)ret);
 
 out:
 	kfree(spec_copy);

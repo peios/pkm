@@ -14,6 +14,7 @@
 
 #include <pkm/token.h>
 
+#include "access_check.h"
 #include "capability.h"
 
 #include "lsm_internal.h"
@@ -289,12 +290,38 @@ u32 pkm_kacs_next_mount_policy_generation(u32 generation)
 	return generation;
 }
 
+/*
+ * kacs.mount.policy.changed (PKM §3.9.4): a filesystem's mount policy set by
+ * a caller the volume-management gate admitted. Every check that reaches
+ * past an object's stored descriptor on that filesystem follows the policy,
+ * so the record is essential. Every failure is decided before the gate, so
+ * a record is always of a change made. Best effort.
+ */
+static void pkm_kacs_audit_mount_policy_changed(const void *subject_token,
+						const struct super_block *sb,
+						u32 previous, u32 policy,
+						u32 generation)
+{
+	const char *fs_type = sb->s_type ? sb->s_type->name : NULL;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+
+	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
+		pip_type = 0;
+		pip_trust = 0;
+	}
+	(void)kacs_rust_emit_mount_policy_changed(
+		subject_token, (const u8 *)fs_type, fs_type ? strlen(fs_type) : 0,
+		policy, previous, generation, pip_type, pip_trust);
+}
+
 long pkm_kacs_set_mount_policy_core(
 	const void *subject_token, struct super_block *sb,
 	const struct kacs_mount_policy_args *args, const u8 *template_bytes)
 {
 	struct pkm_kacs_superblock_security *sec;
 	const u8 *old_template;
+	u32 previous_effective;
 	u32 old_policy;
 	u32 old_generation;
 	u32 new_generation;
@@ -349,6 +376,8 @@ long pkm_kacs_set_mount_policy_core(
 		return -EPERM;
 	}
 
+	/* The policy in force before, resolved as checks resolve it. */
+	previous_effective = pkm_kacs_superblock_mount_policy(sb);
 	sec = pkm_kacs_sb(sb);
 	mutex_lock(&sec->lock);
 	old_template = sec->template_sd_bytes;
@@ -365,6 +394,9 @@ long pkm_kacs_set_mount_policy_core(
 				    old_generation, new_generation,
 				    KACS_MP_SET_OK, 0);
 	pkm_kacs_free((void *)old_template);
+	pkm_kacs_audit_mount_policy_changed(subject_token, sb,
+					    previous_effective, args->policy,
+					    new_generation);
 	return 0;
 }
 

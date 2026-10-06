@@ -8,6 +8,7 @@
 #include <linux/timekeeping.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/workqueue.h>
 
 #include <pkm/token.h>
 
@@ -17,6 +18,39 @@
 #include "token_logon_session.h"
 
 #include <trace/events/kacs.h>
+
+/*
+ * kacs.session.destroyed is written from process context, never from the
+ * teardown itself. A session ends when its last token goes, and that is
+ * usually a cred freed from an RCU callback, where the record's encoder
+ * (which allocates GFP_KERNEL) cannot run. Teardown queues the session,
+ * still holding the reference the session table held, and schedules this
+ * work; the work writes each queued record and drops the reference.
+ *
+ * The record therefore follows the teardown by a scheduling delay rather
+ * than within the same call, and its header names the kworker that wrote
+ * it. That is no loss: from an RCU callback the header named whichever task
+ * the softirq interrupted.
+ */
+static void pkm_kacs_session_audit_workfn(struct work_struct *work)
+{
+	(void)work;
+	kacs_rust_session_audit_drain();
+}
+
+static DECLARE_WORK(pkm_kacs_session_audit_work, pkm_kacs_session_audit_workfn);
+
+/* Safe from any context: schedule_work() neither sleeps nor allocates. */
+void pkm_kacs_session_audit_schedule(void)
+{
+	schedule_work(&pkm_kacs_session_audit_work);
+}
+
+/* Waits until every record queued so far has been written. Sleeps. */
+void pkm_kacs_session_audit_flush(void)
+{
+	flush_work(&pkm_kacs_session_audit_work);
+}
 
 long pkm_kacs_create_logon_session_core(const void *subject_token,
 				  const u8 *spec, size_t spec_len,

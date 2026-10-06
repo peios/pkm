@@ -187,6 +187,7 @@
 
 
 #define PKM_KUNIT_AUDIT_POLICY_OBJECT_ACCESS_SUCCESS 0x00000001U
+#define PKM_KUNIT_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS 0x00000004U
 
 #define PKM_KUNIT_SYSTEM_PRIVILEGES_ALL 0xC000000FFFFFFFFCULL
 
@@ -630,6 +631,8 @@ enum pkm_kunit_msgpack_kind {
 	PKM_KUNIT_MSGPACK_BIN,
 	PKM_KUNIT_MSGPACK_ARRAY,
 	PKM_KUNIT_MSGPACK_MAP,
+	/* A negative integer: negative fixint or int 8/16/32/64. */
+	PKM_KUNIT_MSGPACK_INT,
 };
 
 
@@ -640,6 +643,7 @@ struct pkm_kunit_msgpack_view {
 	size_t total_len;
 	u32 count;
 	u64 uint_value;
+	s64 int_value;
 	bool bool_value;
 };
 
@@ -1212,6 +1216,10 @@ bool pkm_kunit_msgpack_expect_uint_key(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
 	const char *key, u64 expected);
 
+bool pkm_kunit_msgpack_expect_int_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key, s64 expected);
+
 bool pkm_kunit_msgpack_expect_bool_key(
 	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
 	const char *key, bool expected);
@@ -1262,11 +1270,16 @@ bool pkm_kunit_expect_kmes_event_type(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	const char *expected);
 
+bool pkm_kunit_latest_kacs_event(struct kunit *test, const char *type,
+				 u8 *buffer,
+				 struct pkm_kunit_kmes_event_view *view);
+
 bool pkm_kunit_expect_access_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_requested, u32 expected_granted, bool expected_success,
 	const char *expected_trigger_kind, const u8 *expected_ace,
-	size_t expected_ace_len, const char *expected_object_kind);
+	size_t expected_ace_len, const char *expected_object_kind,
+	bool expected_asserted);
 
 bool pkm_kunit_expect_access_audit_subject_group_sids(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
@@ -1293,7 +1306,8 @@ bool pkm_kunit_expect_privilege_use_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_contributed, u32 expected_surviving,
 	u32 expected_check_requested, u32 expected_check_granted,
-	bool expected_success, const char *expected_object_kind);
+	bool expected_success, const char *expected_object_kind,
+	bool expected_asserted);
 
 bool pkm_kunit_expect_caap_diagnostic_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,

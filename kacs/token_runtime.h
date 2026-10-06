@@ -616,6 +616,7 @@ int pkm_kacs_resolve_current_effective_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_resolve_current_primary_ctx(struct pkm_kacs_resolved_ctx *out);
 int pkm_kacs_install_impersonation_token(const void *token);
 int pkm_kacs_revert_impersonation(void);
+int pkm_kacs_revert_impersonation_for_exec(void);
 int pkm_kacs_install_current_primary_token(const void *token);
 int pkm_kmes_current_process_rate_reserve(u32 count);
 void pkm_kmes_current_process_rate_refund(u32 count);
@@ -630,6 +631,38 @@ int kacs_rust_create_logon_session(const void *creator_token, const u8 *spec,
 			     size_t spec_len, u64 created_at,
 			     u64 *logon_session_id_out);
 int kacs_rust_destroy_empty_logon_session(u64 auth_id);
+void kacs_rust_session_audit_drain(void);
+struct pkm_kacs_sd_change_view;
+int kacs_rust_emit_descriptor_changed(const struct pkm_kacs_sd_change_view *chg);
+int kacs_rust_token_own_sd_copy(const void *token, const u8 **out_sd_ptr,
+				size_t *out_sd_len);
+int kacs_rust_emit_descriptor_rejected(const void *token, u64 inode,
+				       u64 device, u64 sd_len, u32 pip_type,
+				       u32 pip_trust);
+int kacs_rust_emit_caap_policy_changed(const void *token,
+				       const u8 *policy_sid,
+				       size_t policy_sid_len, bool removed,
+				       s32 err, u32 pip_type, u32 pip_trust);
+int kacs_rust_emit_mount_policy_changed(const void *token, const u8 *fs_type,
+					size_t fs_type_len, u32 policy,
+					u32 previous, u32 generation,
+					u32 pip_type, u32 pip_trust);
+u32 kacs_rust_token_audit_policy(const void *token);
+int kacs_rust_emit_privilege_use(const void *token, u32 operation, int cap,
+				 u64 privilege, u32 pip_type, u32 pip_trust);
+int kacs_rust_emit_impersonation_started(const void *server_token,
+					 const void *client_token,
+					 const void *installed_token,
+					 u32 permitted_level,
+					 bool used_impersonate, s32 err,
+					 u32 reason, u64 tid, u32 pip_type,
+					 u32 pip_trust);
+int kacs_rust_emit_impersonation_reverted(const void *subject_token,
+					  const void *dropped_token, u32 cause,
+					  s32 err, u64 tid, u32 pip_type,
+					  u32 pip_trust);
+void pkm_kacs_session_audit_schedule(void);
+void pkm_kacs_session_audit_flush(void);
 const void *kacs_rust_token_clone(const void *token);
 const void *kacs_rust_token_deep_copy(const void *token);
 void kacs_rust_token_drop(const void *token);
@@ -708,6 +741,7 @@ int kacs_rust_check_ipc_sd(const void *subject_token_ptr, const u8 *sd_ptr,
 int kacs_rust_port_bind_check(const void *subject_token_ptr, u32 protocol,
 			      u32 port, u32 pip_type, u32 pip_trust);
 int kacs_rust_port_table_replace(const u8 *blob_ptr, size_t blob_len);
+void kacs_rust_port_table_reject_empty(void);
 int kacs_rust_port_table_reset(void);
 bool kacs_rust_port_table_loaded(void);
 const u8 *kacs_rust_port_fallback_sd(size_t *len_out);

@@ -1767,3 +1767,80 @@ fn result_list_wrapper_returns_per_node_statuses() {
         ]
     );
 }
+
+fn denials_for(
+    sacl_aces: &[Vec<u8>],
+    desired: u32,
+    pip: PipContext,
+) -> kacs_core::AccessCheckCoreState<'static> {
+    let owner = sid_bytes([0, 0, 0, 0, 0, 5], &[18]);
+    let group = sid_bytes([0, 0, 0, 0, 0, 5], &[32]);
+    let user = sid_bytes([0, 0, 0, 0, 0, 5], &[21, 13090]);
+    let dacl = acl_bytes(&[basic_ace(
+        ACCESS_ALLOWED_ACE_TYPE,
+        0,
+        READ_CONTROL | WRITE_DAC,
+        &user,
+    )]);
+    let sacl = acl_bytes(sacl_aces);
+    let sd_bytes: &'static [u8] =
+        Vec::leak(sd_bytes(Some(&owner), Some(&group), Some(&sacl), Some(&dacl)));
+    let user: &'static [u8] = Vec::leak(user);
+    let sd = SecurityDescriptor::parse(sd_bytes).expect("sd should parse");
+    let token = primary_token(parse_sid(user));
+    access_check_core(
+        Some(&sd),
+        &token,
+        pip,
+        desired,
+        &mapping(),
+        AccessCheckMode::Scalar,
+        None,
+        &ConditionalContext::default(),
+        None,
+        0,
+        &[],
+    )
+    .expect("check should evaluate")
+}
+
+#[test]
+fn integrity_denial_is_reported_for_the_requested_bits() {
+    // A High label with NO_WRITE_UP against a Medium caller withholds the
+    // write right the DACL grants.
+    let label = [mandatory_label_ace(
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        IntegrityLevel::HIGH,
+    )];
+    let write = denials_for(&label, WRITE_DAC, default_pip());
+    assert_eq!(write.granted & WRITE_DAC, 0);
+    assert_eq!(write.denied_integrity, WRITE_DAC);
+    assert_eq!(write.denied_trust, 0);
+    // Not requested, so not part of the explanation.
+    let read = denials_for(&label, READ_CONTROL, default_pip());
+    assert_eq!(read.granted, READ_CONTROL);
+    assert_eq!(read.denied_integrity, 0);
+}
+
+#[test]
+fn trust_denial_is_reported_for_the_requested_bits() {
+    // A trust label admitting only reads to non-dominant callers.
+    let label = [process_trust_label_ace(GENERIC_READ, 1, 1)];
+    let write = denials_for(&label, WRITE_DAC, default_pip());
+    assert_eq!(write.granted & WRITE_DAC, 0);
+    assert_eq!(write.denied_trust, WRITE_DAC);
+    assert_eq!(write.denied_integrity, 0);
+    // A dominant caller is denied nothing.
+    let dominant = denials_for(&label, WRITE_DAC, PipContext { pip_type: 1, pip_trust: 1 });
+    assert_eq!(dominant.denied_trust, 0);
+}
+
+#[test]
+fn maximum_allowed_reports_every_denied_bit() {
+    let label = [mandatory_label_ace(
+        SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+        IntegrityLevel::HIGH,
+    )];
+    let max = denials_for(&label, kacs_core::MAXIMUM_ALLOWED, default_pip());
+    assert_eq!(max.denied_integrity & WRITE_DAC, WRITE_DAC);
+}

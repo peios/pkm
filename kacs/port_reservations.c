@@ -76,9 +76,15 @@ long pkm_kacs_port_reservations_refresh_from_key(u32 source_id,
 		goto out;
 	if (!blob_len) {
 		/* An empty key has no default reservation: not a table. */
+		kacs_rust_port_table_reject_empty();
 		ret = -EINVAL;
 		goto out;
 	}
+	/*
+	 * A malformed table is refused whole and the one in force kept; the
+	 * refusal is recorded as kacs.config.value.rejected, which is the
+	 * audit trail lcs/source_bootstrap.c promises an administrator.
+	 */
 	ret = kacs_rust_port_table_replace(blob, blob_len);
 
 out:

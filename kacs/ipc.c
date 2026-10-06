@@ -344,6 +344,7 @@ long pkm_kacs_ipc_sd_set(int kind, int id, const void *subject_token,
 {
 	struct pkm_kacs_ipc_swap_arg swap = { };
 	struct pkm_kacs_process_sd *sd = NULL;
+	struct pkm_kacs_process_sd *installed = NULL;
 	const u8 *new_bytes = NULL;
 	size_t new_len = 0;
 	u32 desired = 0;
@@ -360,26 +361,60 @@ long pkm_kacs_ipc_sd_set(int kind, int id, const void *subject_token,
 		return ret;
 	}
 	ret = pkm_kacs_ipc_sd_authorize(sd, subject_token, desired);
-	if (!ret)
-		ret = kacs_rust_merge_process_sd(subject_token, sd->bytes, sd->len,
-						 security_info, input_sd_ptr,
-						 input_sd_len, &new_bytes,
-						 &new_len);
-	pkm_kacs_process_sd_put(sd);
-	if (ret)
+	if (ret) {
+		pkm_kacs_process_sd_put(sd);
 		goto out;
+	}
+	ret = kacs_rust_merge_process_sd(subject_token, sd->bytes, sd->len,
+					 security_info, input_sd_ptr,
+					 input_sd_len, &new_bytes, &new_len);
+	if (ret)
+		goto out_audit;
 
 	swap.new_sd = pkm_kacs_process_sd_wrap_bytes(new_bytes, new_len);
 	if (!swap.new_sd) {
 		pkm_kacs_free((void *)new_bytes);
 		ret = -ENOMEM;
-		goto out;
+		goto out_audit;
 	}
+	/* Held across the swap, so the record can read what was installed. */
+	installed = pkm_kacs_process_sd_get(swap.new_sd);
 	ret = ipc_lsm_with_object(kind, id, pkm_kacs_ipc_swap_sd_cb, &swap);
 	if (swap.new_sd)
 		pkm_kacs_process_sd_put(swap.new_sd);
 	if (swap.old_sd)
 		pkm_kacs_process_sd_put(swap.old_sd);
+
+out_audit:
+	/*
+	 * Authorised, so recorded whether or not it applied. An IPC object has
+	 * no handle with an alarm mask: only a change including the SACL is.
+	 * `sd` is the descriptor the change was computed from, and the one it
+	 * replaced unless another change raced it in between.
+	 */
+	if (pkm_kacs_descriptor_change_audited(security_info, desired, 0)) {
+		struct pkm_kacs_sd_change_view chg = {
+			.subject_token = subject_token,
+			.old_sd = sd->bytes,
+			.old_sd_len = sd->len,
+			.new_sd = (!ret && installed) ? installed->bytes : NULL,
+			.new_sd_len = (!ret && installed) ? installed->len : 0,
+			.ipc_id = id,
+			.kind = PKM_KACS_SD_CHANGE_IPC,
+			.ipc_type = kind == PKM_KACS_IPC_SEM ?
+					    PKM_KACS_SD_CHANGE_IPC_SEM :
+				    kind == PKM_KACS_IPC_SHM ?
+					    PKM_KACS_SD_CHANGE_IPC_SHM :
+					    PKM_KACS_SD_CHANGE_IPC_MSG,
+			.security_info = security_info,
+			.requested = desired,
+			.err = (s32)ret,
+		};
+
+		pkm_kacs_audit_descriptor_changed(&chg);
+	}
+	pkm_kacs_process_sd_put(installed);
+	pkm_kacs_process_sd_put(sd);
 out:
 	trace_kacs_ipc(kind, id, 0, desired, KACS_IPC_SD_SET, ret);
 	return ret;

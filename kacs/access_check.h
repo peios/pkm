@@ -10,9 +10,17 @@
 #define PKM_KACS_RESOLVED_CTX_KUNIT 0U
 #define PKM_KACS_RESOLVED_CTX_TOKEN 1U
 
+/*
+ * pkm_kacs_resolved_ctx.flags. SACL_AUDIT_SUPPRESSED: the caller of the
+ * AccessCheck syscall does not hold SeAuditPrivilege enabled, so the check
+ * runs but the records its SACL would generate are not written (PKM §3.8.9).
+ * Records forced by the checked token's own audit policy are unaffected.
+ */
+#define PKM_KACS_RESOLVED_CTX_F_SACL_AUDIT_SUPPRESSED 0x1U
+
 struct pkm_kacs_resolved_ctx {
 	u32 kind;
-	u32 _reserved;
+	u32 flags;
 	const void *token;
 	const void *caap_cache;
 	u32 default_pip_type;

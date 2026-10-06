@@ -33,6 +33,13 @@ const PRIVILEGE_USED_TYPE: &[u8] = b"kacs.audit.privilege.used";
 const CAAP_SACL_SKIPPED_TYPE: &[u8] = b"kacs.caap.sacl.skipped";
 const CAAP_STAGING_DIVERGED_TYPE: &[u8] = b"kacs.caap.staging.diverged";
 const SESSION_DESTROYED_TYPE: &[u8] = b"kacs.session.destroyed";
+const IMPERSONATION_STARTED_TYPE: &[u8] = b"kacs.impersonation.started";
+const IMPERSONATION_REVERTED_TYPE: &[u8] = b"kacs.impersonation.reverted";
+const DESCRIPTOR_CHANGED_TYPE: &[u8] = b"kacs.audit.descriptor.changed";
+const DESCRIPTOR_REJECTED_TYPE: &[u8] = b"kacs.descriptor.rejected";
+const CAAP_POLICY_CHANGED_TYPE: &[u8] = b"kacs.caap.policy.changed";
+const MOUNT_POLICY_CHANGED_TYPE: &[u8] = b"kacs.mount.policy.changed";
+const CONFIG_VALUE_REJECTED_TYPE: &[u8] = b"kacs.config.value.rejected";
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -225,10 +232,25 @@ impl<'a> AuditObject<'a> {
 pub(crate) struct AuditTarget<'a> {
     pub(crate) subject_ids: Option<AuditSubjectIds>,
     pub(crate) object: AuditObject<'a>,
-    /// Whether the record carries values userspace supplied — an audit
-    /// context, or the caller's own PIP state — and so must say
-    /// `fields.attestation.userspace` (PGSS §6.7).
+    /// Whether the record carries values userspace supplied — every record
+    /// of the AccessCheck syscall, whose descriptor is the caller's — and so
+    /// must say `fields.attestation.userspace` (PGSS §6.7).
     pub(crate) asserted: bool,
+    /// Whether the records a SACL generated are withheld because the
+    /// AccessCheck syscall's caller lacks SeAuditPrivilege. Records the
+    /// checked token's audit policy forces are written regardless.
+    pub(crate) sacl_audit_suppressed: bool,
+    /// What the mandatory checks withheld, for `kacs.audit.access.checked`.
+    pub(crate) denials: AccessDenials,
+}
+
+/// The requested bits the mandatory checks denied in one access check:
+/// `access.denied-integrity` and `access.denied-trust`, each written only
+/// when non-zero.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AccessDenials {
+    pub(crate) integrity: u32,
+    pub(crate) trust: u32,
 }
 
 fn allocate_zeroed(len: usize) -> Result<Vec<u8>, c_long> {
@@ -328,15 +350,143 @@ fn sanitize_utf8_lossy(bytes: Vec<u8>) -> Result<Vec<u8>, c_long> {
     Ok(out)
 }
 
+/// `privilege.name` for one privilege bit. A bit with no name is an
+/// internal fault, and the record is refused rather than written unnamed.
 fn privilege_name(privilege: u64) -> Result<&'static [u8], c_long> {
+    use crate::peios_uapi as uapi;
+
     match privilege {
         SE_SECURITY_PRIVILEGE => Ok(b"SeSecurityPrivilege"),
         SE_TAKE_OWNERSHIP_PRIVILEGE => Ok(b"SeTakeOwnershipPrivilege"),
         SE_BACKUP_PRIVILEGE => Ok(b"SeBackupPrivilege"),
         SE_RESTORE_PRIVILEGE => Ok(b"SeRestorePrivilege"),
         SE_RELABEL_PRIVILEGE => Ok(b"SeRelabelPrivilege"),
+        uapi::KACS_SE_CREATE_TOKEN_PRIVILEGE => Ok(b"SeCreateTokenPrivilege"),
+        uapi::KACS_SE_ASSIGN_PRIMARY_TOKEN_PRIVILEGE => Ok(b"SeAssignPrimaryTokenPrivilege"),
+        uapi::KACS_SE_LOCK_MEMORY_PRIVILEGE => Ok(b"SeLockMemoryPrivilege"),
+        uapi::KACS_SE_INCREASE_QUOTA_PRIVILEGE => Ok(b"SeIncreaseQuotaPrivilege"),
+        uapi::KACS_SE_TCB_PRIVILEGE => Ok(b"SeTcbPrivilege"),
+        uapi::KACS_SE_LOAD_DRIVER_PRIVILEGE => Ok(b"SeLoadDriverPrivilege"),
+        uapi::KACS_SE_SYSTEM_PROFILE_PRIVILEGE => Ok(b"SeSystemProfilePrivilege"),
+        uapi::KACS_SE_SYSTEMTIME_PRIVILEGE => Ok(b"SeSystemtimePrivilege"),
+        uapi::KACS_SE_PROFILE_SINGLE_PROCESS_PRIVILEGE => Ok(b"SeProfileSingleProcessPrivilege"),
+        uapi::KACS_SE_INCREASE_BASE_PRIORITY_PRIVILEGE => Ok(b"SeIncreaseBasePriorityPrivilege"),
+        uapi::KACS_SE_SHUTDOWN_PRIVILEGE => Ok(b"SeShutdownPrivilege"),
+        uapi::KACS_SE_DEBUG_PRIVILEGE => Ok(b"SeDebugPrivilege"),
+        uapi::KACS_SE_AUDIT_PRIVILEGE => Ok(b"SeAuditPrivilege"),
+        uapi::KACS_SE_CHANGE_NOTIFY_PRIVILEGE => Ok(b"SeChangeNotifyPrivilege"),
+        uapi::KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE => Ok(b"SeRemoteShutdownPrivilege"),
+        uapi::KACS_SE_MANAGE_VOLUME_PRIVILEGE => Ok(b"SeManageVolumePrivilege"),
+        uapi::KACS_SE_IMPERSONATE_PRIVILEGE => Ok(b"SeImpersonatePrivilege"),
+        uapi::KACS_SE_CREATE_SYMBOLIC_LINK_PRIVILEGE => Ok(b"SeCreateSymbolicLinkPrivilege"),
         _ => Err(EIO),
     }
+}
+
+/// `linux.cap`: the `CAP_*` name without its prefix, in kebab case.
+fn linux_cap_name(cap: u32) -> Option<&'static [u8]> {
+    const NAMES: [&[u8]; 41] = [
+        b"chown",
+        b"dac-override",
+        b"dac-read-search",
+        b"fowner",
+        b"fsetid",
+        b"kill",
+        b"setgid",
+        b"setuid",
+        b"setpcap",
+        b"linux-immutable",
+        b"net-bind-service",
+        b"net-broadcast",
+        b"net-admin",
+        b"net-raw",
+        b"ipc-lock",
+        b"ipc-owner",
+        b"sys-module",
+        b"sys-rawio",
+        b"sys-chroot",
+        b"sys-ptrace",
+        b"sys-pacct",
+        b"sys-admin",
+        b"sys-boot",
+        b"sys-nice",
+        b"sys-resource",
+        b"sys-time",
+        b"sys-tty-config",
+        b"mknod",
+        b"lease",
+        b"audit-write",
+        b"audit-control",
+        b"setfcap",
+        b"mac-override",
+        b"mac-admin",
+        b"syslog",
+        b"wake-alarm",
+        b"block-suspend",
+        b"audit-read",
+        b"perfmon",
+        b"bpf",
+        b"checkpoint-restore",
+    ];
+    NAMES.get(usize::try_from(cap).ok()?).copied()
+}
+
+/// Where a privilege was spent outside an access check.
+#[derive(Clone, Copy)]
+pub(crate) enum PrivilegeGate {
+    /// A Linux capability check KACS answered with a privilege.
+    LinuxCap(u32),
+    /// The volume-management gate the mount paths ask instead of
+    /// `CAP_SYS_ADMIN`.
+    VolumeMount,
+}
+
+/// `kacs.audit.privilege.used` for a privilege spent at a gate rather than
+/// in an access check: `operation.name` `linux-cap` or `volume-mount`.
+pub(crate) fn emit_gate_privilege_use_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    gate: PrivilegeGate,
+    privilege: u64,
+) -> Result<(), c_long> {
+    let name = privilege_name(privilege)?;
+    let (operation, cap): (&[u8], Option<&[u8]>) = match gate {
+        PrivilegeGate::LinuxCap(cap) => (b"linux-cap", Some(linux_cap_name(cap).ok_or(EIO)?)),
+        PrivilegeGate::VolumeMount => (b"volume-mount", None),
+    };
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_map(&process_info)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let mut writer =
+        MsgpackWriter::with_capacity(160 + subject_map.len() + emitter_map.len())?;
+
+    writer.write_map_len(5 + usize::from(cap.is_some()))?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map.as_slice())?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(operation)?;
+    writer.write_key(b"privilege")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(name)?;
+    if let Some(cap) = cap {
+        writer.write_key(b"linux")?;
+        writer.write_map_len(1)?;
+        writer.write_key(b"cap")?;
+        writer.write_str(cap)?;
+    }
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"success")?;
+    writer.write_bool(true)?;
+
+    emit(PRIVILEGE_USED_TYPE, writer.into_vec().as_slice());
+    Ok(())
 }
 
 fn caap_sacl_phase_name(phase: CaapSaclPhase) -> &'static [u8] {
@@ -524,6 +674,7 @@ struct CheckMaps {
     emitter: Vec<u8>,
     object: Option<Vec<u8>>,
     asserted: bool,
+    denials: AccessDenials,
 }
 
 impl CheckMaps {
@@ -570,11 +721,21 @@ fn encode_access_checked_payload(
     writer.write_map_len(maps.common_len() + 3)?;
     maps.write_head(&mut writer)?;
     writer.write_key(b"access")?;
-    writer.write_map_len(2)?;
+    writer.write_map_len(
+        2 + usize::from(maps.denials.integrity != 0) + usize::from(maps.denials.trust != 0),
+    )?;
     writer.write_key(b"requested")?;
     writer.write_u64(u64::from(event.requested))?;
     writer.write_key(b"granted")?;
     writer.write_u64(u64::from(event.granted))?;
+    if maps.denials.integrity != 0 {
+        writer.write_key(b"denied-integrity")?;
+        writer.write_u64(u64::from(maps.denials.integrity))?;
+    }
+    if maps.denials.trust != 0 {
+        writer.write_key(b"denied-trust")?;
+        writer.write_u64(u64::from(maps.denials.trust))?;
+    }
     writer.write_key(b"outcome")?;
     writer.write_map_len(1)?;
     writer.write_key(b"success")?;
@@ -605,8 +766,12 @@ fn encode_privilege_used_payload(
 ) -> Result<Vec<u8>, c_long> {
     let mut writer = MsgpackWriter::with_capacity(512)?;
 
-    writer.write_map_len(maps.common_len() + 3)?;
+    writer.write_map_len(maps.common_len() + 4)?;
     maps.write_head(&mut writer)?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(b"access-check")?;
     writer.write_key(b"privilege")?;
     writer.write_map_len(3)?;
     writer.write_key(b"name")?;
@@ -769,6 +934,631 @@ fn encode_handle_used_payload(
     Ok(writer.into_vec())
 }
 
+/// The `emitter` map with the thread as well as the process:
+/// `emitter.process.*` and `emitter.thread.tid`, for a record about
+/// something scoped to one thread, such as impersonation.
+fn encode_emitter_thread_map(process: &ProcessInfo, tid: u64) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(112 + process.executable_path.len())?;
+
+    writer.write_map_len(2)?;
+    writer.write_key(b"process")?;
+    writer.write_map_len(3)?;
+    writer.write_key(b"pid")?;
+    writer.write_u64(process.pid)?;
+    writer.write_key(b"name")?;
+    writer.write_str(process.name.as_slice())?;
+    writer.write_key(b"executable")?;
+    writer.write_str(process.executable_path.as_slice())?;
+    writer.write_key(b"thread")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"tid")?;
+    writer.write_u64(tid)?;
+
+    Ok(writer.into_vec())
+}
+
+/// The `outcome` map of a record whose action can fail: `success`, and on
+/// failure the negative `errno` and, where one is known, the `reason`.
+fn write_outcome(
+    writer: &mut MsgpackWriter,
+    errno: i32,
+    reason: Option<&[u8]>,
+) -> Result<(), c_long> {
+    let failed = errno != 0;
+    let reason = if failed { reason } else { None };
+
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1 + usize::from(failed) + usize::from(reason.is_some()))?;
+    writer.write_key(b"success")?;
+    writer.write_bool(!failed)?;
+    if failed {
+        writer.write_key(b"errno")?;
+        write_i64(writer, i64::from(errno))?;
+    }
+    if let Some(reason) = reason {
+        writer.write_key(b"reason")?;
+        writer.write_str(reason)?;
+    }
+    Ok(())
+}
+
+/// A msgpack signed integer, smallest encoding.
+fn write_i64(writer: &mut MsgpackWriter, value: i64) -> Result<(), c_long> {
+    if value >= 0 {
+        return writer.write_u64(value as u64);
+    }
+    if value >= -32 {
+        writer.push_byte(value as i8 as u8)
+    } else if value >= i64::from(i8::MIN) {
+        writer.push_byte(0xd0)?;
+        writer.push_byte(value as i8 as u8)
+    } else if value >= i64::from(i16::MIN) {
+        writer.push_byte(0xd1)?;
+        writer.extend(&(value as i16).to_be_bytes())
+    } else if value >= i64::from(i32::MIN) {
+        writer.push_byte(0xd2)?;
+        writer.extend(&(value as i32).to_be_bytes())
+    } else {
+        writer.push_byte(0xd3)?;
+        writer.extend(&value.to_be_bytes())
+    }
+}
+
+/// The client token of an impersonation, as `kacs.impersonation.started`
+/// describes it under `object.token`.
+pub(crate) struct ImpersonationClient<'a> {
+    /// The installed token's GUID on success, the client token's otherwise.
+    pub(crate) guid: [u8; 16],
+    /// The installed token's LUID on success, the client token's otherwise.
+    pub(crate) id: u64,
+    pub(crate) sid: &'a [u8],
+    pub(crate) token_type: TokenType,
+    pub(crate) integrity: u32,
+    pub(crate) auth_id: Option<u64>,
+    pub(crate) restricted: bool,
+    /// The client token's own impersonation level: the level asked for.
+    pub(crate) requested: ImpersonationLevel,
+    /// The level the gate permitted, as its ABI value, when the gate ran.
+    pub(crate) permitted: Option<u32>,
+    /// Whether the gate needed SeImpersonatePrivilege and used it.
+    pub(crate) used_impersonate: bool,
+}
+
+fn encode_impersonation_started_payload(
+    subject_map: &[u8],
+    emitter_map: &[u8],
+    client: &ImpersonationClient<'_>,
+    errno: i32,
+    reason: Option<&[u8]>,
+) -> Result<Vec<u8>, c_long> {
+    let mut writer = MsgpackWriter::with_capacity(384 + client.sid.len())?;
+    let impersonation = match client.token_type {
+        TokenType::Primary => 0,
+        TokenType::Impersonation => impersonation_level_value(client.requested),
+    };
+
+    writer.write_map_len(4 + usize::from(client.used_impersonate))?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map)?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map)?;
+    writer.write_key(b"object")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"kind")?;
+    writer.write_str(b"token")?;
+    writer.write_key(b"token")?;
+    writer.write_map_len(
+        7 + usize::from(client.auth_id.is_some()) + usize::from(client.permitted.is_some()),
+    )?;
+    writer.write_key(b"guid")?;
+    writer.write_bin(&client.guid)?;
+    writer.write_key(b"id")?;
+    writer.write_u64(client.id)?;
+    writer.write_key(b"sid")?;
+    writer.write_bin(client.sid)?;
+    writer.write_key(b"type")?;
+    writer.write_str(match client.token_type {
+        TokenType::Primary => b"primary",
+        TokenType::Impersonation => b"impersonation",
+    })?;
+    writer.write_key(b"integrity")?;
+    writer.write_u64(u64::from(client.integrity))?;
+    if let Some(auth_id) = client.auth_id {
+        writer.write_key(b"auth-id")?;
+        writer.write_u64(auth_id)?;
+    }
+    writer.write_key(b"restricted")?;
+    writer.write_bool(client.restricted)?;
+    writer.write_key(b"impersonation")?;
+    writer.write_u64(impersonation)?;
+    if let Some(permitted) = client.permitted {
+        writer.write_key(b"impersonation-permitted")?;
+        writer.write_u64(u64::from(permitted))?;
+    }
+    if client.used_impersonate {
+        writer.write_key(b"privilege")?;
+        writer.write_map_len(2)?;
+        writer.write_key(b"name")?;
+        writer.write_str(b"SeImpersonatePrivilege")?;
+        writer.write_key(b"held")?;
+        writer.write_bool(true)?;
+    }
+    write_outcome(&mut writer, errno, reason)?;
+
+    Ok(writer.into_vec())
+}
+
+/// `kacs.impersonation.started`, for an impersonation attempt that reached
+/// the kernel's gate. `token` is the server's token, the one that acted.
+pub(crate) fn emit_impersonation_started_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    tid: u64,
+    client: &ImpersonationClient<'_>,
+    errno: i32,
+    reason: Option<&[u8]>,
+) -> Result<(), c_long> {
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_thread_map(&process_info, tid)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let payload = encode_impersonation_started_payload(
+        subject_map.as_slice(),
+        emitter_map.as_slice(),
+        client,
+        errno,
+        reason,
+    )?;
+
+    emit(IMPERSONATION_STARTED_TYPE, payload.as_slice());
+    Ok(())
+}
+
+/// `kacs.config.value.rejected`: KACS read one of its registry-held tables,
+/// found it malformed, and kept the one in force. `name` is the value at
+/// fault when one was; `fallback` says the compiled-in table is what is in
+/// force.
+pub(crate) fn emit_config_value_rejected_to_kmes(
+    key_path: &[u8],
+    name: Option<&[u8]>,
+    reason: &[u8],
+    errno: i32,
+    fallback: bool,
+) -> Result<(), c_long> {
+    // A value name is an arbitrary registry string: sanitise, never refuse.
+    let name = match name {
+        Some(name) => {
+            let mut copy = Vec::with_capacity(name.len()).map_err(|_| ENOMEM)?;
+            copy.extend_from_slice(name).map_err(|_| ENOMEM)?;
+            Some(sanitize_utf8_lossy(copy)?)
+        }
+        None => None,
+    };
+    let mut writer = MsgpackWriter::with_capacity(
+        192 + key_path.len() + name.as_ref().map_or(0, |n| n.len()),
+    )?;
+
+    writer.write_map_len(3)?;
+    writer.write_key(b"config")?;
+    writer.write_map_len(1 + usize::from(name.is_some()))?;
+    writer.write_key(b"key")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"path")?;
+    writer.write_str(key_path)?;
+    if let Some(name) = &name {
+        writer.write_key(b"name")?;
+        writer.write_str(name.as_slice())?;
+    }
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"reason")?;
+    writer.write_str(reason)?;
+    writer.write_key(b"errno")?;
+    write_i64(&mut writer, i64::from(errno))?;
+    writer.write_key(b"policy")?;
+    writer.write_map_len(2)?;
+    // Reject-or-keep: whatever was in force before still is.
+    writer.write_key(b"previous-retained")?;
+    writer.write_bool(true)?;
+    writer.write_key(b"fallback")?;
+    writer.write_bool(fallback)?;
+
+    emit(CONFIG_VALUE_REJECTED_TYPE, writer.into_vec().as_slice());
+    Ok(())
+}
+
+/// The subject and emitter maps of a record about something `token` did.
+fn actor_maps(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+) -> Result<(Vec<u8>, Vec<u8>), c_long> {
+    let process_info = load_process_info()?;
+    Ok((
+        encode_subject_map(token, subject_ids, effective_pip)?,
+        encode_emitter_map(&process_info)?,
+    ))
+}
+
+/// `kacs.caap.policy.changed`: a central access policy installed, replaced
+/// (`set`) or removed (`remove`) by `token`.
+pub(crate) fn emit_caap_policy_changed_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    policy_sid: &[u8],
+    removed: bool,
+    errno: i32,
+) -> Result<(), c_long> {
+    let (subject, emitter) = actor_maps(token, subject_ids, effective_pip)?;
+    let mut writer =
+        MsgpackWriter::with_capacity(160 + subject.len() + emitter.len() + policy_sid.len())?;
+
+    writer.write_map_len(5)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter.as_slice())?;
+    writer.write_key(b"caap")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"policy")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"sid")?;
+    writer.write_bin(policy_sid)?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(if removed { b"remove" } else { b"set" })?;
+    write_outcome(&mut writer, errno, None)?;
+
+    emit(CAAP_POLICY_CHANGED_TYPE, writer.into_vec().as_slice());
+    Ok(())
+}
+
+/// `object.mount.policy` for a `KACS_MOUNT_POLICY_*` value.
+fn mount_policy_name(policy: u32) -> Result<&'static [u8], c_long> {
+    use crate::peios_uapi as uapi;
+
+    match policy {
+        uapi::KACS_MOUNT_POLICY_UNMANAGED => Ok(b"unmanaged"),
+        uapi::KACS_MOUNT_POLICY_DENY_MISSING => Ok(b"deny-missing"),
+        uapi::KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL => Ok(b"synthesize-ephemeral"),
+        uapi::KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT => Ok(b"synthesize-persistent"),
+        _ => Err(EIO),
+    }
+}
+
+/// `kacs.mount.policy.changed`: `token` set a filesystem's mount policy.
+pub(crate) fn emit_mount_policy_changed_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    fs_type: &[u8],
+    policy: u32,
+    previous: u32,
+    generation: u32,
+) -> Result<(), c_long> {
+    let policy = mount_policy_name(policy)?;
+    let previous = mount_policy_name(previous)?;
+    let (subject, emitter) = actor_maps(token, subject_ids, effective_pip)?;
+    let mut writer =
+        MsgpackWriter::with_capacity(224 + subject.len() + emitter.len() + fs_type.len())?;
+    let fs_type = str::from_utf8(fs_type).map_err(|_| EIO)?;
+
+    writer.write_map_len(4)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter.as_slice())?;
+    writer.write_key(b"object")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"mount")?;
+    writer.write_map_len(3 + usize::from(!fs_type.is_empty()))?;
+    if !fs_type.is_empty() {
+        writer.write_key(b"fs-type")?;
+        writer.write_str(fs_type.as_bytes())?;
+    }
+    writer.write_key(b"policy")?;
+    writer.write_str(policy)?;
+    writer.write_key(b"policy-previous")?;
+    writer.write_str(previous)?;
+    writer.write_key(b"policy-generation")?;
+    writer.write_u64(u64::from(generation))?;
+    write_outcome(&mut writer, 0, None)?;
+
+    emit(MOUNT_POLICY_CHANGED_TYPE, writer.into_vec().as_slice());
+    Ok(())
+}
+
+/// `kacs.descriptor.rejected`: a file's stored descriptor, `sd_len` bytes
+/// long, failed validation when KACS read it. `actor` is the token whose
+/// access made KACS read it, with its identity and PIP, when there is one.
+pub(crate) fn emit_descriptor_rejected_to_kmes(
+    actor: Option<(&AccessCheckToken<'_>, &AuditSubjectIds, PipContext)>,
+    inode: u64,
+    device: u64,
+    sd_len: u64,
+) -> Result<(), c_long> {
+    let maps = match actor {
+        Some((token, ids, pip)) => {
+            let process_info = load_process_info()?;
+            Some((
+                encode_subject_map(token, Some(ids), pip)?,
+                encode_emitter_map(&process_info)?,
+            ))
+        }
+        None => None,
+    };
+    let maps_len = maps.as_ref().map_or(0, |(s, e)| s.len() + e.len());
+    let mut writer = MsgpackWriter::with_capacity(160 + maps_len)?;
+
+    writer.write_map_len(2 + if maps.is_some() { 2 } else { 0 })?;
+    if let Some((subject, emitter)) = &maps {
+        writer.write_key(b"subject")?;
+        writer.extend(subject.as_slice())?;
+        writer.write_key(b"emitter")?;
+        writer.extend(emitter.as_slice())?;
+    }
+    writer.write_key(b"object")?;
+    writer.write_map_len(3)?;
+    writer.write_key(b"kind")?;
+    writer.write_str(b"file")?;
+    writer.write_key(b"file")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"inode")?;
+    writer.write_u64(inode)?;
+    writer.write_key(b"device")?;
+    writer.write_u64(device)?;
+    writer.write_key(b"sd")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"length")?;
+    writer.write_u64(sd_len)?;
+    writer.write_key(b"outcome")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"reason")?;
+    writer.write_str(b"corrupt")?;
+
+    emit(DESCRIPTOR_REJECTED_TYPE, writer.into_vec().as_slice());
+    Ok(())
+}
+
+/// What a descriptor change was made to, as `object.<kind>` names it.
+pub(crate) enum DescriptorObject<'a> {
+    /// A file, by absolute path when the handle's path could be resolved.
+    File { path: Option<&'a [u8]> },
+    /// A token, by LUID and durable GUID.
+    Token { id: u64, guid: [u8; 16] },
+    /// A process, by durable GUID.
+    Process { guid: [u8; 16] },
+    /// A System V IPC object: `sem`, `shm` or `msg`, and its identifier.
+    Ipc { kind: &'static [u8], id: i64 },
+}
+
+/// One side of a descriptor change: its length, SHA-256 digest and owner.
+pub(crate) struct DescriptorFacts<'a> {
+    pub(crate) len: usize,
+    pub(crate) digest: [u8; 32],
+    pub(crate) owner: Option<&'a [u8]>,
+}
+
+/// `kacs.audit.descriptor.changed`'s inputs beyond subject and emitter.
+pub(crate) struct DescriptorChange<'a> {
+    pub(crate) object: DescriptorObject<'a>,
+    /// `object.sd.components`: the `KACS_SECINFO_*` bits addressed.
+    pub(crate) components: u32,
+    /// The descriptor replaced, when it was a stored one.
+    pub(crate) previous: Option<DescriptorFacts<'a>>,
+    /// The descriptor written, when the change applied.
+    pub(crate) current: Option<DescriptorFacts<'a>>,
+    /// The rights the change needed.
+    pub(crate) requested: u32,
+    /// The handle's grant and alarm mask, for a change made through one.
+    pub(crate) handle: Option<(u32, u32)>,
+    pub(crate) errno: i32,
+}
+
+fn write_descriptor_object(
+    writer: &mut MsgpackWriter,
+    change: &DescriptorChange<'_>,
+) -> Result<(), c_long> {
+    let (kind, has_body): (&[u8], bool) = match &change.object {
+        DescriptorObject::File { path } => (b"file", path.is_some()),
+        DescriptorObject::Token { .. } => (b"token", true),
+        DescriptorObject::Process { .. } => (b"process", true),
+        DescriptorObject::Ipc { .. } => (b"ipc", true),
+    };
+
+    writer.write_key(b"object")?;
+    writer.write_map_len(2 + usize::from(has_body))?;
+    writer.write_key(b"kind")?;
+    writer.write_str(kind)?;
+    match &change.object {
+        DescriptorObject::File { path: Some(path) } => {
+            writer.write_key(b"file")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"path")?;
+            writer.write_str(path)?;
+        }
+        DescriptorObject::File { path: None } => {}
+        DescriptorObject::Token { id, guid } => {
+            writer.write_key(b"token")?;
+            writer.write_map_len(2)?;
+            writer.write_key(b"id")?;
+            writer.write_u64(*id)?;
+            writer.write_key(b"guid")?;
+            writer.write_bin(guid)?;
+        }
+        DescriptorObject::Process { guid } => {
+            writer.write_key(b"process")?;
+            writer.write_map_len(1)?;
+            writer.write_key(b"guid")?;
+            writer.write_bin(guid)?;
+        }
+        DescriptorObject::Ipc { kind, id } => {
+            writer.write_key(b"ipc")?;
+            writer.write_map_len(2)?;
+            writer.write_key(b"type")?;
+            writer.write_str(kind)?;
+            writer.write_key(b"id")?;
+            write_i64(writer, *id)?;
+        }
+    }
+
+    let side_len = |facts: &Option<DescriptorFacts<'_>>| match facts {
+        Some(facts) => 2 + usize::from(facts.owner.is_some()),
+        None => 0,
+    };
+    writer.write_key(b"sd")?;
+    writer.write_map_len(1 + side_len(&change.current) + side_len(&change.previous))?;
+    writer.write_key(b"components")?;
+    writer.write_u64(u64::from(change.components))?;
+    if let Some(current) = &change.current {
+        writer.write_key(b"length")?;
+        writer.write_u64(current.len as u64)?;
+        writer.write_key(b"digest")?;
+        writer.write_bin(&current.digest)?;
+        if let Some(owner) = current.owner {
+            writer.write_key(b"owner")?;
+            writer.write_bin(owner)?;
+        }
+    }
+    if let Some(previous) = &change.previous {
+        writer.write_key(b"length-previous")?;
+        writer.write_u64(previous.len as u64)?;
+        writer.write_key(b"digest-previous")?;
+        writer.write_bin(&previous.digest)?;
+        if let Some(owner) = previous.owner {
+            writer.write_key(b"owner-previous")?;
+            writer.write_bin(owner)?;
+        }
+    }
+    Ok(())
+}
+
+/// `kacs.audit.descriptor.changed`: `token` is the caller's token, the one
+/// that made (or tried to make) the change.
+pub(crate) fn emit_descriptor_changed_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    change: &DescriptorChange<'_>,
+) -> Result<(), c_long> {
+    // A file name is an arbitrary byte string: sanitise, as for handle use.
+    let sanitized = match &change.object {
+        DescriptorObject::File { path: Some(path) } => {
+            let mut copy = Vec::with_capacity(path.len()).map_err(|_| ENOMEM)?;
+            copy.extend_from_slice(path).map_err(|_| ENOMEM)?;
+            Some(sanitize_utf8_lossy(copy)?)
+        }
+        _ => None,
+    };
+    let change = DescriptorChange {
+        object: match (&change.object, sanitized.as_deref()) {
+            (DescriptorObject::File { .. }, path) => DescriptorObject::File { path },
+            (DescriptorObject::Token { id, guid }, _) => DescriptorObject::Token {
+                id: *id,
+                guid: *guid,
+            },
+            (DescriptorObject::Process { guid }, _) => DescriptorObject::Process { guid: *guid },
+            (DescriptorObject::Ipc { kind, id }, _) => DescriptorObject::Ipc { kind, id: *id },
+        },
+        previous: change.previous.as_ref().map(|facts| DescriptorFacts {
+            len: facts.len,
+            digest: facts.digest,
+            owner: facts.owner,
+        }),
+        current: change.current.as_ref().map(|facts| DescriptorFacts {
+            len: facts.len,
+            digest: facts.digest,
+            owner: facts.owner,
+        }),
+        ..*change
+    };
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_map(&process_info)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let mut writer = MsgpackWriter::with_capacity(
+        512 + subject_map.len() + emitter_map.len() + sanitized.as_ref().map_or(0, |p| p.len()),
+    )?;
+
+    writer.write_map_len(5)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map.as_slice())?;
+    write_descriptor_object(&mut writer, &change)?;
+    writer.write_key(b"access")?;
+    match change.handle {
+        Some((granted, audit_mask)) => {
+            // Zero when only the SACL made the record exist, as on the
+            // registry's own record.
+            let matched = change.requested & audit_mask;
+            writer.write_map_len(4)?;
+            writer.write_key(b"requested")?;
+            writer.write_u64(u64::from(change.requested))?;
+            writer.write_key(b"granted")?;
+            writer.write_u64(u64::from(granted))?;
+            writer.write_key(b"audit-mask")?;
+            writer.write_u64(u64::from(audit_mask))?;
+            writer.write_key(b"matched")?;
+            writer.write_u64(u64::from(matched))?;
+        }
+        None => {
+            writer.write_map_len(1)?;
+            writer.write_key(b"requested")?;
+            writer.write_u64(u64::from(change.requested))?;
+        }
+    }
+    write_outcome(&mut writer, change.errno, None)?;
+
+    emit(DESCRIPTOR_CHANGED_TYPE, writer.into_vec().as_slice());
+    Ok(())
+}
+
+/// `kacs.impersonation.reverted`. `token` is the thread's token after the
+/// revert; `dropped_guid` and `dropped_sid` identify the token it gave up.
+pub(crate) fn emit_impersonation_reverted_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    tid: u64,
+    dropped_guid: &[u8; 16],
+    dropped_sid: &[u8],
+    operation: &[u8],
+    errno: i32,
+) -> Result<(), c_long> {
+    let process_info = load_process_info()?;
+    let emitter_map = encode_emitter_thread_map(&process_info, tid)?;
+    let subject_map = encode_subject_map(token, subject_ids, effective_pip)?;
+    let mut writer = MsgpackWriter::with_capacity(
+        256 + subject_map.len() + emitter_map.len() + dropped_sid.len(),
+    )?;
+
+    writer.write_map_len(5)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject_map.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter_map.as_slice())?;
+    writer.write_key(b"object")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"kind")?;
+    writer.write_str(b"token")?;
+    writer.write_key(b"token")?;
+    writer.write_map_len(2)?;
+    writer.write_key(b"guid")?;
+    writer.write_bin(dropped_guid)?;
+    writer.write_key(b"sid")?;
+    writer.write_bin(dropped_sid)?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(operation)?;
+    write_outcome(&mut writer, errno, None)?;
+
+    emit(IMPERSONATION_REVERTED_TYPE, writer.into_vec().as_slice());
+    Ok(())
+}
+
 pub(crate) fn encode_logon_session_destroyed_payload(
     session_id: u64,
     user_sid: &[u8],
@@ -840,6 +1630,7 @@ pub(crate) fn emit_access_check_events_to_kmes(
         emitter: encode_emitter_map(&process_info)?,
         object: encode_object_map(&target.object)?,
         asserted: target.asserted,
+        denials: target.denials,
     };
 
     for event in privilege_use_events {
@@ -848,6 +1639,9 @@ pub(crate) fn emit_access_check_events_to_kmes(
     }
 
     for event in audit_events {
+        if target.sacl_audit_suppressed && !event.policy_forced {
+            continue;
+        }
         let payload = encode_access_checked_payload(event, &maps)?;
         emit(ACCESS_CHECKED_TYPE, payload.as_slice());
     }

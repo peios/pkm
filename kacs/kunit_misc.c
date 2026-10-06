@@ -530,6 +530,90 @@ static void pkm_kunit_port_published_table_decides(struct kunit *test)
 	kfree(blob);
 }
 
+/*
+ * PKM §3.12: a port reservation table refused whole is recorded as
+ * kacs.config.value.rejected, naming the key, the value at fault and why,
+ * and saying the table in force was kept.
+ */
+static void pkm_kunit_port_rejected_table_is_recorded(struct kunit *test)
+{
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view config = { };
+	struct pkm_kunit_msgpack_view key = { };
+	struct pkm_kunit_msgpack_view outcome = { };
+	struct pkm_kunit_msgpack_view policy = { };
+	const u8 *fallback;
+	size_t fallback_len = 0;
+	u8 empty[64];
+	size_t empty_len;
+	size_t at = 0;
+	u8 *buffer;
+	u8 *blob;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	fallback = kacs_rust_port_fallback_sd(&fallback_len);
+	KUNIT_ASSERT_NOT_NULL(test, fallback);
+	empty_len = pkm_kunit_port_empty_dacl_sd(empty, sizeof(empty));
+	blob = kunit_kzalloc(test, 512, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, blob);
+	KUNIT_ASSERT_EQ(test, kacs_rust_port_table_reset(), 0);
+
+	/* Two selectors of equal width over one port: ambiguous. */
+	at = pkm_kunit_port_blob_append(blob, at, "@", fallback, fallback_len);
+	at = pkm_kunit_port_blob_append(blob, at, "tcp:80", empty, empty_len);
+	at = pkm_kunit_port_blob_append(blob, at, "*:80", empty, empty_len);
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test, kacs_rust_port_table_replace(blob, at), -EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.config.value.rejected", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 3));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "config", 2U, &config));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &config, "key", 1U, &key));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &key, "path",
+					"Machine\\System\\Network\\TcpIp\\PortReservations"));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &config, "name", "*:80"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "outcome", 2U, &outcome));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &outcome, "reason", "overlap"));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_int_key(
+					test, &outcome, "errno", -EINVAL));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "policy", 2U, &policy));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &policy, "previous-retained", true));
+	/* No table was loaded, so the compiled-in one still answers. */
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &policy, "fallback", true));
+
+	/* A table with no default names no single value. */
+	at = pkm_kunit_port_blob_append(blob, 0, "tcp:80", empty, empty_len);
+	pkm_kunit_reset_kmes();
+	KUNIT_EXPECT_EQ(test, kacs_rust_port_table_replace(blob, at), -EINVAL);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.config.value.rejected", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 3));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "config", 1U, &config));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "outcome", 2U, &outcome));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &outcome, "reason", "missing-default"));
+	pkm_kunit_reset_kmes();
+}
+
 static void pkm_kunit_net_bind_service_is_allow(struct kunit *test)
 {
 	/* The Linux privileged-port floor never refuses; the SD decides. */
@@ -740,6 +824,76 @@ static void pkm_kunit_stratafs_audit_emission_is_best_effort(struct kunit *test)
 }
 
 /*
+ * Section 3.C: a StrataFS record whose allocation fails is not dropped. A
+ * reduced record without the paths is written in its place, keeping the
+ * stratum indices, the operation and the outcome.
+ */
+static void pkm_kunit_stratafs_audit_reduced_record_on_alloc_failure(
+	struct kunit *test)
+{
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view role = { };
+	struct pkm_kunit_msgpack_view stratum = { };
+	struct pkm_kunit_msgpack_view operation = { };
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+
+	pkm_kunit_reset_kmes();
+	pkm_kacs_kunit_stratafs_fail_next_alloc(true);
+	pkm_kacs_stratafs_audit_copy_up("/f", 1, "lo", 0, "up", -ENOSPC);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "stratafs.file.copied-up", buffer,
+				  &view));
+	/* source, destination, outcome: no object, no stratum paths. */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 3));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "object"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "source", 1U, &role));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &role, "stratum", 1U, &stratum));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &stratum, "index", 1));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "destination", 1U, &role));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &role, "stratum", 1U, &stratum));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &stratum, "index", 0));
+
+	pkm_kunit_reset_kmes();
+	pkm_kacs_kunit_stratafs_fail_next_alloc(true);
+	pkm_kacs_stratafs_audit_mutation_refused("/f", "write", 2, "lo",
+						 -EROFS, false);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "stratafs.mutation.refused", buffer,
+				  &view));
+	/* operation, source, outcome */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 3));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_absent_key(
+					test, &root, "object"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "operation", 1U, &operation));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &operation, "name", "write"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "source", 1U, &role));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &role, "stratum", 1U, &stratum));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &stratum, "index", 2));
+	pkm_kacs_kunit_stratafs_fail_next_alloc(false);
+	pkm_kunit_reset_kmes();
+}
+
+/*
  * Section 3.C: kacs.session.destroyed is best-effort where the package name
  * is not valid UTF-8.  No live session can carry such a name -- creation
  * validates it -- so the encoder is probed directly: it refuses the payload,
@@ -762,6 +916,7 @@ static void pkm_kunit_logon_session_destroyed_encoder_drops_non_utf8(
 static struct kunit_case pkm_kunit_misc_cases[] = {
 	KUNIT_CASE(pkm_kunit_port_fallback_admits_system_only_shape),
 	KUNIT_CASE(pkm_kunit_port_published_table_decides),
+	KUNIT_CASE(pkm_kunit_port_rejected_table_is_recorded),
 	KUNIT_CASE(pkm_kunit_net_bind_service_is_allow),
 	KUNIT_CASE(pkm_kunit_probe_smoke),
 	KUNIT_CASE(pkm_kunit_live_capable_sys_boot_uses_shutdown_privilege),
@@ -775,6 +930,7 @@ static struct kunit_case pkm_kunit_misc_cases[] = {
 	KUNIT_CASE(pkm_kunit_privilege_use_record_failure_fails_the_gate),
 	KUNIT_CASE(pkm_kunit_security_capable_marks_privilege_use_twice),
 	KUNIT_CASE(pkm_kunit_stratafs_audit_emission_is_best_effort),
+	KUNIT_CASE(pkm_kunit_stratafs_audit_reduced_record_on_alloc_failure),
 	KUNIT_CASE(pkm_kunit_logon_session_destroyed_encoder_drops_non_utf8),
 	{}
 };

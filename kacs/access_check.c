@@ -15,6 +15,8 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 
+#include <pkm/token.h>
+
 #include "access_check.h"
 #include "caap_cache.h"
 #include "token_fd.h"
@@ -151,6 +153,29 @@ static long pkm_kacs_copy_args_prefix(
 	return 0;
 }
 
+/*
+ * Whether the caller of the AccessCheck syscall may have records written
+ * for the SACL it supplies (PKM §3.8.9). The descriptor on this path is the
+ * caller's own, so without the gate any process could write unthrottled
+ * kernel-origin audit records by handing the kernel a SACL that matches
+ * itself, and push the real audit trail out of the ring. As Windows'
+ * AccessCheckAndAuditAlarm does, generating those records takes
+ * SeAuditPrivilege, enabled, on the caller's effective token -- the caller,
+ * not the token_fd subject being checked. Without it the check runs and
+ * answers as usual and its SACL records are not written.
+ */
+static bool pkm_kacs_access_check_caller_may_audit(void)
+{
+	const void *caller = pkm_kacs_current_effective_token_ptr();
+
+	if (!caller ||
+	    !kacs_rust_token_has_enabled_privilege(caller,
+						   KACS_SE_AUDIT_PRIVILEGE))
+		return false;
+	return kacs_rust_token_mark_privileges_used(caller,
+						    KACS_SE_AUDIT_PRIVILEGE);
+}
+
 static long pkm_kacs_begin_token_resolution(
 	const struct pkm_kacs_usercopy_ops *ops,
 	u64 args_ptr,
@@ -280,6 +305,9 @@ long pkm_kacs_access_check_ingress_scalar_with_token_fd(
 		return ret;
 	}
 	resolution.ctx.caap_cache = caap_cache;
+	if (!pkm_kacs_access_check_caller_may_audit())
+		resolution.ctx.flags |=
+			PKM_KACS_RESOLVED_CTX_F_SACL_AUDIT_SUPPRESSED;
 	ret = pkm_kacs_access_check_ingress_scalar(&resolution.copied_ops,
 						   args_ptr, &resolution.ctx,
 						   event_sinks, summary);
@@ -329,6 +357,9 @@ long pkm_kacs_access_check_ingress_list_with_token_fd(
 		return ret;
 	}
 	resolution.ctx.caap_cache = caap_cache;
+	if (!pkm_kacs_access_check_caller_may_audit())
+		resolution.ctx.flags |=
+			PKM_KACS_RESOLVED_CTX_F_SACL_AUDIT_SUPPRESSED;
 	ret = pkm_kacs_access_check_ingress_list(&resolution.copied_ops, args_ptr,
 						 results_ptr, results_count,
 						 &resolution.ctx,

@@ -6,6 +6,7 @@
 #include <linux/sched.h>
 #include <linux/types.h>
 
+#include "capability.h"
 #include "cred_lifecycle.h"
 #include "copy_up.h"
 #include "lsm_internal.h"
@@ -34,6 +35,9 @@ int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 	new_sec->delete_on_close_dentry = NULL;
 	new_sec->delete_on_close_inode = NULL;
 	new_sec->impersonation_saved_cred = NULL;
+	/* Pending privilege-use records are the parent's, not the child's. */
+	new_sec->priv_use_token = NULL;
+	new_sec->priv_use_pending = 0;
 	new_sec->native_open.expected_dentry = NULL;
 	new_sec->native_open.expected_mnt = NULL;
 	new_sec->native_open.desired_access = 0;
@@ -137,6 +141,11 @@ void pkm_kacs_task_free(struct task_struct *task)
 	if (sec->impersonation_saved_cred)
 		put_cred(sec->impersonation_saved_cred);
 	sec->impersonation_saved_cred = NULL;
+	/*
+	 * Exit runs queued task work, so this is normally already clear; a
+	 * reference it still holds is dropped rather than leaked.
+	 */
+	pkm_kacs_priv_use_task_release(sec);
 	sec->pending_exec_pip_type = 0;
 	sec->pending_exec_pip_trust = 0;
 	sec->pending_exec_pip_valid = 0;

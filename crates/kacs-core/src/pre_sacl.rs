@@ -24,6 +24,9 @@ pub struct PreSaclWalkState<'a> {
     pub mandatory_decided: u32,
     /// Bits decided specifically by PIP.
     pub pip_decided: u32,
+    /// Bits decided specifically by MIC: the rights the mandatory label
+    /// withholds from this caller.
+    pub mic_decided: u32,
     /// Resource attributes extracted from the SACL.
     pub resource_attributes: Vec<ClaimAttribute>,
     /// Scoped policy SIDs extracted from the SACL.
@@ -110,6 +113,7 @@ pub fn pre_sacl_walk<'a>(input: PreSaclWalkInput<'a, '_>) -> KacsResult<PreSaclW
         privilege_granted,
         mandatory_decided,
         pip_decided,
+        mic_decided: mic.mandatory_decided,
         resource_attributes: metadata.resource_attributes,
         policy_sids: metadata.policy_sids,
         provenance,

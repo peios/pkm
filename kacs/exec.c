@@ -424,7 +424,7 @@ void pkm_kacs_bprm_committing_creds(const struct linux_binprm *bprm)
 	(void)bprm;
 	pkm_kacs_copy_up_task_exit(current);
 
-	ret = pkm_kacs_revert_impersonation();
+	ret = pkm_kacs_revert_impersonation_for_exec();
 	if (ret) {
 		trace_kacs_exec(false, false, 0, 0,
 				KACS_EXEC_IMPERSONATION_REVERT_FAIL, ret);

@@ -919,11 +919,14 @@ void pkm_kunit_reset_kmes(void)
 	/*
 	 * Settle what earlier cases left to RCU first: a cred freed by a
 	 * revert drops its token from an RCU callback, and a token's last
-	 * drop destroys its logon session and emits kacs.session.destroyed
-	 * on whichever CPU runs the callback — into a case that expects its
-	 * own events alone, on one ring (PEI-1313 made those frees real).
+	 * drop destroys its logon session and queues kacs.session.destroyed
+	 * for the session-audit work item, which writes it on whichever CPU
+	 * runs the work — into a case that expects its own events alone, on
+	 * one ring (PEI-1313 made those frees real). The barrier settles the
+	 * callbacks; the flush writes whatever records they queued.
 	 */
 	rcu_barrier();
+	pkm_kacs_session_audit_flush();
 	pkm_kmes_kunit_reset_all();
 	pkm_kmes_kunit_clear_process_override();
 	(void)pkm_kmes_kunit_set_current_process_rate_refill_frozen(false);
@@ -1292,6 +1295,13 @@ bool pkm_kunit_msgpack_parse_one(const u8 *bytes, size_t len,
 	memset(out, 0, sizeof(*out));
 	tag = bytes[0];
 
+	if (tag >= 0xe0) {
+		/* Negative fixint, -32 to -1. */
+		out->kind = PKM_KUNIT_MSGPACK_INT;
+		out->int_value = (s64)(s8)tag;
+		out->total_len = 1;
+		return true;
+	}
 	if (tag <= 0x7f) {
 		out->kind = PKM_KUNIT_MSGPACK_UINT;
 		out->uint_value = tag;
@@ -1376,6 +1386,22 @@ bool pkm_kunit_msgpack_parse_one(const u8 *bytes, size_t len,
 			out->uint_value = value;
 			out->total_len = 9;
 			return true;
+		case 0xd0:
+		case 0xd1:
+		case 0xd2:
+		case 0xd3: {
+			size_t width = (size_t)1 << (tag - 0xd0);
+
+			if (!pkm_kunit_msgpack_read_be(bytes + 1, len - 1, width,
+						       &value))
+				return false;
+			out->kind = PKM_KUNIT_MSGPACK_INT;
+			/* Sign-extend the big-endian two's complement value. */
+			out->int_value = width == 8 ? (s64)value :
+				(s64)(value << (64 - 8 * width)) >> (64 - 8 * width);
+			out->total_len = 1 + width;
+			return true;
+		}
 		case 0xd9:
 			if (!pkm_kunit_msgpack_read_be(bytes + 1, len - 1, 1,
 						       &value))
@@ -1560,6 +1586,21 @@ bool pkm_kunit_msgpack_expect_uint_key(
 		return false;
 	KUNIT_EXPECT_EQ(test, value.uint_value, expected);
 	return value.uint_value == expected;
+}
+
+
+/* A negative integer, such as outcome.errno. */
+bool pkm_kunit_msgpack_expect_int_key(
+	struct kunit *test, const struct pkm_kunit_msgpack_view *map,
+	const char *key, s64 expected)
+{
+	struct pkm_kunit_msgpack_view value = { };
+
+	if (!pkm_kunit_msgpack_require_key(test, map, key,
+					   PKM_KUNIT_MSGPACK_INT, &value))
+		return false;
+	KUNIT_EXPECT_EQ(test, value.int_value, expected);
+	return value.int_value == expected;
 }
 
 
@@ -1852,6 +1893,26 @@ bool pkm_kunit_msgpack_parse_payload_root(
 }
 
 
+/*
+ * The newest KACS-origin record of `type` on any ring, copied into `buffer`
+ * (PKM_KUNIT_KMES_CAPTURE_BYTES long) and parsed into `view`.
+ */
+bool pkm_kunit_latest_kacs_event(struct kunit *test, const char *type,
+				 u8 *buffer,
+				 struct pkm_kunit_kmes_event_view *view)
+{
+	struct pkm_kmes_kunit_snapshot snapshot = { };
+	size_t written = 0;
+
+	(void)test;
+	if (pkm_kmes_kunit_copy_latest_matching_event(
+		    KMES_ORIGIN_KACS, type, strlen(type), buffer,
+		    PKM_KUNIT_KMES_CAPTURE_BYTES, &written, &snapshot) != 0)
+		return false;
+	return pkm_kunit_parse_kmes_event(buffer, written, view);
+}
+
+
 bool pkm_kunit_expect_kmes_event_type(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	const char *expected)
@@ -1945,13 +2006,16 @@ static bool pkm_kunit_msgpack_expect_outcome_success(
 /*
  * kacs.audit.access.checked: subject, emitter, [object], access, outcome,
  * trigger, [fields]. expected_object_kind NULL means the record names no
- * object (an access-check ioctl with no audit context).
+ * object (an access-check syscall with no audit context).
+ * expected_asserted is true for a record of the AccessCheck syscall, which
+ * always carries fields.attestation.userspace, and false for a kernel check.
  */
 bool pkm_kunit_expect_access_audit_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_requested, u32 expected_granted, bool expected_success,
 	const char *expected_trigger_kind, const u8 *expected_ace,
-	size_t expected_ace_len, const char *expected_object_kind)
+	size_t expected_ace_len, const char *expected_object_kind,
+	bool expected_asserted)
 {
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
@@ -1963,7 +2027,9 @@ bool pkm_kunit_expect_access_audit_schema(
 	ok &= pkm_kunit_expect_kmes_event_type(test, event,
 					       "kacs.audit.access.checked");
 	if (!pkm_kunit_msgpack_parse_payload_root(
-		    test, event, &root, expected_object_kind ? 6U : 5U))
+		    test, event, &root,
+		    (expected_object_kind ? 6U : 5U) +
+			    (expected_asserted ? 1U : 0U)))
 		return false;
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
@@ -1994,7 +2060,8 @@ bool pkm_kunit_expect_access_audit_schema(
 		KUNIT_EXPECT_TRUE(test, ace_matches);
 		ok &= ace_matches;
 	}
-	ok &= pkm_kunit_msgpack_expect_attestation(test, &root, false);
+	ok &= pkm_kunit_msgpack_expect_attestation(test, &root,
+						   expected_asserted);
 	ok &= pkm_kunit_msgpack_expect_emitter_key(
 		test, &root, 4105, PKM_KUNIT_KMES_PROCESS_NAME,
 		PKM_KUNIT_KMES_PROCESS_PATH);
@@ -2010,8 +2077,13 @@ bool pkm_kunit_expect_access_audit_subject_group_sids(
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
 
-	/* An access-check ioctl with no audit context or PIP: no object. */
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 5))
+	/*
+	 * An access-check syscall with no audit context: no object, and the
+	 * attestation every syscall record carries.
+	 */
+	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 6))
+		return false;
+	if (!pkm_kunit_msgpack_expect_attestation(test, &root, true))
 		return false;
 	if (!pkm_kunit_msgpack_require_key(test, &root, "subject",
 					   PKM_KUNIT_MSGPACK_MAP, &subject))
@@ -2152,18 +2224,29 @@ bool pkm_kunit_expect_privilege_use_schema(
 	struct kunit *test, const struct pkm_kunit_kmes_event_view *event,
 	u32 expected_contributed, u32 expected_surviving,
 	u32 expected_check_requested, u32 expected_check_granted,
-	bool expected_success, const char *expected_object_kind)
+	bool expected_success, const char *expected_object_kind,
+	bool expected_asserted)
 {
 	struct pkm_kunit_msgpack_view root = { };
 	struct pkm_kunit_msgpack_view subject = { };
+	struct pkm_kunit_msgpack_view operation = { };
 	struct pkm_kunit_msgpack_view privilege = { };
 	bool ok = true;
 
 	ok &= pkm_kunit_expect_kmes_event_type(test, event,
 					       "kacs.audit.privilege.used");
+	/* subject, emitter, [object], operation, privilege, access, outcome. */
 	if (!pkm_kunit_msgpack_parse_payload_root(
-		    test, event, &root, expected_object_kind ? 6U : 5U))
+		    test, event, &root,
+		    (expected_object_kind ? 7U : 6U) +
+			    (expected_asserted ? 1U : 0U)))
 		return false;
+	if (pkm_kunit_msgpack_require_map_key(test, &root, "operation", 1U,
+					      &operation))
+		ok &= pkm_kunit_msgpack_expect_str_key(test, &operation, "name",
+						       "access-check");
+	else
+		ok = false;
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
 	ok &= pkm_kunit_msgpack_expect_subject_map(
@@ -2189,7 +2272,8 @@ bool pkm_kunit_expect_privilege_use_schema(
 						   expected_check_granted);
 	ok &= pkm_kunit_msgpack_expect_outcome_success(test, &root,
 						       expected_success);
-	ok &= pkm_kunit_msgpack_expect_attestation(test, &root, false);
+	ok &= pkm_kunit_msgpack_expect_attestation(test, &root,
+						   expected_asserted);
 	ok &= pkm_kunit_msgpack_expect_emitter_key(
 		test, &root, 4206, PKM_KUNIT_KMES_PRIV_PROCESS_NAME,
 		PKM_KUNIT_KMES_PRIV_PROCESS_PATH);
@@ -2212,8 +2296,10 @@ bool pkm_kunit_expect_caap_diagnostic_schema(
 
 	ok &= pkm_kunit_expect_kmes_event_type(test, event,
 					       "kacs.caap.staging.diverged");
-	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 3))
+	/* subject, emitter, access, and the syscall's attestation. */
+	if (!pkm_kunit_msgpack_parse_payload_root(test, event, &root, 4))
 		return false;
+	ok &= pkm_kunit_msgpack_expect_attestation(test, &root, true);
 	ok &= pkm_kunit_msgpack_require_key(test, &root, "subject",
 					    PKM_KUNIT_MSGPACK_MAP, &subject);
 	ok &= pkm_kunit_msgpack_expect_subject_map(

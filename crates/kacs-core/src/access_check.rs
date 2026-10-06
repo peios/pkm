@@ -112,6 +112,12 @@ pub struct AccessCheckCoreState<'a> {
     pub staging_mismatch: bool,
     /// Bits decided specifically by PIP before DACL/CAAP processing.
     pub pip_decided: u32,
+    /// The requested bits mandatory integrity control denied — every bit it
+    /// denied, for a `MAXIMUM_ALLOWED` request (`access.denied-integrity`).
+    pub denied_integrity: u32,
+    /// The requested bits the process-trust label denied, read the same
+    /// way (`access.denied-trust`).
+    pub denied_trust: u32,
     /// Final per-node granted list when result-list mode is active.
     pub object_granted_list: Option<Vec<u32>>,
     /// Audit/alarm events emitted by step 14.
@@ -380,6 +386,14 @@ pub fn access_check_core<'a>(
     let mut updated_privileges = token.privileges;
     updated_privileges.used |= used_delta;
 
+    // A denial explains a request: report the requested bits a mandatory
+    // check withheld, or all of them for a request that named none.
+    let denial_scope = if base.max_allowed_mode {
+        u32::MAX
+    } else {
+        base.mapped_desired
+    };
+
     Ok(AccessCheckCoreState {
         decided: base.decided,
         granted: caap.granted,
@@ -389,6 +403,8 @@ pub fn access_check_core<'a>(
         continuous_audit_mask,
         staging_mismatch,
         pip_decided: base.pip_decided,
+        denied_integrity: base.mic_decided & denial_scope,
+        denied_trust: base.pip_decided & denial_scope,
         object_granted_list: caap.object_granted_list,
         audit_events,
         privilege_use_events,

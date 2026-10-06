@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/bitops.h>
 #include <linux/capability.h>
 #include <linux/cred.h>
 #include <linux/errno.h>
+#include <linux/preempt.h>
 #include <linux/prctl.h>
 #include <linux/sched.h>
+#include <linux/security.h>
+#include <linux/string.h>
+#include <linux/task_work.h>
 #include <linux/types.h>
 
 #include <pkm/token.h>
 
+#include "access_check.h"
 #include "capability.h"
 #include "copy_up.h"
 #include "lsm_internal.h"
@@ -237,10 +243,24 @@ static u64 pkm_kacs_cap_required_privilege(int cap)
 
 long pkm_kacs_check_capability_for_token(const void *subject_token, int cap)
 {
+	return pkm_kacs_check_capability_for_token_held(subject_token, cap,
+						       NULL);
+}
+
+/*
+ * The decision, also reporting in *held_out the privileges the token spent
+ * on it: 0 for a capability every process has or no process has, and on a
+ * refusal.
+ */
+long pkm_kacs_check_capability_for_token_held(const void *subject_token,
+					      int cap, u64 *held_out)
+{
 	u64 privilege;
 	u64 held;
 	int remote_shutdown_origin = 0;
 
+	if (held_out)
+		*held_out = 0;
 	if (!cap_valid(cap))
 		return -EINVAL;
 	if (pkm_kacs_cap_is_allow(cap)) {
@@ -293,7 +313,199 @@ long pkm_kacs_check_capability_for_token(const void *subject_token, int cap)
 		return -EPERM;
 	}
 
+	if (held_out)
+		*held_out = held;
 	return 0;
+}
+
+/*
+ * kacs.audit.privilege.used for a privilege spent at a Linux capability
+ * gate or the volume-management gate (PKM §3.4).
+ *
+ * Recorded when, and only when, all of these hold:
+ *   - the token's audit policy carries PRIVILEGE_USE_SUCCESS, the event's
+ *     own switch, as for privilege use in an access check;
+ *   - the caller did not pass CAP_OPT_NOAUDIT (a probe, not a use);
+ *   - the check is the current task's own, in task context, in a user
+ *     process: kernel threads and interrupt context only count;
+ *   - this process has not already recorded this gate under this token.
+ *
+ * capable() can run under spinlocks and the record allocates, so this
+ * only notes the use; task work writes the record on the way back to user
+ * space. Returns whether the use was queued (for KUnit).
+ */
+static void pkm_kacs_priv_use_task_work(struct callback_head *work);
+
+static bool pkm_kacs_priv_use_first(struct pkm_kacs_process_state *state,
+				    const u8 guid[KACS_UUID_BYTES],
+				    unsigned int bit, bool claim)
+{
+	unsigned long flags;
+	bool first;
+
+	spin_lock_irqsave(&state->priv_use_lock, flags);
+	if (memcmp(state->priv_use_token_guid, guid, KACS_UUID_BYTES)) {
+		memcpy(state->priv_use_token_guid, guid, KACS_UUID_BYTES);
+		state->priv_use_seen = 0;
+	}
+	first = !(state->priv_use_seen & BIT_ULL(bit));
+	if (first && claim)
+		state->priv_use_seen |= BIT_ULL(bit);
+	spin_unlock_irqrestore(&state->priv_use_lock, flags);
+	return first;
+}
+
+static void pkm_kacs_priv_use_unclaim(struct pkm_kacs_process_state *state,
+				      const u8 guid[KACS_UUID_BYTES],
+				      unsigned int bit)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&state->priv_use_lock, flags);
+	if (!memcmp(state->priv_use_token_guid, guid, KACS_UUID_BYTES))
+		state->priv_use_seen &= ~BIT_ULL(bit);
+	spin_unlock_irqrestore(&state->priv_use_lock, flags);
+}
+
+bool pkm_kacs_note_privilege_use(const struct cred *cred, unsigned int bit,
+				 u64 held, unsigned int opts)
+{
+	const struct pkm_kacs_cred_security *sec;
+	struct pkm_kacs_task_security *tsec;
+	struct pkm_kacs_process_state *state;
+	u8 guid[KACS_UUID_BYTES];
+	const void *token;
+
+	if (!held || (opts & CAP_OPT_NOAUDIT) || bit > PKM_KACS_PRIV_USE_VOLUME_BIT)
+		return false;
+	if (!in_task() || (current->flags & PF_KTHREAD) || !current->security)
+		return false;
+	if (!cred || cred != current_cred() || !cred->security)
+		return false;
+	sec = pkm_kacs_cred(cred);
+	token = sec ? sec->token : NULL;
+	if (!token)
+		return false;
+	if (!(kacs_rust_token_audit_policy(token) &
+	      KACS_AUDIT_POLICY_PRIVILEGE_USE_SUCCESS))
+		return false;
+	tsec = pkm_kacs_task(current);
+	state = tsec->process_state;
+	if (!state || kacs_rust_token_guid(token, guid))
+		return false;
+
+	/*
+	 * One token at a time can wait for the task work. A use under another
+	 * token in the same syscall stays unclaimed and is recorded next time.
+	 */
+	if (tsec->priv_use_token && tsec->priv_use_token != token)
+		return false;
+	if (!pkm_kacs_priv_use_first(state, guid, bit, true))
+		return false;
+
+	if (!tsec->priv_use_token) {
+		const void *ref = kacs_rust_token_clone(token);
+
+		if (!ref) {
+			pkm_kacs_priv_use_unclaim(state, guid, bit);
+			return false;
+		}
+		init_task_work(&tsec->priv_use_work,
+			       pkm_kacs_priv_use_task_work);
+		if (task_work_add(current, &tsec->priv_use_work, TWA_RESUME)) {
+			/* Exiting: no later return to user to write it on. */
+			kacs_rust_token_drop(ref);
+			pkm_kacs_priv_use_unclaim(state, guid, bit);
+			return false;
+		}
+		tsec->priv_use_token = ref;
+	}
+	tsec->priv_use_pending |= BIT_ULL(bit);
+	return true;
+}
+
+/*
+ * The privileges a gate spends for `bit`, recomputed when the record is
+ * written: the use was decided under the same token moments earlier.
+ */
+static u64 pkm_kacs_priv_use_privileges(const void *token, unsigned int bit)
+{
+	u64 privilege;
+	u64 held;
+
+	if (bit == PKM_KACS_PRIV_USE_VOLUME_BIT)
+		privilege = KACS_SE_MANAGE_VOLUME_PRIVILEGE |
+			    KACS_SE_TCB_PRIVILEGE;
+	else
+		privilege = pkm_kacs_cap_required_privilege((int)bit);
+	held = kacs_rust_token_enabled_privileges_in_mask(token, privilege);
+	if ((int)bit == CAP_SYS_BOOT &&
+	    kacs_rust_token_is_remote_shutdown_origin(token) > 0 &&
+	    kacs_rust_token_has_enabled_privilege(
+		    token, KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE))
+		held |= KACS_SE_REMOTE_SHUTDOWN_PRIVILEGE;
+	/* Disabled since: name what the gate asks for. */
+	return held ? held : privilege;
+}
+
+static void pkm_kacs_priv_use_task_work(struct callback_head *work)
+{
+	struct pkm_kacs_task_security *tsec =
+		container_of(work, struct pkm_kacs_task_security, priv_use_work);
+	const void *token = tsec->priv_use_token;
+	u64 pending = tsec->priv_use_pending;
+	u32 pip_type = 0;
+	u32 pip_trust = 0;
+
+	/* Cleared first: a gate reached while writing queues afresh. */
+	tsec->priv_use_token = NULL;
+	tsec->priv_use_pending = 0;
+	if (!token)
+		return;
+	if (pkm_kacs_current_pip_context(&pip_type, &pip_trust)) {
+		pip_type = 0;
+		pip_trust = 0;
+	}
+	while (pending) {
+		unsigned int bit = __ffs64(pending);
+		u64 privileges = pkm_kacs_priv_use_privileges(token, bit);
+
+		pending &= ~BIT_ULL(bit);
+		while (privileges) {
+			u64 one = BIT_ULL(__ffs64(privileges));
+
+			privileges &= ~one;
+			(void)kacs_rust_emit_privilege_use(
+				token,
+				bit == PKM_KACS_PRIV_USE_VOLUME_BIT ?
+					PKM_KACS_PRIV_USE_OP_VOLUME_MOUNT :
+					PKM_KACS_PRIV_USE_OP_LINUX_CAP,
+				bit == PKM_KACS_PRIV_USE_VOLUME_BIT ? CAP_SYS_ADMIN :
+								      (int)bit,
+				one, pip_type, pip_trust);
+		}
+	}
+	kacs_rust_token_drop(token);
+}
+
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+/* The per-process dedup, claimed as a gate's first use would claim it. */
+bool pkm_kacs_kunit_priv_use_first(struct pkm_kacs_process_state *state,
+				   const u8 guid[KACS_UUID_BYTES],
+				   unsigned int bit)
+{
+	return pkm_kacs_priv_use_first(state, guid, bit, true);
+}
+#endif
+
+/* Drops a reference task work never got to; see pkm_kacs_task_free(). */
+void pkm_kacs_priv_use_task_release(struct pkm_kacs_task_security *tsec)
+{
+	if (!tsec || !tsec->priv_use_token)
+		return;
+	kacs_rust_token_drop(tsec->priv_use_token);
+	tsec->priv_use_token = NULL;
+	tsec->priv_use_pending = 0;
 }
 
 long pkm_kacs_capset_core(const void *subject_token, struct cred *new,
@@ -425,22 +637,42 @@ bool pkm_kacs_may_manage_volumes(void)
 {
 	const struct pkm_kacs_cred_security *sec;
 	const struct cred *cred = current_cred();
+	const void *token;
+	u64 held;
 
 	if (!cred)
 		return false;
 	sec = cred->security ? pkm_kacs_cred(cred) : NULL;
-	return pkm_kacs_may_manage_volumes_for_token(sec ? sec->token : NULL);
+	token = sec ? sec->token : NULL;
+	if (!pkm_kacs_may_manage_volumes_for_token(token))
+		return false;
+	/* The privileges the gate just spent, for the privilege-use record. */
+	held = kacs_rust_token_enabled_privileges_in_mask(
+		token, KACS_SE_MANAGE_VOLUME_PRIVILEGE | KACS_SE_TCB_PRIVILEGE);
+	pkm_kacs_note_privilege_use(cred, PKM_KACS_PRIV_USE_VOLUME_BIT, held,
+				    CAP_OPT_NONE);
+	return true;
 }
 
 long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 				 struct user_namespace *target_ns, int cap,
 				 unsigned int opts)
 {
+	return pkm_kacs_capable_in_cred_ns_held(cred, target_ns, cap, opts,
+						NULL);
+}
+
+long pkm_kacs_capable_in_cred_ns_held(const struct cred *cred,
+				      struct user_namespace *target_ns,
+				      int cap, unsigned int opts,
+				      u64 *held_out)
+{
 	const struct pkm_kacs_cred_security *sec;
 
-	(void)target_ns;
 	(void)opts;
 
+	if (held_out)
+		*held_out = 0;
 	if (!cap_valid(cap))
 		return -EINVAL;
 	if (!cred) {
@@ -465,7 +697,8 @@ long pkm_kacs_capable_in_cred_ns(const struct cred *cred,
 	if (cap == CAP_SETFCAP && cred == current_cred() &&
 	    pkm_kacs_copy_up_allows_capability_use(target_ns))
 		return 0;
-	return pkm_kacs_check_capability_for_token(sec->token, cap);
+	return pkm_kacs_check_capability_for_token_held(sec->token, cap,
+						       held_out);
 }
 
 long pkm_kacs_capget_for_task(const struct task_struct *target,
@@ -517,8 +750,20 @@ int pkm_kacs_capable(const struct cred *cred,
 		     struct user_namespace *target_ns, int cap,
 		     unsigned int opts)
 {
-	/* The StrataFS capability-clone exception is in the shared core. */
-	return pkm_kacs_capable_in_cred_ns(cred, target_ns, cap, opts);
+	u64 held = 0;
+	long ret;
+
+	/*
+	 * The StrataFS capability-clone exception is in the shared core.
+	 * Every capable() decides twice, once in the patched cap_capable() and
+	 * once here; only this, the LSM hook, notes a privilege use, so each
+	 * use is counted once.
+	 */
+	ret = pkm_kacs_capable_in_cred_ns_held(cred, target_ns, cap, opts,
+					       &held);
+	if (!ret && held)
+		pkm_kacs_note_privilege_use(cred, (unsigned int)cap, held, opts);
+	return (int)ret;
 }
 
 int pkm_kacs_capset(struct cred *new, const struct cred *old,
