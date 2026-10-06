@@ -680,6 +680,65 @@ field: fields.attestation.userspace  optional
   the descriptor, and with it `trigger.ace`, is always the caller's, as are
   any audit context and PIP state it passes.
 
+--- event kacs.caap.policy.changed
+tier: essential
+gating: none — every change a caller holding SeTcbPrivilege makes is recorded
+cardinality: once per kacs_set_caap call that passed the privilege gate
+
+The record that a central access policy was installed, replaced or removed.
+A policy decides access to every object whose SACL names it, alongside that
+object's own DACL, so one change here can widen or narrow access across the
+whole system without touching any object.
+
+Only a caller holding SeTcbPrivilege, enabled, may change a policy; a call
+refused for want of it is not recorded. A call that passed the gate is
+recorded whether or not it applied: a malformed specification leaves the
+old policy in force and the record says so.
+
+The record names the policy, not its rules. Compare two records' effects by
+the access records that follow them.
+
+include: subject
+field: caap.policy.sid          required
+field: operation.name           required
+  values: set | remove
+  closed: true
+  `set` installs a policy, or replaces the one of the same SID whole;
+  `remove` takes it away, after which objects naming it are decided by the
+  recovery policy.
+field: outcome.success          required
+field: outcome.errno            when outcome.success == false
+
+--- event kacs.mount.policy.changed
+tier: essential
+gating: none — every change a caller admitted by the volume-management gate makes is recorded
+cardinality: once per change
+
+The record that a filesystem's KACS mount policy was set: what happens to an
+object on it that has no stored descriptor. `unmanaged` turns access control
+off for the whole filesystem; `deny-missing` refuses such objects; the two
+`synthesize` policies build a descriptor from the parent and the template
+the caller supplies.
+
+Setting a policy needs SeManageVolumePrivilege or SeTcbPrivilege. Every
+other refusal comes before that check, so a record is always of a change
+made.
+
+**The record does not carry the template.** A synthesising policy's template
+descriptor decides what every unlabelled object on the filesystem grants;
+read it back with `kacs_get_mount_policy`.
+
+include: subject
+field: object.mount.fs-type             optional
+  The filesystem's type, when the kernel knows it.
+field: object.mount.policy              required
+field: object.mount.policy-previous     required
+field: object.mount.policy-generation   required
+  The generation the change began. Every descriptor cached under an older
+  one is discarded on its next use.
+field: outcome.success                  required
+  Always true: every refusal is decided before anything changes.
+
 --- event kacs.descriptor.rejected
 tier: standard
 gating: none — every unreadable stored descriptor is recorded

@@ -9875,6 +9875,83 @@ pub extern "C" fn kacs_rust_emit_descriptor_changed(chg: *const PkmKacsSdChangeV
 }
 
 #[no_mangle]
+/// Writes `kacs.caap.policy.changed`: `token` installed or replaced
+/// (`removed` false) or removed the central access policy `policy_sid`, with
+/// `errno` 0 on success. Best effort.
+pub extern "C" fn kacs_rust_emit_caap_policy_changed(
+    token: *const c_void,
+    policy_sid_ptr: *const u8,
+    policy_sid_len: usize,
+    removed: bool,
+    errno: i32,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    if policy_sid_ptr.is_null() || policy_sid_len == 0 {
+        return -EINVAL;
+    }
+    let policy_sid = unsafe { core::slice::from_raw_parts(policy_sid_ptr, policy_sid_len) };
+    let ids = token.audit_subject_ids();
+
+    token.with_access_token(|access_token| {
+        match crate::kmes_payload::emit_caap_policy_changed_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            policy_sid,
+            removed,
+            errno,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+#[no_mangle]
+/// Writes `kacs.mount.policy.changed`: `token` set the mount policy of a
+/// filesystem of type `fs_type` from `previous` to `policy`, now at
+/// `generation`. Best effort.
+pub extern "C" fn kacs_rust_emit_mount_policy_changed(
+    token: *const c_void,
+    fs_type_ptr: *const u8,
+    fs_type_len: usize,
+    policy: u32,
+    previous: u32,
+    generation: u32,
+    pip_type: u32,
+    pip_trust: u32,
+) -> i32 {
+    let Some(token) = (unsafe { PkmKacsBootToken::from_ptr(token) }) else {
+        return -EINVAL;
+    };
+    let fs_type: &[u8] = if fs_type_ptr.is_null() {
+        b""
+    } else {
+        unsafe { core::slice::from_raw_parts(fs_type_ptr, fs_type_len) }
+    };
+    let ids = token.audit_subject_ids();
+
+    token.with_access_token(|access_token| {
+        match crate::kmes_payload::emit_mount_policy_changed_to_kmes(
+            &access_token,
+            Some(&ids),
+            pip_context_from_abi(pip_type, pip_trust),
+            fs_type,
+            policy,
+            previous,
+            generation,
+        ) {
+            Ok(()) => 0,
+            Err(err) => err as i32,
+        }
+    })
+}
+
+#[no_mangle]
 /// Writes `kacs.descriptor.rejected` for a file whose stored descriptor,
 /// `sd_len` bytes, failed validation. `token` is the effective token of the
 /// task that read it, or null to write the record without a subject.

@@ -37,6 +37,8 @@ const IMPERSONATION_STARTED_TYPE: &[u8] = b"kacs.impersonation.started";
 const IMPERSONATION_REVERTED_TYPE: &[u8] = b"kacs.impersonation.reverted";
 const DESCRIPTOR_CHANGED_TYPE: &[u8] = b"kacs.audit.descriptor.changed";
 const DESCRIPTOR_REJECTED_TYPE: &[u8] = b"kacs.descriptor.rejected";
+const CAAP_POLICY_CHANGED_TYPE: &[u8] = b"kacs.caap.policy.changed";
+const MOUNT_POLICY_CHANGED_TYPE: &[u8] = b"kacs.mount.policy.changed";
 
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 
@@ -1108,6 +1110,109 @@ pub(crate) fn emit_impersonation_started_to_kmes(
     )?;
 
     emit(IMPERSONATION_STARTED_TYPE, payload.as_slice());
+    Ok(())
+}
+
+/// The subject and emitter maps of a record about something `token` did.
+fn actor_maps(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+) -> Result<(Vec<u8>, Vec<u8>), c_long> {
+    let process_info = load_process_info()?;
+    Ok((
+        encode_subject_map(token, subject_ids, effective_pip)?,
+        encode_emitter_map(&process_info)?,
+    ))
+}
+
+/// `kacs.caap.policy.changed`: a central access policy installed, replaced
+/// (`set`) or removed (`remove`) by `token`.
+pub(crate) fn emit_caap_policy_changed_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    policy_sid: &[u8],
+    removed: bool,
+    errno: i32,
+) -> Result<(), c_long> {
+    let (subject, emitter) = actor_maps(token, subject_ids, effective_pip)?;
+    let mut writer =
+        MsgpackWriter::with_capacity(160 + subject.len() + emitter.len() + policy_sid.len())?;
+
+    writer.write_map_len(5)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter.as_slice())?;
+    writer.write_key(b"caap")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"policy")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"sid")?;
+    writer.write_bin(policy_sid)?;
+    writer.write_key(b"operation")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"name")?;
+    writer.write_str(if removed { b"remove" } else { b"set" })?;
+    write_outcome(&mut writer, errno, None)?;
+
+    emit(CAAP_POLICY_CHANGED_TYPE, writer.into_vec().as_slice());
+    Ok(())
+}
+
+/// `object.mount.policy` for a `KACS_MOUNT_POLICY_*` value.
+fn mount_policy_name(policy: u32) -> Result<&'static [u8], c_long> {
+    use crate::peios_uapi as uapi;
+
+    match policy {
+        uapi::KACS_MOUNT_POLICY_UNMANAGED => Ok(b"unmanaged"),
+        uapi::KACS_MOUNT_POLICY_DENY_MISSING => Ok(b"deny-missing"),
+        uapi::KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL => Ok(b"synthesize-ephemeral"),
+        uapi::KACS_MOUNT_POLICY_SYNTHESIZE_PERSISTENT => Ok(b"synthesize-persistent"),
+        _ => Err(EIO),
+    }
+}
+
+/// `kacs.mount.policy.changed`: `token` set a filesystem's mount policy.
+pub(crate) fn emit_mount_policy_changed_to_kmes(
+    token: &AccessCheckToken<'_>,
+    subject_ids: Option<&AuditSubjectIds>,
+    effective_pip: PipContext,
+    fs_type: &[u8],
+    policy: u32,
+    previous: u32,
+    generation: u32,
+) -> Result<(), c_long> {
+    let policy = mount_policy_name(policy)?;
+    let previous = mount_policy_name(previous)?;
+    let (subject, emitter) = actor_maps(token, subject_ids, effective_pip)?;
+    let mut writer =
+        MsgpackWriter::with_capacity(224 + subject.len() + emitter.len() + fs_type.len())?;
+    let fs_type = str::from_utf8(fs_type).map_err(|_| EIO)?;
+
+    writer.write_map_len(4)?;
+    writer.write_key(b"subject")?;
+    writer.extend(subject.as_slice())?;
+    writer.write_key(b"emitter")?;
+    writer.extend(emitter.as_slice())?;
+    writer.write_key(b"object")?;
+    writer.write_map_len(1)?;
+    writer.write_key(b"mount")?;
+    writer.write_map_len(3 + usize::from(!fs_type.is_empty()))?;
+    if !fs_type.is_empty() {
+        writer.write_key(b"fs-type")?;
+        writer.write_str(fs_type.as_bytes())?;
+    }
+    writer.write_key(b"policy")?;
+    writer.write_str(policy)?;
+    writer.write_key(b"policy-previous")?;
+    writer.write_str(previous)?;
+    writer.write_key(b"policy-generation")?;
+    writer.write_u64(u64::from(generation))?;
+    write_outcome(&mut writer, 0, None)?;
+
+    emit(MOUNT_POLICY_CHANGED_TYPE, writer.into_vec().as_slice());
     Ok(())
 }
 

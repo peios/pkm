@@ -7671,6 +7671,139 @@ static void pkm_kunit_file_mount_policy_fixes_stratafs_to_deny_missing(
 }
 
 
+/*
+ * PKM §3.9.4: setting a mount policy writes kacs.mount.policy.changed, with
+ * the policy set, the one it replaced and the new generation.
+ */
+static void pkm_kunit_file_mount_policy_change_is_recorded(struct kunit *test)
+{
+	struct kacs_mount_policy_args args = {
+		.policy = KACS_MOUNT_POLICY_SYNTHESIZE_EPHEMERAL,
+	};
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view object = { };
+	struct pkm_kunit_msgpack_view mount = { };
+	const void *subject_token;
+	u32 policy = 0;
+	u32 generation = 0;
+	u32 template_len = 0;
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	subject_token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_mount_policy_for_subject(
+				subject_token, TMPFS_MAGIC, &args, &policy,
+				&generation, &template_len),
+			0L);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.mount.policy.changed", buffer,
+				  &view));
+	/* subject, emitter, object, outcome */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 4));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "object", 1U, &object));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_key(
+					test, &object, "mount",
+					PKM_KUNIT_MSGPACK_MAP, &mount));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &mount, "policy",
+					"synthesize-ephemeral"));
+	/* tmpfs defaults to deny-missing before the change. */
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &mount, "policy-previous",
+					"deny-missing"));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_uint_key(
+					test, &mount, "policy-generation",
+					generation));
+	pkm_kunit_reset_kmes();
+}
+
+
+/*
+ * PKM §3.8.8: installing and removing a central access policy each write
+ * kacs.caap.policy.changed, naming the policy and which it was.
+ */
+static void pkm_kunit_caap_policy_change_is_recorded(struct kunit *test)
+{
+	struct pkm_kunit_kmes_event_view view = { };
+	struct pkm_kunit_msgpack_view root = { };
+	struct pkm_kunit_msgpack_view caap = { };
+	struct pkm_kunit_msgpack_view policy = { };
+	struct pkm_kunit_msgpack_view operation = { };
+	struct pkm_kunit_msgpack_view outcome = { };
+	const void *token = pkm_kacs_current_effective_token_ptr();
+	u8 spec[64];
+	size_t spec_len;
+	u8 *buffer;
+
+	buffer = kunit_kzalloc(test, PKM_KUNIT_KMES_CAPTURE_BYTES, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buffer);
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	spec_len = pkm_kunit_build_caap_spec(
+		spec, pkm_kunit_caap_system_read_dacl,
+		sizeof(pkm_kunit_caap_system_read_dacl));
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_caap_for_token(
+				token, pkm_kunit_caap_policy_sid,
+				sizeof(pkm_kunit_caap_policy_sid), spec,
+				(u32)spec_len),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.caap.policy.changed", buffer,
+				  &view));
+	/* subject, emitter, caap, operation, outcome */
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 5));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "caap", 1U, &caap));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &caap, "policy", 1U, &policy));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bin_key(
+					test, &policy, "sid",
+					pkm_kunit_caap_policy_sid,
+					sizeof(pkm_kunit_caap_policy_sid)));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "operation", 1U,
+					&operation));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &operation, "name", "set"));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "outcome", 1U, &outcome));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_bool_key(
+					test, &outcome, "success", true));
+
+	pkm_kunit_reset_kmes();
+	KUNIT_ASSERT_EQ(test,
+			pkm_kacs_kunit_set_caap_for_token(
+				token, pkm_kunit_caap_policy_sid,
+				sizeof(pkm_kunit_caap_policy_sid), NULL, 0),
+			0);
+	KUNIT_ASSERT_TRUE(test,
+			  pkm_kunit_latest_kacs_event(
+				  test, "kacs.caap.policy.changed", buffer,
+				  &view));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_parse_payload_root(
+					test, &view, &root, 5));
+	KUNIT_ASSERT_TRUE(test, pkm_kunit_msgpack_require_map_key(
+					test, &root, "operation", 1U,
+					&operation));
+	KUNIT_EXPECT_TRUE(test, pkm_kunit_msgpack_expect_str_key(
+					test, &operation, "name", "remove"));
+	pkm_kunit_reset_kmes();
+}
+
+
 static void pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs(
 	struct kunit *test)
 {
@@ -11152,6 +11285,8 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_stratafs_metadata_decision_rebind_is_exact),
 	KUNIT_CASE(pkm_kunit_stratafs_refusal_payload_shapes),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_classifies_synthesize_ephemeral_fs),
+	KUNIT_CASE(pkm_kunit_file_mount_policy_change_is_recorded),
+	KUNIT_CASE(pkm_kunit_caap_policy_change_is_recorded),
 	KUNIT_CASE(pkm_kunit_file_mount_policy_defaults_to_deny_missing),
 	KUNIT_CASE(pkm_kunit_mount_policy_set_persistent_template_success),
 	KUNIT_CASE(pkm_kunit_mount_policy_same_superblock_views_share_policy),

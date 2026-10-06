@@ -1232,6 +1232,16 @@ The mount policy a caller asked for, beside `object.mount.policy`. On a
 refused change, the policy that stayed in force and the one that was
 wanted.
 
+--- field object.mount.policy-previous
+type: str.enum
+values: unmanaged | deny-missing | synthesize-ephemeral | synthesize-persistent
+closed: true
+
+The mount policy a change replaced, beside `object.mount.policy`, the one
+it put in force. A move away from `deny-missing`, or to `unmanaged`, is the
+one to read closely: the first lets objects without a descriptor be
+reached, and the second turns access control off for the whole filesystem.
+
 --- field object.mount.policy-generation
 type: uint
 

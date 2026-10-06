@@ -639,6 +639,14 @@ int kacs_rust_token_own_sd_copy(const void *token, const u8 **out_sd_ptr,
 int kacs_rust_emit_descriptor_rejected(const void *token, u64 inode,
 				       u64 device, u64 sd_len, u32 pip_type,
 				       u32 pip_trust);
+int kacs_rust_emit_caap_policy_changed(const void *token,
+				       const u8 *policy_sid,
+				       size_t policy_sid_len, bool removed,
+				       s32 err, u32 pip_type, u32 pip_trust);
+int kacs_rust_emit_mount_policy_changed(const void *token, const u8 *fs_type,
+					size_t fs_type_len, u32 policy,
+					u32 previous, u32 generation,
+					u32 pip_type, u32 pip_trust);
 u32 kacs_rust_token_audit_policy(const void *token);
 int kacs_rust_emit_privilege_use(const void *token, u32 operation, int cap,
 				 u64 privilege, u32 pip_type, u32 pip_trust);
