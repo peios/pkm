@@ -1,0 +1,50 @@
+diff --git a/block/ioctl.c b/block/ioctl.c
+--- a/block/ioctl.c
++++ b/block/ioctl.c
+@@ -18,6 +18,19 @@
+ #include "blk.h"
+ #include "blk-crypto-internal.h"
+ 
++/* Partition-table maintenance and cache flushing are volume management.
++ * Keep the general CAP_SYS_ADMIN mapping restricted to SeTcbPrivilege. */
++static bool blkdev_may_manage_volumes(void)
++{
++#ifdef CONFIG_SECURITY_PKM
++	extern bool pkm_kacs_may_manage_volumes(void);
++
++	if (pkm_kacs_may_manage_volumes())
++		return true;
++#endif
++	return capable(CAP_SYS_ADMIN);
++}
++
+ static int blkpg_do_ioctl(struct block_device *bdev,
+ 			  struct blkpg_partition __user *upart, int op)
+ {
+@@ -25,7 +38,7 @@
+ 	struct blkpg_partition p;
+ 	sector_t start, length, capacity, end;
+ 
+-	if (!capable(CAP_SYS_ADMIN))
++	if (!blkdev_may_manage_volumes())
+ 		return -EACCES;
+ 	if (copy_from_user(&p, upart, sizeof(struct blkpg_partition)))
+ 		return -EFAULT;
+@@ -519,7 +532,7 @@
+ static int blkdev_flushbuf(struct block_device *bdev, unsigned cmd,
+ 		unsigned long arg)
+ {
+-	if (!capable(CAP_SYS_ADMIN))
++	if (!blkdev_may_manage_volumes())
+ 		return -EACCES;
+ 
+ 	mutex_lock(&bdev->bd_holder_lock);
+@@ -712,7 +725,7 @@
+ 		bdev->bd_disk->bdi->ra_pages = (arg * 512) / PAGE_SIZE;
+ 		return 0;
+ 	case BLKRRPART:
+-		if (!capable(CAP_SYS_ADMIN))
++		if (!blkdev_may_manage_volumes())
+ 			return -EACCES;
+ 		if (bdev_is_partition(bdev))
+ 			return -EINVAL;
