@@ -4,11 +4,13 @@
  */
 
 #include <linux/errno.h>
+#include <linux/ktime.h>
 #include <linux/string.h>
 #include <linux/types.h>
 
 #include "rsi.h"
 #include "source_device.h"
+#include "source_transaction.h"
 #include "source_internal.h"
 
 #include <trace/events/lcs.h>
@@ -80,6 +82,7 @@ long pkm_lcs_source_lookup_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -265,6 +268,7 @@ long pkm_lcs_source_create_entry_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -309,6 +313,7 @@ long pkm_lcs_source_hide_entry_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -366,6 +371,7 @@ long pkm_lcs_source_delete_entry_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -738,6 +744,9 @@ static long pkm_lcs_source_transaction_round_trip_timeout_with_limits(
 					      LCS_OP_TXN_COMMIT : LCS_OP_TXN_ABORT,
 				      transaction_id, timeout_ms, false, false, 0);
 
+	if (op_code == RSI_ABORT_TRANSACTION)
+		pkm_lcs_source_transaction_end(transaction_id);
+
 	if (response)
 		memset(response, 0, sizeof(*response));
 	if (enqueue)
@@ -747,6 +756,7 @@ static long pkm_lcs_source_transaction_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -914,6 +924,7 @@ long pkm_lcs_source_drop_key_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -997,6 +1008,7 @@ long pkm_lcs_source_create_key_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1053,6 +1065,7 @@ long pkm_lcs_source_write_key_round_trip_timeout_late_effect_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1125,6 +1138,7 @@ long pkm_lcs_source_set_value_round_trip_timeout_late_effect_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1185,6 +1199,7 @@ long pkm_lcs_source_delete_value_entry_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1239,6 +1254,7 @@ long pkm_lcs_source_set_blanket_tombstone_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1299,6 +1315,7 @@ long pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
 	if (ret)
 		return ret;
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1363,6 +1380,7 @@ pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 	if (ret)
 		return ret;
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1425,6 +1443,7 @@ long pkm_lcs_source_read_key_round_trip_retaining_frame_timeout_with_limits(
 	if (ret)
 		return ret;
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -1487,6 +1506,7 @@ long pkm_lcs_source_query_values_round_trip_retaining_frame_timeout_with_limits(
 	if (ret)
 		return ret;
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);

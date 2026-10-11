@@ -106,6 +106,7 @@ struct pkm_lcs_source_late_effect {
 };
 
 struct pkm_lcs_source_in_flight_request {
+	u64 deadline_ns;
 	struct list_head link;
 	bool occupied;
 	bool delivered;
@@ -123,6 +124,8 @@ struct pkm_lcs_source_in_flight_request {
 };
 
 struct pkm_lcs_source_fd {
+	u64 session;
+	bool lifetime_protocol;
 	enum pkm_lcs_source_fd_state state;
 	u32 source_id;
 	struct mutex queue_lock;
@@ -628,6 +631,7 @@ struct pkm_lcs_symlink_target_resolution {
 };
 
 struct pkm_lcs_source_response_waiter {
+	u64 deadline_ns;
 	wait_queue_head_t wait;
 	bool completed;
 	bool attached;

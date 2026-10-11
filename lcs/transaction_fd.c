@@ -39,6 +39,7 @@
 #include "rsi.h"
 #include "transaction_fd.h"
 #include "source_device.h"
+#include "source_transaction.h"
 
 extern int lcs_rust_layer_name_casefold_eq(const u8 *left, u32 left_len,
 					   const u8 *right, u32 right_len,
@@ -742,6 +743,7 @@ static void pkm_lcs_transaction_fd_destroy(
 	if (!txn)
 		return;
 
+	pkm_lcs_source_transaction_put(txn->transaction_id);
 	pkm_lcs_transaction_log_clear(txn);
 	pkm_lcs_audit_caller_snapshot_destroy(&txn->audit_caller);
 	kfree(txn);
@@ -1617,6 +1619,7 @@ static int pkm_lcs_transaction_fd_release(struct inode *inode,
 					       final_state, 0, false);
 	}
 
+	pkm_lcs_source_transaction_end(txn->transaction_id);
 	if (retain_detached_commit)
 		return 0;
 
@@ -3193,6 +3196,10 @@ long pkm_lcs_transaction_fd_publish(u32 timeout_ms)
 	if (ret)
 		goto out_free;
 
+	ret = pkm_lcs_source_transaction_own(txn->transaction_id, timeout_ms);
+	if (ret)
+		goto out_free;
+
 	txn->state = REG_TXN_ACTIVE_UNBOUND;
 	txn->next_operation_index = 1;
 	txn->mutation_log_capacity =
@@ -3220,6 +3227,7 @@ long pkm_lcs_transaction_fd_publish(u32 timeout_ms)
 	return fd;
 
 out_unregister:
+	pkm_lcs_source_transaction_put(txn->transaction_id);
 	pkm_lcs_transaction_fd_registry_remove(txn);
 out_free:
 	kfree(txn);

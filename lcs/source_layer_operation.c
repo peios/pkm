@@ -4,6 +4,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/ktime.h>
 #include <linux/jhash.h>
 #include <linux/kernel.h>
 #include <linux/limits.h>
@@ -142,6 +143,7 @@ long pkm_lcs_source_delete_layer_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -202,6 +204,7 @@ static long pkm_lcs_source_delete_layer_round_trip_retaining_frame_timeout_with_
 	if (ret)
 		return ret;
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);
@@ -862,6 +865,7 @@ long pkm_lcs_source_flush_round_trip_timeout_with_limits(
 
 	pkm_lcs_source_response_waiter_init(&waiter);
 	deadline = pkm_lcs_source_deadline_from_timeout_ms(timeout_ms);
+	waiter.deadline_ns = ktime_get_ns() + (u64)timeout_ms * NSEC_PER_MSEC;
 
 	for (;;) {
 		ret = pkm_lcs_source_wait_for_slot(source_id, limits, deadline);

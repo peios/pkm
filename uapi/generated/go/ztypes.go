@@ -456,11 +456,29 @@ type Reg_src_hive_entry struct {
 	_          uint32
 	Scope_guid [16]uint8
 }
+type Reg_src_negotiate_args struct {
+	Version uint32
+	Flags   uint32
+	Session uint64
+}
 type Reg_src_register_args struct {
 	Hive_count   uint32
 	_            uint32
 	Max_sequence uint64
 	Hives_ptr    uint64
+}
+type Reg_src_renew_args struct {
+	Session              uint64
+	Transaction_id       uint64
+	Lifetime_deadline_ns uint64
+	Lease_deadline_ns    uint64
+}
+type Reg_src_request_context_args struct {
+	Session              uint64
+	Request_id           uint64
+	Request_deadline_ns  uint64
+	Lifetime_deadline_ns uint64
+	Lease_deadline_ns    uint64
 }
 type Reg_txn_status_args struct {
 	State          uint32

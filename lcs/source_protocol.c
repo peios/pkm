@@ -18,6 +18,7 @@
 #include "key_fd.h"
 #include "rsi.h"
 #include "source_device.h"
+#include "source_transaction.h"
 #include "source_internal.h"
 #include "transaction_fd.h"
 
@@ -260,6 +261,11 @@ long pkm_lcs_source_accept_response_file(
 			record->waiter_was_attached && !record->waiter;
 	}
 
+	if (record->op_code == RSI_BEGIN_TRANSACTION && status != RSI_OK &&
+	    pkm_lcs_rsi_status_known(status))
+		pkm_lcs_source_transaction_begin_failed(record->txn_id, source_fd->session);
+	if (record->op_code == RSI_COMMIT_TRANSACTION && status == RSI_OK)
+		pkm_lcs_source_transaction_end(record->txn_id);
 	record->response_accepted = true;
 	trace_lcs_rsi_response(source_fd->source_id, request_id, record->txn_id,
 			       record->op_code, status,
