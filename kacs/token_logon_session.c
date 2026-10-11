@@ -19,6 +19,20 @@
 
 #include <trace/events/kacs.h>
 
+static long (*pkm_kacs_validate_lcs_credentials)(const void *token)
+	__ro_after_init;
+
+int __init pkm_kacs_register_lcs_credential_validator(
+	long (*validate)(const void *token))
+{
+	if (!validate)
+		return -EINVAL;
+	if (pkm_kacs_validate_lcs_credentials)
+		return -EBUSY;
+	pkm_kacs_validate_lcs_credentials = validate;
+	return 0;
+}
+
 /*
  * kacs.session.destroyed is written from process context, never from the
  * teardown itself. A session ends when its last token goes, and that is
@@ -120,6 +134,15 @@ long pkm_kacs_create_token_core(const void *subject_token,
 		return ret;
 	if (!new_token)
 		return -EACCES;
+	if (kacs_rust_token_lcs_private_layer_count(new_token)) {
+		/* Never expose an unvalidated extension, including before LCS init. */
+		ret = pkm_kacs_validate_lcs_credentials ?
+			pkm_kacs_validate_lcs_credentials(new_token) : -EACCES;
+		if (ret) {
+			kacs_rust_token_drop(new_token);
+			return ret;
+		}
+	}
 
 	fd = pkm_kacs_open_token_fd_with_fixed_access(new_token,
 						      KACS_TOKEN_ALL_ACCESS);

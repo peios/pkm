@@ -678,6 +678,7 @@ int kacs_rust_token_audit_summary(
 u32 kacs_rust_token_lcs_scope_guid_count(const void *token);
 int kacs_rust_token_lcs_scope_guid(const void *token, u32 index,
 				   u8 out[KACS_LCS_SCOPE_GUID_BYTES]);
+bool kacs_rust_token_lcs_private_layers_tcb_authorized(const void *token);
 u32 kacs_rust_token_lcs_private_layer_count(const void *token);
 int kacs_rust_token_lcs_private_layer(const void *token, u32 index,
 				      const char **name_out, u32 *len_out);

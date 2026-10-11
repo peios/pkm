@@ -1849,6 +1849,7 @@ static void pkm_lcs_kunit_private_credentials_over_cap_is_e2big(
 	static const char private_layer[] = "PrivateLayer";
 	struct pkm_lcs_runtime_limits limits = { };
 	struct pkm_lcs_private_credential_view view = { };
+	struct pkm_lcs_layer_snapshot snapshot = { };
 	const void *token;
 
 	token = kacs_rust_kunit_create_lcs_private_credential_token(
@@ -1870,14 +1871,14 @@ static void pkm_lcs_kunit_private_credentials_over_cap_is_e2big(
 	limits.max_private_layers_per_token = 8;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_private_credentials_acquire_for_token(
-				token, &limits, &view),
+				token, &limits, &snapshot, &view),
 			-E2BIG);
 
 	limits.max_scope_guids_per_token = 8;
 	limits.max_private_layers_per_token = 0;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_private_credentials_acquire_for_token(
-				token, &limits, &view),
+				token, &limits, &snapshot, &view),
 			-E2BIG);
 
 	/* Within both caps the same token acquires cleanly. */
@@ -1885,7 +1886,7 @@ static void pkm_lcs_kunit_private_credentials_over_cap_is_e2big(
 	limits.max_private_layers_per_token = 8;
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_private_credentials_acquire_for_token(
-				token, &limits, &view),
+				token, &limits, &snapshot, &view),
 			0L);
 	KUNIT_EXPECT_EQ(test, view.scope_count, ARRAY_SIZE(scopes));
 	pkm_lcs_private_credentials_release(&view);
@@ -1896,7 +1897,7 @@ static void pkm_lcs_kunit_private_credentials_over_cap_is_e2big(
 	 */
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_private_credentials_acquire_for_token(
-				NULL, &limits, &view),
+				NULL, &limits, &snapshot, &view),
 			-EACCES);
 
 	kacs_rust_token_drop(token);

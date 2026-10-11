@@ -485,8 +485,8 @@ long pkm_lcs_reg_open_key_for_token(
 	if (ret)
 		return ret;
 	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
-	ret = pkm_lcs_private_credentials_acquire_for_token(token, &limits,
-							   &private_view);
+	ret = pkm_lcs_private_credentials_acquire_for_token(
+		token, &limits, &snapshot, &private_view);
 	if (ret)
 		goto out_snapshot;
 

@@ -1980,7 +1980,7 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 			goto out_copy;
 		pkm_lcs_runtime_limits_snapshot_or_default(&limits);
 		ret = pkm_lcs_private_credentials_acquire_for_token(
-			token, &limits, &private_view);
+			token, &limits, &snapshot, &private_view);
 		if (ret)
 			goto out_snapshot;
 		live_inputs.scope_guids = private_view.scope_guids;

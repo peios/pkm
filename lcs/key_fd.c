@@ -2152,7 +2152,8 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	if (ret)
 		return ret;
 	ret = pkm_lcs_private_credentials_acquire_for_token(
-		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+		pkm_kacs_current_effective_token_ptr(), &limits,
+		&layer_snapshot, &private_view);
 	if (ret)
 		goto out_frames;
 
@@ -2403,7 +2404,8 @@ static long pkm_lcs_key_fd_query_value_from_args(
 	if (ret)
 		goto out_name;
 	ret = pkm_lcs_private_credentials_acquire_for_token(
-		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+		pkm_kacs_current_effective_token_ptr(), &limits,
+		&layer_snapshot, &private_view);
 	if (ret)
 		goto out_frame;
 
@@ -4159,7 +4161,8 @@ static long pkm_lcs_key_fd_query_values_batch_from_args(
 	if (ret)
 		return ret;
 	ret = pkm_lcs_private_credentials_acquire_for_token(
-		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+		pkm_kacs_current_effective_token_ptr(), &limits,
+		&layer_snapshot, &private_view);
 	if (ret)
 		goto out_frame;
 
@@ -4304,7 +4307,8 @@ static long pkm_lcs_key_fd_enum_value_from_args(
 	if (ret)
 		return ret;
 	ret = pkm_lcs_private_credentials_acquire_for_token(
-		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+		pkm_kacs_current_effective_token_ptr(), &limits,
+		&layer_snapshot, &private_view);
 	if (ret)
 		goto out_frame;
 
@@ -4522,7 +4526,8 @@ static long pkm_lcs_key_fd_enum_subkey_from_args(
 	if (ret)
 		return ret;
 	ret = pkm_lcs_private_credentials_acquire_for_token(
-		pkm_kacs_current_effective_token_ptr(), &limits, &private_view);
+		pkm_kacs_current_effective_token_ptr(), &limits,
+		&layer_snapshot, &private_view);
 	if (ret)
 		goto out_frame;
 

@@ -3,6 +3,12 @@
 #define _SECURITY_PKM_KACS_TOKEN_LOGON_SESSION_H
 
 #include <linux/types.h>
+#include <linux/init.h>
+
+/* LCS supplies the policy for its credential extension. Built-in, installed
+ * once during init and immutable before userspace can create tokens. */
+int __init pkm_kacs_register_lcs_credential_validator(
+	long (*validate)(const void *token));
 
 long pkm_kacs_create_logon_session_core(const void *subject_token,
 				  const u8 *spec, size_t spec_len,

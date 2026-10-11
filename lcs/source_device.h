@@ -911,6 +911,7 @@ long pkm_lcs_runtime_limits_refresh_self_config_from_machine_hive(
 	struct pkm_lcs_self_config_apply_plan *result_out);
 long pkm_lcs_private_credentials_acquire_for_token(
 	const void *token, const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot,
 	struct pkm_lcs_private_credential_view *view);
 void pkm_lcs_private_credentials_release(
 	struct pkm_lcs_private_credential_view *view);
