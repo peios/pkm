@@ -343,6 +343,7 @@ int stratafs_rebind_dentry(struct dentry *dentry,
 		path_put(&old_path);
 	stratafs_refresh_inode(inode, provider);
 	mutex_unlock(&iinfo->rebind_lock);
+	pkm_kacs_stratafs_invalidate_sd_cache(inode);
 	return 0;
 }
 

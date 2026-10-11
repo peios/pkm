@@ -156,16 +156,15 @@ bool pkm_kacs_inode_sd_cache_current(const struct super_block *sb,
 }
 
 /*
- * A StrataFS root's entry is current for the check that just refreshed it and
- * stale for the next: which stratum root provides the mount root, or whether
- * any does, changes with no event KACS can see (PEI-575). The ensure paths
- * re-read such an entry every time.
+ * A provider's descriptor can change through a stratum without notifying the
+ * outer inode (PEI-253). Re-read on each new check, including missing/corrupt
+ * entries and entries installed by set_sd. The root can also change provider
+ * without notification (PEI-575). This does not change a file's frozen grant.
  */
 static bool pkm_kacs_inode_sd_cache_rereads_each_time(
-	const struct pkm_kacs_inode_sd_cache *cache)
+	const struct inode *inode)
 {
-	return cache &&
-	       cache->source == PKM_KACS_INODE_SD_SOURCE_STRATAFS_ROOT;
+	return inode->i_sb->s_magic == STRATAFS_SUPER_MAGIC;
 }
 
 static void pkm_kacs_inode_sd_cache_destroy(
@@ -220,6 +219,19 @@ void pkm_kacs_inode_replace_sd_cache_locked(
 	rcu_assign_pointer(sec->sd_cache, new_cache);
 	if (old_cache)
 		call_rcu(&old_cache->rcu, pkm_kacs_inode_sd_cache_free_rcu);
+}
+
+void pkm_kacs_stratafs_invalidate_sd_cache(struct inode *inode)
+{
+	struct pkm_kacs_inode_security *sec;
+
+	if (!inode || !inode->i_security ||
+	    inode->i_sb->s_magic != STRATAFS_SUPER_MAGIC)
+		return;
+	sec = pkm_kacs_inode(inode);
+	mutex_lock(&sec->lock);
+	pkm_kacs_inode_replace_sd_cache_locked(sec, NULL);
+	mutex_unlock(&sec->lock);
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
@@ -405,16 +417,6 @@ static long pkm_kacs_inode_read_sd_xattr_locked(
 		kvfree(bytes);
 		return -ENOMEM;
 	}
-	/*
-	 * The root of a StrataFS mount answers with whichever stratum root
-	 * currently provides it, or with the synthesised bare-root descriptor
-	 * when none does, and neither transition is visible here. Never treat
-	 * that read as current: the next check reads it again (PEI-575).
-	 */
-	if (inode->i_sb->s_magic == STRATAFS_SUPER_MAGIC &&
-	    inode->i_sb->s_root && inode == d_inode(inode->i_sb->s_root))
-		cache->source = PKM_KACS_INODE_SD_SOURCE_STRATAFS_ROOT;
-
 	*cache_out = cache;
 	return 0;
 }
@@ -440,7 +442,7 @@ retry:
 		if (pkm_kacs_inode_sd_cache_current(inode->i_sb, cache)) {
 			struct pkm_kacs_inode_sd_cache *fresh = NULL;
 
-			if (!pkm_kacs_inode_sd_cache_rereads_each_time(cache)) {
+			if (!pkm_kacs_inode_sd_cache_rereads_each_time(inode)) {
 				*cache_out = cache;
 				return 0;
 			}
@@ -731,7 +733,7 @@ long pkm_kacs_inode_ensure_effective_cache(
 		bool pending = cache->state == PKM_KACS_INODE_SD_VALID &&
 			       cache->source ==
 				       PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING;
-		bool reread = pkm_kacs_inode_sd_cache_rereads_each_time(cache);
+		bool reread = pkm_kacs_inode_sd_cache_rereads_each_time(inode);
 
 		pkm_kacs_inode_sd_cache_free(cache);
 		if (reread)
@@ -810,7 +812,7 @@ long pkm_kacs_inode_ensure_effective_cache_by_inode(
 		bool pending = cache->state == PKM_KACS_INODE_SD_VALID &&
 			       cache->source ==
 				       PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING;
-		bool reread = pkm_kacs_inode_sd_cache_rereads_each_time(cache);
+		bool reread = pkm_kacs_inode_sd_cache_rereads_each_time(inode);
 
 		pkm_kacs_inode_sd_cache_free(cache);
 		if (!pending && !reread)
