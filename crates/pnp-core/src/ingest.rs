@@ -68,9 +68,14 @@ struct Collector {
 }
 
 impl Collector {
-    /// Interns a profile path and returns its index.
+    /// Interns a profile path using the executor's ASCII-insensitive lookup,
+    /// retaining the first spelling, and returns its index.
     fn note_profile(&mut self, path: &str) -> Result<u32, BuildError> {
-        if let Some(i) = self.profiles.iter().position(|p| p.as_str() == path) {
+        if let Some(i) = self
+            .profiles
+            .iter()
+            .position(|p| p.as_str().eq_ignore_ascii_case(path))
+        {
             return Ok(i as u32);
         }
         self.profiles.push(str_to_pkm(path)?)?;

@@ -73,6 +73,92 @@ fn a_backslash_path_is_folded_and_the_same_profile_is_interned_once() {
 }
 
 #[test]
+fn profile_case_variants_share_an_index_and_keep_the_first_spelling() {
+    let (forest, _) = build(
+        Layer::Interface,
+        vec![
+            rb("a").actions(&["JOIN(Default)"]),
+            rb("b").actions(&["JOIN(DEFAULT)"]),
+            rb("c").actions(&["JOIN(default)"]),
+            rb("d").actions(&["JOIN(other)"]),
+        ],
+    );
+    let names: Vec<&str> = forest.profiles.iter().map(|p| p.as_str()).collect();
+    assert_eq!(names, ["Default", "other"]);
+    let e = pnp_core::evaluate(&forest, &wired(), &Default::default()).unwrap();
+    let verdicts: Vec<Verdict> = e.candidates.iter().map(|c| c.verdict).collect();
+    assert_eq!(
+        verdicts,
+        [
+            Verdict::Join(0),
+            Verdict::Join(0),
+            Verdict::Join(0),
+            Verdict::Join(1)
+        ]
+    );
+    assert!(
+        e.conflict,
+        "the genuinely different profile still conflicts"
+    );
+}
+
+#[test]
+fn equal_priority_case_variant_joins_agree_in_either_input_order() {
+    for actions in [
+        ["JOIN(default)", "JOIN(DEFAULT)"],
+        ["JOIN(DEFAULT)", "JOIN(default)"],
+    ] {
+        let e = judge_in(
+            Layer::Interface,
+            vec![
+                rb("a").int("Priority", 10).actions(&[actions[0]]),
+                rb("b").int("Priority", 10).actions(&[actions[1]]),
+            ],
+            &wired(),
+        );
+        assert!(!e.conflict, "{actions:?}");
+        assert!(!e.backstop);
+        assert_eq!(e.verdict, Verdict::Join(0));
+        assert_eq!(e.candidates.len(), 2);
+        assert!(e.candidates.iter().all(|c| c.verdict == Verdict::Join(0)));
+    }
+}
+
+#[test]
+fn nested_profile_case_and_separator_variants_agree() {
+    let (forest, _) = build(
+        Layer::Interface,
+        vec![
+            rb("a").actions(&["JOIN(Office\\London)"]),
+            rb("b").child(rb("exception").actions(&["JOIN(office/LONDON)"])),
+        ],
+    );
+    let e = pnp_core::evaluate(&forest, &wired(), &Default::default()).unwrap();
+    assert!(!e.conflict);
+    assert_eq!(e.candidates.len(), 2);
+    assert!(e.candidates.iter().all(|c| c.verdict == Verdict::Join(0)));
+    let names: Vec<&str> = forest.profiles.iter().map(|p| p.as_str()).collect();
+    assert_eq!(names, ["Office/London"]);
+}
+
+#[test]
+fn profile_interning_preserves_non_ascii_distinctions() {
+    // Match netd's ASCII-only profile lookup, not Unicode case folding.
+    let (forest, _) = build(
+        Layer::Interface,
+        vec![
+            rb("a").actions(&["JOIN(Ärea)"]),
+            rb("b").actions(&["JOIN(ärea)"]),
+        ],
+    );
+    let names: Vec<&str> = forest.profiles.iter().map(|p| p.as_str()).collect();
+    assert_eq!(names, ["Ärea", "ärea"]);
+    let e = pnp_core::evaluate(&forest, &wired(), &Default::default()).unwrap();
+    assert!(e.conflict);
+    assert_eq!(e.candidates.len(), 2);
+}
+
+#[test]
 fn the_backstop_is_ignore() {
     let e = judge_in(
         Layer::Interface,
