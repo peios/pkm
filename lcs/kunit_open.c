@@ -7949,6 +7949,24 @@ static void pkm_lcs_kunit_reg_create_key_entry_race_retries_open(
 }
 
 
+static int pkm_lcs_kunit_named_layer_probe_then_create_thread(void *raw_script)
+{
+	struct pkm_lcs_kunit_walk_then_read_create_source_script *script = raw_script;
+	struct pkm_lcs_kunit_read_key_source_script parent = script->create.read_key;
+	int ret;
+
+	parent.file = script->file;
+	ret = pkm_lcs_kunit_read_key_source_thread(&parent);
+	if (ret) {
+		script->result = ret;
+		return ret;
+	}
+	ret = pkm_lcs_kunit_walk_then_read_create_source_thread(script);
+	script->reads += parent.reads;
+	script->writes += parent.writes;
+	return ret;
+}
+
 static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	struct kunit *test)
 {
@@ -7956,12 +7974,7 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	static const char layer_src[] = "policy";
 	static const u8 root_guid[RSI_GUID_SIZE] = { 1 };
 	static const u8 policy_layer_guid[RSI_GUID_SIZE] = { 0x39 };
-	/*
-	 * Naming a layer asks for that layer's own entry (PEI-765), so the
-	 * path is not resolved across the enabled layers first: the source
-	 * sees the parent read and the create straight away, and answers
-	 * ALREADY_EXISTS itself if the layer already holds the entry.
-	 */
+	/* Probe the named layer before issuing any create operation. */
 	static const struct pkm_lcs_kunit_walk_source_step steps[] = {
 		{
 			.expected_child = "App",
@@ -7971,7 +7984,7 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	struct pkm_lcs_kunit_walk_then_read_create_source_script script = {
 		.walk = {
 			.steps = steps,
-			.step_count = 0,
+			.step_count = ARRAY_SIZE(steps),
 		},
 		.create = {
 			.read_key = {
@@ -8031,7 +8044,7 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	script.create.read_key.sd_len =
 		sizeof(pkm_lcs_kunit_parent_sd_create_subkey_ci_generic_read);
 	task = pkm_lcs_kunit_kthread_run(
-		pkm_lcs_kunit_walk_then_read_create_source_thread,
+		pkm_lcs_kunit_named_layer_probe_then_create_thread,
 		&script, "pkm-lcs-kunit-create-live-layer");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 
@@ -8042,11 +8055,11 @@ static void pkm_lcs_kunit_reg_create_key_missing_uses_live_layer_table(
 	KUNIT_EXPECT_EQ(test, disposition, (u32)REG_CREATED_NEW);
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_EQ(test, script.reads, 3U);
-	KUNIT_EXPECT_EQ(test, script.writes, 3U);
-	/* The layer is read once to classify it and once to admit it. */
-	KUNIT_EXPECT_EQ(test, ctx.strnlens, 3U);
-	KUNIT_EXPECT_EQ(test, ctx.reads, 3U);
+	KUNIT_EXPECT_EQ(test, script.reads, 5U);
+	KUNIT_EXPECT_EQ(test, script.writes, 5U);
+	/* Classify, probe and admit the named layer, plus copy the path. */
+	KUNIT_EXPECT_EQ(test, ctx.strnlens, 4U);
+	KUNIT_EXPECT_EQ(test, ctx.reads, 4U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
 	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_snapshot((int)fd, &snapshot),
 			0L);
