@@ -8495,7 +8495,7 @@ static void pkm_kunit_synthesize_file_sd_parent_inheritance_success(
 	KUNIT_ASSERT_EQ(test, child_subset_len, parent_subset_len);
 	child_dacl_offset = pkm_kunit_read_u32(child_subset, 16);
 	KUNIT_ASSERT_NE(test, child_dacl_offset, 0U);
-	KUNIT_EXPECT_EQ(test, child_subset[child_dacl_offset + 8 + 1], 0x11);
+	KUNIT_EXPECT_EQ(test, child_subset[child_dacl_offset + 8 + 1], 0x10);
 	pkm_kunit_expect_sd_dacl_reserved_fields(test, child_sd, 0x5d,
 						 0x1234);
 
@@ -8620,8 +8620,7 @@ static void pkm_kunit_synthesize_file_sd_null_group_template_inherits(
 	ace = pkm_kunit_first_inherited_dacl_ace_const(child_sd);
 	KUNIT_ASSERT_NOT_NULL(test, ace);
 	KUNIT_EXPECT_EQ(test, ace[1],
-			PKM_KUNIT_OBJECT_INHERIT_ACE |
-				PKM_KUNIT_INHERITED_ACE);
+			PKM_KUNIT_INHERITED_ACE);
 
 	pkm_kacs_free((void *)child_sd);
 	pkm_kacs_free((void *)template_sd);
@@ -8677,9 +8676,7 @@ static void pkm_kunit_build_created_file_sd_inheritance_flag_matrix(
 			.parent_flags = PKM_KUNIT_CONTAINER_INHERIT_ACE |
 					PKM_KUNIT_OBJECT_INHERIT_ACE,
 			.file_inherits = true,
-			.file_flags = PKM_KUNIT_CONTAINER_INHERIT_ACE |
-				      PKM_KUNIT_OBJECT_INHERIT_ACE |
-				      PKM_KUNIT_INHERITED_ACE,
+			.file_flags = PKM_KUNIT_INHERITED_ACE,
 			.dir_inherits = true,
 			.dir_flags = PKM_KUNIT_CONTAINER_INHERIT_ACE |
 				     PKM_KUNIT_OBJECT_INHERIT_ACE |
@@ -8695,8 +8692,7 @@ static void pkm_kunit_build_created_file_sd_inheritance_flag_matrix(
 		{
 			.parent_flags = PKM_KUNIT_OBJECT_INHERIT_ACE,
 			.file_inherits = true,
-			.file_flags = PKM_KUNIT_OBJECT_INHERIT_ACE |
-				      PKM_KUNIT_INHERITED_ACE,
+			.file_flags = PKM_KUNIT_INHERITED_ACE,
 			.dir_inherits = true,
 			.dir_flags = PKM_KUNIT_OBJECT_INHERIT_ACE |
 				     PKM_KUNIT_INHERIT_ONLY_ACE |
@@ -8707,9 +8703,7 @@ static void pkm_kunit_build_created_file_sd_inheritance_flag_matrix(
 					PKM_KUNIT_OBJECT_INHERIT_ACE |
 					PKM_KUNIT_INHERIT_ONLY_ACE,
 			.file_inherits = true,
-			.file_flags = PKM_KUNIT_CONTAINER_INHERIT_ACE |
-				      PKM_KUNIT_OBJECT_INHERIT_ACE |
-				      PKM_KUNIT_INHERITED_ACE,
+			.file_flags = PKM_KUNIT_INHERITED_ACE,
 			.dir_inherits = true,
 			.dir_flags = PKM_KUNIT_CONTAINER_INHERIT_ACE |
 				     PKM_KUNIT_OBJECT_INHERIT_ACE |
@@ -8720,19 +8714,23 @@ static void pkm_kunit_build_created_file_sd_inheritance_flag_matrix(
 					PKM_KUNIT_OBJECT_INHERIT_ACE |
 					PKM_KUNIT_NO_PROPAGATE_INHERIT_ACE,
 			.file_inherits = true,
-			.file_flags = PKM_KUNIT_NO_PROPAGATE_INHERIT_ACE |
-				      PKM_KUNIT_INHERITED_ACE,
+			.file_flags = PKM_KUNIT_INHERITED_ACE,
 			.dir_inherits = true,
-			.dir_flags = PKM_KUNIT_NO_PROPAGATE_INHERIT_ACE |
-				     PKM_KUNIT_INHERITED_ACE,
+			.dir_flags = PKM_KUNIT_INHERITED_ACE,
 		},
 		{
 			.parent_flags = PKM_KUNIT_CONTAINER_INHERIT_ACE |
 					PKM_KUNIT_NO_PROPAGATE_INHERIT_ACE,
 			.file_inherits = false,
 			.dir_inherits = true,
-			.dir_flags = PKM_KUNIT_NO_PROPAGATE_INHERIT_ACE |
-				     PKM_KUNIT_INHERITED_ACE,
+			.dir_flags = PKM_KUNIT_INHERITED_ACE,
+		},
+		{
+			.parent_flags = PKM_KUNIT_OBJECT_INHERIT_ACE |
+					PKM_KUNIT_NO_PROPAGATE_INHERIT_ACE,
+			.file_inherits = true,
+			.file_flags = PKM_KUNIT_INHERITED_ACE,
+			.dir_inherits = false,
 		},
 		{
 			.parent_flags = 0,
@@ -8933,11 +8931,11 @@ static void pkm_kunit_build_created_file_sd_preserves_dacl_source_order(
 		0, creator_deny_mask);
 	pkm_kunit_expect_dacl_ace_header(
 		test, child_sd, child_sd_len, 2, PKM_KUNIT_ACCESS_ALLOWED_ACE_TYPE,
-		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_INHERITED_ACE,
+		PKM_KUNIT_INHERITED_ACE,
 		parent_allow_mask);
 	pkm_kunit_expect_dacl_ace_header(
 		test, child_sd, child_sd_len, 3, PKM_KUNIT_ACCESS_DENIED_ACE_TYPE,
-		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_INHERITED_ACE,
+		PKM_KUNIT_INHERITED_ACE,
 		parent_deny_mask);
 
 	pkm_kacs_free((void *)child_sd);
@@ -9074,8 +9072,7 @@ static void pkm_kunit_build_created_file_sd_parent_preserves_opaque_ace(
 	expected_ace = kunit_kzalloc(test, source_ace_len, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, expected_ace);
 	memcpy(expected_ace, source_ace, source_ace_len);
-	expected_ace[1] = PKM_KUNIT_OBJECT_INHERIT_ACE |
-			  PKM_KUNIT_INHERITED_ACE;
+	expected_ace[1] = PKM_KUNIT_INHERITED_ACE;
 
 	KUNIT_ASSERT_EQ(test,
 			kacs_rust_build_created_file_sd(subject_token,
@@ -9213,7 +9210,7 @@ static void pkm_kunit_build_created_file_sd_inherits_parent_sacl(
 	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_SACL_DEFAULTED, 0U);
 	pkm_kunit_expect_inherited_sacl_ace_flags(
 		test, child_sd, true,
-		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_INHERITED_ACE);
+		PKM_KUNIT_INHERITED_ACE);
 
 	pkm_kacs_free((void *)child_sd);
 	pkm_kacs_free((void *)parent_sd);
@@ -9578,7 +9575,7 @@ static void pkm_kunit_build_created_file_sd_creator_without_dacl_inherits_parent
 	KUNIT_EXPECT_EQ(test, control & PKM_KUNIT_SE_DACL_DEFAULTED, 0U);
 	pkm_kunit_expect_inherited_ace_flags(
 		test, child_sd, true,
-		PKM_KUNIT_OBJECT_INHERIT_ACE | PKM_KUNIT_INHERITED_ACE);
+		PKM_KUNIT_INHERITED_ACE);
 
 	pkm_kacs_free((void *)child_sd);
 	pkm_kacs_free((void *)parent_sd);
