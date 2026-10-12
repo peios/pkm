@@ -8,7 +8,7 @@ use crate::privilege::{PrivilegeProvenance, SE_RELABEL_PRIVILEGE};
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
-const INHERIT_ONLY_ACE: u8 = 0x08;
+const INHERIT_ONLY_ACE: u8 = peios_uapi::KACS_ACE_FLAG_INHERIT_ONLY as u8;
 
 /// Token mandatory-policy bit enabling NO_WRITE_UP enforcement.
 pub const TOKEN_MANDATORY_POLICY_NO_WRITE_UP: u32 =

@@ -7,13 +7,14 @@
 #include <pkm/file.h>
 #include <pkm/process.h>
 #include <pkm/psb.h>
+#include <pkm/token.h>
 #include "access_check.h"
 #include "signing.h"
 
 #define KACS_UUID_BYTES 16U
-#define KACS_LCS_SCOPE_GUID_BYTES 16U
-#define KACS_LCS_MAX_SCOPE_GUIDS_PER_TOKEN 256U
-#define KACS_LCS_MAX_PRIVATE_LAYERS_PER_TOKEN 256U
+#define KACS_LCS_SCOPE_GUID_BYTES KACS_TOKEN_LCS_SCOPE_GUID_BYTES
+#define KACS_LCS_MAX_SCOPE_GUIDS_PER_TOKEN KACS_TOKEN_LCS_MAX_SCOPE_GUIDS
+#define KACS_LCS_MAX_PRIVATE_LAYERS_PER_TOKEN KACS_TOKEN_LCS_MAX_PRIVATE_LAYERS
 
 typedef struct {
 	u8 bytes[KACS_UUID_BYTES];

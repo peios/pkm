@@ -16,9 +16,9 @@ use crate::pkm_alloc::{slice_to_vec, Vec};
 use crate::sid::Sid;
 use crate::token::TokenView;
 
-const INHERIT_ONLY_ACE: u8 = 0x08;
-const SUCCESSFUL_ACCESS_ACE_FLAG: u8 = 0x40;
-const FAILED_ACCESS_ACE_FLAG: u8 = 0x80;
+const INHERIT_ONLY_ACE: u8 = peios_uapi::KACS_ACE_FLAG_INHERIT_ONLY as u8;
+const SUCCESSFUL_ACCESS_ACE_FLAG: u8 = peios_uapi::KACS_ACE_FLAG_SUCCESSFUL_ACCESS as u8;
+const FAILED_ACCESS_ACE_FLAG: u8 = peios_uapi::KACS_ACE_FLAG_FAILED_ACCESS as u8;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 
