@@ -10022,6 +10022,8 @@ static void pkm_lcs_kunit_source_write_path_metadata_sd_audits(
 	struct kunit *test)
 {
 	static const char event_type[] = "lcs.source.response.rejected";
+	static const char unrelated_type[] = "pkm.kunit.source.noise";
+	static const u8 unrelated_payload[] = { 0x80 };
 	static const char validation_class[] = "malformed-security-descriptor";
 	static const u8 parent_guid[RSI_GUID_SIZE] = {
 		0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9,
@@ -10113,6 +10115,10 @@ static void pkm_lcs_kunit_source_write_path_metadata_sd_audits(
 						  &response_len);
 
 		pkm_kmes_kunit_reset_all();
+		/* A shared ring can receive other records before this audit. */
+		pkm_kmes_emit_kernel(KMES_ORIGIN_LCS, unrelated_type,
+				     sizeof(unrelated_type) - 1,
+				     unrelated_payload, sizeof(unrelated_payload));
 		count = pkm_lcs_kunit_source_device_write_file(
 			&file, response, response_len, false,
 			&response_result);
@@ -10152,17 +10158,20 @@ static void pkm_lcs_kunit_source_write_path_metadata_sd_audits(
 				       sizeof(parent_guid)),
 				0);
 
-		KUNIT_ASSERT_EQ(test,
-				pkm_kmes_kunit_copy_single_buffer(
-					buffer, sizeof(buffer), &written,
-					&kmes_snapshot),
-				0);
+		ret = pkm_kmes_kunit_copy_latest_matching_event(
+			KMES_ORIGIN_LCS, event_type, sizeof(event_type) - 1,
+			buffer, sizeof(buffer), &written, &kmes_snapshot);
+		KUNIT_EXPECT_EQ(test, ret, 0L);
+		if (ret)
+			goto out_release_source;
 		type_len = get_unaligned_le16(
 			buffer + KMES_EVENT_TYPE_LEN_OFFSET);
 		header_size = get_unaligned_le32(
 			buffer + KMES_EVENT_HEADER_SIZE_OFFSET);
-		KUNIT_ASSERT_EQ(test, type_len,
+		KUNIT_EXPECT_EQ(test, type_len,
 				(u16)(sizeof(event_type) - 1));
+		if (type_len != sizeof(event_type) - 1)
+			goto out_release_source;
 		KUNIT_EXPECT_EQ(test, buffer[KMES_EVENT_ORIGIN_CLASS_OFFSET],
 				(u8)KMES_ORIGIN_LCS);
 		KUNIT_EXPECT_EQ(
@@ -10170,7 +10179,9 @@ static void pkm_lcs_kunit_source_write_path_metadata_sd_audits(
 			memcmp(buffer + KMES_EVENT_HEADER_BASE_SIZE,
 			       event_type, type_len),
 			0);
-		KUNIT_ASSERT_TRUE(test, written > header_size);
+		KUNIT_EXPECT_TRUE(test, written > header_size);
+		if (written <= header_size)
+			goto out_release_source;
 		KUNIT_EXPECT_TRUE(test,
 				  pkm_lcs_kunit_buffer_contains(
 					  buffer, written, validation_class));
