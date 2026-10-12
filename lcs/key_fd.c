@@ -9459,6 +9459,7 @@ static long pkm_lcs_backup_stage_descendants(
 {
 	struct pkm_lcs_backup_path_entry_view *entries = NULL;
 	struct pkm_lcs_backup_child_section *child = NULL;
+	u8 parent_guid_snapshot[PKM_LCS_GUID_BYTES];
 	u32 entry_count = 0;
 	u32 i;
 	long ret;
@@ -9467,6 +9468,10 @@ static long pkm_lcs_backup_stage_descendants(
 	    !root_guid || !parent_guid || !parent_enum_frame || !refs ||
 	    !sections)
 		return -EINVAL;
+
+	/* Appending descendants can relocate the array containing parent_guid. */
+	memcpy(parent_guid_snapshot, parent_guid, sizeof(parent_guid_snapshot));
+	parent_guid = parent_guid_snapshot;
 
 	ret = pkm_lcs_backup_materialize_path_entries(
 		limits, parent_enum_frame, parent_enum_frame_len,
