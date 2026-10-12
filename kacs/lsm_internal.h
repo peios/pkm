@@ -282,6 +282,10 @@ struct pkm_kacs_process_state {
 	refcount_t refs;
 	spinlock_t mitigation_lock;
 	struct mutex sd_lock;
+	/* Serializes publication and application of process primary installs. */
+	struct mutex primary_lock;
+	const void *desired_primary_token;
+	u64 primary_epoch;
 	u8 process_guid[KACS_UUID_BYTES];
 	u32 pip_type;
 	u32 pip_trust;
@@ -327,6 +331,9 @@ struct pkm_kacs_task_security {
 	 */
 	bool usermodehelper;
 	struct pkm_kacs_process_state *process_state;
+	/* Only this task writes its applied epoch; primary_lock protects it. */
+	u64 primary_epoch;
+	struct callback_head primary_enroll_work;
 	/*
 	 * Privilege uses through a Linux capability gate waiting for their
 	 * kacs.audit.privilege.used records. capable() can run under

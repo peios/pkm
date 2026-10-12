@@ -120,3 +120,4 @@ init/rootfs-always-tmpfs.patch
 # KACS's own check. Cut against the whole series above (beside the token
 # files of proc-base-token-files).
 fs/proc-base-psb-file.patch
+kernel/fork-primary-token-enroll.patch

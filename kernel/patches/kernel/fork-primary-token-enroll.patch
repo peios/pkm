@@ -1,0 +1,17 @@
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -2475,6 +2475,14 @@
+ 
+ 	copy_oom_score_adj(clone_flags, p);
+ 
++#ifdef CONFIG_SECURITY_PKM
++	if (clone_flags & CLONE_THREAD) {
++		extern void pkm_kacs_primary_thread_enroll(struct task_struct *task);
++
++		/* Published and fully initialized, but not runnable yet. */
++		pkm_kacs_primary_thread_enroll(p);
++	}
++#endif
+ 	return p;
+ 
+ bad_fork_core_free:
