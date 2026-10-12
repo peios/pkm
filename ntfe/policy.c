@@ -136,11 +136,14 @@ int peios_ntfe_policy_publish_why(void *packet_forest, void *raw_forest,
 							  "counter-store-refused");
 		return ret;
 	}
+	peios_ntfe_kunit_policy_publishing(PEIOS_NTFE_BEFORE_GENERATION);
 	fresh->generation = ntfe_rust_generation_advance();
+	peios_ntfe_kunit_policy_publishing(PEIOS_NTFE_BEFORE_POLICY_SWAP);
 	old = rcu_dereference_protected(
 		peios_ntfe_active,
 		lockdep_is_held(&peios_ntfe_publish_lock));
 	rcu_assign_pointer(peios_ntfe_active, fresh);
+	peios_ntfe_kunit_policy_publishing(PEIOS_NTFE_AFTER_POLICY_SWAP);
 	/* Taken under the lock: once it drops, a later publication may
 	 * retire fresh.
 	 */
@@ -171,34 +174,50 @@ int peios_ntfe_policy_publish_why(void *packet_forest, void *raw_forest,
 	return 0;
 }
 
-int peios_ntfe_policy_eval(u8 layer, const struct peios_ntfe_snapshot *snap,
-			  struct peios_ntfe_outcome *out)
+void peios_ntfe_policy_snapshot_begin(u8 layer,
+				     struct peios_ntfe_policy_snapshot *snapshot)
 {
-	struct peios_ntfe_policy *policy;
-	void *forest;
-	u8 level;
-	int ret;
-
-	if (layer >= PEIOS_NTFE_LAYER_COUNT)
-		return -EINVAL;
+	const struct peios_ntfe_policy *policy;
 
 	rcu_read_lock();
 	policy = rcu_dereference(peios_ntfe_active);
-	forest = policy ? policy->forests[layer] : NULL;
-	if (!forest) {
-		rcu_read_unlock();
-		return -ENOENT;
-	}
-	level = policy->reporting_level;
-	if (peios_ntfe_kunit_eval_should_fail()) {
-		rcu_read_unlock();
-		return -ENOMEM;
-	}
-	/* Bounded, non-sleeping work: pnp-core allocates GFP_ATOMIC, and
-	 * the stores it calls back into are softirq-safe.
-	 */
-	ret = ntfe_rust_evaluate(forest, snap, layer, level, out);
+	snapshot->forest = policy && layer < PEIOS_NTFE_LAYER_COUNT ?
+		policy->forests[layer] : NULL;
+	snapshot->generation = policy ? policy->generation : 0;
+	snapshot->reporting_level = policy ? policy->reporting_level : 1;
+	snapshot->cache_generation = ntfe_rust_generation();
+	snapshot->layer = layer;
+}
+
+void peios_ntfe_policy_snapshot_end(void)
+{
 	rcu_read_unlock();
+}
+
+int peios_ntfe_policy_snapshot_eval(const struct peios_ntfe_policy_snapshot *policy,
+				    const struct peios_ntfe_snapshot *snap,
+				    struct peios_ntfe_outcome *out)
+{
+	if (policy->layer >= PEIOS_NTFE_LAYER_COUNT)
+		return -EINVAL;
+	if (!policy->forest)
+		return -ENOENT;
+	if (peios_ntfe_kunit_eval_should_fail())
+		return -ENOMEM;
+	/* Bounded, non-sleeping work under the snapshot's RCU read lock. */
+	return ntfe_rust_evaluate(policy->forest, snap, policy->layer,
+				  policy->reporting_level, out);
+}
+
+int peios_ntfe_policy_eval(u8 layer, const struct peios_ntfe_snapshot *snap,
+			  struct peios_ntfe_outcome *out)
+{
+	struct peios_ntfe_policy_snapshot policy;
+	int ret;
+
+	peios_ntfe_policy_snapshot_begin(layer, &policy);
+	ret = peios_ntfe_policy_snapshot_eval(&policy, snap, out);
+	peios_ntfe_policy_snapshot_end();
 	return ret;
 }
 

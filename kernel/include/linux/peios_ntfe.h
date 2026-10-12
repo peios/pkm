@@ -58,7 +58,8 @@ void pkm_kacs_socket_owner_put(struct peios_ntfe_owner *owner);
  * same-policy refresh must also invalidate a concurrent reader.
  */
 struct peios_ntfe_sentence {
-	u64 generation;		/* 0 = empty; the policy generation that judged */
+	u64 generation;		/* 0 = empty; policy/context invalidation epoch */
+	u64 policy_generation;	/* the actual policy object that judged */
 	s64 expires_at;		/* CLOCK_REALTIME seconds; 0 = never */
 	u64 rule_hash;		/* FNV-1a-64 of the attributing rule's path */
 	u8 verdict;		/* enum peios_ntfe_verdict */
