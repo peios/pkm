@@ -114,14 +114,6 @@ enum pkm_kacs_inode_sd_source {
 	 * xattr to a real SOURCE_XATTR entry on the next cache miss.
 	 */
 	PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING = 5,
-	/*
-	 * A StrataFS root's descriptor, read through the outer inode. Which
-	 * stratum root provides the mount root -- or whether any does -- changes
-	 * underneath it with no event KACS can see. The entry satisfies the
-	 * check that just refreshed it, and every ensure re-reads it in place
-	 * rather than trusting what an earlier check read (PEI-575).
-	 */
-	PKM_KACS_INODE_SD_SOURCE_STRATAFS_ROOT = 6,
 };
 
 struct pkm_kacs_inode_sd_cache {

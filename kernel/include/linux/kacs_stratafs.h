@@ -37,6 +37,11 @@ void stratafs_kacs_audit_deferred_refusal(const struct dentry *outer,
  */
 struct pkm_kacs_stratafs_copy_up;
 
+/* Drop the outer inode's parsed SD after rebinding; preserves file grants.
+ * Call without StrataFS rebind locks held: an SD read can resolve a provider.
+ */
+void pkm_kacs_stratafs_invalidate_sd_cache(struct inode *inode);
+
 /* Evaluate one lower object's descriptor under StrataFS's deny-missing class. */
 int pkm_kacs_stratafs_authorize_path(const struct path *path,
 				     u32 desired_access);
