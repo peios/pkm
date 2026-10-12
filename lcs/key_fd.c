@@ -2193,6 +2193,20 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 		goto out_frames;
 	}
 
+	/* Hive roots have no child name. Other keys report their stored
+	 * informational name, not the spelling used to open this fd.
+	 */
+	if (key_fd->path_component_count > 1) {
+		if ((size_t)read_key.name_offset > read_frame.len ||
+		    (size_t)read_key.name_len >
+			    read_frame.len - (size_t)read_key.name_offset) {
+			ret = -EIO;
+			goto out_frames;
+		}
+		key_name = (const char *)read_frame.data + read_key.name_offset;
+		key_name_len = read_key.name_len;
+	}
+
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
 		key_fd->source_id, 0, key_fd->key_guid, &limits,
 		limits.request_timeout_ms, &enum_frame,
