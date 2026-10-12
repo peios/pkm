@@ -2,6 +2,8 @@
 
 #include "kunit_common.h"
 
+#include <kunit/resource.h>
+
 
 static void pkm_lcs_kunit_transaction_watch_burst_over_limit_overflows_once(
 	struct kunit *test)
@@ -4114,8 +4116,7 @@ static void pkm_lcs_kunit_commit_timeout_closed_fd_source_teardown(
 	pkm_lcs_kunit_append_one_create_log(test, (int)fd, root_guid, 0xc5);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_kunit_transaction_fd_commit_timeout((int)fd,
-								    1),
+			pkm_lcs_kunit_commit_queued_timeout(test, (int)fd),
 			(long)-ETIMEDOUT);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_source_device_read_file(
@@ -4139,6 +4140,34 @@ static void pkm_lcs_kunit_commit_timeout_closed_fd_source_teardown(
 }
 
 
+struct pkm_lcs_kunit_late_commit_fixture {
+	struct kunit *test;
+	struct file source;
+	const void *token;
+	long fd;
+};
+
+static void pkm_lcs_kunit_late_commit_cleanup(void *data)
+{
+	struct pkm_lcs_kunit_late_commit_fixture *fixture = data;
+
+	/*
+	 * Down the source first, including when an assertion aborts before
+	 * commit, so closing the transaction cannot wait on an absent peer.
+	 */
+	if (fixture->source.private_data)
+		KUNIT_EXPECT_EQ(fixture->test,
+			pkm_lcs_source_device_release_file(&fixture->source), 0);
+	if (fixture->fd >= 0)
+		KUNIT_EXPECT_EQ(fixture->test,
+			close_fd((unsigned int)fixture->fd), 0);
+	flush_delayed_fput();
+	pkm_lcs_kunit_reset_source_table();
+	if (fixture->token)
+		kacs_rust_token_drop(fixture->token);
+}
+
+
 static void pkm_lcs_kunit_commit_timeout_malformed_late_response_downs_source(
 	struct kunit *test)
 {
@@ -4152,16 +4181,24 @@ static void pkm_lcs_kunit_commit_timeout_malformed_late_response_downs_source(
 	struct pkm_lcs_source_table_snapshot source_table_snapshot = { };
 	u8 response[RSI_MIN_RESPONSE_SIZE];
 	u8 out[64];
-	struct file file = { };
-	const void *token;
+	struct pkm_lcs_kunit_late_commit_fixture *fixture;
+	struct file *file;
 	u64 request_id;
 	size_t response_len;
 	u32 count = 0;
 	long fd;
 
-	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	fixture = kunit_kzalloc(test, sizeof(*fixture), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, fixture);
+	fixture->test = test;
+	fixture->fd = -1;
+	KUNIT_ASSERT_EQ(test, kunit_add_action_or_reset(test,
+		pkm_lcs_kunit_late_commit_cleanup, fixture), 0);
+	file = &fixture->source;
+	pkm_lcs_kunit_setup_registered_source(test, file, &fixture->token);
 
 	fd = pkm_lcs_reg_begin_transaction();
+	fixture->fd = fd;
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_snapshot((int)fd,
@@ -4178,8 +4215,7 @@ static void pkm_lcs_kunit_commit_timeout_malformed_late_response_downs_source(
 	pkm_lcs_kunit_append_one_create_log(test, (int)fd, root_guid, 0xd5);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_kunit_transaction_fd_commit_timeout((int)fd,
-								    1),
+			pkm_lcs_kunit_commit_queued_timeout(test, (int)fd),
 			(long)-ETIMEDOUT);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),
@@ -4188,7 +4224,7 @@ static void pkm_lcs_kunit_commit_timeout_malformed_late_response_downs_source(
 
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_kunit_source_device_read_file(
-				&file, out, sizeof(out), true),
+				file, out, sizeof(out), true),
 			(ssize_t)(RSI_REQUEST_HEADER_SIZE + sizeof(u64)));
 	request_id = get_unaligned_le64(out + RSI_REQUEST_ID_OFFSET);
 
@@ -4197,14 +4233,14 @@ static void pkm_lcs_kunit_commit_timeout_malformed_late_response_downs_source(
 					    0x80000000U, &response_len);
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_source_device_write_file(
-				&file, response, response_len, false,
+				file, response, response_len, false,
 				&response_result),
 			(long)-EIO);
 	KUNIT_EXPECT_TRUE(test, response_result.malformed_source_data);
 	KUNIT_EXPECT_FALSE(test, response_result.caller_waiter_attached);
 	KUNIT_EXPECT_EQ(test, response_result.in_flight_count, 0U);
 
-	pkm_lcs_kunit_source_fd_snapshot(&file, &source_fd_snapshot);
+	pkm_lcs_kunit_source_fd_snapshot(file, &source_fd_snapshot);
 	KUNIT_EXPECT_TRUE(test, source_fd_snapshot.closing);
 	pkm_lcs_kunit_source_table_snapshot(&source_table_snapshot);
 	KUNIT_EXPECT_EQ(test, source_table_snapshot.active_count, 0U);
@@ -4218,11 +4254,7 @@ static void pkm_lcs_kunit_commit_timeout_malformed_late_response_downs_source(
 			pkm_lcs_source_bound_transaction_acquire(1, &count),
 			(long)-EIO);
 
-	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
-	flush_delayed_fput();
-	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
-	pkm_lcs_kunit_reset_source_table();
-	kacs_rust_token_drop(token);
+	kunit_release_action(test, pkm_lcs_kunit_late_commit_cleanup, fixture);
 }
 
 

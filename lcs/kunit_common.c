@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "kunit_common.h"
+#include "source_internal.h"
+
+#include <kunit/static_stub.h>
 
 
 bool pkm_lcs_kunit_usercopy_read(void *raw_ctx, void *dst,
@@ -3301,6 +3304,46 @@ pkm_lcs_kunit_guid_generator(struct pkm_lcs_kunit_guid_sequence *sequence)
 		.generate = pkm_lcs_kunit_guid_sequence_generate,
 		.ctx = sequence,
 	};
+}
+
+
+/*
+ * Expire only the response wait: admission must have queued the request.
+ * Run the real timeout/detach path, with a deadline that is already past.
+ * The static stub belongs to this KUnit case, not to other kernel tasks.
+ */
+static long pkm_lcs_kunit_expire_queued_response(
+	struct pkm_lcs_source_response_waiter *waiter, unsigned long deadline,
+	struct pkm_lcs_source_response_result *result)
+{
+	struct kunit *test = kunit_get_current_test();
+	long ret;
+
+	KUNIT_EXPECT_TRUE(test, waiter->attached);
+	kunit_deactivate_static_stub(test,
+		pkm_lcs_source_response_waiter_wait_until);
+	ret = pkm_lcs_source_response_waiter_wait_until(waiter, jiffies, result);
+	kunit_activate_static_stub(test,
+		pkm_lcs_source_response_waiter_wait_until,
+		pkm_lcs_kunit_expire_queued_response);
+	return ret;
+}
+
+long pkm_lcs_kunit_commit_queued_timeout(struct kunit *test, int fd)
+{
+	long ret;
+
+	kunit_activate_static_stub(test,
+		pkm_lcs_source_response_waiter_wait_until,
+		pkm_lcs_kunit_expire_queued_response);
+	/*
+	 * This deadline only bounds admission. The response wait expires at
+	 * its entry, regardless of the host's scheduling or emulation speed.
+	 */
+	ret = pkm_lcs_kunit_transaction_fd_commit_timeout(fd, U32_MAX);
+	kunit_deactivate_static_stub(test,
+		pkm_lcs_source_response_waiter_wait_until);
+	return ret;
 }
 
 
@@ -8931,8 +8974,7 @@ void pkm_lcs_kunit_commit_timeout_late_response(
 	pkm_lcs_kunit_append_one_create_log(test, (int)fd, root_guid, 0xa5);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_kunit_transaction_fd_commit_timeout((int)fd,
-								    1),
+			pkm_lcs_kunit_commit_queued_timeout(test, (int)fd),
 			(long)-ETIMEDOUT);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_snapshot((int)fd,
@@ -9075,8 +9117,7 @@ void pkm_lcs_kunit_commit_timeout_late_create_watch(
 			(ssize_t)-EAGAIN);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_kunit_transaction_fd_commit_timeout(
-				(int)txn_fd, 1),
+			pkm_lcs_kunit_commit_queued_timeout(test, (int)txn_fd),
 			(long)-ETIMEDOUT);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_log_snapshot((int)txn_fd,
@@ -9188,8 +9229,7 @@ void pkm_lcs_kunit_commit_timeout_closed_fd_late_response(
 	pkm_lcs_kunit_append_one_create_log(test, (int)fd, root_guid, 0xb5);
 
 	KUNIT_EXPECT_EQ(test,
-			pkm_lcs_kunit_transaction_fd_commit_timeout((int)fd,
-								    1),
+			pkm_lcs_kunit_commit_queued_timeout(test, (int)fd),
 			(long)-ETIMEDOUT);
 	KUNIT_ASSERT_EQ(test,
 			pkm_lcs_transaction_fd_log_snapshot((int)fd, &log),

@@ -760,6 +760,8 @@ struct pkm_lcs_kunit_walk_then_query_values_source_script {
 };
 
 
+long pkm_lcs_kunit_commit_queued_timeout(struct kunit *test, int fd);
+
 void pkm_lcs_kunit_setup_registered_source(struct kunit *test,
 						  struct file *file,
 						  const void **token_out);
