@@ -1907,27 +1907,75 @@ long pkm_lcs_create_missing_copied_path_finish_for_token(
 		inputs, -1, udisposition);
 }
 
-/*
- * Whether a create that names a layer creates that layer's own entry.
- *
- * A key's presence at a path is per layer (§5.2.5): a create naming a layer
- * other than base creates *that layer's* entry, with its own GUID, when the
- * layer has none there -- that is how hide-and-replace is authored. Another
- * layer already naming the path is not "the key exists" for the named layer,
- * so the existing-path finisher, which resolves across every enabled layer
- * and never consults the layer argument, is skipped for it. When the named
- * layer does hold the entry the source answers ALREADY_EXISTS, which retries
- * as an open of the effective key with REG_OPENED_EXISTING (PEI-765).
- */
-static long pkm_lcs_reg_create_key_layer_owns_entry(
+/* Look at this layer's own entry, not the winner of layer resolution. */
+static long pkm_lcs_create_named_layer_entry_present(
+	const void *token, const struct pkm_lcs_usercopy_ops *ops,
+	int parent_fd, const struct pkm_lcs_syscall_path_copy *copy,
+	const char __user *ulayer,
+	const struct pkm_lcs_create_missing_runtime_inputs *inputs,
+	int txn_fd, bool *present)
+{
+	struct pkm_lcs_create_missing_parent_resolution resolution = { };
+	struct pkm_lcs_create_layer_target target = { };
+	struct pkm_lcs_layer_target_admission_plan target_plan = { };
+	struct pkm_lcs_source_response_frame frame = { };
+	struct pkm_lcs_source_response_result response = { };
+	struct pkm_lcs_rsi_lookup_guid_entry_result entry = { };
+	u64 txn_id = 0, next_sequence = 0;
+	long ret;
+
+	*present = false;
+	ret = pkm_lcs_create_missing_copied_parent_for_token_with_txn(
+		token, parent_fd, copy, inputs->scope_guids, inputs->scope_count,
+		inputs->layers, inputs->layer_count, inputs->private_layers,
+		inputs->private_layer_count, txn_fd, &resolution);
+	if (ret)
+		return ret;
+	ret = pkm_lcs_create_layer_target_prepare_with_limits(
+		ops, ulayer, inputs->layers, inputs->layer_count,
+		&resolution.limits, &target, &target_plan);
+	if (ret)
+		goto out_resolution;
+	ret = pkm_lcs_transaction_read_txn_id_for_target(
+		txn_fd, resolution.parent.source_id,
+		resolution.parent.ancestor_guids[0], 0, &txn_id);
+	if (ret)
+		goto out_target;
+	ret = pkm_lcs_source_lookup_round_trip_retaining_frame_timeout_with_limits(
+		resolution.parent.source_id, txn_id, resolution.parent.key_guid,
+		resolution.child_name, resolution.child_name_len,
+		&resolution.limits, resolution.limits.request_timeout_ms,
+		&frame, &response, NULL);
+	if (ret)
+		goto out_frame;
+	ret = pkm_lcs_source_next_sequence_snapshot(&next_sequence);
+	if (ret)
+		goto out_frame;
+	ret = pkm_lcs_rsi_materialize_lookup_layer_entry(
+		frame.data, frame.len, response.request_id, next_sequence,
+		resolution.child_name, resolution.child_name_len,
+		target.name, target.name_len, &response.limits, &entry);
+	if (!ret)
+		*present = entry.present != 0;
+out_frame:
+	pkm_lcs_source_response_frame_destroy(&frame);
+out_target:
+	pkm_lcs_create_layer_target_destroy(&target);
+out_resolution:
+	pkm_lcs_create_missing_parent_resolution_destroy(&resolution);
+	return ret;
+}
+
+/* Non-base named layers need a per-layer presence check (PEI-765/1375). */
+static long pkm_lcs_reg_create_key_needs_layer_lookup(
 	const struct pkm_lcs_usercopy_ops *ops, const char __user *ulayer,
-	bool *owns_entry_out)
+	bool *needs_lookup_out)
 {
 	struct pkm_lcs_create_layer_target target = { };
 	bool is_base = false;
 	long ret;
 
-	*owns_entry_out = false;
+	*needs_lookup_out = false;
 	if (!ulayer)
 		return 0;
 
@@ -1939,7 +1987,7 @@ static long pkm_lcs_reg_create_key_layer_owns_entry(
 	pkm_lcs_create_layer_target_destroy(&target);
 	if (ret)
 		return ret;
-	*owns_entry_out = !is_base;
+	*needs_lookup_out = !is_base;
 	return 0;
 }
 
@@ -1958,15 +2006,16 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 	struct pkm_lcs_runtime_limits limits;
 	const struct pkm_lcs_create_missing_runtime_inputs *active_inputs =
 		inputs;
-	bool layer_owns_entry = false;
+	bool needs_layer_lookup = false;
+	bool layer_entry_present = false;
 	long ret;
 
 	ret = pkm_lcs_create_preflight(desired_access, flags, &preflight);
 	if (ret)
 		return ret;
 
-	ret = pkm_lcs_reg_create_key_layer_owns_entry(ops, ulayer,
-						      &layer_owns_entry);
+	ret = pkm_lcs_reg_create_key_needs_layer_lookup(ops, ulayer,
+						      &needs_layer_lookup);
 	if (ret)
 		return ret;
 
@@ -2000,7 +2049,14 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 		active_inputs = &live_inputs;
 	}
 
-	if (layer_owns_entry)
+	if (needs_layer_lookup) {
+		ret = pkm_lcs_create_named_layer_entry_present(
+			token, ops, parent_fd, &copy, ulayer, active_inputs,
+			txn_fd, &layer_entry_present);
+		if (ret)
+			goto out_private;
+	}
+	if (needs_layer_lookup && !layer_entry_present)
 		ret = -ENOENT;
 	else
 		ret = pkm_lcs_create_existing_copied_path_finish_for_token_with_txn(
@@ -2014,6 +2070,7 @@ static long pkm_lcs_reg_create_key_for_token_with_txn(
 			token, ops, parent_fd, &copy, desired_access, ulayer,
 			flags, active_inputs, txn_fd, udisposition);
 	}
+out_private:
 	pkm_lcs_private_credentials_release(&private_view);
 out_snapshot:
 	pkm_lcs_source_layer_snapshot_release(&snapshot);

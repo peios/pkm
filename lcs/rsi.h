@@ -341,6 +341,12 @@ long pkm_lcs_rsi_materialize_lookup_child(
 	u32 private_layer_count,
 	const struct pkm_lcs_runtime_limits *limits,
 	struct pkm_lcs_rsi_lookup_child_result *result);
+long pkm_lcs_rsi_materialize_lookup_layer_entry(
+	const u8 *frame, size_t frame_len, u64 request_id,
+	u64 next_sequence, const char *child_name, u32 child_name_len,
+	const char *layer_name, u32 layer_name_len,
+	const struct pkm_lcs_runtime_limits *limits,
+	struct pkm_lcs_rsi_lookup_guid_entry_result *result);
 long pkm_lcs_rsi_materialize_lookup_guid_entry(
 	const u8 *frame, size_t frame_len, u64 request_id,
 	u64 next_sequence, const char *child_name, u32 child_name_len,

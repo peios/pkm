@@ -8022,6 +8022,69 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
     limits: *const PkmLcsRuntimeLimitsCopy,
     result_out: *mut PkmLcsRsiLookupGuidEntryResultCopy,
 ) -> c_int {
+    if target_guid.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let mut target = [0u8; 16];
+    target.copy_from_slice(unsafe { slice::from_raw_parts(target_guid, 16) });
+    unsafe {
+        materialize_rsi_lookup_entry(
+            frame, frame_len, request_id, next_sequence, child_name, child_name_len,
+            |entry| matches!(entry.entry.target, PathTarget::Guid(guid) if guid == target),
+            limits, result_out,
+        )
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_layer_entry(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    child_name: *const u8,
+    child_name_len: u32,
+    layer_name: *const u8,
+    layer_name_len: u32,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    result_out: *mut PkmLcsRsiLookupGuidEntryResultCopy,
+) -> c_int {
+    if layer_name.is_null() {
+        return LinuxErrno::Einval.negated_return() as c_int;
+    }
+    let parsed_limits = match lcs_limits_from_copy(limits) {
+        Ok(limits) => limits,
+        Err(errno) => return errno.negated_return() as c_int,
+    };
+    let layer_bytes = unsafe { slice::from_raw_parts(layer_name, layer_name_len as usize) };
+    let layer = match validate_layer_name_bytes(layer_bytes, &parsed_limits) {
+        Ok(layer) => layer,
+        Err(_) => return LinuxErrno::Einval.negated_return() as c_int,
+    };
+    unsafe {
+        materialize_rsi_lookup_entry(
+            frame, frame_len, request_id, next_sequence, child_name, child_name_len,
+            |entry| matches!(entry.entry.target, PathTarget::Guid(_))
+                && casefold_eq(entry.entry.layer, layer),
+            limits, result_out,
+        )
+    }
+}
+
+unsafe fn materialize_rsi_lookup_entry<F>(
+    frame: *const u8,
+    frame_len: usize,
+    request_id: u64,
+    next_sequence: u64,
+    child_name: *const u8,
+    child_name_len: u32,
+    matches: F,
+    limits: *const PkmLcsRuntimeLimitsCopy,
+    result_out: *mut PkmLcsRsiLookupGuidEntryResultCopy,
+) -> c_int
+where
+    F: Fn(&NamedPathEntry<'_>) -> bool,
+{
     if result_out.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
@@ -8034,7 +8097,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
         };
     }
 
-    if frame.is_null() || child_name.is_null() || target_guid.is_null() {
+    if frame.is_null() || child_name.is_null() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
     let limits = if limits.is_null() {
@@ -8055,9 +8118,6 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
     if validate_key_component_bytes(child_bytes, &limits).is_err() {
         return LinuxErrno::Einval.negated_return() as c_int;
     }
-
-    let mut target = [0u8; 16];
-    target.copy_from_slice(unsafe { slice::from_raw_parts(target_guid, 16) });
 
     let payload = match parse_rsi_lookup_success_response_payload(
         frame_bytes,
@@ -8093,10 +8153,8 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_lookup_guid_entry(
             source_path_entry_count = source_path_entry_count
                 .checked_add(1)
                 .ok_or(LcsError::RsiPayloadLengthOverflow)?;
-            if let PathTarget::Guid(guid) = entry.entry.target {
-                if guid == target {
-                    present = true;
-                }
+            if matches(&entry) {
+                present = true;
             }
             Ok(())
         },
