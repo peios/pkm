@@ -1,0 +1,66 @@
+NTFE (PEI-1432): account for the complete extension and retain allocation offsets.
+
+The NTFE payload plus ordinary conntrack extensions exceeds 255 bytes.
+Use 16-bit internal sizes/offsets, and include NTFE and alignment padding
+in the compile-time bound. This changes no userspace ABI.
+
+diff --git a/include/net/netfilter/nf_conntrack_extend.h b/include/net/netfilter/nf_conntrack_extend.h
+--- a/include/net/netfilter/nf_conntrack_extend.h
++++ b/include/net/netfilter/nf_conntrack_extend.h
+@@ -39,8 +39,8 @@
+ 
+ /* Extensions: optional stuff which isn't permanently in struct. */
+ struct nf_ct_ext {
+-	u8 offset[NF_CT_EXT_NUM];
+-	u8 len;
++	u16 offset[NF_CT_EXT_NUM];
++	u16 len;
+ 	unsigned int gen_id;
+ 	char data[] __aligned(8);
+ };
+diff --git a/net/netfilter/nf_conntrack_extend.c b/net/netfilter/nf_conntrack_extend.c
+--- a/net/netfilter/nf_conntrack_extend.c
++++ b/net/netfilter/nf_conntrack_extend.c
+@@ -30,7 +30,7 @@
+ 
+ atomic_t nf_conntrack_ext_genid __read_mostly = ATOMIC_INIT(1);
+ 
+-static const u8 nf_ct_ext_type_len[NF_CT_EXT_NUM] = {
++static const u16 nf_ct_ext_type_len[NF_CT_EXT_NUM] = {
+ 	[NF_CT_EXT_HELPER] = sizeof(struct nf_conn_help),
+ #if IS_ENABLED(CONFIG_NF_NAT)
+ 	[NF_CT_EXT_NAT] = sizeof(struct nf_conn_nat),
+@@ -63,9 +63,11 @@
+ static __always_inline unsigned int total_extension_size(void)
+ {
+ 	/* remember to add new extensions below */
+-	BUILD_BUG_ON(NF_CT_EXT_NUM > 10);
++	BUILD_BUG_ON(NF_CT_EXT_NUM > 11);
+ 
++	/* Bound padding for every allocation order, not just payload bytes. */
+ 	return sizeof(struct nf_ct_ext) +
++	       NF_CT_EXT_NUM * (__alignof__(struct nf_ct_ext) - 1) +
+ 	       sizeof(struct nf_conn_help)
+ #if IS_ENABLED(CONFIG_NF_NAT)
+ 		+ sizeof(struct nf_conn_nat)
+@@ -90,6 +92,9 @@
+ #if IS_ENABLED(CONFIG_NET_ACT_CT)
+ 		+ sizeof(struct nf_conn_act_ct_ext)
+ #endif
++#if IS_ENABLED(CONFIG_PEIOS_NTFE)
++		+ sizeof(struct peios_ntfe_ct)
++#endif
+ 	;
+ }
+ 
+@@ -101,8 +106,8 @@
+ 	/* Conntrack must not be confirmed to avoid races on reallocation. */
+ 	WARN_ON(nf_ct_is_confirmed(ct));
+ 
+-	/* struct nf_ct_ext uses u8 to store offsets/size */
+-	BUILD_BUG_ON(total_extension_size() > 255u);
++	/* struct nf_ct_ext uses u16 to store offsets/size */
++	BUILD_BUG_ON(total_extension_size() > 65535u);
+ 
+ 	if (ct->ext) {
+ 		const struct nf_ct_ext *old = ct->ext;

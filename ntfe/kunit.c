@@ -27,6 +27,8 @@
 #include <linux/string.h>
 #include <linux/unaligned.h>
 #include <net/netfilter/nf_conntrack_extend.h>
+#include <net/netfilter/nf_conntrack_acct.h>
+#include <net/netfilter/nf_conntrack_seqadj.h>
 
 #include <pkm/ntfe.h>
 #include <linux/ipv6.h>
@@ -569,6 +571,74 @@ static struct nf_conn *ntfe_test_flow(struct kunit *test)
 	 */
 	peios_ntfe_ct_ext_add(ct);
 	return ct;
+}
+
+static bool ntfe_test_extension_fits(struct kunit *test, struct nf_conn *ct,
+				     enum nf_ct_ext_id id, size_t size)
+{
+	size_t offset = ct->ext->offset[id];
+	bool fits = offset >= sizeof(*ct->ext) && offset + size <= ct->ext->len;
+
+	KUNIT_EXPECT_TRUE(test, fits);
+	return fits;
+}
+
+static void ntfe_kunit_extension_capacity(struct kunit *test)
+{
+	int order;
+
+	for (order = 0; order < 2; order++) {
+		struct nf_conntrack_tuple orig = { }, repl = { };
+		struct nf_conn *ct = nf_conntrack_alloc(&init_net,
+			&nf_ct_zone_dflt, &orig, &repl, GFP_KERNEL);
+		struct peios_ntfe_ct *pc;
+		struct nf_conn_acct *acct;
+		u16 ntfe_offset, acct_offset;
+
+		KUNIT_ASSERT_FALSE(test, IS_ERR_OR_NULL(ct));
+		if (order)
+			nf_ct_ext_add(ct, NF_CT_EXT_ACCT, GFP_KERNEL);
+		peios_ntfe_ct_ext_add(ct);
+		if (!order)
+			nf_ct_ext_add(ct, NF_CT_EXT_ACCT, GFP_KERNEL);
+		pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+		acct = nf_ct_ext_find(ct, NF_CT_EXT_ACCT);
+		KUNIT_EXPECT_NOT_NULL(test, pc);
+		KUNIT_EXPECT_NOT_NULL(test, acct);
+		if (!pc || !acct)
+			goto out;
+		/* Stop before another allocation if length already wrapped;
+		 * the regression must not corrupt the test kernel itself.
+		 */
+		if (!ntfe_test_extension_fits(test, ct, NF_CT_EXT_NTFE,
+					      sizeof(*pc)) ||
+		    !ntfe_test_extension_fits(test, ct, NF_CT_EXT_ACCT,
+					      sizeof(*acct)))
+			goto out;
+		KUNIT_EXPECT_GT(test, (unsigned int)ct->ext->len, 255U);
+		ntfe_offset = ct->ext->offset[NF_CT_EXT_NTFE];
+		acct_offset = ct->ext->offset[NF_CT_EXT_ACCT];
+		pc->start_secs = 0x11223344;
+		atomic64_set(&acct->counter[0].packets, 17);
+		KUNIT_EXPECT_NOT_NULL(test,
+			nf_ct_ext_add(ct, NF_CT_EXT_SEQADJ, GFP_KERNEL));
+		if (!ntfe_test_extension_fits(test, ct, NF_CT_EXT_SEQADJ,
+					      sizeof(struct nf_conn_seqadj)))
+			goto out;
+		KUNIT_EXPECT_EQ(test, ct->ext->offset[NF_CT_EXT_NTFE], ntfe_offset);
+		KUNIT_EXPECT_EQ(test, ct->ext->offset[NF_CT_EXT_ACCT], acct_offset);
+		KUNIT_EXPECT_GE(test, (size_t)ct->ext->offset[NF_CT_EXT_SEQADJ],
+				(size_t)ntfe_offset + sizeof(*pc));
+		KUNIT_EXPECT_GE(test, (size_t)ct->ext->offset[NF_CT_EXT_SEQADJ],
+				(size_t)acct_offset + sizeof(*acct));
+		/* Reallocation may move the block: reacquire both payloads. */
+		pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+		acct = nf_ct_ext_find(ct, NF_CT_EXT_ACCT);
+		KUNIT_EXPECT_EQ(test, pc->start_secs, 0x11223344ULL);
+		KUNIT_EXPECT_EQ(test, atomic64_read(&acct->counter[0].packets), 17LL);
+out:
+		nf_conntrack_free(ct);
+	}
 }
 
 static void ntfe_kunit_tag_store(struct kunit *test)
@@ -3157,6 +3227,7 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_deepest_tree),
 	KUNIT_CASE(ntfe_kunit_event_stream),
 	KUNIT_CASE(ntfe_kunit_reject_kinds_cross_the_bridge),
+	KUNIT_CASE(ntfe_kunit_extension_capacity),
 	KUNIT_CASE(ntfe_kunit_tag_store),
 	KUNIT_CASE(ntfe_kunit_counter_store),
 	KUNIT_CASE(ntfe_kunit_report_lands_in_kmes),

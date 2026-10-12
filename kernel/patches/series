@@ -75,6 +75,7 @@ net/ntfe-wireup.patch
 # size table, add at flow creation, release at free). Touches conntrack
 # files no other patch does; order-independent.
 net/ntfe-conntrack-ext.patch
+net/ntfe-conntrack-capacity.patch
 # NTFE Flow slice: the refusal bit on sk_buff (NTFE does not judge its own
 # refusals). One hunk in include/linux/skbuff.h; order-independent.
 net/ntfe-refusal-bit.patch
