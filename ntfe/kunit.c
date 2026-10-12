@@ -2719,6 +2719,85 @@ static void ntfe_kunit_identity_unresolved(struct kunit *test)
 }
 
 
+/* PEI-1436: publication between packet facts and the Flow epoch must not
+ * make an old-context verdict current in the sentence cache. Exercise both
+ * replacement and removal, plus adding context to an absent snapshot.
+ */
+static void ntfe_test_context(struct kunit *test, const char *trust)
+{
+	struct peios_ntfe_context_table *table = NULL;
+
+	if (trust) {
+		table = peios_ntfe_context_table_alloc(1);
+		KUNIT_ASSERT_NOT_NULL(test, table);
+		strscpy(table->entries[0].ifname, "eth0", IFNAMSIZ);
+		strscpy(table->entries[0].network_id, "test-network",
+			PEIOS_NTFE_NETWORK_ID_LEN);
+		strscpy(table->entries[0].network_trust, trust,
+			PEIOS_NTFE_NETWORK_TRUST_LEN);
+	}
+	KUNIT_ASSERT_EQ(test, peios_ntfe_context_publish(table), 0);
+}
+
+static void ntfe_kunit_context_publication_cache(struct kunit *test)
+{
+	static const char * const before[] = { "home", "home", NULL };
+	static const char * const after[] = { "public", NULL, "home" };
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.in = dev,
+		.net = &init_net,
+	};
+	u32 scenario, slot;
+
+	ntfe_test_publish_flow(test, "Network.Trust.Equal", "home", "PASS");
+	for (scenario = 0; scenario < ARRAY_SIZE(before); scenario++) {
+		for (slot = 0; slot < 2; slot++) {
+			struct nf_conn *ct = ntfe_test_flow(test);
+			struct sk_buff *skb = ntfe_test_tcp4_skb(test, 443);
+			struct peios_ntfe_snapshot snap;
+			unsigned int expected = scenario == 2 ? NF_ACCEPT : NF_DROP;
+			u64 cached;
+
+			state.hook = slot ? NF_INET_LOCAL_IN : NF_INET_LOCAL_OUT;
+			ntfe_test_context(test, before[scenario]);
+			ntfe_test_flow_snap(&snap, ct);
+			/* Slot 0 is an ordinary outbound flow; slot 1 exercises
+			 * the other endpoint of a loopback flow.
+			 */
+			snap.loopback = slot;
+			if (slot) {
+				snap.seat = PEIOS_NTFE_SEAT_LOCAL_IN;
+				snap.direction = PEIOS_NTFE_DIR_IN;
+			}
+			peios_ntfe_context_fill(snap.ifname, &snap);
+			ntfe_test_context(test, after[scenario]);
+			KUNIT_EXPECT_EQ(test,
+				peios_ntfe_flow_dispatch(skb, &state, &snap), expected);
+
+			/* A later packet has fresh facts. It must reuse the new
+			 * verdict, never the pre-publication one.
+			 */
+			snap.has &= ~PEIOS_NTFE_HAS_NETWORK;
+			memset(snap.network_id, 0, sizeof(snap.network_id));
+			memset(snap.network_name, 0, sizeof(snap.network_name));
+			memset(snap.network_trust, 0, sizeof(snap.network_trust));
+			peios_ntfe_context_fill(snap.ifname, &snap);
+			cached = atomic64_read(&peios_ntfe_stats.flow_cached);
+			KUNIT_EXPECT_EQ(test,
+				peios_ntfe_flow_dispatch(skb, &state, &snap), expected);
+			KUNIT_EXPECT_EQ(test,
+				atomic64_read(&peios_ntfe_stats.flow_cached), cached + 1);
+			kfree_skb(skb);
+			nf_conntrack_free(ct);
+		}
+	}
+	KUNIT_EXPECT_EQ(test, peios_ntfe_context_publish(NULL), 0);
+	KUNIT_EXPECT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1), 0);
+}
+
 struct ntfe_policy_publication_probe {
 	struct sk_buff *skb;
 	const struct nf_hook_state *state;
@@ -3415,6 +3494,7 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_eval_failure_fails_closed),
 	KUNIT_CASE(ntfe_kunit_identity_unresolved),
 	KUNIT_CASE(ntfe_kunit_policy_publication_cache),
+	KUNIT_CASE(ntfe_kunit_context_publication_cache),
 	KUNIT_CASE(ntfe_kunit_sentence_same_generation_refresh),
 	KUNIT_CASE(ntfe_kunit_sentence_write_in_progress),
 	KUNIT_CASE(ntfe_kunit_sentence_concurrency),
