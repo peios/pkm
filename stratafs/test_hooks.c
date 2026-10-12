@@ -70,6 +70,8 @@ static struct stratafs_hook stratafs_hooks[STRATAFS_HOOK_POINTS] = {
 	[STRATAFS_HOOK_COPY_UP_PUBLISH]	= { .name = "copy-up-publish" },
 	[STRATAFS_HOOK_RENAME_PROVIDER]	= { .name = "rename-provider" },
 	[STRATAFS_HOOK_LINK_INSTALL]	= { .name = "link-install" },
+	[STRATAFS_HOOK_SUPERSEDE_PUBLISH]	= { .name = "supersede-publish" },
+	[STRATAFS_HOOK_SUPERSEDE_REMOVE]	= { .name = "supersede-remove" },
 };
 
 int stratafs_test_hook(enum stratafs_test_hook_point point)
