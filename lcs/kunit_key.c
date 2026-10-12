@@ -4420,7 +4420,7 @@ static void pkm_lcs_kunit_key_fd_enum_subkey_malformed_source(
 
 static void pkm_lcs_kunit_key_fd_query_key_info_success(struct kunit *test)
 {
-	static const char * const path[] = { "Machine", "Software" };
+	static const char * const path[] = { "Machine", "sOURCEnAME" };
 	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0x5a },
@@ -4536,10 +4536,62 @@ static void pkm_lcs_kunit_key_fd_query_key_info_success(struct kunit *test)
 }
 
 
+static void pkm_lcs_kunit_key_fd_query_key_info_rejects_name_mismatch(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Expected" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = { { 1 }, { 0x5a } };
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct reg_query_key_info_args args = { };
+	struct pkm_lcs_kunit_read_key_source_script read_key = {
+		.expected_guid = ancestors[1],
+		.name = "Unrelated",
+	};
+	struct pkm_lcs_kunit_symlink_sequence_op op = {
+		.op = PKM_LCS_KUNIT_SYMLINK_SEQ_READ_KEY,
+		.read_key = &read_key,
+	};
+	struct pkm_lcs_kunit_symlink_sequence_source_script script = {
+		.ops = &op,
+		.op_count = 1,
+	};
+	struct task_struct *task;
+	struct file file = { };
+	const void *token;
+	long fd;
+
+	pkm_lcs_kunit_setup_registered_source(test, &file, &token);
+	script.file = &file;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, READ_CONTROL, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	pkm_kmes_kunit_reset_all();
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_symlink_sequence_source_thread, &script,
+		"pkm-lcs-kunit-query-name");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	/* Even a length probe validates the source before publishing metadata. */
+	KUNIT_EXPECT_EQ(test,
+		pkm_lcs_kunit_key_fd_query_key_info((int)fd, &ops, &args),
+		(long)-EIO);
+	KUNIT_EXPECT_EQ(test, pkm_lcs_kunit_kthread_stop(task), 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 1U);
+	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
+	pkm_lcs_kunit_expect_source_validation_audit(
+		test, "malformed-key-metadata", ancestors[1]);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(token);
+}
+
 static void pkm_lcs_kunit_key_fd_query_key_info_resolves_policy_layers(
 	struct kunit *test)
 {
-	static const char * const path[] = { "Machine", "Software" };
+	static const char * const path[] = { "Machine", "sOURCEnAME" };
 	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0xad, 0x01 },
@@ -4670,7 +4722,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_retains_runtime_limits(
 	struct kunit *test)
 {
 	enum { LONG_NAME_LEN = 300 };
-	static const char * const path[] = { "Machine", "Software" };
+	static const char * const path[] = { "Machine", "sOURCEnAME" };
 	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0x63 },
@@ -4769,7 +4821,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_retains_runtime_limits(
 static void pkm_lcs_kunit_key_fd_query_key_info_erange_probe(
 	struct kunit *test)
 {
-	static const char * const path[] = { "Machine", "Software" };
+	static const char * const path[] = { "Machine", "sOURCEnAME" };
 	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0x5c },
@@ -4882,7 +4934,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_erange_probe(
 static void pkm_lcs_kunit_key_fd_query_key_info_fails_before_source(
 	struct kunit *test)
 {
-	static const char * const path[] = { "Machine", "Software" };
+	static const char * const path[] = { "Machine", "sOURCEnAME" };
 	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0x5e },
@@ -4952,7 +5004,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_fails_before_source(
 static void pkm_lcs_kunit_key_fd_query_key_info_copyout_fault(
 	struct kunit *test)
 {
-	static const char * const path[] = { "Machine", "Software" };
+	static const char * const path[] = { "Machine", "sOURCEnAME" };
 	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0x5f },
@@ -5037,7 +5089,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_copyout_fault(
 static void pkm_lcs_kunit_key_fd_query_key_info_malformed_enum(
 	struct kunit *test)
 {
-	static const char * const path[] = { "Machine", "Software" };
+	static const char * const path[] = { "Machine", "sOURCEnAME" };
 	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = {
 		{ 1 },
 		{ 0x61 },
@@ -17799,6 +17851,7 @@ static struct kunit_case pkm_lcs_kunit_key_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_copyout_fault),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_enum_subkey_malformed_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_success),
+	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_rejects_name_mismatch),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_resolves_policy_layers),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_retains_runtime_limits),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_erange_probe),
