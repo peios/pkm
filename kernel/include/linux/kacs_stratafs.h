@@ -24,6 +24,10 @@ int stratafs_kacs_validate_supersede(const struct path *outer_target);
  */
 void stratafs_kacs_audit_deferred_refusal(const struct dentry *outer,
 					  int result);
+/* Confirm a deferred target is gone in its original providing stratum.
+ * Used only to classify a failed outer VFS check, never to authorize unlink.
+ */
+bool stratafs_kacs_deferred_target_gone(const struct file *file);
 #endif
 
 /* Fixed by PSD-011; shared with KACS so its mount policy is immutable. */
