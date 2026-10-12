@@ -3,6 +3,8 @@
  * LCS source response frame and waiter value helpers.
  */
 
+#include <kunit/static_stub.h>
+
 #include <linux/errno.h>
 #include <linux/jiffies.h>
 #include <linux/mutex.h>
@@ -218,6 +220,9 @@ long pkm_lcs_source_response_waiter_wait_until(
 {
 	long rc = -ETIMEDOUT;
 	long ret;
+
+	KUNIT_STATIC_STUB_REDIRECT(pkm_lcs_source_response_waiter_wait_until,
+				   waiter, deadline, result);
 
 	if (!waiter)
 		return -EINVAL;
