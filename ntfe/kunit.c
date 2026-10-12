@@ -49,7 +49,7 @@
  * The seams (ntfe.h): how many of the next evaluations fail, how many of
  * the next device-side allocations are refused, and who records a flow
  * endpoint's identity between its resolution and its record. The suite's
- * exit resets all three, so a failed case cannot leak one into the next.
+ * exit resets the hooks, so a failed case cannot leak one into the next.
  */
 static atomic_t ntfe_kunit_fail_evals = ATOMIC_INIT(0);
 static atomic_t ntfe_kunit_fail_allocs = ATOMIC_INIT(0);
@@ -74,6 +74,17 @@ void peios_ntfe_kunit_identity_resolved(struct nf_conn *ct,
 
 	if (fn)
 		fn(ct, pc, slot);
+}
+
+static void (*ntfe_kunit_on_sentence_read)(const struct peios_ntfe_sentence *s);
+
+void peios_ntfe_kunit_sentence_read_field(const struct peios_ntfe_sentence *s)
+{
+	void (*fn)(const struct peios_ntfe_sentence *s) =
+		READ_ONCE(ntfe_kunit_on_sentence_read);
+
+	if (fn)
+		fn(s);
 }
 
 static struct net_device *ntfe_test_dev(struct kunit *test, const char *name,
@@ -2637,16 +2648,100 @@ static void ntfe_kunit_identity_unresolved(struct kunit *test)
 	sk_free(sk);
 }
 
+
+static struct nf_conn *ntfe_sentence_race_ct;
+static u32 ntfe_sentence_race_slot;
+static const struct peios_ntfe_sentence ntfe_sentence_race_new = {
+	.generation = 7,
+	.expires_at = 10,
+	.rule_hash = 0x2222,
+	.verdict = PEIOS_NTFE_VERDICT_PASS,
+	.reject_kind = 1,
+};
+
+/* Publish a complete refresh between the expiry and verdict reads. */
+static void ntfe_test_sentence_refresh(const struct peios_ntfe_sentence *s)
+{
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ntfe_sentence_race_ct,
+						NF_CT_EXT_NTFE);
+
+	if (s != &pc->sentence[ntfe_sentence_race_slot])
+		return;
+	WRITE_ONCE(ntfe_kunit_on_sentence_read, NULL);
+	peios_ntfe_kunit_sentence_write(ntfe_sentence_race_ct,
+		ntfe_sentence_race_slot, &ntfe_sentence_race_new);
+}
+
+static void ntfe_kunit_sentence_same_generation_refresh(struct kunit *test)
+{
+	struct nf_conn *ct = ntfe_test_flow(test);
+	const struct peios_ntfe_sentence old = {
+		.generation = 7,
+		.expires_at = 1000,
+		.rule_hash = 0x1111,
+		.verdict = PEIOS_NTFE_VERDICT_DROP,
+	};
+	struct peios_ntfe_sentence out = { };
+	u32 slot;
+
+	for (slot = 0; slot < 2; slot++) {
+		KUNIT_EXPECT_FALSE(test,
+			peios_ntfe_kunit_sentence_read(ct, slot, &out));
+		peios_ntfe_kunit_sentence_write(ct, slot, &old);
+		ntfe_sentence_race_ct = ct;
+		ntfe_sentence_race_slot = slot;
+		WRITE_ONCE(ntfe_kunit_on_sentence_read,
+			   ntfe_test_sentence_refresh);
+		KUNIT_EXPECT_FALSE(test,
+			peios_ntfe_kunit_sentence_read(ct, slot, &out));
+		WRITE_ONCE(ntfe_kunit_on_sentence_read, NULL);
+		/* A later attempt sees exactly the replacement, never an old
+		 * expiry attached to the new PASS verdict (PEI-748).
+		 */
+		KUNIT_EXPECT_TRUE(test,
+			peios_ntfe_kunit_sentence_read(ct, slot, &out));
+		KUNIT_EXPECT_EQ(test, out.generation, 7ULL);
+		KUNIT_EXPECT_EQ(test, out.expires_at, 10LL);
+		KUNIT_EXPECT_EQ(test, out.rule_hash, 0x2222ULL);
+		KUNIT_EXPECT_EQ(test, out.verdict, (u8)PEIOS_NTFE_VERDICT_PASS);
+		KUNIT_EXPECT_EQ(test, out.reject_kind, (u8)1);
+	}
+	ntfe_sentence_race_ct = NULL;
+	nf_conntrack_free(ct);
+}
+
+/* Readers must return immediately while a writer owns either slot. */
+static void ntfe_kunit_sentence_write_in_progress(struct kunit *test)
+{
+	struct nf_conn *ct = ntfe_test_flow(test);
+	struct peios_ntfe_ct *pc = nf_ct_ext_find(ct, NF_CT_EXT_NTFE);
+	struct peios_ntfe_sentence out = { };
+	bool active_read, other_read;
+	u32 slot;
+
+	KUNIT_ASSERT_NOT_NULL(test, pc);
+	peios_ntfe_kunit_sentence_write(ct, 0, &ntfe_sentence_race_new);
+	peios_ntfe_kunit_sentence_write(ct, 1, &ntfe_sentence_race_new);
+	for (slot = 0; slot < 2; slot++) {
+		spin_lock_bh(&ct->lock);
+		write_seqcount_begin(&pc->sentence_seq[slot]);
+		active_read = peios_ntfe_kunit_sentence_read(ct, slot, &out);
+		other_read = peios_ntfe_kunit_sentence_read(ct, slot ^ 1, &out);
+		write_seqcount_end(&pc->sentence_seq[slot]);
+		spin_unlock_bh(&ct->lock);
+		KUNIT_EXPECT_FALSE(test, active_read);
+		KUNIT_EXPECT_TRUE(test, other_read);
+		KUNIT_EXPECT_TRUE(test,
+			peios_ntfe_kunit_sentence_read(ct, slot, &out));
+	}
+	nf_conntrack_free(ct);
+}
+
 /*
- * The sentence's concurrency protocol (§6.8). A writer zeroes the
- * generation, writes the fields and publishes the generation last; a
- * reader that finds it mid-write — fields set, generation zero — reads
- * the slot as absent and the flow is simply judged, never answered by
- * the half-written verdict. (The other torn form, a whole write landing
- * between the reader's two generation loads, needs a second CPU at an
- * instant one thread cannot arrange.) Two first packets of a new flow
- * may both evaluate: both judgments run their effects and the second
- * write is the sentence.
+ * Empty slots are absent even if their other fields are populated. Two
+ * first packets may both evaluate: both judgments run their effects and
+ * the second write is the sentence. Same-generation publication races are
+ * exercised independently above through the real reader and writer.
  */
 static void ntfe_kunit_sentence_concurrency(struct kunit *test)
 {
@@ -3080,6 +3175,7 @@ static void ntfe_kunit_device_allocation_enomem(struct kunit *test)
 
 static void ntfe_kunit_exit(struct kunit *test)
 {
+	WRITE_ONCE(ntfe_kunit_on_sentence_read, NULL);
 	atomic_set(&ntfe_kunit_fail_evals, 0);
 	atomic_set(&ntfe_kunit_fail_allocs, 0);
 	WRITE_ONCE(ntfe_kunit_on_resolved, NULL);
@@ -3176,6 +3272,8 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_ingest_progress),
 	KUNIT_CASE(ntfe_kunit_eval_failure_fails_closed),
 	KUNIT_CASE(ntfe_kunit_identity_unresolved),
+	KUNIT_CASE(ntfe_kunit_sentence_same_generation_refresh),
+	KUNIT_CASE(ntfe_kunit_sentence_write_in_progress),
 	KUNIT_CASE(ntfe_kunit_sentence_concurrency),
 	KUNIT_CASE(ntfe_kunit_identity_resolve_race),
 	KUNIT_CASE(ntfe_kunit_identity_handler_reads_kernel),

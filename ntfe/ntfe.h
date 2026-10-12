@@ -621,11 +621,18 @@ int ntfe_rust_evaluate(const void *forest,
  *    refused;
  *  - identity_resolved: between a flow endpoint's resolution and its
  *    record, so a test can be the CPU that records first.
+ *  - sentence_read_field: after the expiry read, so a test can publish
+ *    a same-policy refresh before the remaining sentence fields.
  * The wrappers expose static internals the suite asserts through.
  */
 #ifdef CONFIG_PEIOS_NTFE_KUNIT
 struct file_operations;
 struct sock;
+void peios_ntfe_kunit_sentence_read_field(const struct peios_ntfe_sentence *s);
+bool peios_ntfe_kunit_sentence_read(struct nf_conn *ct, u32 slot,
+				   struct peios_ntfe_sentence *out);
+void peios_ntfe_kunit_sentence_write(struct nf_conn *ct, u32 slot,
+				    const struct peios_ntfe_sentence *val);
 bool peios_ntfe_kunit_eval_should_fail(void);
 bool peios_ntfe_kunit_alloc_should_fail(void);
 void peios_ntfe_kunit_identity_resolved(struct nf_conn *ct,
@@ -635,6 +642,11 @@ const struct file_operations *peios_ntfe_kunit_dev_fops(void);
 void peios_ntfe_kunit_listener_fill(struct peios_ntfe_listener_rec *rec,
 				    const struct sock *sk, u8 protocol);
 #else
+static inline void peios_ntfe_kunit_sentence_read_field(
+	const struct peios_ntfe_sentence *s)
+{
+}
+
 static inline bool peios_ntfe_kunit_eval_should_fail(void)
 {
 	return false;

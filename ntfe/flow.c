@@ -80,29 +80,41 @@ static u32 ntfe_sentence_slot(const struct peios_ntfe_snapshot *snap)
 }
 
 /* Lock-free read; false when the slot is empty or was torn under us. */
-static bool ntfe_sentence_read(const struct peios_ntfe_sentence *s,
+static bool ntfe_sentence_read(const struct peios_ntfe_ct *pc, u32 slot,
 			      struct peios_ntfe_sentence *out)
 {
-	u64 gen = smp_load_acquire(&s->generation);
+	const struct peios_ntfe_sentence *s = &pc->sentence[slot];
+	const seqcount_t *seq = &pc->sentence_seq[slot].seqcount;
+	unsigned int start;
+	u64 gen;
 
+	/* Read the bare counter so even PREEMPT_RT never takes ct->lock.
+	 * A dump may hold a conntrack bucket lock; interference is a miss,
+	 * not a reason to wait for the writer or retry on the hot path.
+	 */
+	if (!raw_seqcount_try_begin(seq, start))
+		return false;
+	gen = READ_ONCE(s->generation);
 	if (!gen)
 		return false;
 	out->expires_at = READ_ONCE(s->expires_at);
+	peios_ntfe_kunit_sentence_read_field(s);
 	out->rule_hash = READ_ONCE(s->rule_hash);
 	out->verdict = READ_ONCE(s->verdict);
 	out->reject_kind = READ_ONCE(s->reject_kind);
-	smp_rmb();
-	if (READ_ONCE(s->generation) != gen)
+	if (read_seqcount_retry(seq, start))
 		return false;
 	out->generation = gen;
 	return true;
 }
 
-static void ntfe_sentence_write(struct nf_conn *ct,
-			       struct peios_ntfe_sentence *s,
-			       const struct peios_ntfe_sentence *val)
+static void ntfe_sentence_write(struct nf_conn *ct, struct peios_ntfe_ct *pc,
+			       u32 slot, const struct peios_ntfe_sentence *val)
 {
+	struct peios_ntfe_sentence *s = &pc->sentence[slot];
+
 	spin_lock_bh(&ct->lock);
+	write_seqcount_begin(&pc->sentence_seq[slot]);
 	WRITE_ONCE(s->generation, 0);
 	smp_wmb();
 	WRITE_ONCE(s->expires_at, val->expires_at);
@@ -110,6 +122,7 @@ static void ntfe_sentence_write(struct nf_conn *ct,
 	WRITE_ONCE(s->verdict, val->verdict);
 	WRITE_ONCE(s->reject_kind, val->reject_kind);
 	smp_store_release(&s->generation, val->generation);
+	write_seqcount_end(&pc->sentence_seq[slot]);
 	spin_unlock_bh(&ct->lock);
 }
 
@@ -373,7 +386,7 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 	pc = ntfe_ct_ext(ct);
 	slot = ntfe_sentence_slot(snap);
 
-	if (pc && ntfe_sentence_read(&pc->sentence[slot], &cur)) {
+	if (pc && ntfe_sentence_read(pc, slot, &cur)) {
 		if (cur.generation != gen) {
 			evflags = PEIOS_NTFE_EV_F_REJUDGED;
 			atomic64_inc(&peios_ntfe_stats.flow_rejudged);
@@ -443,7 +456,7 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 		cur.verdict = out.verdict;
 		cur.reject_kind = out.reject_kind;
 		if (pc) {
-			ntfe_sentence_write(ct, &pc->sentence[slot], &cur);
+			ntfe_sentence_write(ct, pc, slot, &cur);
 			ntfe_flow_record(pc, &view);
 		} else {
 			atomic64_inc(&peios_ntfe_stats.flow_uncached);
@@ -458,7 +471,7 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 	 * sends nothing (PEI-1303).
 	 */
 	if (snap->loopback && pc &&
-	    ntfe_sentence_read(&pc->sentence[slot ^ 1], &other) &&
+	    ntfe_sentence_read(pc, slot ^ 1, &other) &&
 	    ntfe_sentence_current(&other, gen, snap->t_secs) &&
 	    ntfe_sentence_stricter(&other, &cur))
 		other_rules = true;
@@ -493,12 +506,12 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 
 /* --- the flows dump ------------------------------------------------- */
 
-static void ntfe_sentence_to_rec(const struct peios_ntfe_sentence *s,
+static void ntfe_sentence_to_rec(const struct peios_ntfe_ct *pc,
 				struct peios_ntfe_flow_rec *rec, u32 slot)
 {
 	struct peios_ntfe_sentence val;
 
-	if (!ntfe_sentence_read(s, &val))
+	if (!ntfe_sentence_read(pc, slot, &val))
 		return;
 	rec->sentence_generation[slot] = val.generation;
 	rec->sentence_expires_at[slot] = val.expires_at;
@@ -595,8 +608,8 @@ static void ntfe_flow_fill(struct peios_ntfe_flow_rec *rec,
 			rec->direction = READ_ONCE(pc->direction);
 			rec->loopback = READ_ONCE(pc->loopback);
 		}
-		ntfe_sentence_to_rec(&pc->sentence[0], rec, 0);
-		ntfe_sentence_to_rec(&pc->sentence[1], rec, 1);
+		ntfe_sentence_to_rec(pc, rec, 0);
+		ntfe_sentence_to_rec(pc, rec, 1);
 		ntfe_owner_to_rec(pc, rec, 0);
 		ntfe_owner_to_rec(pc, rec, 1);
 		/* The flow's total: a reader seeing more than the record
@@ -699,3 +712,21 @@ out:
 	kfree(batch);
 	return ret;
 }
+
+#ifdef CONFIG_PEIOS_NTFE_KUNIT
+bool peios_ntfe_kunit_sentence_read(struct nf_conn *ct, u32 slot,
+				   struct peios_ntfe_sentence *out)
+{
+	struct peios_ntfe_ct *pc = ntfe_ct_ext(ct);
+
+	return pc && ntfe_sentence_read(pc, slot, out);
+}
+
+void peios_ntfe_kunit_sentence_write(struct nf_conn *ct, u32 slot,
+				    const struct peios_ntfe_sentence *val)
+{
+	struct peios_ntfe_ct *pc = ntfe_ct_ext(ct);
+
+	ntfe_sentence_write(ct, pc, slot, val);
+}
+#endif
