@@ -89,7 +89,7 @@ index da983e105..15d77203b 100644
  	struct file_attr fattr;
  	struct file_kattr fa = { .flags_valid = true }; /* hint only */
 +#ifdef CONFIG_SECURITY_PKM
-+	struct file *pkm_fileattr_file = NULL;
++	struct file *pkm_fileattr_file __free(fput) = NULL;
 +#endif
  	int error;
  
@@ -99,7 +99,7 @@ index da983e105..15d77203b 100644
  			return -EBADF;
  
 +#ifdef CONFIG_SECURITY_PKM
-+		pkm_fileattr_file = fd_file(f);
++		pkm_fileattr_file = get_file(fd_file(f));
 +		error = pkm_kacs_file_fileattr_get(pkm_fileattr_file);
 +		if (error)
 +			return error;
@@ -127,7 +127,7 @@ index da983e105..15d77203b 100644
  	struct file_attr fattr;
  	struct file_kattr fa;
 +#ifdef CONFIG_SECURITY_PKM
-+	struct file *pkm_fileattr_file = NULL;
++	struct file *pkm_fileattr_file __free(fput) = NULL;
 +#endif
  	int error;
  
@@ -137,7 +137,7 @@ index da983e105..15d77203b 100644
  			return -EBADF;
  
 +#ifdef CONFIG_SECURITY_PKM
-+		pkm_fileattr_file = fd_file(f);
++		pkm_fileattr_file = get_file(fd_file(f));
 +		error = pkm_kacs_file_fileattr_set(pkm_fileattr_file);
 +		if (error)
 +			return error;
