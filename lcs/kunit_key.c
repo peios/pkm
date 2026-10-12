@@ -17639,27 +17639,20 @@ static void pkm_lcs_kunit_key_fd_set_value_allocation_failure_is_enomem(
 /*
  * §5.4.4: if lcs.audit.backup.started cannot be emitted, the backup returns
  * EIO and does not start — nothing is read from the subtree and nothing is
- * written to the output fd. The snapshot that was opened to find out is
- * released.
+ * written to the output fd. No snapshot is requested before START succeeds.
  */
 static void pkm_lcs_kunit_key_fd_backup_start_audit_failure_is_eio(
 	struct kunit *test)
 {
 	struct reg_backup_args args = { };
-	struct pkm_lcs_kunit_backup_snapshot_source_script script = {
-		.begin_status = RSI_OK,
-		.abort_status = RSI_OK,
-		.expect_export_reads = false,
-	};
+	struct pkm_lcs_source_fd_snapshot source_snapshot = { };
 	struct pkm_lcs_kunit_backup_output_file output = { };
 	struct pkm_kmes_kunit_snapshot kmes = { };
-	struct task_struct *task;
 	struct file file = { };
 	const void *token;
 	const void *source_token;
 	long key_fd;
 	int output_fd;
-	int thread_ret;
 
 	pkm_kmes_kunit_reset_all();
 	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
@@ -17672,20 +17665,14 @@ static void pkm_lcs_kunit_key_fd_backup_start_audit_failure_is_eio(
 	KUNIT_ASSERT_TRUE(test, output_fd >= 0);
 	args.output_fd = output_fd;
 
-	script.file = &file;
-	task = pkm_lcs_kunit_kthread_run(
-		pkm_lcs_kunit_backup_snapshot_source_thread, &script,
-		"pkm-lcs-kunit-backup-audit-fail");
-	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
 	pkm_lcs_kunit_fail_next_start_audit();
 	KUNIT_EXPECT_EQ(test,
 			pkm_lcs_kunit_key_fd_backup_for_token(
 				(int)key_fd, token, &args),
 			(long)-EIO);
-	thread_ret = pkm_lcs_kunit_kthread_stop(task);
-	KUNIT_EXPECT_EQ(test, thread_ret, 0);
-	KUNIT_EXPECT_EQ(test, script.result, 0);
-	KUNIT_EXPECT_TRUE(test, script.saw_abort);
+	pkm_lcs_kunit_source_fd_snapshot(&file, &source_snapshot);
+	KUNIT_EXPECT_EQ(test, source_snapshot.queued_request_count, 0U);
+	KUNIT_EXPECT_EQ(test, source_snapshot.in_flight_request_count, 0U);
 	KUNIT_EXPECT_EQ(test, output.len, (size_t)0);
 	/* Neither START nor COMPLETE reached KMES. */
 	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_snapshot_single_active(&kmes),
