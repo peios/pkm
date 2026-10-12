@@ -32,6 +32,7 @@ fs/namespace-rootfs-seed-sd.patch
 fs/namespace-mount-volume-privilege.patch
 fs/super-mount-volume-privilege.patch
 fs/fsopen-reconfigure-volume-privilege.patch
+block/ioctl-volume-privilege.patch
 fs/open-faccessat-access-gate.patch
 fs/open-fchdir-traverse.patch
 fs/open-fchmod-fchown-gate.patch
