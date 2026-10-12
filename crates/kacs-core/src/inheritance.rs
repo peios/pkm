@@ -1,4 +1,6 @@
-use crate::access_mask::GenericMapping;
+use crate::access_mask::{
+    GenericMapping, GENERIC_ALL, GENERIC_EXECUTE, GENERIC_READ, GENERIC_WRITE,
+};
 use crate::ace::{
     minimum_acl_revision_for_ace_type, Ace, AceKind, ACCESS_ALLOWED_ACE_TYPE,
     ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE,
@@ -151,15 +153,35 @@ fn build_inherited_acl(
         if (ace.ace_flags() & CONTAINER_INHERIT_ACE) == 0 {
             continue;
         }
+        let flags = inherited_ace_flags(ace.ace_flags());
+        let split =
+            ace_needs_resolution(ace) && flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) != 0;
+        let effective_flags = if split {
+            flags
+                & !(OBJECT_INHERIT_ACE
+                    | CONTAINER_INHERIT_ACE
+                    | NO_PROPAGATE_INHERIT_ACE
+                    | INHERIT_ONLY_ACE)
+        } else {
+            flags
+        };
         let rewritten = rewrite_ace(
             ace,
-            inherited_ace_flags(ace.ace_flags()),
+            effective_flags,
             owner,
             group,
             mapping,
             valid_mapped_mask,
         )?;
         builder.push_ace(ace.ace_type(), rewritten.as_slice())?;
+        if split {
+            // Keep the next creator's SID and mapping unresolved, including
+            // any callback payload and object GUIDs.
+            let mut carried = PkmVec::new();
+            carried.extend_from_slice(ace.bytes())?;
+            carried[1] = flags | INHERIT_ONLY_ACE;
+            builder.push_ace(ace.ace_type(), carried.as_slice())?;
+        }
     }
 
     if builder.ace_count == 0 {
@@ -192,6 +214,20 @@ fn build_default_acl(
     builder.finish()
 }
 
+fn ace_needs_resolution(ace: Ace<'_>) -> bool {
+    let (mask, sid) = match ace.kind() {
+        AceKind::SingleSid { mask, sid }
+        | AceKind::Object { mask, sid, .. }
+        | AceKind::Callback { mask, sid, .. }
+        | AceKind::CallbackObject { mask, sid, .. }
+        | AceKind::ResourceAttribute { mask, sid, .. } => (mask, sid),
+        AceKind::Opaque => return false,
+    };
+    sid.as_bytes() == CREATOR_OWNER_SID
+        || sid.as_bytes() == CREATOR_GROUP_SID
+        || mask & (GENERIC_ALL | GENERIC_EXECUTE | GENERIC_READ | GENERIC_WRITE) != 0
+}
+
 fn inherited_ace_flags(parent_flags: u8) -> u8 {
     // Registry keys are always containers and only CONTAINER_INHERIT ACEs reach
     // this path (see build_inherited_acl), so the inherited copy always applies
@@ -200,7 +236,7 @@ fn inherited_ace_flags(parent_flags: u8) -> u8 {
     // actually enforced on subkeys instead of being skipped by the DACL walk.
     let mut flags = (parent_flags | INHERITED_ACE) & !INHERIT_ONLY_ACE;
     if (parent_flags & NO_PROPAGATE_INHERIT_ACE) != 0 {
-        flags &= !(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+        flags &= !(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | NO_PROPAGATE_INHERIT_ACE);
     }
     flags
 }

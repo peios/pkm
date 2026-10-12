@@ -27,7 +27,8 @@ use crate::port_reservation::{
 };
 use crate::access_mask::{
     GenericMapping, ACCESS_SYSTEM_SECURITY, FILE_GENERIC_MAPPING, FILE_READ_DATA,
-    FILE_WRITE_DATA, GENERIC_ALL, IPC_GENERIC_MAPPING, MNTNS_GENERIC_MAPPING,
+    FILE_WRITE_DATA, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, GENERIC_EXECUTE,
+    IPC_GENERIC_MAPPING, MNTNS_GENERIC_MAPPING,
     PROCESS_GENERIC_MAPPING, PROCESS_QUERY_INFORMATION,
     PROCESS_QUERY_LIMITED, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
@@ -2773,7 +2774,11 @@ fn build_securityfs_logon_sessions_sd_bytes() -> Result<(*mut u8, usize), i32> {
 
 fn ace_inherits_to_child(ace_flags: u8, child_is_container: bool) -> bool {
     if child_is_container {
-        (ace_flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)) != 0
+        // OI alone targets files below this directory. NP prevents reaching
+        // them, so it must not turn into an effective directory grant.
+        (ace_flags & CONTAINER_INHERIT_ACE) != 0
+            || (ace_flags & OBJECT_INHERIT_ACE != 0
+                && ace_flags & NO_PROPAGATE_INHERIT_ACE == 0)
     } else {
         (ace_flags & OBJECT_INHERIT_ACE) != 0
     }
@@ -2789,8 +2794,9 @@ fn inherited_ace_flags(parent_flags: u8, child_is_container: bool) -> u8 {
     {
         flags |= INHERIT_ONLY_ACE;
     }
-    if (parent_flags & NO_PROPAGATE_INHERIT_ACE) != 0 {
-        flags &= !(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE);
+    if !child_is_container || (parent_flags & NO_PROPAGATE_INHERIT_ACE) != 0 {
+        flags &= !(OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+            | NO_PROPAGATE_INHERIT_ACE | INHERIT_ONLY_ACE);
     }
 
     flags
@@ -2852,7 +2858,9 @@ fn build_rewritten_file_ace_bytes(
 ) -> Result<Vec<u8>, i32> {
     let mut bytes = Vec::new();
     let mask;
-    if ace.kind() == AceKind::Opaque {
+    if !substitute_creator || ace.kind() == AceKind::Opaque {
+        // A propagating copy is the original rule: neither creator SIDs nor
+        // generic masks are resolved until it applies to a descendant.
         bytes
             .extend_from_slice(ace.bytes())
             .map_err(|_| -ENOMEM)?;
@@ -3028,8 +3036,8 @@ fn build_rewritten_file_ace_bytes(
 }
 
 /// The ACEs one parent ACE contributes to one child: the effective ACE, and
-/// for a CREATOR OWNER / CREATOR GROUP ACE inherited by a container, a second
-/// that carries the rule onward.
+/// for a creator-SID or generic-rights ACE inherited by a container, a second
+/// that carries the original rule onward.
 ///
 /// A creator ACE is a rule rather than a grant — "whoever makes this gets
 /// that" — so it has to be resolved *and* preserved. Emitting only the
@@ -3057,7 +3065,16 @@ fn build_inherited_ace_bytes(
 
     let inherited_flags = inherited_ace_flags(parent_flags, child_is_container);
 
-    if !ace_sid_names_creator(ace.kind()) {
+    let generic = match ace.kind() {
+        AceKind::SingleSid { mask, .. }
+        | AceKind::Object { mask, .. }
+        | AceKind::Callback { mask, .. }
+        | AceKind::CallbackObject { mask, .. }
+        | AceKind::ResourceAttribute { mask, .. } =>
+            mask & (GENERIC_ALL | GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE) != 0,
+        AceKind::Opaque => false,
+    };
+    if !ace_sid_names_creator(ace.kind()) && !generic {
         return build_rewritten_file_ace_bytes(
             ace,
             inherited_flags,

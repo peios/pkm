@@ -200,49 +200,68 @@ fn registry_container_inheritance_uses_ci_marks_inherited_and_maps_generics() {
             | SE_SACL_AUTO_INHERITED
     );
 
-    let dacl = child.dacl().unwrap();
-    let entries: Vec<_> = dacl.entries().map(Result::unwrap).collect();
-    assert_eq!(entries.len(), 2);
-
-    match entries[0].kind() {
-        AceKind::SingleSid { mask, sid } => {
-            assert_eq!(mask, KEY_READ);
-            assert_eq!(sid.as_bytes(), owner.as_slice());
-        }
-        other => panic!("unexpected ACE kind: {other:?}"),
-    }
+    let entries: Vec<_> = child
+        .dacl()
+        .unwrap()
+        .entries()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0].ace_flags(), INHERITED_ACE);
     assert_eq!(
-        entries[0].ace_flags(),
-        CONTAINER_INHERIT_ACE | INHERITED_ACE
+        entries[0].kind(),
+        AceKind::SingleSid {
+            mask: KEY_READ,
+            sid: kacs_core::Sid::parse(&owner).unwrap(),
+        }
+    );
+    assert_eq!(
+        entries[1].ace_flags(),
+        CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE
+    );
+    assert_eq!(
+        entries[1].kind(),
+        AceKind::SingleSid {
+            mask: GENERIC_READ,
+            sid: kacs_core::Sid::parse(&creator_owner).unwrap(),
+        }
+    );
+    // NP produces only the resolved ACE, with all propagation bits removed.
+    assert_eq!(entries[2].ace_flags(), INHERITED_ACE);
+    assert_eq!(
+        entries[2].kind(),
+        AceKind::SingleSid {
+            mask: KEY_WRITE,
+            sid: kacs_core::Sid::parse(&group).unwrap(),
+        }
     );
 
-    match entries[1].kind() {
-        AceKind::SingleSid { mask, sid } => {
-            assert_eq!(mask, KEY_WRITE);
-            assert_eq!(sid.as_bytes(), group.as_slice());
-        }
-        other => panic!("unexpected ACE kind: {other:?}"),
-    }
-    assert_ne!(entries[1].ace_flags() & INHERITED_ACE, 0);
+    let sacl_entries: Vec<_> = child
+        .sacl()
+        .unwrap()
+        .entries()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(sacl_entries.len(), 2);
+    assert_eq!(sacl_entries[0].ace_flags(), INHERITED_ACE);
     assert_eq!(
-        entries[1].ace_flags() & (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE),
-        0
-    );
-
-    let sacl = child.sacl().unwrap();
-    let sacl_entries: Vec<_> = sacl.entries().map(Result::unwrap).collect();
-    assert_eq!(sacl_entries.len(), 1);
-    assert_eq!(
-        sacl_entries[0].ace_flags(),
-        CONTAINER_INHERIT_ACE | INHERITED_ACE
-    );
-    match sacl_entries[0].kind() {
-        AceKind::SingleSid { mask, sid } => {
-            assert_eq!(mask, KEY_READ);
-            assert_eq!(sid.as_bytes(), other.as_slice());
+        sacl_entries[0].kind(),
+        AceKind::SingleSid {
+            mask: KEY_READ,
+            sid: kacs_core::Sid::parse(&other).unwrap(),
         }
-        other => panic!("unexpected ACE kind: {other:?}"),
-    }
+    );
+    assert_eq!(
+        sacl_entries[1].ace_flags(),
+        CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE
+    );
+    assert_eq!(
+        sacl_entries[1].kind(),
+        AceKind::SingleSid {
+            mask: GENERIC_READ,
+            sid: kacs_core::Sid::parse(&other).unwrap(),
+        }
+    );
 }
 
 #[test]
@@ -392,20 +411,88 @@ fn registry_container_inheritance_clears_inherit_only_on_child() {
 
     let dacl = child.dacl().unwrap();
     let entries: Vec<_> = dacl.entries().map(Result::unwrap).collect();
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), 2);
 
-    // INHERIT_ONLY cleared; CONTAINER_INHERIT retained for further propagation;
-    // INHERITED marked. The DENY now applies to the subkey itself.
+    // The effective DENY applies here; a separate unmodified generic rule
+    // carries the denial onward.
     assert_eq!(entries[0].ace_flags() & INHERIT_ONLY_ACE, 0);
-    assert_eq!(
-        entries[0].ace_flags(),
-        CONTAINER_INHERIT_ACE | INHERITED_ACE
-    );
+    assert_eq!(entries[0].ace_flags(), INHERITED_ACE);
     match entries[0].kind() {
         AceKind::SingleSid { mask, sid } => {
             assert_eq!(mask, KEY_WRITE);
             assert_eq!(sid.as_bytes(), other.as_slice());
         }
         other => panic!("unexpected ACE kind: {other:?}"),
+    }
+}
+
+#[test]
+fn creator_and_generic_rules_are_resolved_again_for_grandchildren() {
+    let parent_owner = sid(5, &[18]);
+    let owner = sid(5, &[21, 1000]);
+    let group = sid(5, &[21, 513]);
+    let grand_owner = sid(5, &[21, 1001]);
+    let grand_group = sid(5, &[21, 514]);
+    let other = sid(5, &[11]);
+    for (who, expected) in [
+        (sid(3, &[0]), &grand_owner),
+        (sid(3, &[1]), &grand_group),
+        (other.clone(), &other),
+    ] {
+        let rules = acl(&[basic_ace(
+            ACCESS_ALLOWED_ACE_TYPE,
+            CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+            GENERIC_READ,
+            &who,
+        )]);
+        let root = sd(&parent_owner, &group, None, Some(&rules));
+        let child_bytes = inherit_registry_container_child_sd(RegistryContainerChildInheritance {
+            parent_sd: SecurityDescriptor::parse(&root).unwrap(),
+            token_owner: kacs_core::Sid::parse(&owner).unwrap(),
+            token_primary_group: kacs_core::Sid::parse(&group).unwrap(),
+            token_default_dacl: None,
+            generic_mapping: registry_mapping(),
+            valid_mapped_access_mask: REG_VALID_MAPPED_ACCESS_MASK,
+        })
+        .unwrap();
+        // A different mapping makes accidental eager resolution observable.
+        let mut mapping = registry_mapping();
+        mapping.read = KEY_SET_VALUE;
+        let grand_bytes = inherit_registry_container_child_sd(RegistryContainerChildInheritance {
+            parent_sd: SecurityDescriptor::parse(child_bytes.as_slice()).unwrap(),
+            token_owner: kacs_core::Sid::parse(&grand_owner).unwrap(),
+            token_primary_group: kacs_core::Sid::parse(&grand_group).unwrap(),
+            token_default_dacl: None,
+            generic_mapping: mapping,
+            valid_mapped_access_mask: REG_VALID_MAPPED_ACCESS_MASK,
+        })
+        .unwrap();
+        let grand = SecurityDescriptor::parse(grand_bytes.as_slice()).unwrap();
+        let aces: Vec<_> = grand
+            .dacl()
+            .unwrap()
+            .entries()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(aces.len(), 2);
+        assert_eq!(aces[0].ace_flags(), INHERITED_ACE);
+        assert_eq!(
+            aces[0].kind(),
+            AceKind::SingleSid {
+                mask: KEY_SET_VALUE,
+                sid: kacs_core::Sid::parse(expected).unwrap(),
+            }
+        );
+        assert_eq!(
+            aces[1].ace_flags(),
+            CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE
+        );
+        assert_eq!(
+            aces[1].kind(),
+            AceKind::SingleSid {
+                mask: GENERIC_READ,
+                sid: kacs_core::Sid::parse(&who).unwrap(),
+            }
+        );
     }
 }
