@@ -189,6 +189,7 @@ long pkm_kmes_kunit_publish_self_config_plan(
 	const struct pkm_kmes_self_config_apply_plan *plan,
 	struct pkm_kmes_self_config_apply_plan *result_out);
 int pkm_kmes_kunit_poke_single_ring(u64 pos, const void *bytes, size_t len);
+int pkm_kmes_kunit_poke_ring(u32 cpu_id, u64 pos, const void *bytes, size_t len);
 bool pkm_kmes_kunit_set_ready(bool ready);
 u64 pkm_kmes_kunit_pre_init_drops(void);
 void pkm_kmes_kunit_set_ring_cpu_id_skew(bool skew);
