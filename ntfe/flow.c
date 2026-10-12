@@ -408,6 +408,18 @@ static unsigned int ntfe_flow_dispatch_policy(
 		atomic64_inc(&peios_ntfe_stats.flow_cached);
 	} else {
 		ntfe_flow_view(snap, pc, slot, &view);
+		/* Packet facts can predate policy->cache_generation. Refresh
+		 * Network.* after that Acquire epoch read: context publication
+		 * swaps the table before advancing the epoch (AcqRel), so an
+		 * old context cannot acquire the replacement's cache stamp.
+		 * A later publication makes this sentence stale as usual.
+		 * Keep the traversal interface used by the packet snapshot.
+		 */
+		view.has &= ~PEIOS_NTFE_HAS_NETWORK;
+		memset(view.network_id, 0, sizeof(view.network_id));
+		memset(view.network_name, 0, sizeof(view.network_name));
+		memset(view.network_trust, 0, sizeof(view.network_trust));
+		peios_ntfe_context_fill(snap->ifname, &view);
 		/* The identity facts cost a socket lookup inbound: resolved
 		 * only when there is a Flow forest to judge them.
 		 */
