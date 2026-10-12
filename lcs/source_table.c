@@ -370,6 +370,38 @@ out_unlock:
 	return ret;
 }
 
+long pkm_lcs_source_hive_name_copy(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	char **name_out, u32 *name_len_out)
+{
+	struct pkm_lcs_source_registration_hive_copy *hive;
+	struct pkm_lcs_source_slot *slot;
+	long ret = -EIO;
+
+	if (!source_id || !root_guid || !name_out || !name_len_out)
+		return -EINVAL;
+	*name_out = NULL;
+	*name_len_out = 0;
+	pkm_lcs_source_table_lock();
+	slot = pkm_lcs_source_slot_find_locked(source_id);
+	if (!slot || slot->status != PKM_LCS_SOURCE_SLOT_STATUS_ACTIVE)
+		goto out_unlock;
+	hive = pkm_lcs_source_slot_hive_find_locked(slot, root_guid);
+	if (!hive)
+		goto out_unlock;
+	*name_out = kmemdup_nul(hive->name, hive->name_len, GFP_KERNEL);
+	if (!*name_out) {
+		ret = -ENOMEM;
+		goto out_unlock;
+	}
+	*name_len_out = hive->name_len;
+	ret = 0;
+
+out_unlock:
+	pkm_lcs_source_table_unlock();
+	return ret;
+}
+
 long pkm_lcs_source_hive_generation_snapshot(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	u64 *generation_out)

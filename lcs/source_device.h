@@ -1601,6 +1601,10 @@ long pkm_lcs_source_drop_key_round_trip(
 long pkm_lcs_source_record_transaction_generation(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	u64 *generation_out);
+/* Caller owns the copied registered spelling and must kfree it. */
+long pkm_lcs_source_hive_name_copy(
+	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
+	char **name_out, u32 *name_len_out);
 long pkm_lcs_source_hive_generation_snapshot(
 	u32 source_id, const u8 root_guid[RSI_GUID_SIZE],
 	u64 *generation_out);

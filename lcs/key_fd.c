@@ -2095,6 +2095,10 @@ static const char *pkm_lcs_key_fd_leaf_name(const struct pkm_lcs_key_fd *key_fd,
 	return name;
 }
 
+static long pkm_lcs_key_fd_value_name_casefold_equal_with_limits(
+	const char *left, u32 left_len, const char *right, u32 right_len,
+	const struct pkm_lcs_runtime_limits *limits, bool *equal);
+
 static long pkm_lcs_key_fd_query_key_info_from_args(
 	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
 	struct reg_query_key_info_args *args)
@@ -2112,6 +2116,9 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 	struct pkm_lcs_rsi_read_key_result read_key = { };
 	struct pkm_lcs_runtime_limits limits;
 	const char *key_name;
+	char *hive_name = NULL;
+	u32 hive_name_len = 0;
+	bool name_matches;
 	size_t key_name_len;
 	u64 hive_generation = 0;
 	u64 next_sequence = 0;
@@ -2194,9 +2201,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 		goto out_frames;
 	}
 
-	/* Hive roots have no child name. Other keys report their stored
-	 * informational name, not the spelling used to open this fd.
-	 */
+	/* The stored spelling must describe the leaf this fd resolved. */
 	if (key_fd->path_component_count > 1) {
 		if ((size_t)read_key.name_offset > read_frame.len ||
 		    (size_t)read_key.name_len >
@@ -2204,8 +2209,33 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 			ret = -EIO;
 			goto out_frames;
 		}
+		ret = pkm_lcs_key_fd_value_name_casefold_equal_with_limits(
+			key_name, (u32)key_name_len,
+			(const char *)read_frame.data + read_key.name_offset,
+			read_key.name_len, &limits, &name_matches);
+		if (ret)
+			goto out_frames;
+		if (!name_matches) {
+			(void)pkm_lcs_emit_source_validation_failure_audit(
+				key_fd->source_id, NULL, 0, false,
+				read_response.request_id, true, RSI_READ_KEY, true,
+				key_fd->key_guid, true,
+				PKM_LCS_SOURCE_VALIDATION_MALFORMED_KEY_METADATA);
+			ret = -EIO;
+			goto out_frames;
+		}
 		key_name = (const char *)read_frame.data + read_key.name_offset;
 		key_name_len = read_key.name_len;
+	} else {
+		/* Root READ_KEY records have no child name. The registered
+		 * hive name supplies their preserved spelling.
+		 */
+		ret = pkm_lcs_source_hive_name_copy(key_fd->source_id,
+			key_fd->key_guid, &hive_name, &hive_name_len);
+		if (ret)
+			goto out_frames;
+		key_name = hive_name;
+		key_name_len = hive_name_len;
 	}
 
 	ret = pkm_lcs_source_enum_children_round_trip_retaining_frame_timeout_with_limits(
@@ -2269,6 +2299,7 @@ static long pkm_lcs_key_fd_query_key_info_from_args(
 		ret = -EFAULT;
 
 out_frames:
+	kfree(hive_name);
 	pkm_lcs_source_response_frame_destroy(&values_frame);
 	pkm_lcs_source_response_frame_destroy(&enum_frame);
 	pkm_lcs_source_response_frame_destroy(&read_frame);
