@@ -74,6 +74,8 @@ void peios_ntfe_ct_ext_add(struct nf_conn *ct)
 	pc = nf_ct_ext_add(ct, NF_CT_EXT_NTFE, GFP_ATOMIC);
 	if (pc) {
 		memset(pc, 0, sizeof(*pc));
+		seqcount_spinlock_init(&pc->sentence_seq[0], &ct->lock);
+		seqcount_spinlock_init(&pc->sentence_seq[1], &ct->lock);
 		RCU_INIT_POINTER(pc->tags, NULL);
 		/* The flow's birth: the Start.* facts (flow.c reads it). */
 		pc->start_secs = ktime_get_real_seconds();

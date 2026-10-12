@@ -11,6 +11,7 @@
 #define _LINUX_PEIOS_NTFE_H
 
 #include <linux/types.h>
+#include <linux/seqlock.h>
 
 struct nf_conn;
 struct peios_ntfe_tag_table;
@@ -52,9 +53,9 @@ void pkm_kacs_socket_owner_put(struct peios_ntfe_owner *owner);
 
 /*
  * One cached Flow-layer judgment — a "sentence" (net/ntfe/flow.c). Written
- * under the flow's lock with `generation` zeroed first and published last
- * (release); read lock-free with an acquire and a re-check of
- * `generation`, so a reader never applies a torn sentence.
+ * under the flow's lock, inside the slot's sentence_seq write section.
+ * The policy generation is identity, not a modification counter: a
+ * same-policy refresh must also invalidate a concurrent reader.
  */
 struct peios_ntfe_sentence {
 	u64 generation;		/* 0 = empty; the policy generation that judged */
@@ -98,6 +99,7 @@ struct peios_ntfe_ct {
 	u8 src_mac[6];
 	u8 _pad1[2];
 	struct peios_ntfe_sentence sentence[2];
+	seqcount_spinlock_t sentence_seq[2];
 	struct peios_ntfe_owner owner[2];
 	u8 owner_kind[2];		/* enum peios_ntfe_local_kind (net/ntfe/ntfe.h) */
 	u8 owner_unresolved[2];		/* confessed at resolution */
