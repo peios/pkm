@@ -61,7 +61,9 @@ status=$?
 set -e
 
 fail=0
-rows=$(grep -c '^DIR_BENCH ' "$log" || true)
+# SeaBIOS can leave a bare CR before the first guest line. Treat it as a
+# line boundary as well, so that the first measurement is counted.
+rows=$(tr '\r' '\n' < "$log" | grep -c '^DIR_BENCH ' || true)
 if [[ $rows -ne 24 ]]; then
 	echo "  EXPECTED 24 measurement rows, got $rows"
 	fail=1
