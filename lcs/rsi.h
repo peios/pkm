@@ -123,6 +123,7 @@ struct pkm_lcs_rsi_lookup_guid_entry_result {
 };
 
 struct pkm_lcs_rsi_read_key_result {
+	u32 name_offset;
 	u32 sd_offset;
 	u32 sd_len;
 	u32 name_len;

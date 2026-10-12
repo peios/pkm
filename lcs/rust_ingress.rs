@@ -470,6 +470,7 @@ pub struct PkmLcsRsiLookupGuidEntryResultCopy {
 
 #[repr(C)]
 pub struct PkmLcsRsiReadKeyResultCopy {
+    pub name_offset: u32,
     pub sd_offset: u32,
     pub sd_len: u32,
     pub name_len: u32,
@@ -8550,6 +8551,7 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
 
     unsafe {
         *result_out = PkmLcsRsiReadKeyResultCopy {
+            name_offset: 0,
             sd_offset: 0,
             sd_len: 0,
             name_len: 0,
@@ -8617,6 +8619,12 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
         return rsi_read_key_response_error_return(err);
     }
 
+    let (name_offset, name_len) =
+        match retained_frame_slice_offset(frame_bytes, payload.name.data) {
+            Ok(value) => value,
+            Err(errno) => return errno.negated_return() as c_int,
+        };
+
     let base = frame_bytes.as_ptr() as usize;
     let end = base.saturating_add(frame_len);
     let sd_ptr = payload.sd.data.as_ptr() as usize;
@@ -8638,7 +8646,8 @@ pub unsafe extern "C" fn lcs_rust_materialize_rsi_read_key_response(
     unsafe {
         (*result_out).sd_offset = sd_offset as u32;
         (*result_out).sd_len = sd_len as u32;
-        (*result_out).name_len = payload.name.data.len() as u32;
+        (*result_out).name_offset = name_offset;
+        (*result_out).name_len = name_len;
         (*result_out).last_write_time = payload.last_write_time;
         (*result_out).volatile_key = payload.volatile as u8;
         (*result_out).symlink = payload.symlink as u8;

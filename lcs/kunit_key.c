@@ -4509,9 +4509,9 @@ static void pkm_lcs_kunit_key_fd_query_key_info_success(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, script.reads, 3U);
 	KUNIT_EXPECT_EQ(test, script.writes, 3U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
-	KUNIT_EXPECT_EQ(test, args.name_len, 8U);
-	KUNIT_EXPECT_EQ(test, memcmp(name, "Software", 8), 0);
-	KUNIT_EXPECT_EQ(test, name[8], 0xaaU);
+	KUNIT_EXPECT_EQ(test, args.name_len, 10U);
+	KUNIT_EXPECT_EQ(test, memcmp(name, "SourceName", 10), 0);
+	KUNIT_EXPECT_EQ(test, name[10], 0xaaU);
 	KUNIT_EXPECT_EQ(test, args.last_write_time, 2000ULL);
 	KUNIT_EXPECT_EQ(test, args.subkey_count, 1U);
 	KUNIT_EXPECT_EQ(test, args.value_count, 1U);
@@ -4648,8 +4648,8 @@ static void pkm_lcs_kunit_key_fd_query_key_info_resolves_policy_layers(
 	KUNIT_EXPECT_EQ(test, script.reads, 3U);
 	KUNIT_EXPECT_EQ(test, script.writes, 3U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
-	KUNIT_EXPECT_EQ(test, args.name_len, 8U);
-	KUNIT_EXPECT_EQ(test, memcmp(name, "Software", 8), 0);
+	KUNIT_EXPECT_EQ(test, args.name_len, 10U);
+	KUNIT_EXPECT_EQ(test, memcmp(name, "SourceName", 10), 0);
 	KUNIT_EXPECT_EQ(test, args.subkey_count, 0U);
 	KUNIT_EXPECT_EQ(test, args.value_count, 1U);
 	KUNIT_EXPECT_EQ(test, args.max_subkey_name_len, 0U);
@@ -4842,7 +4842,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_erange_probe(
 	KUNIT_EXPECT_EQ(test, script.reads, 3U);
 	KUNIT_EXPECT_EQ(test, script.writes, 3U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
-	KUNIT_EXPECT_EQ(test, args.name_len, 8U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 10U);
 	KUNIT_EXPECT_EQ(test, args.last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, name[0], 0xaaU);
 
@@ -4867,7 +4867,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_erange_probe(
 	KUNIT_EXPECT_EQ(test, script.reads, 3U);
 	KUNIT_EXPECT_EQ(test, script.writes, 3U);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 0U);
-	KUNIT_EXPECT_EQ(test, args.name_len, 8U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 10U);
 	KUNIT_EXPECT_EQ(test, args.last_write_time, 0ULL);
 	KUNIT_EXPECT_EQ(test, args.name_ptr, 0ULL);
 
@@ -5024,7 +5024,7 @@ static void pkm_lcs_kunit_key_fd_query_key_info_copyout_fault(
 	KUNIT_EXPECT_EQ(test, thread_ret, 0);
 	KUNIT_EXPECT_EQ(test, script.result, 0);
 	KUNIT_EXPECT_EQ(test, ctx.writes, 1U);
-	KUNIT_EXPECT_EQ(test, args.name_len, 8U);
+	KUNIT_EXPECT_EQ(test, args.name_len, 10U);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	pkm_lcs_kunit_flush_deferred_key_fd_release();
