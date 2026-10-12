@@ -1,4 +1,7 @@
-use kacs_core::{AceKind, CONTAINER_INHERIT_ACE, GENERIC_READ, INHERITED_ACE, SecurityDescriptor};
+use kacs_core::{
+    AceKind, CONTAINER_INHERIT_ACE, GENERIC_READ, INHERIT_ONLY_ACE, INHERITED_ACE,
+    SecurityDescriptor,
+};
 use lcs_core::{
     KEY_ENUMERATE_SUB_KEYS, KEY_NOTIFY, KEY_QUERY_VALUE, LcsError, READ_CONTROL,
     RegistryKeyInitialSecurityDescriptorInput, compute_registry_key_initial_security_descriptor,
@@ -106,15 +109,25 @@ fn lcs_registry_key_initial_sd_delegates_to_kacs_inheritance() {
         .entries()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries[0].ace_flags(),
-        CONTAINER_INHERIT_ACE | INHERITED_ACE
-    );
+    // A propagating CREATOR OWNER ACE splits into the resolved ACE that
+    // applies to this key and an unmapped inherit-only copy for its children.
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].ace_flags(), INHERITED_ACE);
     match entries[0].kind() {
         AceKind::SingleSid { mask, sid } => {
             assert_eq!(mask, KEY_READ);
             assert_eq!(sid.as_bytes(), token_owner.as_slice());
+        }
+        other => panic!("unexpected ACE kind: {other:?}"),
+    }
+    assert_eq!(
+        entries[1].ace_flags(),
+        CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE | INHERITED_ACE
+    );
+    match entries[1].kind() {
+        AceKind::SingleSid { mask, sid } => {
+            assert_eq!(mask, GENERIC_READ);
+            assert_eq!(sid.as_bytes(), creator_owner.as_slice());
         }
         other => panic!("unexpected ACE kind: {other:?}"),
     }
