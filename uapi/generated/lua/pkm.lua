@@ -999,9 +999,19 @@ M.REG_RESTORE_ARGS_SIZE = 4
 M.REG_SET_SECURITY_ARGS_SIZE = 24
 M.REG_SET_VALUE_ARGS_SIZE = 64
 M.REG_SRC_HIVE_ENTRY_SIZE = 56
+M.REG_SRC_LIFETIME_VERSION = 1
+M.REG_SRC_NEGOTIATE = 3222295041
+M.REG_SRC_NEGOTIATE_ARGS_SIZE = 16
+M.REG_SRC_NEGOTIATE_NR = 1
 M.REG_SRC_REGISTER = 1075335680
 M.REG_SRC_REGISTER_ARGS_SIZE = 24
 M.REG_SRC_REGISTER_NR = 0
+M.REG_SRC_RENEW = 3223343619
+M.REG_SRC_RENEW_ARGS_SIZE = 32
+M.REG_SRC_RENEW_NR = 3
+M.REG_SRC_REQUEST_CONTEXT = 3223867906
+M.REG_SRC_REQUEST_CONTEXT_ARGS_SIZE = 40
+M.REG_SRC_REQUEST_CONTEXT_NR = 2
 M.REG_SZ = 1
 M.REG_TOMBSTONE = 65535
 M.REG_TXN_ABORTED = 3
@@ -1741,6 +1751,16 @@ M.struct = {
       scope_guid = {offset = 40, size = 16, signed = false, kind = "bytes"},
     },
   },
+  ["reg_src_negotiate_args"] = {
+    size = 16,
+    pack = "<I4I4I8",
+    fields = {"version", "flags", "session"},
+    field = {
+      version = {offset = 0, size = 4, signed = false, kind = "uint"},
+      flags = {offset = 4, size = 4, signed = false, kind = "uint"},
+      session = {offset = 8, size = 8, signed = false, kind = "uint"},
+    },
+  },
   ["reg_src_register_args"] = {
     size = 24,
     pack = "<I4xxxxI8I8",
@@ -1749,6 +1769,29 @@ M.struct = {
       hive_count = {offset = 0, size = 4, signed = false, kind = "uint"},
       max_sequence = {offset = 8, size = 8, signed = false, kind = "uint"},
       hives_ptr = {offset = 16, size = 8, signed = false, kind = "uint"},
+    },
+  },
+  ["reg_src_renew_args"] = {
+    size = 32,
+    pack = "<I8I8I8I8",
+    fields = {"session", "transaction_id", "lifetime_deadline_ns", "lease_deadline_ns"},
+    field = {
+      session = {offset = 0, size = 8, signed = false, kind = "uint"},
+      transaction_id = {offset = 8, size = 8, signed = false, kind = "uint"},
+      lifetime_deadline_ns = {offset = 16, size = 8, signed = false, kind = "uint"},
+      lease_deadline_ns = {offset = 24, size = 8, signed = false, kind = "uint"},
+    },
+  },
+  ["reg_src_request_context_args"] = {
+    size = 40,
+    pack = "<I8I8I8I8I8",
+    fields = {"session", "request_id", "request_deadline_ns", "lifetime_deadline_ns", "lease_deadline_ns"},
+    field = {
+      session = {offset = 0, size = 8, signed = false, kind = "uint"},
+      request_id = {offset = 8, size = 8, signed = false, kind = "uint"},
+      request_deadline_ns = {offset = 16, size = 8, signed = false, kind = "uint"},
+      lifetime_deadline_ns = {offset = 24, size = 8, signed = false, kind = "uint"},
+      lease_deadline_ns = {offset = 32, size = 8, signed = false, kind = "uint"},
     },
   },
   ["reg_txn_status_args"] = {

@@ -2907,6 +2907,197 @@ fn bindgen_test_layout_reg_src_register_args() {
 }
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
+pub struct reg_src_negotiate_args {
+    pub version: __u32,
+    pub flags: __u32,
+    pub session: __u64,
+}
+#[test]
+fn bindgen_test_layout_reg_src_negotiate_args() {
+    const UNINIT: ::core::mem::MaybeUninit<reg_src_negotiate_args> =
+        ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<reg_src_negotiate_args>(),
+        16usize,
+        concat!("Size of: ", stringify!(reg_src_negotiate_args))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<reg_src_negotiate_args>(),
+        8usize,
+        concat!("Alignment of ", stringify!(reg_src_negotiate_args))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).version) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_negotiate_args),
+            "::",
+            stringify!(version)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).flags) as usize - ptr as usize },
+        4usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_negotiate_args),
+            "::",
+            stringify!(flags)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).session) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_negotiate_args),
+            "::",
+            stringify!(session)
+        )
+    );
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_src_request_context_args {
+    pub session: __u64,
+    pub request_id: __u64,
+    pub request_deadline_ns: __u64,
+    pub lifetime_deadline_ns: __u64,
+    pub lease_deadline_ns: __u64,
+}
+#[test]
+fn bindgen_test_layout_reg_src_request_context_args() {
+    const UNINIT: ::core::mem::MaybeUninit<reg_src_request_context_args> =
+        ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<reg_src_request_context_args>(),
+        40usize,
+        concat!("Size of: ", stringify!(reg_src_request_context_args))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<reg_src_request_context_args>(),
+        8usize,
+        concat!("Alignment of ", stringify!(reg_src_request_context_args))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).session) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_request_context_args),
+            "::",
+            stringify!(session)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).request_id) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_request_context_args),
+            "::",
+            stringify!(request_id)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).request_deadline_ns) as usize - ptr as usize },
+        16usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_request_context_args),
+            "::",
+            stringify!(request_deadline_ns)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).lifetime_deadline_ns) as usize - ptr as usize },
+        24usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_request_context_args),
+            "::",
+            stringify!(lifetime_deadline_ns)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).lease_deadline_ns) as usize - ptr as usize },
+        32usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_request_context_args),
+            "::",
+            stringify!(lease_deadline_ns)
+        )
+    );
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct reg_src_renew_args {
+    pub session: __u64,
+    pub transaction_id: __u64,
+    pub lifetime_deadline_ns: __u64,
+    pub lease_deadline_ns: __u64,
+}
+#[test]
+fn bindgen_test_layout_reg_src_renew_args() {
+    const UNINIT: ::core::mem::MaybeUninit<reg_src_renew_args> = ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<reg_src_renew_args>(),
+        32usize,
+        concat!("Size of: ", stringify!(reg_src_renew_args))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<reg_src_renew_args>(),
+        8usize,
+        concat!("Alignment of ", stringify!(reg_src_renew_args))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).session) as usize - ptr as usize },
+        0usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_renew_args),
+            "::",
+            stringify!(session)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).transaction_id) as usize - ptr as usize },
+        8usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_renew_args),
+            "::",
+            stringify!(transaction_id)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).lifetime_deadline_ns) as usize - ptr as usize },
+        16usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_renew_args),
+            "::",
+            stringify!(lifetime_deadline_ns)
+        )
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).lease_deadline_ns) as usize - ptr as usize },
+        24usize,
+        concat!(
+            "Offset of field: ",
+            stringify!(reg_src_renew_args),
+            "::",
+            stringify!(lease_deadline_ns)
+        )
+    );
+}
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
 pub struct reg_src_hive_entry {
     pub name_len: __u32,
     pub _pad0: __u32,

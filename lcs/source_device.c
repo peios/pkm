@@ -8,6 +8,10 @@
  */
 
 #include <linux/errno.h>
+#include <linux/ktime.h>
+#include <linux/uaccess.h>
+#include <pkm/lcs.h>
+#include "source_transaction.h"
 #include <linux/atomic.h>
 #include <linux/fcntl.h>
 #include <linux/fdtable.h>
@@ -39,8 +43,11 @@ extern int lcs_rust_validate_rsi_queued_request_frame(
 	const u8 *frame, size_t frame_len,
 	struct pkm_lcs_rsi_built_request *retained);
 
+static atomic64_t pkm_lcs_source_session = ATOMIC64_INIT(0);
+
 static void pkm_lcs_source_fd_init(struct pkm_lcs_source_fd *source_fd)
 {
+	source_fd->session = atomic64_inc_return(&pkm_lcs_source_session);
 	source_fd->state = PKM_LCS_SOURCE_FD_UNREGISTERED;
 	source_fd->source_id = 0;
 	mutex_init(&source_fd->queue_lock);
@@ -275,6 +282,8 @@ long pkm_lcs_source_in_flight_insert_locked(
 	if (key_guid)
 		memcpy(record->key_guid, key_guid, sizeof(record->key_guid));
 	record->limits = effective_limits;
+	record->deadline_ns = waiter && waiter->deadline_ns ? waiter->deadline_ns :
+		ktime_get_ns() + (u64)effective_limits.request_timeout_ms * NSEC_PER_MSEC;
 	if (late_effect) {
 		ret = pkm_lcs_source_late_effect_copy_restore(
 			&record->late_effect, late_effect);
@@ -763,6 +772,10 @@ static long pkm_lcs_source_device_ioctl(struct file *file, unsigned int cmd,
 					unsigned long arg)
 {
 	switch (cmd) {
+	case REG_SRC_NEGOTIATE:
+	case REG_SRC_REQUEST_CONTEXT:
+	case REG_SRC_RENEW:
+		return pkm_lcs_source_lifetime_ioctl(file, cmd, arg);
 	case REG_SRC_REGISTER:
 		return pkm_lcs_source_register_file_for_token_with_bootstrap(
 			pkm_kacs_current_effective_token_ptr(), file, NULL,

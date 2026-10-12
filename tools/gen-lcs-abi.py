@@ -313,7 +313,8 @@ def build():
     w("encoded value is what `_IOC` produces from the direction, type byte,")
     w("number and argument size.")
     w("")
-    groups = [("Source device fd", ["REG_SRC_REGISTER"]),
+    groups = [("Source device fd", ["REG_SRC_REGISTER", "REG_SRC_NEGOTIATE",
+                                    "REG_SRC_REQUEST_CONTEXT", "REG_SRC_RENEW"]),
               ("Key fd", [n for n, _, _, _, _ in consts
                           if n.startswith("REG_IOC_") and not n.endswith("_NR")
                           and n not in ("REG_IOC_TYPE", "REG_IOC_COMMIT",

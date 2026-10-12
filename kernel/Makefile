@@ -21,7 +21,7 @@ pkm-y := kacs/lsm.o kacs/pkm_trace.o kacs/securityfs.o kacs/kmes_rate.o kacs/tlp
 	lcs/source_protocol.o lcs/source_registration.o lcs/source_request.o \
 	lcs/source_response.o lcs/source_response_plan.o lcs/source_routing.o \
 	lcs/source_table.o \
-	lcs/source_symlink.o lcs/source_device.o lcs/syscall_inputs.o \
+	lcs/source_symlink.o lcs/source_device.o lcs/source_transaction.o lcs/syscall_inputs.o \
 	kacs/kacs_rust.o
 pkm-$(CONFIG_SECURITY_PKM_KUNIT) += \
 	kacs/kunit_support.o kacs/kunit_common.o kacs/kunit_access.o kacs/kunit_token.o \

@@ -41,6 +41,7 @@
 #include "key_fd.h"
 #include "rsi.h"
 #include "source_device.h"
+#include "source_transaction.h"
 #include "transaction_fd.h"
 
 #define PKM_LCS_MAX_SD_BYTES 65535U
@@ -6187,6 +6188,10 @@ static long pkm_lcs_key_fd_backup_begin_read_only_snapshot(
 	if (ret)
 		goto out_release_counter;
 
+	ret = pkm_lcs_source_transaction_own(transaction_id, 0);
+	if (ret)
+		goto out_release_counter;
+
 	ret = pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
 		key_fd->source_id, transaction_id, RSI_TXN_READ_ONLY, limits,
 		limits->request_timeout_ms, NULL, NULL);
@@ -6197,6 +6202,7 @@ static long pkm_lcs_key_fd_backup_begin_read_only_snapshot(
 	return 0;
 
 out_release_counter:
+	pkm_lcs_source_transaction_put(transaction_id);
 	release_ret = pkm_lcs_source_read_only_transaction_release(
 		key_fd->source_id, &count);
 	if (!ret)
@@ -6218,6 +6224,7 @@ static long pkm_lcs_key_fd_backup_release_read_only_snapshot(
 	ret = pkm_lcs_source_abort_transaction_round_trip_timeout_with_limits(
 		key_fd->source_id, transaction_id, limits,
 		limits->request_timeout_ms, NULL, NULL);
+	pkm_lcs_source_transaction_put(transaction_id);
 	release_ret = pkm_lcs_source_read_only_transaction_release(
 		key_fd->source_id, &count);
 	if (!ret)
@@ -6241,11 +6248,17 @@ static long pkm_lcs_key_fd_restore_begin_read_write_transaction(
 	if (ret)
 		return ret;
 
+	ret = pkm_lcs_source_transaction_own(transaction_id, 0);
+	if (ret)
+		return ret;
+
 	ret = pkm_lcs_source_begin_transaction_round_trip_timeout_with_limits(
 		key_fd->source_id, transaction_id, RSI_TXN_READ_WRITE, limits,
 		limits->request_timeout_ms, NULL, NULL);
-	if (ret)
+	if (ret) {
+		pkm_lcs_source_transaction_put(transaction_id);
 		return ret;
+	}
 
 	*transaction_id_out = transaction_id;
 	return 0;
@@ -6258,6 +6271,7 @@ static long pkm_lcs_key_fd_restore_abort_read_write_transaction(
 	if (!key_fd || !limits || !transaction_id)
 		return -EINVAL;
 
+	pkm_lcs_source_transaction_put(transaction_id);
 	return pkm_lcs_source_abort_transaction_round_trip_timeout_with_limits(
 		key_fd->source_id, transaction_id, limits,
 		limits->request_timeout_ms, NULL, NULL);
@@ -6290,6 +6304,7 @@ static long pkm_lcs_key_fd_restore_commit_read_write_transaction(
 	ret = pkm_lcs_source_restore_commit_transaction_round_trip_timeout_with_limits(
 		key_fd->source_id, transaction_id, limits,
 		limits->request_timeout_ms, &late_effect, &response, &enqueue);
+	pkm_lcs_source_transaction_put(transaction_id);
 	if (commit_dispatched_out)
 		*commit_dispatched_out = response.request_id || enqueue.request_id;
 	return ret;

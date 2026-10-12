@@ -17,6 +17,9 @@
 
 /* Source registration ioctl number namespace. */
 #define REG_SRC_REGISTER_NR			0U
+#define REG_SRC_NEGOTIATE_NR 1U
+#define REG_SRC_REQUEST_CONTEXT_NR 2U
+#define REG_SRC_RENEW_NR 3U
 
 /* Key-fd and transaction-fd ioctl number namespace. */
 #define REG_IOC_QUERY_VALUE_NR			0U
@@ -203,6 +206,34 @@ struct reg_src_register_args {
 	__u64 hives_ptr;
 };
 
+/* Optional RSI lifetime extension, negotiated before REG_SRC_REGISTER.
+ * All timestamps use CLOCK_MONOTONIC nanoseconds. Zero lifetime means an
+ * operation-owned transaction with no independent lifetime limit.
+ * The session is unique to this open source fd, including across restarts.
+ */
+#define REG_SRC_LIFETIME_VERSION 1U
+struct reg_src_negotiate_args {
+	__u32 version;
+	__u32 flags; /* must be zero */
+	__u64 session; /* output */
+};
+struct reg_src_request_context_args {
+	__u64 session;
+	__u64 request_id;
+	__u64 request_deadline_ns; /* output, includes queue/admission time */
+	__u64 lifetime_deadline_ns; /* output */
+	__u64 lease_deadline_ns; /* output; zero means no live transaction */
+};
+struct reg_src_renew_args {
+	__u64 session;
+	__u64 transaction_id;
+	__u64 lifetime_deadline_ns; /* output */
+	__u64 lease_deadline_ns; /* output */
+};
+#define REG_SRC_NEGOTIATE _IOWR(REG_IOC_TYPE, REG_SRC_NEGOTIATE_NR, struct reg_src_negotiate_args)
+#define REG_SRC_REQUEST_CONTEXT _IOWR(REG_IOC_TYPE, REG_SRC_REQUEST_CONTEXT_NR, struct reg_src_request_context_args)
+#define REG_SRC_RENEW _IOWR(REG_IOC_TYPE, REG_SRC_RENEW_NR, struct reg_src_renew_args)
+
 struct reg_src_hive_entry {
 	__u32 name_len;
 	__u32 _pad0;
@@ -231,6 +262,9 @@ struct reg_src_hive_entry {
 #define REG_BACKUP_ARGS_SIZE			4U
 #define REG_RESTORE_ARGS_SIZE			4U
 #define REG_TXN_STATUS_ARGS_SIZE		8U
+#define REG_SRC_NEGOTIATE_ARGS_SIZE 16U
+#define REG_SRC_REQUEST_CONTEXT_ARGS_SIZE 40U
+#define REG_SRC_RENEW_ARGS_SIZE 32U
 #define REG_SRC_REGISTER_ARGS_SIZE		24U
 #define REG_SRC_HIVE_ENTRY_SIZE			56U
 

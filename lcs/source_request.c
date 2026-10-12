@@ -15,6 +15,7 @@
 
 #include "rsi.h"
 #include "source_device.h"
+#include "source_transaction.h"
 #include "source_internal.h"
 
 #include <trace/events/lcs.h>
@@ -1415,6 +1416,9 @@ long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 	u64 next_request_id;
 	long ret;
 
+	if (op_code == RSI_ABORT_TRANSACTION)
+		pkm_lcs_source_transaction_end(transaction_id);
+
 	if (result)
 		memset(result, 0, sizeof(*result));
 	if (!limits) {
@@ -1505,6 +1509,17 @@ long pkm_lcs_source_dispatch_transaction_request_with_waiter(
 		NULL, limits, late_effect, waiter);
 	if (ret)
 		goto out_unlock_queue;
+
+	if (op_code == RSI_BEGIN_TRANSACTION) {
+		ret = pkm_lcs_source_transaction_bind(transaction_id, source_fd);
+		if (ret) {
+			pkm_lcs_source_in_flight_release_locked(source_fd,
+				pkm_lcs_source_in_flight_find_locked(source_fd, built.request_id));
+			if (waiter)
+				WRITE_ONCE(waiter->attached, false);
+			goto out_unlock_queue;
+		}
+	}
 
 	request->len = built.len;
 	request->request_id = built.request_id;

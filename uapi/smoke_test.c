@@ -305,6 +305,21 @@ ASSERT_STRUCT_SIZE(reg_txn_status_args, REG_TXN_STATUS_ARGS_SIZE);
 ASSERT_FIELD_OFFSET(reg_txn_status_args, state, 0);
 ASSERT_FIELD_OFFSET(reg_txn_status_args, terminal_errno, 4);
 
+ASSERT_STRUCT_SIZE(reg_src_negotiate_args, REG_SRC_NEGOTIATE_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_src_negotiate_args, session, 8);
+ASSERT_STRUCT_SIZE(reg_src_request_context_args, REG_SRC_REQUEST_CONTEXT_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_src_request_context_args, request_deadline_ns, 16);
+ASSERT_FIELD_OFFSET(reg_src_request_context_args, lease_deadline_ns, 32);
+ASSERT_STRUCT_SIZE(reg_src_renew_args, REG_SRC_RENEW_ARGS_SIZE);
+ASSERT_FIELD_OFFSET(reg_src_renew_args, lifetime_deadline_ns, 16);
+ASSERT_FIELD_OFFSET(reg_src_renew_args, lease_deadline_ns, 24);
+ASSERT_IOCTL_ENCODING(REG_SRC_NEGOTIATE, REG_SRC_NEGOTIATE_NR,
+                     _IOC_READ | _IOC_WRITE, REG_SRC_NEGOTIATE_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_SRC_REQUEST_CONTEXT, REG_SRC_REQUEST_CONTEXT_NR,
+                     _IOC_READ | _IOC_WRITE, REG_SRC_REQUEST_CONTEXT_ARGS_SIZE);
+ASSERT_IOCTL_ENCODING(REG_SRC_RENEW, REG_SRC_RENEW_NR,
+                     _IOC_READ | _IOC_WRITE, REG_SRC_RENEW_ARGS_SIZE);
+
 ASSERT_STRUCT_SIZE(reg_src_register_args, REG_SRC_REGISTER_ARGS_SIZE);
 ASSERT_FIELD_OFFSET(reg_src_register_args, hive_count, 0);
 ASSERT_FIELD_OFFSET(reg_src_register_args, _pad, 4);
