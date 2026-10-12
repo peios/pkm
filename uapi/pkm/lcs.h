@@ -244,7 +244,7 @@ struct reg_src_hive_entry {
 	__u8 scope_guid[16];
 };
 
-/* PSD-005 §11.2 syscall and ioctl argument sizes. */
+/* Syscall and ioctl argument sizes (Kernel TRM section 5.A, LCS ABI). */
 #define REG_CREATE_KEY_ARGS_SIZE		48U
 #define REG_QUERY_VALUE_ARGS_SIZE		64U
 #define REG_SET_VALUE_ARGS_SIZE			64U

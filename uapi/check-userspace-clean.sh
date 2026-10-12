@@ -41,4 +41,13 @@ if grep -En '^[[:space:]]*#[[:space:]]*define[[:space:]]+KACS_[A-Z0-9_]*(PIP|PRO
 fi
 echo "  ok  no None/Isolated PIP constant"
 
+# 4. Public and kernel integration headers must cite the live TRM/PCSA
+#    books, never the retired PSD series. Internal crate history and README
+#    prose are outside this header/ABI gate (PEI-284).
+if grep -R -n --include='*.h' --include='*.c' 'PSD-' "$here" "$here/../kernel/include"; then
+    echo "check-userspace-clean: replace retired PSD citations with live TRM/PCSA references" >&2
+    exit 1
+fi
+echo "  ok  no retired specification citations in ABI/integration headers"
+
 echo "check-userspace-clean: PASS"
