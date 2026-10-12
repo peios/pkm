@@ -2649,10 +2649,78 @@ static void ntfe_kunit_identity_unresolved(struct kunit *test)
 }
 
 
+struct ntfe_policy_publication_probe {
+	struct sk_buff *skb;
+	const struct nf_hook_state *state;
+	const struct peios_ntfe_snapshot *snap;
+	enum peios_ntfe_policy_publication_stage stage;
+	unsigned int verdict;
+	bool fired;
+};
+
+static struct ntfe_policy_publication_probe *ntfe_policy_probe;
+
+void peios_ntfe_kunit_policy_publishing(enum peios_ntfe_policy_publication_stage stage)
+{
+	struct ntfe_policy_publication_probe *probe = READ_ONCE(ntfe_policy_probe);
+
+	if (!probe || probe->stage != stage)
+		return;
+	probe->fired = true;
+	probe->verdict = peios_ntfe_flow_dispatch(probe->skb, probe->state,
+						probe->snap);
+}
+
+static void ntfe_kunit_policy_publication_cache(struct kunit *test)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = {
+		.hook = NF_INET_LOCAL_OUT,
+		.pf = NFPROTO_IPV4,
+		.out = dev,
+		.net = &init_net,
+	};
+	enum peios_ntfe_policy_publication_stage stage;
+
+	for (stage = PEIOS_NTFE_BEFORE_GENERATION;
+	     stage <= PEIOS_NTFE_AFTER_POLICY_SWAP; stage++) {
+		struct nf_conn *ct = ntfe_test_flow(test);
+		struct sk_buff *skb = ntfe_test_tcp4_skb(test, 443);
+		struct peios_ntfe_snapshot snap;
+		struct ntfe_policy_publication_probe probe = {
+			.skb = skb, .state = &state, .snap = &snap,
+			.stage = stage,
+		};
+		unsigned int during = stage == PEIOS_NTFE_AFTER_POLICY_SWAP ?
+			NF_DROP : NF_ACCEPT;
+
+		ntfe_test_flow_snap(&snap, ct);
+		ntfe_test_publish_flow(test, NULL, NULL, "PASS");
+		WRITE_ONCE(ntfe_policy_probe, &probe);
+		ntfe_test_publish_flow(test, NULL, NULL, "DROP");
+		WRITE_ONCE(ntfe_policy_probe, NULL);
+		KUNIT_EXPECT_TRUE(test, probe.fired);
+		KUNIT_EXPECT_EQ(test, probe.verdict, during);
+		/* An old in-flight PASS is permitted; a cached PASS that
+		 * survives publication of DROP is not (PEI-747).
+		 */
+		KUNIT_EXPECT_EQ(test,
+			peios_ntfe_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_DROP);
+		KUNIT_EXPECT_EQ(test,
+			peios_ntfe_flow_dispatch(skb, &state, &snap),
+			(unsigned int)NF_DROP);
+		kfree_skb(skb);
+		nf_conntrack_free(ct);
+	}
+	KUNIT_EXPECT_EQ(test, peios_ntfe_policy_publish(NULL, NULL, NULL, 1), 0);
+}
+
 static struct nf_conn *ntfe_sentence_race_ct;
 static u32 ntfe_sentence_race_slot;
 static const struct peios_ntfe_sentence ntfe_sentence_race_new = {
 	.generation = 7,
+	.policy_generation = 3,
 	.expires_at = 10,
 	.rule_hash = 0x2222,
 	.verdict = PEIOS_NTFE_VERDICT_PASS,
@@ -2677,6 +2745,7 @@ static void ntfe_kunit_sentence_same_generation_refresh(struct kunit *test)
 	struct nf_conn *ct = ntfe_test_flow(test);
 	const struct peios_ntfe_sentence old = {
 		.generation = 7,
+		.policy_generation = 3,
 		.expires_at = 1000,
 		.rule_hash = 0x1111,
 		.verdict = PEIOS_NTFE_VERDICT_DROP,
@@ -2701,6 +2770,7 @@ static void ntfe_kunit_sentence_same_generation_refresh(struct kunit *test)
 		KUNIT_EXPECT_TRUE(test,
 			peios_ntfe_kunit_sentence_read(ct, slot, &out));
 		KUNIT_EXPECT_EQ(test, out.generation, 7ULL);
+		KUNIT_EXPECT_EQ(test, out.policy_generation, 3ULL);
 		KUNIT_EXPECT_EQ(test, out.expires_at, 10LL);
 		KUNIT_EXPECT_EQ(test, out.rule_hash, 0x2222ULL);
 		KUNIT_EXPECT_EQ(test, out.verdict, (u8)PEIOS_NTFE_VERDICT_PASS);
@@ -3175,6 +3245,7 @@ static void ntfe_kunit_device_allocation_enomem(struct kunit *test)
 
 static void ntfe_kunit_exit(struct kunit *test)
 {
+	WRITE_ONCE(ntfe_policy_probe, NULL);
 	WRITE_ONCE(ntfe_kunit_on_sentence_read, NULL);
 	atomic_set(&ntfe_kunit_fail_evals, 0);
 	atomic_set(&ntfe_kunit_fail_allocs, 0);
@@ -3272,6 +3343,7 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_ingest_progress),
 	KUNIT_CASE(ntfe_kunit_eval_failure_fails_closed),
 	KUNIT_CASE(ntfe_kunit_identity_unresolved),
+	KUNIT_CASE(ntfe_kunit_policy_publication_cache),
 	KUNIT_CASE(ntfe_kunit_sentence_same_generation_refresh),
 	KUNIT_CASE(ntfe_kunit_sentence_write_in_progress),
 	KUNIT_CASE(ntfe_kunit_sentence_concurrency),

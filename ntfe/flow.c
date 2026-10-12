@@ -97,6 +97,7 @@ static bool ntfe_sentence_read(const struct peios_ntfe_ct *pc, u32 slot,
 	gen = READ_ONCE(s->generation);
 	if (!gen)
 		return false;
+	out->policy_generation = READ_ONCE(s->policy_generation);
 	out->expires_at = READ_ONCE(s->expires_at);
 	peios_ntfe_kunit_sentence_read_field(s);
 	out->rule_hash = READ_ONCE(s->rule_hash);
@@ -117,6 +118,7 @@ static void ntfe_sentence_write(struct nf_conn *ct, struct peios_ntfe_ct *pc,
 	write_seqcount_begin(&pc->sentence_seq[slot]);
 	WRITE_ONCE(s->generation, 0);
 	smp_wmb();
+	WRITE_ONCE(s->policy_generation, val->policy_generation);
 	WRITE_ONCE(s->expires_at, val->expires_at);
 	WRITE_ONCE(s->rule_hash, val->rule_hash);
 	WRITE_ONCE(s->verdict, val->verdict);
@@ -126,10 +128,13 @@ static void ntfe_sentence_write(struct nf_conn *ct, struct peios_ntfe_ct *pc,
 	spin_unlock_bh(&ct->lock);
 }
 
-static bool ntfe_sentence_current(const struct peios_ntfe_sentence *s, u64 gen,
+static bool ntfe_sentence_current(const struct peios_ntfe_sentence *s,
+				 const struct peios_ntfe_policy_snapshot *policy,
 				 s64 now)
 {
-	return s->generation == gen && !(s->expires_at && now >= s->expires_at);
+	return s->generation == policy->cache_generation &&
+	       s->policy_generation == policy->generation &&
+	       !(s->expires_at && now >= s->expires_at);
 }
 
 /* Strictness: DROP > REJECT(Refused) > REJECT(Prohibited) > PASS. */
@@ -364,9 +369,10 @@ static unsigned int ntfe_apply_sentence(struct sk_buff *skb,
 	}
 }
 
-unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
-				     const struct nf_hook_state *state,
-				     const struct peios_ntfe_snapshot *snap)
+static unsigned int ntfe_flow_dispatch_policy(
+	struct sk_buff *skb, const struct nf_hook_state *state,
+	const struct peios_ntfe_snapshot *snap,
+	const struct peios_ntfe_policy_snapshot *policy)
 {
 	struct nf_conn *ct = (struct nf_conn *)snap->flow;
 	struct peios_ntfe_sentence cur = { }, other = { };
@@ -374,7 +380,6 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 	struct peios_ntfe_snapshot view;
 	struct peios_ntfe_outcome out;
 	struct peios_ntfe_ct *pc;
-	u64 gen = ntfe_rust_generation();
 	u8 evflags = 0;
 	bool hit = false, other_rules = false;
 	u32 slot;
@@ -387,7 +392,8 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 	slot = ntfe_sentence_slot(snap);
 
 	if (pc && ntfe_sentence_read(pc, slot, &cur)) {
-		if (cur.generation != gen) {
+		if (cur.generation != policy->cache_generation ||
+		    cur.policy_generation != policy->generation) {
 			evflags = PEIOS_NTFE_EV_F_REJUDGED;
 			atomic64_inc(&peios_ntfe_stats.flow_rejudged);
 		} else if (cur.expires_at && snap->t_secs >= cur.expires_at) {
@@ -405,13 +411,13 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 		/* The identity facts cost a socket lookup inbound: resolved
 		 * only when there is a Flow forest to judge them.
 		 */
-		if (peios_ntfe_policy_has_layer(PEIOS_NTFE_LAYER_FLOW)) {
+		if (policy->forest) {
 			ntfe_flow_identity(skb, state, snap, ct, pc, slot, &ids);
 			ntfe_flow_view_identity(&view, &ids, slot);
 			if (view.local_unresolved || view.remote_unresolved)
 				evflags |= PEIOS_NTFE_EV_F_IDENTITY_UNRESOLVED;
 		}
-		ret = peios_ntfe_policy_eval(PEIOS_NTFE_LAYER_FLOW, &view, &out);
+		ret = peios_ntfe_policy_snapshot_eval(policy, &view, &out);
 		if (ret == -ENOENT) {
 			/* No Flow forest: permissive, and nothing to cache. */
 			atomic64_inc(&peios_ntfe_stats.permissive);
@@ -447,7 +453,8 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 			break;
 		}
 
-		cur.generation = gen;
+		cur.generation = policy->cache_generation;
+		cur.policy_generation = policy->generation;
 		cur.expires_at = out.expires_at;
 		/* The whole path's hash: `attributed` is cut short for the
 		 * event, and a long path's prefix names no rule (PEI-1308).
@@ -472,7 +479,7 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 	 */
 	if (snap->loopback && pc &&
 	    ntfe_sentence_read(pc, slot ^ 1, &other) &&
-	    ntfe_sentence_current(&other, gen, snap->t_secs) &&
+	    ntfe_sentence_current(&other, policy, snap->t_secs) &&
 	    ntfe_sentence_stricter(&other, &cur))
 		other_rules = true;
 
@@ -502,6 +509,19 @@ unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
 
 	return ntfe_apply_sentence(skb, state, snap,
 				   other_rules ? &other : &cur);
+}
+
+unsigned int peios_ntfe_flow_dispatch(struct sk_buff *skb,
+				     const struct nf_hook_state *state,
+				     const struct peios_ntfe_snapshot *snap)
+{
+	struct peios_ntfe_policy_snapshot policy;
+	unsigned int verdict;
+
+	peios_ntfe_policy_snapshot_begin(PEIOS_NTFE_LAYER_FLOW, &policy);
+	verdict = ntfe_flow_dispatch_policy(skb, state, snap, &policy);
+	peios_ntfe_policy_snapshot_end();
+	return verdict;
 }
 
 /* --- the flows dump ------------------------------------------------- */

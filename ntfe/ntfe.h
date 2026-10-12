@@ -370,6 +370,25 @@ int peios_ntfe_policy_rejected_emit(const struct peios_ntfe_build_why *why,
  * 0 = outcome filled; -ENOENT = no forest for the layer (permissive);
  * -ENOMEM = evaluation failed mid-flight (caller fails closed).
  */
+/* Held between begin/end under RCU. Layer presence, evaluation and policy
+ * identity all refer to this same object. cache_generation additionally
+ * tracks context changes, which need not publish a different policy.
+ */
+struct peios_ntfe_policy_snapshot {
+	const void *forest;
+	u64 generation;
+	u64 cache_generation;
+	u8 reporting_level;
+	u8 layer;
+};
+
+void peios_ntfe_policy_snapshot_begin(u8 layer,
+				     struct peios_ntfe_policy_snapshot *snapshot);
+void peios_ntfe_policy_snapshot_end(void);
+int peios_ntfe_policy_snapshot_eval(const struct peios_ntfe_policy_snapshot *policy,
+				    const struct peios_ntfe_snapshot *snap,
+				    struct peios_ntfe_outcome *out);
+
 int peios_ntfe_policy_eval(u8 layer, const struct peios_ntfe_snapshot *snap,
 			  struct peios_ntfe_outcome *out);
 
@@ -625,7 +644,14 @@ int ntfe_rust_evaluate(const void *forest,
  *    a same-policy refresh before the remaining sentence fields.
  * The wrappers expose static internals the suite asserts through.
  */
+enum peios_ntfe_policy_publication_stage {
+	PEIOS_NTFE_BEFORE_GENERATION,
+	PEIOS_NTFE_BEFORE_POLICY_SWAP,
+	PEIOS_NTFE_AFTER_POLICY_SWAP,
+};
+
 #ifdef CONFIG_PEIOS_NTFE_KUNIT
+void peios_ntfe_kunit_policy_publishing(enum peios_ntfe_policy_publication_stage stage);
 struct file_operations;
 struct sock;
 void peios_ntfe_kunit_sentence_read_field(const struct peios_ntfe_sentence *s);
@@ -642,6 +668,11 @@ const struct file_operations *peios_ntfe_kunit_dev_fops(void);
 void peios_ntfe_kunit_listener_fill(struct peios_ntfe_listener_rec *rec,
 				    const struct sock *sk, u8 protocol);
 #else
+static inline void peios_ntfe_kunit_policy_publishing(
+	enum peios_ntfe_policy_publication_stage stage)
+{
+}
+
 static inline void peios_ntfe_kunit_sentence_read_field(
 	const struct peios_ntfe_sentence *s)
 {
