@@ -14,6 +14,7 @@
 #include <linux/vmalloc.h>
 
 #include "../kacs/token_runtime.h"
+#include "../kacs/token_logon_session.h"
 #include "rsi.h"
 #include "source_device.h"
 
@@ -298,8 +299,70 @@ void pkm_lcs_source_base_layer_snapshot(
 		*layer_count = ARRAY_SIZE(pkm_lcs_base_layer_snapshot);
 }
 
+/* Validate against the exact snapshot the caller will resolve, not a second
+ * lookup that could race a precedence change. An unapproved attachment fails
+ * explicitly rather than silently falling through to a lower layer. */
+static long pkm_lcs_validate_private_layer_authority(
+	const void *token, const struct pkm_lcs_layer_snapshot *snapshot,
+	const struct pkm_lcs_runtime_limits *limits)
+{
+	const char *name;
+	u32 count, len, i, j;
+	bool equal;
+	long ret;
+
+	count = kacs_rust_token_lcs_private_layer_count(token);
+	if (!count || kacs_rust_token_lcs_private_layers_tcb_authorized(token))
+		return 0;
+	if (!snapshot)
+		return -EINVAL;
+	for (i = 0; i < count; i++) {
+		ret = kacs_rust_token_lcs_private_layer(token, i, &name, &len);
+		if (ret)
+			return ret;
+		for (j = 0; j < snapshot->layer_count; j++) {
+			const struct pkm_lcs_rsi_layer_view *layer = &snapshot->layers[j];
+
+			if (!layer->precedence)
+				continue;
+			ret = pkm_lcs_layer_name_casefold_equal_with_limits(
+				name, len, layer->name, layer->name_len, limits, &equal);
+			if (ret)
+				return ret;
+			if (equal)
+				return -EPERM;
+		}
+	}
+	return 0;
+}
+
+static long pkm_lcs_validate_new_token_credentials(const void *token)
+{
+	struct pkm_lcs_layer_snapshot snapshot = { };
+	struct pkm_lcs_runtime_limits limits;
+	long ret;
+
+	if (kacs_rust_token_lcs_private_layers_tcb_authorized(token))
+		return 0;
+	ret = pkm_lcs_source_layer_snapshot_acquire(&snapshot);
+	if (ret)
+		return ret;
+	pkm_lcs_runtime_limits_snapshot_or_default(&limits);
+	ret = pkm_lcs_validate_private_layer_authority(token, &snapshot, &limits);
+	pkm_lcs_source_layer_snapshot_release(&snapshot);
+	return ret;
+}
+
+static int __init pkm_lcs_credential_validator_init(void)
+{
+	return pkm_kacs_register_lcs_credential_validator(
+		pkm_lcs_validate_new_token_credentials);
+}
+core_initcall(pkm_lcs_credential_validator_init);
+
 long pkm_lcs_private_credentials_acquire_for_token(
 	const void *token, const struct pkm_lcs_runtime_limits *limits,
+	const struct pkm_lcs_layer_snapshot *snapshot,
 	struct pkm_lcs_private_credential_view *view)
 {
 	const char *private_layer_name;
@@ -333,6 +396,9 @@ long pkm_lcs_private_credentials_acquire_for_token(
 	if (scope_count > limits->max_scope_guids_per_token ||
 	    private_layer_count > limits->max_private_layers_per_token)
 		return -E2BIG;
+	ret = pkm_lcs_validate_private_layer_authority(token, snapshot, limits);
+	if (ret)
+		return ret;
 
 	if (scope_count) {
 		view->scope_guids = kcalloc(scope_count,

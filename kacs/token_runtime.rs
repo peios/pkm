@@ -645,6 +645,8 @@ struct PkmKacsBootToken {
     device_claims: Vec<ClaimAttribute>,
     lcs_scope_guids: Vec<[u8; KACS_LCS_SCOPE_GUID_BYTES]>,
     lcs_private_layers: Vec<String>,
+    // Immutable authority captured from the creator, never the consuming token.
+    lcs_private_layers_tcb_authorized: bool,
     confinement_sid: Option<OwnedSid>,
     confinement_capabilities: Vec<OwnedSidAndAttributes>,
     confinement_capability_views: Vec<SidAndAttributes<'static>>,
@@ -5164,6 +5166,7 @@ impl PkmKacsBootToken {
             device_claims: Vec::new(),
             lcs_scope_guids: Vec::new(),
             lcs_private_layers: Vec::new(),
+            lcs_private_layers_tcb_authorized: false,
             confinement_sid: None,
             confinement_capabilities: Vec::new(),
             confinement_capability_views: Vec::new(),
@@ -5325,6 +5328,7 @@ impl PkmKacsBootToken {
             device_claims: Vec::new(),
             lcs_scope_guids: Vec::new(),
             lcs_private_layers: Vec::new(),
+            lcs_private_layers_tcb_authorized: false,
             confinement_sid: None,
             confinement_capabilities: Vec::new(),
             confinement_capability_views: Vec::new(),
@@ -5747,6 +5751,7 @@ impl PkmKacsBootToken {
             device_claims: Vec::new(),
             lcs_scope_guids: Vec::new(),
             lcs_private_layers: Vec::new(),
+            lcs_private_layers_tcb_authorized: false,
             confinement_sid: None,
             confinement_capabilities: Vec::new(),
             confinement_capability_views: Vec::new(),
@@ -5966,6 +5971,20 @@ impl PkmKacsBootToken {
             parse_projected_supplementary_gids(supp_gids_bytes, supp_gids_count)?;
         let (lcs_scope_guids, lcs_private_layers) =
             parse_lcs_credential_extension(spec, &sorted_offsets, lcs_credentials_offset)?;
+        // Authorize the attachment, including a later promotion of a named
+        // layer. Snapshot and use marking are one mutation-locked decision.
+        // The resulting token need not itself hold TCB privilege.
+        let lcs_private_layers_tcb_authorized = if lcs_private_layers.is_empty() {
+            false
+        } else {
+            let _guard = creator.lock_mutation();
+            let privileges = creator.privileges_snapshot_locked();
+            let authorized = privileges.present & privileges.enabled & SE_TCB_PRIVILEGE != 0;
+            if authorized {
+                creator.mark_privileges_used(SE_TCB_PRIVILEGE);
+            }
+            authorized
+        };
         let user_claims = if user_claims_bytes.is_empty() {
             Vec::new()
         } else {
@@ -6155,6 +6174,7 @@ impl PkmKacsBootToken {
             device_claims,
             lcs_scope_guids,
             lcs_private_layers,
+            lcs_private_layers_tcb_authorized,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -6368,6 +6388,7 @@ impl PkmKacsBootToken {
                     return null();
                 }
             },
+            lcs_private_layers_tcb_authorized: token.lcs_private_layers_tcb_authorized,
             lcs_private_layers: match try_clone_vec(&token.lcs_private_layers) {
                 Ok(value) => value,
                 Err(_) => {
@@ -6590,6 +6611,7 @@ impl PkmKacsBootToken {
             device_claims,
             lcs_scope_guids,
             lcs_private_layers,
+            lcs_private_layers_tcb_authorized: self.lcs_private_layers_tcb_authorized,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -6726,6 +6748,7 @@ impl PkmKacsBootToken {
             device_claims,
             lcs_scope_guids,
             lcs_private_layers,
+            lcs_private_layers_tcb_authorized: self.lcs_private_layers_tcb_authorized,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -6796,6 +6819,7 @@ impl PkmKacsBootToken {
                 private_layers.push(layer).map_err(|_| -ENOMEM)?;
             }
             token.lcs_private_layers = private_layers;
+            token.lcs_private_layers_tcb_authorized = true;
             Ok(())
         })();
 
@@ -7745,6 +7769,7 @@ impl PkmKacsBootToken {
             device_claims,
             lcs_scope_guids,
             lcs_private_layers,
+            lcs_private_layers_tcb_authorized: self.lcs_private_layers_tcb_authorized,
             confinement_sid,
             confinement_capabilities,
             confinement_capability_views,
@@ -9325,6 +9350,15 @@ pub extern "C" fn kacs_rust_token_lcs_scope_guid(
         core::ptr::copy_nonoverlapping(guid.as_ptr(), out, KACS_LCS_SCOPE_GUID_BYTES);
     }
     0
+}
+
+#[no_mangle]
+/// Whether a TCB-authorized creator attached this token's private layer names.
+/// Duplication and restriction preserve this immutable authorization.
+pub extern "C" fn kacs_rust_token_lcs_private_layers_tcb_authorized(token: *const c_void) -> bool {
+    unsafe { PkmKacsBootToken::from_ptr(token) }
+        .map(|token| token.lcs_private_layers_tcb_authorized)
+        .unwrap_or(false)
 }
 
 #[no_mangle]
