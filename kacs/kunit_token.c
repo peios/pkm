@@ -1199,54 +1199,7 @@ static void pkm_kunit_create_token_malformed_claims_fail_closed(
 }
 
 
-static void pkm_kunit_create_token_primary_below_impersonation_denies(
-	struct kunit *test)
-{
-	static const u8 source_name[8] = {
-		'A', 'u', 't', 'h', 'd', 0, 0, 0,
-	};
-	u8 session_spec[64] = { };
-	u8 token_spec[256] = { };
-	struct pkm_kunit_token_spec_args spec_args = {
-		.token_type = KACS_TOKEN_TYPE_PRIMARY,
-		.impersonation_level = KACS_IMLEVEL_IDENTIFICATION,
-		.integrity_level = PKM_KUNIT_IL_MEDIUM,
-		.mandatory_policy = 0x00000003U,
-		.source_name = source_name,
-		.user_sid = pkm_kunit_local_service_sid,
-		.user_sid_len = sizeof(pkm_kunit_local_service_sid),
-	};
-	const void *subject_token;
-	u64 logon_session_id = 0;
-	size_t session_spec_len;
-	size_t token_spec_len;
-
-	subject_token = pkm_kacs_current_primary_token_ptr();
-	KUNIT_ASSERT_NOT_NULL(test, subject_token);
-	session_spec_len = pkm_kunit_build_logon_session_spec(
-		session_spec, PKM_KUNIT_LOGON_TYPE_NETWORK, "Kerberos",
-		pkm_kunit_local_service_sid, sizeof(pkm_kunit_local_service_sid));
-	KUNIT_ASSERT_GT(test, (long)session_spec_len, 0L);
-	KUNIT_ASSERT_EQ(test,
-			pkm_kacs_kunit_create_logon_session_for_subject(
-				subject_token, session_spec, session_spec_len,
-				&logon_session_id),
-			0L);
-
-	spec_args.logon_session_id = logon_session_id;
-	token_spec_len = pkm_kunit_build_token_spec(token_spec,
-						    sizeof(token_spec),
-						    &spec_args);
-	KUNIT_ASSERT_GT(test, (long)token_spec_len, 0L);
-	KUNIT_EXPECT_EQ(test,
-			pkm_kacs_kunit_create_token_for_subject(
-				subject_token, token_spec, token_spec_len),
-			(long)-EINVAL);
-}
-
-
-static void pkm_kunit_create_token_impersonation_levels_query(
-	struct kunit *test)
+static void pkm_kunit_create_token_levels_query(struct kunit *test, u32 type)
 {
 	static const u8 source_name[8] = {
 		'A', 'u', 't', 'h', 'd', 0, 0, 0,
@@ -1258,7 +1211,7 @@ static void pkm_kunit_create_token_impersonation_levels_query(
 		KACS_IMLEVEL_DELEGATION,
 	};
 	struct pkm_kunit_token_spec_args spec_args = {
-		.token_type = KACS_TOKEN_TYPE_IMPERSONATION,
+		.token_type = type,
 		.integrity_level = PKM_KUNIT_IL_MEDIUM,
 		.mandatory_policy = 0x00000003U,
 		.source_name = source_name,
@@ -1304,7 +1257,7 @@ static void pkm_kunit_create_token_impersonation_levels_query(
 		KUNIT_EXPECT_EQ(test,
 				pkm_kunit_query_token_u32(test, (int)fd,
 							  KACS_TOKEN_CLASS_TYPE),
-				KACS_TOKEN_TYPE_IMPERSONATION);
+				type);
 		KUNIT_EXPECT_EQ(test,
 				pkm_kunit_query_token_u32(
 					test, (int)fd,
@@ -1312,6 +1265,17 @@ static void pkm_kunit_create_token_impersonation_levels_query(
 				levels[i]);
 		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
 	}
+}
+
+
+static void pkm_kunit_create_token_primary_levels_query(struct kunit *test)
+{
+	pkm_kunit_create_token_levels_query(test, KACS_TOKEN_TYPE_PRIMARY);
+}
+
+static void pkm_kunit_create_token_impersonation_levels_query(struct kunit *test)
+{
+	pkm_kunit_create_token_levels_query(test, KACS_TOKEN_TYPE_IMPERSONATION);
 }
 
 
@@ -4706,39 +4670,47 @@ static void pkm_kunit_token_duplicate_identification_to_primary_denies(
 }
 
 
-/*
- * PEI-524: socket capture clamps to the source token's own level. A process
- * whose primary sits at Impersonation conveys no more than Impersonation
- * however high it sets the socket option.
- */
+/* Every primary ceiling, including PEI-526's low levels, bounds capture. */
 static void pkm_kunit_peer_socket_capture_clamps_to_source_level(
 	struct kunit *test)
 {
-	struct pkm_kacs_boot_snapshot captured = { };
-	const void *client_token;
-	const void *captured_token = NULL;
-	long ret;
+	static const u32 levels[] = {
+		KACS_IMLEVEL_ANONYMOUS,
+		KACS_IMLEVEL_IDENTIFICATION,
+		KACS_IMLEVEL_IMPERSONATION,
+		KACS_IMLEVEL_DELEGATION,
+	};
+	u32 i, j;
 
-	client_token = kacs_rust_kunit_create_impersonation_variant_token(
-		PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
-		KACS_IMLEVEL_IMPERSONATION, PKM_KUNIT_IL_SYSTEM, 0, 0);
-	KUNIT_ASSERT_NOT_NULL(test, client_token);
+	for (i = 0; i < ARRAY_SIZE(levels); i++) {
+		const void *client_token;
 
-	ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
-		client_token, SOCK_STREAM, KACS_IMLEVEL_DELEGATION, 0, 0,
-		&captured_token, NULL, NULL);
-	KUNIT_ASSERT_EQ(test, ret, 0L);
-	KUNIT_ASSERT_NOT_NULL(test, captured_token);
-	KUNIT_ASSERT_TRUE(test,
-			  kacs_rust_kunit_token_snapshot(captured_token,
-							 &captured));
-	KUNIT_EXPECT_EQ(test, captured.token_type,
-			(u32)KACS_TOKEN_TYPE_IMPERSONATION);
-	KUNIT_EXPECT_EQ(test, captured.impersonation_level,
-			(u32)KACS_IMLEVEL_IMPERSONATION);
+		client_token = kacs_rust_kunit_create_impersonation_variant_token(
+			PKM_KUNIT_USER_KIND_SYSTEM, KACS_TOKEN_TYPE_PRIMARY,
+			levels[i], PKM_KUNIT_IL_SYSTEM, 0, 0);
+		KUNIT_ASSERT_NOT_NULL(test, client_token);
 
-	kacs_rust_token_drop(captured_token);
-	kacs_rust_token_drop(client_token);
+		for (j = 0; j < ARRAY_SIZE(levels); j++) {
+			struct pkm_kacs_boot_snapshot captured = { };
+			const void *captured_token = NULL;
+			long ret;
+
+			ret = pkm_kacs_kunit_capture_peer_socket_for_subject(
+				client_token, SOCK_STREAM, levels[j], 0, 0,
+				&captured_token, NULL, NULL);
+			KUNIT_ASSERT_EQ(test, ret, 0L);
+			KUNIT_ASSERT_NOT_NULL(test, captured_token);
+			KUNIT_ASSERT_TRUE(test,
+				kacs_rust_kunit_token_snapshot(captured_token,
+							      &captured));
+			KUNIT_EXPECT_EQ(test, captured.token_type,
+					(u32)KACS_TOKEN_TYPE_IMPERSONATION);
+			KUNIT_EXPECT_EQ(test, captured.impersonation_level,
+					min(levels[i], levels[j]));
+			kacs_rust_token_drop(captured_token);
+		}
+		kacs_rust_token_drop(client_token);
+	}
 }
 
 
@@ -13495,7 +13467,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_create_token_invalid_logon_session_fails_closed),
 	KUNIT_CASE(pkm_kunit_create_token_write_restricted_requires_user_deny_only),
 	KUNIT_CASE(pkm_kunit_create_token_malformed_claims_fail_closed),
-	KUNIT_CASE(pkm_kunit_create_token_primary_below_impersonation_denies),
+	KUNIT_CASE(pkm_kunit_create_token_primary_levels_query),
 	KUNIT_CASE(pkm_kunit_create_token_impersonation_levels_query),
 	KUNIT_CASE(pkm_kunit_create_token_invalid_mandatory_policy_fails_closed),
 	KUNIT_CASE(pkm_kunit_create_token_invalid_audit_policy_fails_closed),
