@@ -199,7 +199,7 @@ field: object.file.path-relative    optional
   could not be had, the kernel writes the record without its paths rather
   than lose it.
 field: operation.name               required
-  values: copy-file-range | copy-up-publication-rollback | create | create-rollback | fallocate | link | link-rollback | mmap | remap-file-range | removexattr | rename | rmdir | setattr | setxattr | splice-write | supersede | supersede-publication | tmpfile | truncate | unlink | write
+  values: copy-file-range | copy-up-publication-rollback | create | create-rollback | fallocate | link | link-rollback | mmap | remap-file-range | removexattr | rename | rmdir | setattr | setxattr | splice-write | supersede | supersede-removal | tmpfile | truncate | unlink | write
   closed: false
   StrataFS names its own operations, and the set is disjoint from the
   `file.` names an already-open handle uses.
