@@ -24,6 +24,7 @@ int pkm_kacs_inode_alloc_security(struct inode *inode)
 	sec = pkm_kacs_inode(inode);
 	mutex_init(&sec->lock);
 	RCU_INIT_POINTER(sec->sd_cache, NULL);
+	sec->sd_cache_epoch = 0;
 	atomic_set(&sec->delete_on_close_lineages, 0);
 	atomic_set(&sec->signed_exec_pinned, 0);
 	sec->persist_work_queued = false;
