@@ -7351,6 +7351,55 @@ static void pkm_kunit_token_query_user_probe_and_payload(struct kunit *test)
 }
 
 
+static void pkm_kunit_token_query_guid_contract(struct kunit *test)
+{
+	struct kacs_query_args args = { .token_class = KACS_TOKEN_CLASS_GUID };
+	kacs_uuid_t effective_guid = kacs_effective_token_guid();
+	u8 buf[17], untouched[17];
+	long fd, denied;
+
+	memset(buf, 0xa5, sizeof(buf));
+	memcpy(untouched, buf, sizeof(buf));
+	fd = pkm_kacs_open_self_token_internal(0, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL), 0L);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 16U);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	args.buf_len = 15;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_kunit_token_fd_query((int)fd, &args, buf), (long)-ERANGE);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 16U);
+	pkm_kunit_expect_bytes_eq(test, buf, sizeof(buf), untouched, sizeof(untouched));
+	args.buf_len = 16;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_kunit_token_fd_query((int)fd, &args, buf), 0L);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 16U);
+	pkm_kunit_expect_guid_eq(test, buf, effective_guid.bytes);
+	KUNIT_EXPECT_EQ(test, buf[16], (u8)0xa5);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	/* Reopening the same token preserves the audit identity. */
+	fd = pkm_kacs_open_self_token_internal(0, KACS_TOKEN_QUERY);
+	KUNIT_ASSERT_GE(test, fd, 0L);
+	args.buf_len = sizeof(buf);
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_kunit_token_fd_query((int)fd, &args, buf), 0L);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 16U);
+	pkm_kunit_expect_guid_eq(test, buf, effective_guid.bytes);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+
+	denied = pkm_kacs_open_self_token_internal(0, KACS_TOKEN_QUERY_SOURCE);
+	KUNIT_ASSERT_GE(test, denied, 0L);
+	args.buf_ptr = 0;
+	args.buf_len = 0;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_kunit_token_fd_query((int)denied, &args, NULL), (long)-EACCES);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 0U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)denied), 0);
+}
+
+
 static void pkm_kunit_token_query_groups_payload(struct kunit *test)
 {
 	static const u8 administrators_sid[] = {
@@ -7513,7 +7562,7 @@ static void pkm_kunit_token_query_invalid_class(struct kunit *test)
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
 			(long)-EINVAL);
 
-	args.token_class = 0x19;
+	args.token_class = 0x1a;
 	KUNIT_EXPECT_EQ(test,
 			pkm_kacs_kunit_token_fd_query((int)fd, &args, NULL),
 			(long)-EINVAL);
@@ -9065,6 +9114,16 @@ static void pkm_kunit_token_adjust_interactivity_scope_updates_target(struct kun
 	KUNIT_EXPECT_EQ(test, before.interactivity_scope, 0U);
 	KUNIT_EXPECT_EQ(test, after.interactivity_scope, 7U);
 	KUNIT_EXPECT_EQ(test, after.modified_id, before.modified_id + 1);
+	args.token_class = KACS_TOKEN_CLASS_GUID;
+	args.buf_len = sizeof(buf);
+	args.buf_ptr = (u64)(unsigned long)buf;
+	KUNIT_EXPECT_EQ(test,
+		pkm_kacs_kunit_token_fd_query((int)fd, &args, buf), 0L);
+	KUNIT_EXPECT_EQ(test, args.buf_len, 16U);
+	pkm_kunit_expect_guid_eq(test, buf, before.token_guid);
+	pkm_kunit_expect_guid_eq(test, buf, after.token_guid);
+	args.token_class = KACS_TOKEN_CLASS_INTERACTIVITY_SCOPE;
+	args.buf_len = 4;
 
 	args.buf_ptr = (u64)(unsigned long)buf;
 	KUNIT_EXPECT_EQ(test,
@@ -13576,6 +13635,7 @@ static struct kunit_case pkm_kunit_token_cases[] = {
 	KUNIT_CASE(pkm_kunit_exec_pip_capped_under_tracer_or_no_new_privs),
 	KUNIT_CASE(pkm_kunit_token_impersonate_rejects_primary_token),
 	KUNIT_CASE(pkm_kunit_token_query_user_probe_and_payload),
+	KUNIT_CASE(pkm_kunit_token_query_guid_contract),
 	KUNIT_CASE(pkm_kunit_token_query_groups_payload),
 	KUNIT_CASE(pkm_kunit_token_query_privileges_payload),
 	KUNIT_CASE(pkm_kunit_token_query_optional_empty_shapes),

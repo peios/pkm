@@ -307,6 +307,7 @@ const TOKEN_CLASS_IMPERSONATION_LEVEL: u32 = 0x15;
 const TOKEN_CLASS_USER_CLAIMS: u32 = 0x16;
 const TOKEN_CLASS_DEVICE_CLAIMS: u32 = 0x17;
 const TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS: u32 = 0x18;
+const TOKEN_CLASS_GUID: u32 = 0x19;
 const KACS_UUID_BYTES: usize = 16;
 
 extern "C" {
@@ -7829,6 +7830,7 @@ impl PkmKacsBootToken {
                     .ok_or(-EINVAL)
             }
             TOKEN_CLASS_STATISTICS => Ok(40),
+            TOKEN_CLASS_GUID => Ok(KACS_UUID_BYTES),
             TOKEN_CLASS_DEFAULT_DACL => {
                 let _guard = self.lock_mutation();
                 Ok(self.default_dacl_bytes().len())
@@ -7863,7 +7865,7 @@ impl PkmKacsBootToken {
             }
             TOKEN_CLASS_IMPERSONATION_LEVEL => Ok(4),
             0 => Err(-EINVAL),
-            value if value > TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS => Err(-EINVAL),
+            value if value > TOKEN_CLASS_GUID => Err(-EINVAL),
             _ => Err(-EINVAL),
         }
     }
@@ -7923,6 +7925,7 @@ impl PkmKacsBootToken {
                     && writer.write_u32(0)
                     && writer.write_u64(self.expiration)
             }
+            TOKEN_CLASS_GUID => writer.write_bytes(&self.token_guid),
             TOKEN_CLASS_ORIGIN => writer.write_u64(self.origin),
             TOKEN_CLASS_ELEVATION_TYPE => writer.write_u32(self.elevation_type()),
             TOKEN_CLASS_DEVICE_GROUPS => {
