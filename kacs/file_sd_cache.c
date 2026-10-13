@@ -795,8 +795,8 @@ struct pkm_kacs_inode_sd_cache *pkm_kacs_inode_sd_cache_get_current(
 	return owned;
 }
 
-long pkm_kacs_inode_ensure_effective_cache(
-	struct file *file, struct pkm_kacs_inode_security *sec)
+long pkm_kacs_inode_get_effective_cache(struct file *file, struct pkm_kacs_inode_security *sec,
+					struct pkm_kacs_inode_sd_cache **cache_out)
 {
 	struct pkm_kacs_inode_sd_cache *cache;
 	struct pkm_kacs_inode_sd_cache *locked_cache = NULL;
@@ -804,6 +804,9 @@ long pkm_kacs_inode_ensure_effective_cache(
 	bool needs_persist = false;
 	long ret;
 
+	if (!cache_out)
+		return -EINVAL;
+	*cache_out = NULL;
 	if (!file || !sec)
 		return -EINVAL;
 
@@ -818,9 +821,11 @@ long pkm_kacs_inode_ensure_effective_cache(
 				       PKM_KACS_INODE_SD_SOURCE_SYNTHETIC_PENDING;
 		bool reread = pkm_kacs_inode_sd_cache_rereads_each_time(inode);
 
-		pkm_kacs_inode_sd_cache_free(cache);
-		if (reread)
+		if (reread) {
+			pkm_kacs_inode_sd_cache_free(cache);
 			goto resolve;
+		}
+		*cache_out = cache;
 		if (!pending)
 			return 0;
 		/*
@@ -847,6 +852,11 @@ resolve:
 	mutex_lock(&sec->lock);
 	ret = pkm_kacs_inode_resolve_effective_cache_locked(file, sec,
 							    &locked_cache, 0);
+	/* The resolver returns a borrowed entry protected by sec->lock. */
+	if (!ret) {
+		refcount_inc(&locked_cache->refs);
+		*cache_out = locked_cache;
+	}
 	/*
 	 * A freshly synthesized SD on a SYNTHESIZE_PERSISTENT mount owes a
 	 * deferred write-back. Claim it under sec->lock (one in-flight persist
@@ -865,6 +875,17 @@ resolve:
 
 	if (needs_persist)
 		pkm_kacs_inode_queue_sd_persist(file, sec);
+	return ret;
+}
+
+/* Population-only callers do not retain a descriptor snapshot. */
+long pkm_kacs_inode_ensure_effective_cache(struct file *file, struct pkm_kacs_inode_security *sec)
+{
+	struct pkm_kacs_inode_sd_cache *cache = NULL;
+	long ret;
+
+	ret = pkm_kacs_inode_get_effective_cache(file, sec, &cache);
+	pkm_kacs_inode_sd_cache_free(cache);
 	return ret;
 }
 

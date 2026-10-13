@@ -1237,16 +1237,16 @@ long pkm_kacs_stamp_native_file_granted_access_for_subject(
 		return ret;
 	/* Set-security takes inode_sec->lock before CAAP, never the reverse. */
 	inode_sec = pkm_kacs_inode(inode);
-	ret = pkm_kacs_inode_ensure_effective_cache(file, inode_sec);
+	ret = pkm_kacs_inode_get_effective_cache(file, inode_sec, &cache);
 	if (!ret) {
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+		if (inode_sec->kunit_open_cache_selected)
+			inode_sec->kunit_open_cache_selected(file,
+							     inode_sec->kunit_open_cache_context);
+#endif
 		ret = pkm_kacs_caap_cache_lock(&caap_cache);
 		if (ret)
-			return ret;
-		cache = pkm_kacs_inode_sd_cache_get_current(inode, inode_sec);
-		if (!cache) {
-			ret = -EACCES;
-			goto out_unlock_caap;
-		}
+			goto out_put_cache;
 		if (cache->state != PKM_KACS_INODE_SD_VALID || !cache->bytes ||
 		    cache->len == 0) {
 			ret = -EACCES;
@@ -1275,10 +1275,10 @@ long pkm_kacs_stamp_native_file_granted_access_for_subject(
 				}
 			}
 		}
-		pkm_kacs_inode_sd_cache_free(cache);
-out_unlock_caap:
 		pkm_kacs_caap_cache_unlock();
 	}
+out_put_cache:
+	pkm_kacs_inode_sd_cache_free(cache);
 	return ret;
 }
 
@@ -1329,16 +1329,16 @@ long pkm_kacs_stamp_file_granted_access_for_subject(
 		return ret;
 	/* Set-security takes inode_sec->lock before CAAP, never the reverse. */
 	inode_sec = pkm_kacs_inode(inode);
-	ret = pkm_kacs_inode_ensure_effective_cache(file, inode_sec);
+	ret = pkm_kacs_inode_get_effective_cache(file, inode_sec, &cache);
 	if (!ret) {
+#ifdef CONFIG_SECURITY_PKM_KUNIT
+		if (inode_sec->kunit_open_cache_selected)
+			inode_sec->kunit_open_cache_selected(file,
+							     inode_sec->kunit_open_cache_context);
+#endif
 		ret = pkm_kacs_caap_cache_lock(&caap_cache);
 		if (ret)
-			return ret;
-		cache = pkm_kacs_inode_sd_cache_get_current(inode, inode_sec);
-		if (!cache) {
-			ret = -EACCES;
-			goto out_unlock_caap;
-		}
+			goto out_put_cache;
 		if (cache->state != PKM_KACS_INODE_SD_VALID || !cache->bytes ||
 		    cache->len == 0) {
 			ret = -EACCES;
@@ -1358,10 +1358,10 @@ long pkm_kacs_stamp_file_granted_access_for_subject(
 				file_sec->managed = 1;
 			}
 		}
-		pkm_kacs_inode_sd_cache_free(cache);
-out_unlock_caap:
 		pkm_kacs_caap_cache_unlock();
 	}
+out_put_cache:
+	pkm_kacs_inode_sd_cache_free(cache);
 	return ret;
 }
 
