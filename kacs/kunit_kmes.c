@@ -1837,8 +1837,8 @@ static void pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size(
  * rings live, generation unchanged, capacity retained -- and is reported
  * like one: a kmes.buffer.swap.failed naming both capacities and -EIO.
  */
-static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
-	struct kunit *test)
+static void pkm_kunit_kmes_swap_migration_abort(struct kunit *test,
+					     bool cross_cpu)
 {
 	static const char swap_failed_type[] = "kmes.buffer.swap.failed";
 	/* 1 MiB asked for, the 4 MiB default kept, and -EIO signed. */
@@ -1852,6 +1852,8 @@ static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
 	struct pkm_kmes_runtime_config config;
 	struct pkm_kmes_runtime_config snapshot = { };
 	struct pkm_kmes_kunit_snapshot ring = { };
+	struct pkm_kmes_kunit_snapshot restored = { };
+	struct pkm_kmes_kunit_snapshot report = { };
 	struct pkm_kmes_kunit_fd_snapshot fd_before = { };
 	struct pkm_kmes_kunit_fd_snapshot fd_after = { };
 	const void *token;
@@ -1863,7 +1865,14 @@ static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
 	u8 scratch[256];
 	size_t written = 0;
 	int fd;
+	struct cpumask *saved_cpus;
+	int report_cpu, affinity_ret;
+	long apply_ret;
 
+	if (cross_cpu && num_online_cpus() < 2) {
+		kunit_skip(test, "cross-CPU report needs two online CPUs");
+		return;
+	}
 	token = kacs_rust_kunit_create_query_only_token();
 	KUNIT_ASSERT_NOT_NULL(test, token);
 	fds = kunit_kcalloc(test, nr_cpu_ids, sizeof(*fds), GFP_KERNEL);
@@ -1884,18 +1893,36 @@ static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
 	KUNIT_ASSERT_EQ(test,
 			pkm_kunit_kmes_attach_all(token, fds, &count, &capacity),
 			0L);
-	fd = pkm_kunit_find_current_kmes_fd(test, fds, count, &fd_before);
+	KUNIT_ASSERT_LT(test, (int)ring.cpu_id, count);
+	fd = fds[ring.cpu_id];
 	KUNIT_ASSERT_GE(test, fd, 0);
+	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fd, &fd_before), 0);
+	KUNIT_ASSERT_EQ(test, fd_before.cpu_id, ring.cpu_id);
 
 	/* Corrupt the one live event's size, then ask for a swap. */
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_poke_single_ring(ring.tail_pos, zero_size,
-							sizeof(zero_size)),
+			pkm_kmes_kunit_poke_ring(ring.cpu_id, ring.tail_pos,
+						zero_size, sizeof(zero_size)),
 			0);
 	config = pkm_kunit_kmes_default_config();
 	config.buffer_capacity = PKM_KUNIT_KMES_SWAP_CAPACITY;
-	KUNIT_EXPECT_EQ(test, pkm_kmes_kunit_runtime_config_apply(&config),
-			(long)-EIO);
+	if (cross_cpu) {
+		/* The report must activate a second ring, not rely on chance. */
+		saved_cpus = kunit_kzalloc(test, cpumask_size(), GFP_KERNEL);
+		KUNIT_ASSERT_NOT_NULL(test, saved_cpus);
+		cpumask_copy(saved_cpus, current->cpus_ptr);
+		report_cpu = cpumask_any_but(cpu_online_mask, ring.cpu_id);
+		KUNIT_ASSERT_LT(test, report_cpu, nr_cpu_ids);
+		affinity_ret = set_cpus_allowed_ptr(current, cpumask_of(report_cpu));
+		KUNIT_ASSERT_EQ(test, affinity_ret, 0);
+		apply_ret = pkm_kmes_kunit_runtime_config_apply(&config);
+		/* Restore before any assertion can abort the test. */
+		affinity_ret = set_cpus_allowed_ptr(current, saved_cpus);
+		KUNIT_EXPECT_EQ(test, affinity_ret, 0);
+	} else {
+		apply_ret = pkm_kmes_kunit_runtime_config_apply(&config);
+	}
+	KUNIT_EXPECT_EQ(test, apply_ret, (long)-EIO);
 
 	KUNIT_ASSERT_EQ(test, pkm_kmes_kunit_fd_snapshot(fd, &fd_after), 0);
 	KUNIT_EXPECT_EQ(test, fd_after.generation, fd_before.generation);
@@ -1906,20 +1933,29 @@ static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
 			(u64)PKM_KUNIT_KMES_DEFAULT_CAPACITY);
 
 	/*
-	 * Repair the planted corruption so the ring parses again, then read
-	 * the report, which sits after the repaired event.
+	 * Repair the original ring and prove the event survived. The failure
+	 * report may be on a different CPU after the sleeping config change.
 	 */
 	KUNIT_ASSERT_EQ(test,
-			pkm_kmes_kunit_poke_single_ring(ring.tail_pos,
-							original_size,
-							sizeof(original_size)),
+			pkm_kmes_kunit_poke_ring(ring.cpu_id, ring.tail_pos,
+						original_size, sizeof(original_size)),
 			0);
+	KUNIT_ASSERT_EQ(test,
+			pkm_kmes_kunit_copy_latest_matching_event(
+				KMES_ORIGIN_KACS, PKM_KUNIT_KMES_DIRECT_TYPE,
+				sizeof(PKM_KUNIT_KMES_DIRECT_TYPE) - 1, scratch,
+				sizeof(scratch), &written, &restored),
+			0);
+	KUNIT_EXPECT_EQ(test, restored.cpu_id, ring.cpu_id);
+	KUNIT_EXPECT_MEMEQ(test, scratch, original_size, sizeof(original_size));
 	KUNIT_ASSERT_EQ(test,
 			pkm_kmes_kunit_copy_latest_matching_event(
 				KMES_ORIGIN_KMES, swap_failed_type,
 				sizeof(swap_failed_type) - 1, scratch,
-				sizeof(scratch), &written, NULL),
+				sizeof(scratch), &written, &report),
 			0);
+	if (cross_cpu)
+		KUNIT_EXPECT_EQ(test, (int)report.cpu_id, report_cpu);
 	header_size = get_unaligned_le32(scratch + KMES_EVENT_HEADER_SIZE_OFFSET);
 	KUNIT_ASSERT_LE(test, (size_t)header_size, written);
 	KUNIT_ASSERT_EQ(test, written - header_size, sizeof(expected) - 1);
@@ -1930,6 +1966,17 @@ static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
 	kacs_rust_token_drop(token);
 }
 
+static void pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports(
+	struct kunit *test)
+{
+	pkm_kunit_kmes_swap_migration_abort(test, false);
+}
+
+static void pkm_kunit_kmes_swap_migration_abort_reports_on_other_cpu(
+	struct kunit *test)
+{
+	pkm_kunit_kmes_swap_migration_abort(test, true);
+}
 
 /*
  * PKM *kernel-emit.pre-init-silent. With the ready flag cleared, kernel
@@ -2394,6 +2441,7 @@ static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_runtime_rate_change_clamps_live_bucket),
 	KUNIT_CASE(pkm_kunit_kmes_tail_resync_discards_window_on_corrupt_size),
 	KUNIT_CASE(pkm_kunit_kmes_swap_migration_abort_keeps_ring_and_reports),
+	KUNIT_CASE(pkm_kunit_kmes_swap_migration_abort_reports_on_other_cpu),
 	KUNIT_CASE(pkm_kunit_kmes_softirq_emit_lands_and_defers_wake),
 	KUNIT_CASE(pkm_kunit_kmes_bh_disabled_task_emit_wakes_directly),
 	KUNIT_CASE(pkm_kunit_kmes_hardirq_emit_is_refused),

@@ -3944,6 +3944,25 @@ int pkm_kmes_kunit_poke_single_ring(u64 pos, const void *bytes, size_t len)
 	return 0;
 }
 
+/* Keep the planted corruption tied to its ring even if another CPU emits. */
+int pkm_kmes_kunit_poke_ring(u32 cpu_id, u64 pos, const void *bytes, size_t len)
+{
+	struct pkm_kmes_cpu_state *cpu;
+
+	if (!bytes || !len || cpu_id >= nr_cpu_ids)
+		return -EINVAL;
+	if (!pkm_kmes_ready)
+		return -ENODEV;
+	cpu = pkm_kmes_cpus[cpu_id].live;
+	if (!cpu || !cpu->data)
+		return -ENODEV;
+	if (len > cpu->capacity)
+		return -ERANGE;
+
+	pkm_kmes_write_bytes_at(cpu->data, cpu->capacity, pos, bytes, len);
+	return 0;
+}
+
 /* Reopen the pre-initialisation window; returns the flag's previous value. */
 bool pkm_kmes_kunit_set_ready(bool ready)
 {
