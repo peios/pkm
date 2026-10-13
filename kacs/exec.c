@@ -378,14 +378,23 @@ bool pkm_kacs_exec_pip_cap_for_unsafe(unsigned int bprm_unsafe,
 int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 				  const struct file *file)
 {
+	const void *primary_token;
+	int ret;
+
 	if (!bprm || !bprm->cred)
 		return -EACCES;
 
-	return (int)pkm_kacs_bprm_creds_from_file_core(
-		pkm_kacs_current_effective_token_ptr(),
-		pkm_kacs_current_primary_token_ptr(), file, bprm->cred,
-		current_cred(), true, true,
-		pkm_kacs_current_is_usermodehelper(), bprm->unsafe);
+	/* A sibling can enter exec before servicing a successful install. */
+	primary_token = pkm_kacs_primary_token_for_exec();
+	if (!primary_token)
+		return -EACCES;
+	ret = pkm_kacs_bprm_creds_from_file_core(pkm_kacs_current_effective_token_ptr(),
+						 primary_token, file, bprm->cred,
+						 current_cred(), true, true,
+						 pkm_kacs_current_is_usermodehelper(),
+						 bprm->unsafe);
+	kacs_rust_token_drop(primary_token);
+	return ret;
 }
 
 /*
