@@ -5,16 +5,104 @@
 #include "capability.h"
 #include "socket.h"
 
+#include <kunit/resource.h>
+#include <linux/debug_locks.h>
 #include <linux/in.h>
 #include <linux/in6.h>
 #include <pkm/net.h>
+#include <pkm/socket.h>
 #include <linux/kacs_stratafs.h>
 #include <linux/limits.h>
+#include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/security.h>
 #include <linux/user_namespace.h>
 #include "cred_lifecycle.h"
 #include "file_access.h"
+
+struct pkm_kunit_socket_release {
+	struct sock sk;
+	struct socket sock;
+	struct rcu_head rcu;
+	bool called;
+};
+
+static void pkm_kunit_socket_release_rcu(struct rcu_head *rcu)
+{
+	struct pkm_kunit_socket_release *f;
+
+	f = container_of(rcu, struct pkm_kunit_socket_release, rcu);
+	pkm_kacs_sk_free_security(&f->sk);
+	f->called = true;
+}
+
+static void pkm_kunit_socket_sd_put(void *sd)
+{
+	pkm_kacs_process_sd_put(sd);
+}
+
+static void pkm_kunit_socket_final_release_from_rcu(struct kunit *test)
+{
+	struct pkm_kunit_socket_release *f;
+	struct pkm_kacs_socket_security *sec;
+	struct pkm_kacs_process_sd *sd;
+	const void *token;
+	int fd = -1, len = sizeof(fd), ret;
+
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))
+		KUNIT_ASSERT_TRUE(test, debug_locks);
+	token = pkm_kacs_current_effective_token_ptr();
+	KUNIT_ASSERT_NOT_NULL(test, token);
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->sk.sk_security = kunit_kzalloc(test, pkm_blob_sizes.lbs_sock +
+					 sizeof(*sec), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f->sk.sk_security);
+	f->sk.sk_family = AF_UNIX;
+	f->sk.sk_type = SOCK_STREAM;
+	f->sock.sk = &f->sk;
+	f->sock.type = SOCK_STREAM;
+	f->sock.state = SS_CONNECTED;
+	ret = pkm_kacs_sk_alloc_security(&f->sk, AF_UNIX, GFP_KERNEL);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	sec = pkm_kacs_sock(&f->sk);
+
+	/* Exercise the live register in task context before final release. */
+	ret = pkm_kacs_sock_getsockopt(&f->sock, KACS_SO_PEER_TOKEN,
+				       KERNEL_SOCKPTR(&fd), KERNEL_SOCKPTR(&len));
+	KUNIT_ASSERT_EQ(test, ret, -ENODATA);
+	sd = kzalloc_obj(*sd);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	refcount_set(&sd->refs, 1);
+	ret = kunit_add_action_or_reset(test, pkm_kunit_socket_sd_put, sd);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	sec->socket_sd = pkm_kacs_process_sd_get(sd);
+	/* Each field owns a reference, even when all six alias one token. */
+	sec->peer_token = kacs_rust_token_clone(token);
+	sec->listener_token = kacs_rust_token_clone(token);
+	sec->binder_token = kacs_rust_token_clone(token);
+	sec->owner_token = kacs_rust_token_clone(token);
+	sec->convey_src = kacs_rust_token_clone(token);
+	sec->convey_token = kacs_rust_token_clone(token);
+	sec->pass_token = true;
+
+	/* No live users remain; this is the lifetime rule of __sk_destruct(). */
+	call_rcu(&f->rcu, pkm_kunit_socket_release_rcu);
+	/* Finish the callback before KUnit can release its managed fixture. */
+	rcu_barrier();
+	KUNIT_EXPECT_TRUE(test, f->called);
+	KUNIT_EXPECT_PTR_EQ(test, sec->peer_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sec->listener_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sec->binder_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sec->owner_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sec->convey_src, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sec->convey_token, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, sec->socket_sd, NULL);
+	KUNIT_EXPECT_FALSE(test, sec->pass_token);
+	KUNIT_EXPECT_EQ(test, refcount_read(&sd->refs), 1);
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))
+		KUNIT_EXPECT_TRUE(test, debug_locks);
+}
 
 
 static void pkm_kunit_probe_smoke(struct kunit *test)
@@ -914,6 +1002,7 @@ static void pkm_kunit_logon_session_destroyed_encoder_drops_non_utf8(
 }
 
 static struct kunit_case pkm_kunit_misc_cases[] = {
+	KUNIT_CASE(pkm_kunit_socket_final_release_from_rcu),
 	KUNIT_CASE(pkm_kunit_port_fallback_admits_system_only_shape),
 	KUNIT_CASE(pkm_kunit_port_published_table_decides),
 	KUNIT_CASE(pkm_kunit_port_rejected_table_is_recorded),
