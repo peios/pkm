@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <linux/bitops.h>
 #include <linux/cred.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
@@ -9,24 +10,111 @@
 
 #include "stratafs.h"
 
-unsigned long stratafs_provider_ino(struct super_block *sb,
-				    struct inode *provider)
+/*
+ * Derived numbers have their high bit clear. Encode the filesystem's small
+ * mount-local ID as a self-delimiting low-bit tag, followed by the provider's
+ * inode number. For ID width b, the tag has b-1 low zeroes, one marker bit,
+ * then the ID's remaining b-1 bits. Distinct tag widths cannot overlap.
+ * Low tags keep small inode numbers small through nested StrataFS mounts.
+ */
+unsigned long stratafs_derive_ino(unsigned long fsid, u64 ino)
+{
+	unsigned int bits = fls_long(fsid);
+	unsigned int tag_bits;
+	unsigned long marker;
+
+	if (!bits || bits * 2 >= BITS_PER_LONG || !ino)
+		return 0;
+	tag_bits = bits * 2 - 1;
+	if (ino >> (BITS_PER_LONG - 1 - tag_bits))
+		return 0;
+	marker = 1UL << (bits - 1);
+	return ((unsigned long)ino << tag_bits) |
+	       ((fsid ^ marker) << bits) | marker;
+}
+
+void stratafs_init_identities(struct stratafs_sb_info *sbi)
+{
+	mutex_init(&sbi->identity_lock);
+	xa_init(&sbi->identities);
+	xa_init(&sbi->filesystem_ids);
+	sbi->next_filesystem_id = 0;
+	atomic64_set(&sbi->next_ino, 0);
+}
+
+void stratafs_free_identities(struct stratafs_sb_info *sbi)
+{
+	struct stratafs_identity *identity;
+	unsigned long index;
+
+	xa_for_each(&sbi->identities, index, identity) {
+		xa_erase(&sbi->identities, index);
+		iput(identity->inode);
+		kfree(identity);
+	}
+	xa_destroy(&sbi->identities);
+	xa_destroy(&sbi->filesystem_ids);
+}
+
+int stratafs_alloc_ino(struct super_block *sb, unsigned long *number)
+{
+	const unsigned long high = 1UL << (BITS_PER_LONG - 1);
+	s64 previous;
+
+	/* Saturate instead of wrapping or truncating on a 32-bit build. */
+	previous = atomic64_fetch_add_unless(&STRATAFS_SB(sb)->next_ino,
+					   1, high - 1);
+	if ((u64)previous >= high - 1)
+		return -EOVERFLOW;
+	*number = high | (unsigned long)(previous + 1);
+	return 0;
+}
+
+int stratafs_identity_number(struct super_block *sb, struct inode *provider,
+			    const struct kstat *stat, unsigned long *number)
 {
 	struct stratafs_sb_info *sbi = STRATAFS_SB(sb);
 	struct stratafs_identity *identity;
 	unsigned long key = (unsigned long)provider >> 3;
-	unsigned long number = 0;
-	int ret;
+	unsigned long fsid, derived;
+	void *entry;
+	int ret = -ENOMEM;
 
 	mutex_lock(&sbi->identity_lock);
 	identity = xa_load(&sbi->identities, key);
 	if (identity) {
 		if (WARN_ON(identity->inode != provider))
 			goto out;
-		number = identity->number;
+		*number = identity->number;
+		ret = 0;
 		goto out;
 	}
 
+	if ((stat->result_mask & STATX_INO) && stat->ino) {
+		entry = xa_load(&sbi->filesystem_ids, (unsigned long)stat->dev);
+		if (entry) {
+			fsid = xa_to_value(entry);
+		} else {
+			fsid = sbi->next_filesystem_id + 1;
+			if (fsid >= (1UL << (BITS_PER_LONG / 2 - 1)))
+				goto fallback;
+			ret = xa_err(xa_store(&sbi->filesystem_ids,
+				(unsigned long)stat->dev, xa_mk_value(fsid),
+				GFP_KERNEL));
+			if (ret)
+				goto out;
+			sbi->next_filesystem_id = fsid;
+		}
+		derived = stratafs_derive_ino(fsid, stat->ino);
+		if (derived) {
+			*number = derived;
+			ret = 0;
+			goto out;
+		}
+	}
+
+fallback:
+	ret = -ENOMEM;
 	identity = kzalloc(sizeof(*identity), GFP_KERNEL);
 	if (!identity)
 		goto out;
@@ -35,17 +123,41 @@ unsigned long stratafs_provider_ino(struct super_block *sb,
 		kfree(identity);
 		goto out;
 	}
-	identity->number = atomic64_inc_return(&sbi->next_ino);
-	ret = xa_err(xa_store(&sbi->identities, key, identity, GFP_KERNEL));
+	ret = stratafs_alloc_ino(sb, &identity->number);
+	if (!ret)
+		ret = xa_err(xa_store(&sbi->identities, key, identity, GFP_KERNEL));
 	if (ret) {
 		iput(identity->inode);
 		kfree(identity);
 		goto out;
 	}
-	number = identity->number;
+	*number = identity->number;
 out:
 	mutex_unlock(&sbi->identity_lock);
-	return number;
+	return ret;
+}
+
+int stratafs_provider_ino(struct super_block *sb, const struct path *provider,
+			 unsigned long *number)
+{
+	struct kstat stat;
+	const struct cred *old_cred;
+	int ret;
+
+	/*
+	 * Use the filesystem's reported domain, not just inode->i_sb. Btrfs
+	 * subvolumes share a superblock but have separate inode-number domains.
+	 * This is the same internal attribute/credential path as ->getattr.
+	 * A transient attribute error must not switch an already-derived
+	 * object into a different fallback identity.
+	 */
+	old_cred = override_creds(STRATAFS_SB(sb)->resolution_cred);
+	ret = vfs_getattr_nosec(provider, &stat, STATX_INO, AT_STATX_DONT_SYNC);
+	revert_creds(old_cred);
+	if (ret)
+		return ret;
+	return stratafs_identity_number(sb, d_inode(provider->dentry), &stat,
+					number);
 }
 
 void stratafs_refresh_inode(struct inode *inode, const struct path *provider)
@@ -91,6 +203,7 @@ struct inode *stratafs_new_inode(struct super_block *sb,
 	struct stratafs_inode_info *info;
 	struct inode *inode;
 	unsigned long number;
+	int ret = -ENOMEM;
 
 	inode = new_inode(sb);
 	if (!inode)
@@ -107,12 +220,15 @@ struct inode *stratafs_new_inode(struct super_block *sb,
 		if (!info->provider)
 			goto fail_relative;
 		info->provider_index = provider_index;
-		number = stratafs_provider_ino(sb, info->provider);
-		if (!number)
+		ret = stratafs_provider_ino(sb, provider, &number);
+		if (ret)
 			goto fail_provider;
 		inode->i_ino = number;
 	} else {
-		inode->i_ino = atomic64_inc_return(&STRATAFS_SB(sb)->next_ino);
+		ret = stratafs_alloc_ino(sb, &number);
+		if (ret)
+			goto fail_relative;
+		inode->i_ino = number;
 	}
 	inode->i_private = info;
 	stratafs_refresh_inode(inode, provider);
@@ -146,7 +262,7 @@ fail_info:
 	kfree(info);
 fail:
 	iput(inode);
-	return ERR_PTR(-ENOMEM);
+	return ERR_PTR(ret);
 }
 
 static struct stratafs_dentry_info *

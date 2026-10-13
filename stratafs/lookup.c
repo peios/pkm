@@ -404,7 +404,7 @@ int stratafs_get_provider(struct dentry *dentry, struct path *path,
 		 * the mount-time one goes, stat() on the mount point kept
 		 * reporting the number allocated for the mount-time provider.
 		 *
-		 * The identity map is already keyed by provider inode, so the
+		 * The identity is based on the provider, so the
 		 * number the root should report is the number any other merged
 		 * path to that same provider reports. Without this they
 		 * disagree -- two paths naming one object with unequal inode
@@ -414,12 +414,16 @@ int stratafs_get_provider(struct dentry *dentry, struct path *path,
 		 * The dentry stays pinned; only the number follows.
 		 */
 		if (d_inode(dentry)) {
-			struct inode *provider_inode = d_inode(path->dentry);
-			unsigned long number = stratafs_provider_ino(
-				dentry->d_sb, provider_inode);
+			unsigned long number;
 
-			if (number)
-				d_inode(dentry)->i_ino = number;
+			ret = stratafs_provider_ino(dentry->d_sb, path, &number);
+			if (ret) {
+				path_put(path);
+				stratafs_put_paths(&roots,
+					STRATAFS_SB(dentry->d_sb)->count);
+				return ret;
+			}
+			d_inode(dentry)->i_ino = number;
 		}
 		stratafs_put_paths(&roots, STRATAFS_SB(dentry->d_sb)->count);
 		return 0;

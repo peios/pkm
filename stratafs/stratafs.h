@@ -52,7 +52,10 @@ struct stratafs_sb_info {
 	const struct cred *resolution_cred;
 	char *display_options;
 	struct mutex identity_lock;
+	/* Only overflow/unsupported provider identities retain inode pins. */
 	struct xarray identities;
+	struct xarray filesystem_ids;
+	unsigned long next_filesystem_id;
 	atomic64_t next_ino;
 	struct mutex staging_lock;
 	struct list_head staging;
@@ -192,8 +195,14 @@ int stratafs_rebind_open_file(struct file *file, const struct path *provider,
 int stratafs_copy_up_metadata_file(struct file *file, struct dentry *dentry,
 				    struct path *provider,
 				    unsigned int *provider_index);
-unsigned long stratafs_provider_ino(struct super_block *sb,
-				    struct inode *provider);
+void stratafs_init_identities(struct stratafs_sb_info *sbi);
+void stratafs_free_identities(struct stratafs_sb_info *sbi);
+unsigned long stratafs_derive_ino(unsigned long fsid, u64 ino);
+int stratafs_alloc_ino(struct super_block *sb, unsigned long *number);
+int stratafs_identity_number(struct super_block *sb, struct inode *provider,
+			    const struct kstat *stat, unsigned long *number);
+int stratafs_provider_ino(struct super_block *sb, const struct path *provider,
+			 unsigned long *number);
 int stratafs_getattr(struct mnt_idmap *idmap, const struct path *path,
 			     struct kstat *stat, u32 request_mask,
 			     unsigned int flags);
