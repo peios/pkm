@@ -31,12 +31,13 @@ page on disk differs from what would be generated, or an owned directory
 holds a page that would not be, without writing.
 """
 import json
-import pathlib
 import re
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-KERNEL_FRAGMENTS = ROOT / "pkm" / "evman"
+from appendix_paths import PKM, LEARN, learn_is_absent
+
+ROOT = PKM.parent
+KERNEL_FRAGMENTS = PKM / "evman"
 # Userspace components ship their fragments from their own repositories.
 # A checkout without one of them is legitimate; the book then lacks its
 # fields, and says so on stderr.
@@ -51,7 +52,7 @@ USERSPACE_FRAGMENTS = [
     ROOT / "trustd" / "trustd.evman",
     ROOT / "gxwi" / "gxwid.evman",
 ]
-BOOK = (ROOT / "learn/peios.product/2--using-peios.antho/600--reference.shelf"
+BOOK = (LEARN / "peios.product/0--using-peios.antho/600--reference.shelf"
         / "100--events.book")
 TOOL = "pkm/tools/gen-events-book.py"
 
@@ -772,18 +773,19 @@ def on_disk():
     return found
 
 
-def learn_is_absent():
-    """True when there is no learn/ checkout beside pkm/ to write into.
-
-    A pkm checkout on its own is a legitimate state, and so is a build
-    container that mounts only pkm/ -- neither is drift.
-    """
-    return not BOOK.exists()
-
-
 def main():
     if learn_is_absent():
         print(f"skipped: no learn/ checkout at {BOOK}", file=sys.stderr)
+        return 0
+    missing = [p for p in USERSPACE_FRAGMENTS if not p.exists()]
+    if "--check" in sys.argv and missing:
+        # The published book indexes every component's fields. Without all
+        # of their fragments the generated book is partial, so comparing it
+        # would report the absent components as drift.
+        for p in missing:
+            print(f"skipped: no fragment at {p}", file=sys.stderr)
+        print("skipped: --check needs every userspace fragment beside pkm/",
+              file=sys.stderr)
         return 0
     cat = load()
     for fragment, n, msg in cat.problems:
@@ -825,7 +827,7 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text)
         written += 1
-    print(f"wrote {written} of {len(pages)} pages under {BOOK.relative_to(ROOT)}"
+    print(f"wrote {written} of {len(pages)} pages under {BOOK}"
           + (f", removed {len(stale)}" if stale else ""))
     return 0
 

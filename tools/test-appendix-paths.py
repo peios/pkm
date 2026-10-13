@@ -16,7 +16,15 @@ from appendix_paths import PKM, LEARN
 
 
 BOOK = Path("peios.product/3--advanced-peios.antho/300--trms.shelf/100--peios-kernel.book")
+EVENTS = Path("peios.product/0--using-peios.antho/600--reference.shelf/100--events.book")
+USERSPACE_FRAGMENTS = {
+    "peinit": ["peinit.evman"], "peipkg": ["peipkg.evman"],
+    "eventd": ["eventd.evman"], "authd": ["authd.evman", "lpsd.evman"],
+    "timed": ["timed.evman"], "netd": ["netd.evman"],
+    "trustd": ["trustd.evman"], "gxwi": ["gxwid.evman"],
+}
 APPENDICES = {
+    "gen-events-book": EVENTS / "a1--all-event-types.md",
     "gen-kmes-abi": BOOK / "2--kmes/a1--kmes-abi.md",
     "gen-kacs-abi": BOOK / "3--kacs/a1--kacs-abi.md",
     "gen-lcs-abi": BOOK / "5--lcs/a1--lcs-abi.md",
@@ -39,12 +47,20 @@ class AppendixPathsTests(unittest.TestCase):
         (kernel / "tools").mkdir(parents=True)
         for script in ["appendix_paths", *APPENDICES]:
             shutil.copyfile(PKM / "tools" / (script + ".py"), kernel / "tools" / (script + ".py"))
-        for directory in ["uapi", "kacs", "kmes", "lcs", "stratafs", "kernel", "crates"]:
+        for directory in ["uapi", "kacs", "kmes", "lcs", "stratafs", "kernel", "crates", "evman"]:
             (kernel / directory).symlink_to(PKM / directory, target_is_directory=True)
+        for component, files in USERSPACE_FRAGMENTS.items():
+            target = self.root / component
+            target.mkdir(exist_ok=True)
+            for name in files:
+                source = PKM.parent / component / name
+                if source.exists():
+                    shutil.copyfile(source, target / name)
         return kernel
 
     def docs(self, name):
         docs = self.root / name
+        shutil.copytree(LEARN / EVENTS, docs / EVENTS)
         for relative in APPENDICES.values():
             target = docs / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +109,18 @@ class AppendixPathsTests(unittest.TestCase):
                 self.assertNotEqual(self.run_generator(kernel, generator, docs=docs).returncode, 0)
                 self.assert_checked(self.run_generator(kernel, generator, docs=docs, check=False))
                 self.assertEqual(target.read_bytes(), original)
+
+    def test_events_book_missing_from_selected_companion_fails(self):
+        kernel = self.kernel("review")
+        docs = self.docs("docs")
+        shutil.rmtree(docs / EVENTS)
+        result = self.run_generator(kernel, "gen-events-book", docs=docs)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("out of date", result.stderr)
+        self.assertNotIn("no learn/ checkout", result.stderr)
+        self.assertFalse((docs / EVENTS).exists())
+        self.assert_checked(self.run_generator(kernel, "gen-events-book", docs=docs, check=False))
+        self.assert_checked(self.run_generator(kernel, "gen-events-book", docs=docs))
 
     def test_explicit_invalid_companion_fails(self):
         kernel = self.kernel("review")
