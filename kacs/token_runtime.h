@@ -1105,6 +1105,8 @@ long pkm_kacs_kunit_open_then_change_sd_for_subject(
 long pkm_kacs_kunit_open_file_for_subject(
 	const struct pkm_kacs_kunit_file_open_args *args,
 	u32 *granted_access_out);
+long pkm_kacs_kunit_cold_open_then_set_sd(
+	const void *subject_token, const u8 *sd, size_t sd_len, bool native);
 long pkm_kacs_kunit_open_file_for_subject_audit(
 	const struct pkm_kacs_kunit_file_open_args *args,
 	u32 *granted_access_out, u32 *continuous_audit_out);
