@@ -746,6 +746,7 @@ const (
 	KMES_VAL_EINVAL                                     = 0
 	KMES_WAKE_FUTEX                                     = 1
 	KMES_WAKE_NOTE                                      = 0
+	LABEL_SECURITY_INFORMATION                          = 16
 	LCS_AUDIT_BACKUP_COMPLETE                           = 2
 	LCS_AUDIT_BACKUP_START                              = 1
 	LCS_AUDIT_KEY_OPEN                                  = 0
@@ -1007,7 +1008,7 @@ const (
 	REG_VALID_ACE_ACCESS_MASK                           = 4044292159
 	REG_VALID_DESIRED_ACCESS_MASK                       = 4077846591
 	REG_VALID_MAPPED_ACCESS_MASK                        = 17760319
-	REG_VALID_SECURITY_INFORMATION                      = 15
+	REG_VALID_SECURITY_INFORMATION                      = 31
 	REG_WATCH_EVENT_MIN_SIZE                            = 8
 	REG_WATCH_EVENT_NAME_LEN_OFFSET                     = 6
 	REG_WATCH_EVENT_NAME_OFFSET                         = 8

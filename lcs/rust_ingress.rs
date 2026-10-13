@@ -1598,6 +1598,7 @@ fn set_security_merge_error_return(err: LcsError) -> c_int {
         LcsError::MalformedSecurityDescriptor { .. }
         | LcsError::ZeroSecurityInfo
         | LcsError::UnknownSecurityInfoFlags { .. }
+        | LcsError::ConflictingSecurityInfoFlags { .. }
         | LcsError::SecurityDescriptorMergeMissingOwner { .. }
         | LcsError::SecurityDescriptorConstructionFailed { .. }
         | LcsError::MaximumAllowedInAce(_)
@@ -1609,7 +1610,8 @@ fn set_security_merge_error_return(err: LcsError) -> c_int {
 
 fn get_security_plan_error_return(err: LcsError) -> c_int {
     match err {
-        LcsError::ZeroSecurityInfo | LcsError::UnknownSecurityInfoFlags { .. } => {
+        LcsError::ZeroSecurityInfo | LcsError::UnknownSecurityInfoFlags { .. }
+        | LcsError::ConflictingSecurityInfoFlags { .. } => {
             LinuxErrno::Einval
         }
         LcsError::MalformedSecurityDescriptor { .. }

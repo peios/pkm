@@ -2,8 +2,8 @@ use crate::access::{
     parse_registry_source_security_descriptor, validate_registry_acl_access_masks,
 };
 use crate::constants::{
-    DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    REG_WATCH_SD_CHANGED, SACL_SECURITY_INFORMATION,
+    DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, REG_WATCH_SD_CHANGED, SACL_SECURITY_INFORMATION,
 };
 use crate::error::{LcsError, LcsResult};
 use crate::ioctl::validate_registry_security_info;
@@ -18,11 +18,12 @@ use crate::transaction::{
 };
 use crate::watch::{WatchMutationContext, validate_watch_mutation_context};
 use kacs_core::{
-    Acl, MAX_SECURITY_DESCRIPTOR_BYTES, PkmVec, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED,
-    SE_DACL_DEFAULTED, SE_DACL_PRESENT, SE_DACL_PROTECTED, SE_DACL_TRUSTED, SE_GROUP_DEFAULTED,
-    SE_OWNER_DEFAULTED, SE_RM_CONTROL_VALID, SE_SACL_AUTO_INHERIT_REQ, SE_SACL_AUTO_INHERITED,
-    SE_SACL_DEFAULTED, SE_SACL_PRESENT, SE_SACL_PROTECTED, SE_SELF_RELATIVE, SE_SERVER_SECURITY,
-    SecurityDescriptor, Sid,
+    AceKind, Acl, INHERIT_ONLY_ACE, MAX_SECURITY_DESCRIPTOR_BYTES, PkmVec,
+    SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERITED, SE_DACL_DEFAULTED, SE_DACL_PRESENT,
+    SE_DACL_PROTECTED, SE_DACL_TRUSTED, SE_GROUP_DEFAULTED, SE_OWNER_DEFAULTED,
+    SE_RM_CONTROL_VALID, SE_SACL_AUTO_INHERIT_REQ, SE_SACL_AUTO_INHERITED, SE_SACL_DEFAULTED,
+    SE_SACL_PRESENT, SE_SACL_PROTECTED, SE_SELF_RELATIVE, SE_SERVER_SECURITY,
+    SYSTEM_MANDATORY_LABEL_ACE_TYPE, SecurityDescriptor, Sid,
 };
 
 const OWNER_CONTROL_MASK: u16 = SE_OWNER_DEFAULTED;
@@ -113,10 +114,27 @@ pub fn plan_registry_get_security(
     let existing =
         parse_registry_source_security_descriptor(existing_sd, "reg_get_security.existing_sd")?;
 
+    let label_sacl = if security_info & LABEL_SECURITY_INFORMATION != 0 {
+        select_label_sacl(existing.sacl())?
+    } else {
+        None
+    };
+    let label_component = label_sacl
+        .as_ref()
+        .map(|bytes| SecurityDescriptorComponent {
+            bytes: bytes.as_slice(),
+            control: existing.control() & SACL_CONTROL_MASK,
+        });
+    let label_control = if security_info & LABEL_SECURITY_INFORMATION != 0 {
+        existing.control() & SACL_CONTROL_MASK & !SE_SACL_PRESENT
+    } else {
+        0
+    };
+
     let output_sd = build_security_descriptor(
         "reg_get_security.output_sd",
         existing.resource_manager_control(),
-        retained_rm_control(existing.control()),
+        retained_rm_control(existing.control()) | label_control,
         selected_sid_component(
             existing.owner(),
             existing.control(),
@@ -131,13 +149,13 @@ pub fn plan_registry_get_security(
             security_info,
             GROUP_SECURITY_INFORMATION,
         ),
-        selected_acl_component(
+        label_component.or(selected_acl_component(
             existing.sacl(),
             existing.control(),
             SACL_CONTROL_MASK,
             security_info,
             SACL_SECURITY_INFORMATION,
-        ),
+        )),
         selected_acl_component(
             existing.dacl(),
             existing.control(),
@@ -201,7 +219,19 @@ pub fn plan_registry_set_security(
     } else {
         sid_component(existing.group(), existing.control(), GROUP_CONTROL_MASK)
     };
-    let sacl = if (security_info & SACL_SECURITY_INFORMATION) != 0 {
+    let label_sacl = if security_info & LABEL_SECURITY_INFORMATION != 0 {
+        merge_label_sacl(existing.sacl(), input.sacl())?
+    } else {
+        None
+    };
+    let sacl = if security_info & LABEL_SECURITY_INFORMATION != 0 {
+        label_sacl
+            .as_ref()
+            .map(|bytes| SecurityDescriptorComponent {
+                bytes: bytes.as_slice(),
+                control: existing.control() & SACL_CONTROL_MASK,
+            })
+    } else if (security_info & SACL_SECURITY_INFORMATION) != 0 {
         acl_component(input.sacl(), input.control(), SACL_CONTROL_MASK)
     } else {
         acl_component(existing.sacl(), existing.control(), SACL_CONTROL_MASK)
@@ -215,7 +245,11 @@ pub fn plan_registry_set_security(
     let merged_sd = build_security_descriptor(
         "reg_set_security.merged_sd",
         existing.resource_manager_control(),
-        retained_rm_control(existing.control()),
+        if security_info & LABEL_SECURITY_INFORMATION != 0 {
+            label_merge_base_control(existing.control(), security_info)
+        } else {
+            retained_rm_control(existing.control())
+        },
         Some(owner),
         group,
         sacl,
@@ -347,6 +381,113 @@ fn selected_required_owner_component<'a>(
         });
     }
     Ok(owner)
+}
+
+fn label_merge_base_control(mut control: u16, security_info: u32) -> u16 {
+    // LABEL changes ACEs, not SACL inheritance/protection flags. In particular,
+    // preserve unselected NULL-ACL flags even though there is no ACL component.
+    control &= !(SE_SACL_PRESENT | SE_DACL_PRESENT);
+    if security_info & OWNER_SECURITY_INFORMATION != 0 {
+        control &= !OWNER_CONTROL_MASK;
+    }
+    if security_info & GROUP_SECURITY_INFORMATION != 0 {
+        control &= !GROUP_CONTROL_MASK;
+    }
+    if security_info & DACL_SECURITY_INFORMATION != 0 {
+        control &= !DACL_CONTROL_MASK;
+    }
+    control
+}
+
+fn select_label_sacl(sacl: Option<Acl<'_>>) -> LcsResult<Option<PkmVec<u8>>> {
+    let Some(acl) = sacl else { return Ok(None) };
+    for ace in acl.entries() {
+        let ace = ace.map_err(|_| LcsError::MalformedSecurityDescriptor {
+            field: "reg_get_security.existing_sd",
+        })?;
+        if ace.ace_type() == SYSTEM_MANDATORY_LABEL_ACE_TYPE
+            && ace.ace_flags() & INHERIT_ONLY_ACE == 0
+        {
+            return build_label_acl(sacl, &[ace.bytes()]);
+        }
+    }
+    Ok(None)
+}
+
+fn merge_label_sacl(
+    existing: Option<Acl<'_>>,
+    input: Option<Acl<'_>>,
+) -> LcsResult<Option<PkmVec<u8>>> {
+    let malformed = || LcsError::MalformedSecurityDescriptor {
+        field: "reg_set_security.label",
+    };
+    let label = if let Some(input) = input {
+        let mut entries = input.entries();
+        let ace = entries
+            .next()
+            .ok_or_else(malformed)?
+            .map_err(|_| malformed())?;
+        if entries.next().is_some()
+            || ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE
+            || ace.ace_flags() & INHERIT_ONLY_ACE != 0
+        {
+            return Err(malformed());
+        }
+        let AceKind::SingleSid { sid, .. } = ace.kind() else {
+            return Err(malformed());
+        };
+        if sid.identifier_authority() != [0, 0, 0, 0, 0, 16] || sid.sub_authority_count() != 1 {
+            return Err(malformed());
+        }
+        Some(ace.bytes())
+    } else {
+        None
+    };
+    let allocation = || LcsError::SecurityDescriptorConstructionFailed {
+        field: "reg_set_security.label",
+    };
+    let mut entries = PkmVec::new();
+    if let Some(label) = label {
+        entries.push(label).map_err(|_| allocation())?;
+    }
+    if let Some(existing) = existing {
+        for ace in existing.entries() {
+            let ace = ace.map_err(|_| malformed())?;
+            if ace.ace_type() != SYSTEM_MANDATORY_LABEL_ACE_TYPE {
+                entries.push(ace.bytes()).map_err(|_| allocation())?;
+            }
+        }
+    }
+    build_label_acl(existing, entries.as_slice())
+}
+
+fn build_label_acl(template: Option<Acl<'_>>, entries: &[&[u8]]) -> LcsResult<Option<PkmVec<u8>>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let invalid = || LcsError::SecurityDescriptorConstructionFailed {
+        field: "registry_security.label_acl",
+    };
+    let size = entries.iter().try_fold(8usize, |size, ace| {
+        size.checked_add(ace.len()).ok_or_else(invalid)
+    })?;
+    let acl_size = u16::try_from(size).map_err(|_| invalid())?;
+    let count = u16::try_from(entries.len()).map_err(|_| invalid())?;
+    let mut bytes = PkmVec::with_capacity(size).map_err(|_| invalid())?;
+    bytes
+        .extend_from_slice(
+            template
+                .map(|acl| &acl.bytes()[..8])
+                .unwrap_or(&[2, 0, 0, 0, 0, 0, 0, 0]),
+        )
+        .map_err(|_| invalid())?;
+    write_u16_at(&mut bytes, 2, acl_size);
+    write_u16_at(&mut bytes, 4, count);
+    for ace in entries {
+        bytes.extend_from_slice(ace).map_err(|_| invalid())?;
+    }
+    Acl::parse(bytes.as_slice()).map_err(|_| invalid())?;
+    Ok(Some(bytes))
 }
 
 fn validate_indicated_input_acls(

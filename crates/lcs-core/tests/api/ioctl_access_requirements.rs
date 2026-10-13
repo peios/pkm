@@ -96,7 +96,7 @@ fn non_fixed_ioctl_requirements_are_classified_without_guessing_masks() {
 }
 
 #[test]
-fn security_info_validation_rejects_zero_label_and_unknown_bits() {
+fn security_info_validation_accepts_label_but_rejects_zero_and_unknown_bits() {
     assert_eq!(
         validate_registry_security_info(0),
         Err(LcsError::ZeroSecurityInfo)
@@ -105,9 +105,12 @@ fn security_info_validation_rejects_zero_label_and_unknown_bits() {
     let label_security_information = 0x0000_0010;
     assert_eq!(
         validate_registry_security_info(label_security_information),
-        Err(LcsError::UnknownSecurityInfoFlags {
-            flags: label_security_information,
-            unknown: label_security_information,
+        Ok(())
+    );
+    assert_eq!(
+        validate_registry_security_info(label_security_information | SACL_SECURITY_INFORMATION),
+        Err(LcsError::ConflictingSecurityInfoFlags {
+            flags: label_security_information | SACL_SECURITY_INFORMATION,
         })
     );
 

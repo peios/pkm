@@ -1,12 +1,12 @@
 use crate::access::{registry_fd_has_right, validate_registry_granted_access};
 use crate::constants::{
     ACCESS_SYSTEM_SECURITY, DACL_SECURITY_INFORMATION, DELETE, GROUP_SECURITY_INFORMATION,
-    KEY_ENUMERATE_SUB_KEYS, KEY_NOTIFY, KEY_QUERY_VALUE, KEY_SET_VALUE, OWNER_SECURITY_INFORMATION,
-    READ_CONTROL, REG_IOC_BACKUP, REG_IOC_BLANKET_TOMBSTONE, REG_IOC_COMMIT, REG_IOC_DELETE_KEY,
-    REG_IOC_DELETE_VALUE, REG_IOC_ENUM_SUBKEYS, REG_IOC_ENUM_VALUES, REG_IOC_FLUSH,
-    REG_IOC_GET_SECURITY, REG_IOC_HIDE_KEY, REG_IOC_NOTIFY, REG_IOC_QUERY_KEY_INFO,
-    REG_IOC_QUERY_VALUE, REG_IOC_QUERY_VALUES_BATCH, REG_IOC_RESTORE, REG_IOC_SET_SECURITY,
-    REG_IOC_SET_VALUE, REG_IOC_TXN_STATUS, REG_VALID_SECURITY_INFORMATION,
+    KEY_ENUMERATE_SUB_KEYS, KEY_NOTIFY, KEY_QUERY_VALUE, KEY_SET_VALUE, LABEL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, READ_CONTROL, REG_IOC_BACKUP, REG_IOC_BLANKET_TOMBSTONE,
+    REG_IOC_COMMIT, REG_IOC_DELETE_KEY, REG_IOC_DELETE_VALUE, REG_IOC_ENUM_SUBKEYS,
+    REG_IOC_ENUM_VALUES, REG_IOC_FLUSH, REG_IOC_GET_SECURITY, REG_IOC_HIDE_KEY, REG_IOC_NOTIFY,
+    REG_IOC_QUERY_KEY_INFO, REG_IOC_QUERY_VALUE, REG_IOC_QUERY_VALUES_BATCH, REG_IOC_RESTORE,
+    REG_IOC_SET_SECURITY, REG_IOC_SET_VALUE, REG_IOC_TXN_STATUS, REG_VALID_SECURITY_INFORMATION,
     SACL_SECURITY_INFORMATION, WRITE_DAC, WRITE_OWNER,
 };
 use crate::errno::LinuxErrno;
@@ -119,6 +119,14 @@ pub fn validate_registry_security_info(security_info: u32) -> LcsResult<()> {
         });
     }
 
+    if security_info & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)
+        == (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)
+    {
+        return Err(LcsError::ConflictingSecurityInfoFlags {
+            flags: security_info,
+        });
+    }
+
     Ok(())
 }
 
@@ -135,7 +143,8 @@ pub fn registry_security_info_required_access(
             if (security_info
                 & (OWNER_SECURITY_INFORMATION
                     | GROUP_SECURITY_INFORMATION
-                    | DACL_SECURITY_INFORMATION))
+                    | DACL_SECURITY_INFORMATION
+                    | LABEL_SECURITY_INFORMATION))
                 != 0
             {
                 required |= READ_CONTROL;
@@ -145,7 +154,12 @@ pub fn registry_security_info_required_access(
             }
         }
         RegistrySecurityOperation::Set => {
-            if (security_info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION)) != 0 {
+            if (security_info
+                & (OWNER_SECURITY_INFORMATION
+                    | GROUP_SECURITY_INFORMATION
+                    | LABEL_SECURITY_INFORMATION))
+                != 0
+            {
                 required |= WRITE_OWNER;
             }
             if (security_info & DACL_SECURITY_INFORMATION) != 0 {
