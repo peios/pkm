@@ -74,13 +74,6 @@ static void pkm_kacs_register_set(struct pkm_kacs_socket_security *sec,
 		kacs_rust_token_drop(old);
 }
 
-static void pkm_kacs_socket_peer_token_drop(struct pkm_kacs_socket_security *sec)
-{
-	if (!sec)
-		return;
-	pkm_kacs_register_set(sec, NULL);
-}
-
 /* Installs @token (counted, consumed) as the listener's conveyed identity. */
 static void pkm_kacs_listener_set(struct pkm_kacs_socket_security *sec,
 				  const void *token)
@@ -130,22 +123,6 @@ static long pkm_kacs_listener_stamp(struct pkm_kacs_socket_security *sec)
 		return -EACCES;
 	pkm_kacs_listener_set(sec, token);
 	return 0;
-}
-
-static void pkm_kacs_socket_convey_drop(struct pkm_kacs_socket_security *sec)
-{
-	const void *src, *token;
-
-	mutex_lock(&sec->convey_lock);
-	src = sec->convey_src;
-	token = sec->convey_token;
-	sec->convey_src = NULL;
-	sec->convey_token = NULL;
-	mutex_unlock(&sec->convey_lock);
-	if (src)
-		kacs_rust_token_drop(src);
-	if (token)
-		kacs_rust_token_drop(token);
 }
 
 static bool pkm_kacs_socket_type_supported(int type)
@@ -413,13 +390,30 @@ void pkm_kacs_sk_free_security(struct sock *sk)
 		return;
 
 	sec = pkm_kacs_sock(sk);
-	pkm_kacs_socket_peer_token_drop(sec);
-	pkm_kacs_listener_set(sec, NULL);
-	pkm_kacs_binder_set(sec, NULL);
+	/*
+	 * security_sk_free() has exclusive ownership: either allocation failed
+	 * before publication, or the socket's last user has gone. In particular,
+	 * __sk_destruct() may call us from an RCU callback. Do not take the live
+	 * socket's locks here, including the sleeping convey_lock. Each field
+	 * owns a separate reference, even when several name the same token.
+	 */
+	kacs_rust_token_drop(sec->peer_token);
+	sec->peer_token = NULL;
+	kacs_rust_token_drop(sec->listener_token);
+	sec->listener_token = NULL;
+	kacs_rust_token_drop(sec->binder_token);
+	sec->binder_token = NULL;
 	sec->rebind_tcb = false;
-	pkm_kacs_socket_owner_set(sec, NULL, PEIOS_NTFE_OWNER_UNSTAMPED, NULL, 0,
-				  NULL);
-	pkm_kacs_socket_convey_drop(sec);
+	kacs_rust_token_drop(sec->owner_token);
+	sec->owner_token = NULL;
+	sec->owner_kind = PEIOS_NTFE_OWNER_UNSTAMPED;
+	memset(sec->owner_guid, 0, sizeof(sec->owner_guid));
+	sec->owner_pid = 0;
+	sec->owner_comm[0] = '\0';
+	kacs_rust_token_drop(sec->convey_src);
+	sec->convey_src = NULL;
+	kacs_rust_token_drop(sec->convey_token);
+	sec->convey_token = NULL;
 	pkm_kacs_process_sd_put(sec->socket_sd);
 	sec->socket_sd = NULL;
 	sec->max_impersonation = KACS_IMLEVEL_IMPERSONATION;
