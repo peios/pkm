@@ -1205,6 +1205,7 @@ long pkm_kacs_kunit_authorize_psb_read_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_authorize_psb_read_core(args->subject_token,
 						&caller_state, &target_state,
