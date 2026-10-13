@@ -777,6 +777,16 @@ def main():
     if learn_is_absent():
         print(f"skipped: no learn/ checkout at {BOOK}", file=sys.stderr)
         return 0
+    missing = [p for p in USERSPACE_FRAGMENTS if not p.exists()]
+    if "--check" in sys.argv and missing:
+        # The published book indexes every component's fields. Without all
+        # of their fragments the generated book is partial, so comparing it
+        # would report the absent components as drift.
+        for p in missing:
+            print(f"skipped: no fragment at {p}", file=sys.stderr)
+        print("skipped: --check needs every userspace fragment beside pkm/",
+              file=sys.stderr)
+        return 0
     cat = load()
     for fragment, n, msg in cat.problems:
         print(f"warning: {fragment}:{n}: {msg}", file=sys.stderr)
