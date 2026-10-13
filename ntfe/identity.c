@@ -186,12 +186,16 @@ static struct sock *ntfe_raw_v6_lookup(struct net *net, u8 protocol,
  * The receiver early demux already found, with a reference. Only a
  * unicast transport's: early demux also attaches the one socket a
  * multicast datagram matches when it matches one, but that datagram is
- * still `shared` (PEI-1305), so the callers ask after that check.
+ * still `shared` (PEI-1305), so the callers ask after that check. The
+ * networking caller's RCU read section keeps an unreferenced UDP pointer
+ * allocated; it does not stop the last reference dropping on another CPU.
+ * If that happened, the caller must fall back to the ordinary tuple lookup.
  */
 static struct sock *ntfe_early_receiver(struct sock *early)
 {
-	if (early)
-		sock_hold(early);
+	/* UDP early demux supplies an RCU-protected pointer, not a reference. */
+	if (!early || !refcount_inc_not_zero(&early->sk_refcnt))
+		return NULL;
 	return early;
 }
 
@@ -222,8 +226,8 @@ static struct sock *ntfe_receiver_v4(struct net *net, struct sk_buff *skb,
 	*shared = false;
 	switch (iph->protocol) {
 	case IPPROTO_TCP:
-		if (early)
-			return ntfe_early_receiver(early);
+		if (ntfe_early_receiver(early))
+			return early;
 		th = skb_header_pointer(skb, thoff, sizeof(_th), &_th);
 		if (!th)
 			return NULL;
@@ -237,8 +241,8 @@ static struct sock *ntfe_receiver_v4(struct net *net, struct sk_buff *skb,
 			*shared = true;
 			return NULL;
 		}
-		if (early)
-			return ntfe_early_receiver(early);
+		if (ntfe_early_receiver(early))
+			return early;
 		uh = skb_header_pointer(skb, thoff, sizeof(_uh), &_uh);
 		if (!uh)
 			return NULL;
@@ -273,8 +277,8 @@ static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 		   rcu_access_pointer(inet6_protos[proto]) != NULL;
 	switch (proto) {
 	case IPPROTO_TCP:
-		if (early)
-			return ntfe_early_receiver(early);
+		if (ntfe_early_receiver(early))
+			return early;
 		th = skb_header_pointer(skb, thoff, sizeof(_th), &_th);
 		if (!th)
 			return NULL;
@@ -287,8 +291,8 @@ static struct sock *ntfe_receiver_v6(struct net *net, struct sk_buff *skb,
 			*shared = true;
 			return NULL;
 		}
-		if (early)
-			return ntfe_early_receiver(early);
+		if (ntfe_early_receiver(early))
+			return early;
 		uh = skb_header_pointer(skb, thoff, sizeof(_uh), &_uh);
 		if (!uh)
 			return NULL;
