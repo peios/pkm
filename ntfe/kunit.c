@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/icmp.h>
 #include <linux/mman.h>
+#include <linux/rcupdate.h>
 #include <linux/rtnetlink.h>
 #include <linux/uaccess.h>
 #include <net/ip.h>
@@ -652,6 +653,17 @@ out:
 	}
 }
 
+/* Tag arrays may be replaced through RCU; copy the value while pinned. */
+static int ntfe_test_tag_lookup(const void *flow, u64 hash, u64 *value_out)
+{
+	int ret;
+
+	rcu_read_lock();
+	ret = peios_ntfe_tag_lookup(flow, hash, value_out);
+	rcu_read_unlock();
+	return ret;
+}
+
 static void ntfe_kunit_tag_store(struct kunit *test)
 {
 	struct nf_conn *ct = ntfe_test_flow(test);
@@ -661,26 +673,26 @@ static void ntfe_kunit_tag_store(struct kunit *test)
 	u32 i;
 
 	/* Absent until written. */
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 0);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x1001, &value), 0);
 
 	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_SET, 7);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 1);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x1001, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 7ULL);
 
 	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_ADD, 5);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 1);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x1001, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 12ULL);
 
 	/* Add on an absent tag starts from zero. */
 	peios_ntfe_tag_apply(ct, 0x1002, PEIOS_NTFE_TAG_ADD, 3);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1002, &value), 1);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x1002, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 3ULL);
 
 	/* Clear reads as absent; the slot is reusable. */
 	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_CLEAR, 0);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 0);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x1001, &value), 0);
 	peios_ntfe_tag_apply(ct, 0x1001, PEIOS_NTFE_TAG_SET, 1);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x1001, &value), 1);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x1001, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 1ULL);
 
 	/* Growth past the initial table, up to the tripwire, then refusal
@@ -688,9 +700,9 @@ static void ntfe_kunit_tag_store(struct kunit *test)
 	 */
 	for (i = 0; i < PEIOS_NTFE_TAG_MAX_PER_FLOW - 2; i++)
 		peios_ntfe_tag_apply(ct, 0x2000 + i, PEIOS_NTFE_TAG_SET, i);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x2000, &value), 1);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x2000, &value), 1);
 	KUNIT_EXPECT_EQ(test,
-			peios_ntfe_tag_lookup(ct, 0x2000 + PEIOS_NTFE_TAG_MAX_PER_FLOW - 3,
+			ntfe_test_tag_lookup(ct, 0x2000 + PEIOS_NTFE_TAG_MAX_PER_FLOW - 3,
 					     &value),
 			1);
 	KUNIT_EXPECT_EQ(test, value,
@@ -698,7 +710,7 @@ static void ntfe_kunit_tag_store(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_refused),
 			refused_before);
 	peios_ntfe_tag_apply(ct, 0x3000, PEIOS_NTFE_TAG_SET, 1);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, 0x3000, &value), 0);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, 0x3000, &value), 0);
 	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_refused),
 			refused_before + 1);
 
@@ -706,7 +718,7 @@ static void ntfe_kunit_tag_store(struct kunit *test)
 	peios_ntfe_tag_apply(NULL, 0x1001, PEIOS_NTFE_TAG_SET, 1);
 	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_untracked),
 			untracked_before + 1);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(NULL, 0x1001, &value), 0);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(NULL, 0x1001, &value), 0);
 
 	/* An unconfirmed entry is born with refcount 0 (confirmation sets
 	 * it to 1), so it is released the way conntrack's own error paths
@@ -3090,7 +3102,7 @@ static void ntfe_kunit_sentence_concurrency(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, atomic64_read(&peios_ntfe_stats.tag_writes),
 			writes0 + 2);
 	KUNIT_EXPECT_EQ(test,
-			peios_ntfe_tag_lookup(race,
+			ntfe_test_tag_lookup(race,
 					     peios_ntfe_path_hash("seen", 4),
 					     &value),
 			1);
@@ -3312,7 +3324,7 @@ static void ntfe_kunit_flow_pointer_held_by_skb(struct kunit *test)
 			(unsigned int)NF_ACCEPT);
 	KUNIT_EXPECT_EQ(test, peios_ntfe_hook_local_in(NULL, skb, &state),
 			(unsigned int)NF_DROP);
-	KUNIT_EXPECT_EQ(test, peios_ntfe_tag_lookup(ct, hits, &value), 1);
+	KUNIT_EXPECT_EQ(test, ntfe_test_tag_lookup(ct, hits, &value), 1);
 	KUNIT_EXPECT_EQ(test, value, 2ULL);
 	/* Still alive on the skb's reference alone. */
 	KUNIT_EXPECT_EQ(test, refcount_read(&ct->ct_general.use), 1U);
