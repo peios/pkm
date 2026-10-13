@@ -190,6 +190,11 @@ struct pkm_kacs_inode_security {
 	struct pkm_kacs_inode_sd_cache __rcu *sd_cache;
 	/* Every publication/invalidation, including NULL -> NULL; under ->lock. */
 	u64 sd_cache_epoch;
+	/* Explicit writes/clears, distinct from read-side publication. */
+	u64 sd_cache_invalidation;
+	/* StrataFS read-start ordering, protected by ->lock. */
+	u64 sd_cache_read_ticket;
+	u64 sd_cache_published_ticket;
 	atomic_t delete_on_close_lineages;
 	atomic_t signed_exec_pinned;
 	/* Set under ->lock while a deferred SD persist task_work is in flight. */

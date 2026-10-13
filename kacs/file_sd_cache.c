@@ -31,6 +31,8 @@
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 #include <kunit/test.h>
 #include <linux/debug_locks.h>
+#include <linux/completion.h>
+#include <linux/kthread.h>
 #endif
 
 static long pkm_kacs_superblock_synthesis_snapshot(const struct super_block *sb,
@@ -231,6 +233,8 @@ void pkm_kacs_inode_replace_sd_cache_locked(
 	old_cache = rcu_dereference_protected(sec->sd_cache,
 					      lockdep_is_held(&sec->lock));
 	sec->sd_cache_epoch++;
+	sec->sd_cache_invalidation++;
+	sec->sd_cache_published_ticket = sec->sd_cache_read_ticket;
 	rcu_assign_pointer(sec->sd_cache, new_cache);
 	if (old_cache)
 		call_rcu(&old_cache->rcu, pkm_kacs_inode_sd_cache_free_rcu);
@@ -446,20 +450,22 @@ static long pkm_kacs_inode_get_or_populate_cache_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
 	struct pkm_kacs_inode_sd_cache **cache_out)
 {
-	struct pkm_kacs_inode_sd_cache *cache, *fresh;
+	struct pkm_kacs_inode_sd_cache *cache, *fresh, *published;
 	struct inode *inode = file_inode(file);
+	bool reread;
 	u32 generation;
-	u64 epoch;
+	u64 epoch, invalidation, ticket = 0;
 	long ret;
 
 	if (!inode)
 		return -EACCES;
 	lockdep_assert_held(&sec->lock);
+	reread = pkm_kacs_inode_sd_cache_rereads_each_time(inode);
 retry:
 	cache = rcu_dereference_protected(sec->sd_cache,
 					  lockdep_is_held(&sec->lock));
 	if (cache && pkm_kacs_inode_sd_cache_current(inode->i_sb, cache) &&
-	    !pkm_kacs_inode_sd_cache_rereads_each_time(inode)) {
+	    !reread) {
 		*cache_out = cache;
 		return 0;
 	}
@@ -476,13 +482,17 @@ retry:
 		refcount_inc(&cache->refs);
 	generation = pkm_kacs_superblock_policy_generation(inode->i_sb);
 	epoch = sec->sd_cache_epoch;
+	invalidation = sec->sd_cache_invalidation;
+	if (reread)
+		ticket = ++sec->sd_cache_read_ticket;
 	fresh = NULL;
 	mutex_unlock(&sec->lock);
 	ret = pkm_kacs_inode_read_sd_xattr(file, &fresh);
 	mutex_lock(&sec->lock);
-	if (rcu_dereference_protected(sec->sd_cache,
-				      lockdep_is_held(&sec->lock)) != cache ||
-	    epoch != sec->sd_cache_epoch ||
+	published = rcu_dereference_protected(sec->sd_cache,
+					      lockdep_is_held(&sec->lock));
+	if ((reread ? invalidation != sec->sd_cache_invalidation :
+	     (published != cache || epoch != sec->sd_cache_epoch)) ||
 	    generation != pkm_kacs_superblock_policy_generation(inode->i_sb)) {
 		pkm_kacs_inode_sd_cache_free(fresh);
 		pkm_kacs_inode_sd_cache_free(cache);
@@ -492,13 +502,34 @@ retry:
 		pkm_kacs_inode_sd_cache_free(cache);
 		return ret;
 	}
-	if (!pkm_kacs_inode_try_publish_sd_cache(sec, cache, fresh)) {
+	/*
+	 * StrataFS rechecks its provider on every access. Another reader's
+	 * publication is not an invalidation: restarting for it makes a burst
+	 * of N readers perform O(N^2) reads. Reuse only an observation whose
+	 * read began later than ours, without an intervening explicit write
+	 * or policy change. Otherwise publish our completed read. StrataFS
+	 * has a fixed DENY_MISSING policy, so no synthesis follows this step.
+	 * The pinned snapshot excludes ABA: a different published pointer
+	 * proves that its ticket belongs to this read interval, even if an
+	 * unchanged old cache survived arbitrarily many failed reads. Signed
+	 * subtraction orders wrap with fewer than 2^63 tickets in that interval.
+	 */
+	if (reread && published && published != cache &&
+	    (s64)(sec->sd_cache_published_ticket - ticket) > 0) {
+		pkm_kacs_inode_sd_cache_free(fresh);
+		pkm_kacs_inode_sd_cache_free(cache);
+		*cache_out = published;
+		return 0;
+	}
+	if (!pkm_kacs_inode_try_publish_sd_cache(sec, published, fresh)) {
 		pkm_kacs_inode_sd_cache_free(fresh);
 		pkm_kacs_inode_sd_cache_free(cache);
 		goto retry;
 	}
-	if (cache)
-		call_rcu(&cache->rcu, pkm_kacs_inode_sd_cache_free_rcu);
+	if (reread)
+		sec->sd_cache_published_ticket = ticket;
+	if (published)
+		call_rcu(&published->rcu, pkm_kacs_inode_sd_cache_free_rcu);
 	pkm_kacs_inode_sd_cache_free(cache);
 	*cache_out = fresh;
 	return 0;
@@ -1097,9 +1128,33 @@ static void pkm_kacs_inode_queue_sd_persist(
 #ifdef CONFIG_SECURITY_PKM_KUNIT
 /* Real VFS dentries and xattr dispatch, on a mount private to each test. */
 #define PKM_SD_TEST_LEVELS 33
+#define PKM_SD_TEST_READERS 4
+
+struct pkm_sd_test_reader {
+	struct task_struct *task;
+	struct completion entered;
+	struct completion release;
+	struct completion done;
+	struct file *file;
+	unsigned int probes;
+	unsigned int index;
+	long ret;
+	u8 state;
+	u8 owner;
+};
+
+struct pkm_sd_test_contention {
+	struct pkm_sd_test_reader readers[PKM_SD_TEST_READERS];
+	u8 state;
+	u8 revision;
+	bool error_first;
+	bool latest_missing;
+};
 
 struct pkm_sd_test_fixture {
 	struct vfsmount *mnt;
+	unsigned long old_magic;
+	struct pkm_sd_test_contention *contention;
 	struct dentry *chain[PKM_SD_TEST_LEVELS];
 	struct file files[PKM_SD_TEST_LEVELS];
 	const struct xattr_handler * const *old_handlers;
@@ -1115,6 +1170,50 @@ struct pkm_sd_test_fixture {
 	bool empty_round_trip;
 };
 
+/* Each reader captures different bytes before the release barrier. */
+static int pkm_sd_test_contended_xattr(struct pkm_sd_test_contention *c,
+				       void *buffer, size_t size)
+{
+	static const u8 sd[] = {
+		1, 0, 0, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	};
+	struct pkm_sd_test_reader *r = NULL;
+	u8 state;
+	unsigned int i;
+
+	for (i = 0; i < PKM_SD_TEST_READERS; i++) {
+		if (c->readers[i].task == current) {
+			r = &c->readers[i];
+			break;
+		}
+	}
+	if (!r)
+		return -EIO;
+	state = c->latest_missing && r->index == PKM_SD_TEST_READERS - 1 ?
+		PKM_KACS_INODE_SD_MISSING : c->state;
+	if (!buffer)
+		r->probes++;
+	if (buffer) {
+		if (size < sizeof(sd))
+			return -ERANGE;
+		memcpy(buffer, sd, sizeof(sd));
+		((u8 *)buffer)[28] += r->index + READ_ONCE(c->revision);
+	}
+	if (r->probes == 1 &&
+	    (buffer || state != PKM_KACS_INODE_SD_VALID)) {
+		complete(&r->entered);
+		wait_for_completion(&r->release);
+	}
+	if (c->error_first && !r->index && buffer)
+		return -EIO;
+	if (state == PKM_KACS_INODE_SD_MISSING)
+		return -ENODATA;
+	if (state == PKM_KACS_INODE_SD_CORRUPT)
+		return 0;
+	return sizeof(sd);
+}
+
 static int pkm_sd_test_getxattr(const struct xattr_handler *handler,
 				struct dentry *dentry, struct inode *inode,
 				const char *name, void *buffer, size_t size)
@@ -1124,6 +1223,8 @@ static int pkm_sd_test_getxattr(const struct xattr_handler *handler,
 	struct pkm_kacs_inode_security *sec;
 	int ret;
 
+	if (f->contention)
+		return pkm_sd_test_contended_xattr(f->contention, buffer, size);
 	if (f->read_error)
 		return f->read_error;
 	if (inode == f->trigger && f->empty_invalidation) {
@@ -1208,6 +1309,7 @@ static void pkm_sd_test_cleanup(void *data)
 	while (f->count)
 		dput(f->chain[--f->count]);
 	if (!IS_ERR_OR_NULL(f->mnt)) {
+		f->mnt->mnt_sb->s_magic = f->old_magic;
 		f->mnt->mnt_sb->s_xattr = f->old_handlers;
 		f->mnt->mnt_root->d_fsdata = NULL;
 		kern_unmount(f->mnt);
@@ -1234,6 +1336,7 @@ pkm_sd_test_fixture(struct kunit *test, unsigned int levels, u32 policy)
 	put_filesystem(type);
 	if (IS_ERR(f->mnt))
 		return NULL;
+	f->old_magic = f->mnt->mnt_sb->s_magic;
 	f->old_handlers = f->mnt->mnt_sb->s_xattr;
 	f->mnt->mnt_sb->s_xattr = pkm_sd_test_handlers;
 	f->mnt->mnt_root->d_fsdata = f;
@@ -1445,6 +1548,197 @@ static void pkm_sd_test_stacked_xattr(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, debug_locks);
 }
 
+static int pkm_sd_test_reader_thread(void *data)
+{
+	struct pkm_sd_test_reader *r = data;
+	struct pkm_kacs_inode_security *sec = pkm_kacs_inode(file_inode(r->file));
+	struct pkm_kacs_inode_sd_cache *cache;
+
+	mutex_lock(&sec->lock);
+	r->ret = pkm_kacs_inode_resolve_effective_cache_locked(r->file, sec, &cache, 0);
+	if (!r->ret) {
+		r->state = cache->state;
+		if (cache->state == PKM_KACS_INODE_SD_VALID && cache->len >= 32)
+			r->owner = cache->bytes[28];
+	}
+	mutex_unlock(&sec->lock);
+	complete(&r->done);
+	while (!kthread_should_stop())
+		schedule_timeout_interruptible(HZ);
+	return 0;
+}
+
+static void pkm_sd_test_contention(struct kunit *test, u8 state, bool reverse,
+				   bool error_first, unsigned int mutation,
+				   bool latest_missing)
+{
+	struct pkm_sd_test_fixture *f = pkm_sd_test_fixture(test, 1,
+		KACS_MOUNT_POLICY_DENY_MISSING);
+	struct pkm_sd_test_contention *c;
+	struct pkm_kacs_inode_sd_cache *cache;
+	struct pkm_kacs_inode_security *sec;
+	unsigned int started = 0, i, index;
+	unsigned long waited;
+	bool ready = true;
+	bool changed = mutation == 1 || mutation == 2;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	c = kunit_kzalloc(test, sizeof(*c), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, c);
+	f->contention = c;
+	/* A private real VFS fixture, with StrataFS's production cache rule. */
+	f->mnt->mnt_sb->s_magic = STRATAFS_SUPER_MAGIC;
+	c->state = state;
+	c->error_first = error_first;
+	c->latest_missing = latest_missing;
+	sec = pkm_kacs_inode(file_inode(&f->files[0]));
+	if (mutation == 3 || mutation == 4) {
+		/* A pre-read replacement is not a later reader, even at wrap. */
+		KUNIT_ASSERT_EQ(test,
+				pkm_kacs_missing_file_sd_policy_result(f->mnt->mnt_sb, &cache), 0L);
+		mutex_lock(&sec->lock);
+		sec->sd_cache_read_ticket = mutation == 3 ? U64_MAX - 2 : 0;
+		pkm_kacs_inode_replace_sd_cache_locked(sec, cache);
+		/* Model an old cached observation surviving many failed reads. */
+		if (mutation == 4)
+			sec->sd_cache_read_ticket = 1ULL << 63;
+		mutex_unlock(&sec->lock);
+	}
+	for (i = 0; i < PKM_SD_TEST_READERS; i++) {
+		struct pkm_sd_test_reader *r = &c->readers[i];
+
+		init_completion(&r->entered);
+		init_completion(&r->release);
+		init_completion(&r->done);
+		r->file = &f->files[0];
+		r->index = i;
+		r->task = kthread_create(pkm_sd_test_reader_thread, r, "pkm-sd-reader");
+		if (IS_ERR(r->task)) {
+			KUNIT_FAIL(test, "could not start reader %u", i);
+			ready = false;
+			break;
+		}
+		started++;
+		wake_up_process(r->task);
+		waited = wait_for_completion_timeout(&r->entered, 5 * HZ);
+		KUNIT_EXPECT_NE(test, waited, 0UL);
+		if (!waited) {
+			ready = false;
+			break;
+		}
+	}
+	if (!ready)
+		goto out_stop;
+	if (changed) {
+		/* All old bytes are captured; even NULL -> NULL must defeat them. */
+		WRITE_ONCE(c->revision, 32);
+		mutex_lock(&sec->lock);
+		if (mutation == 1) {
+			pkm_kacs_inode_replace_sd_cache_locked(sec, NULL);
+		} else {
+			struct pkm_kacs_superblock_security *sb_sec =
+				pkm_kacs_sb(f->mnt->mnt_sb);
+
+			mutex_lock(&sb_sec->lock);
+			sb_sec->policy_generation =
+				pkm_kacs_next_mount_policy_generation(sb_sec->policy_generation);
+			mutex_unlock(&sb_sec->lock);
+		}
+		mutex_unlock(&sec->lock);
+	}
+	for (i = 0; i < started; i++) {
+		struct pkm_sd_test_reader *r;
+
+		index = reverse ? started - 1 - i : i;
+		r = &c->readers[index];
+		complete_all(&r->release);
+		waited = wait_for_completion_timeout(&r->done, 5 * HZ);
+		KUNIT_EXPECT_NE(test, waited, 0UL);
+		if (!waited) {
+			ready = false;
+			goto out_stop;
+		}
+		KUNIT_EXPECT_EQ(test, r->ret, error_first && !index ? -EIO : 0L);
+		KUNIT_EXPECT_EQ(test, r->probes, changed ? 2U : 1U);
+		if (!r->ret) {
+			KUNIT_EXPECT_EQ(test, r->state, latest_missing ?
+				(u8)PKM_KACS_INODE_SD_MISSING : state);
+			if (r->state == PKM_KACS_INODE_SD_VALID)
+				KUNIT_EXPECT_EQ(test, r->owner,
+						(u8)(18 + (reverse && !changed ? started - 1 :
+						   index) + (changed ? 32 : 0)));
+		}
+	}
+out_stop:
+	for (i = 0; i < started; i++)
+		complete_all(&c->readers[i].release);
+	for (i = 0; i < started; i++)
+		kthread_stop(c->readers[i].task);
+	if (!ready)
+		return;
+	cache = pkm_kacs_inode_sd_cache_get_current(file_inode(&f->files[0]), sec);
+	KUNIT_EXPECT_NOT_NULL(test, cache);
+	if (cache) {
+		KUNIT_EXPECT_EQ(test, cache->state, latest_missing ?
+			(u8)PKM_KACS_INODE_SD_MISSING : state);
+		if (cache->state == PKM_KACS_INODE_SD_VALID)
+			KUNIT_EXPECT_EQ(test, cache->bytes[28],
+					(u8)(18 + started - 1 + (changed ? 32 : 0)));
+		pkm_kacs_inode_sd_cache_free(cache);
+	}
+	KUNIT_EXPECT_TRUE(test, debug_locks);
+}
+
+static void pkm_sd_test_contended_valid(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, false, false, 0, false);
+}
+
+static void pkm_sd_test_contended_reverse(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, true, false, 0, false);
+}
+
+static void pkm_sd_test_contended_missing(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_MISSING, false, false, 0, false);
+}
+
+static void pkm_sd_test_contended_corrupt(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_CORRUPT, false, false, 0, false);
+}
+
+static void pkm_sd_test_contended_error(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, true, true, 0, false);
+}
+
+static void pkm_sd_test_contended_invalidation(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, false, false, 1, false);
+}
+
+static void pkm_sd_test_contended_generation(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, false, false, 2, false);
+}
+
+static void pkm_sd_test_contended_later_missing(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, true, false, 0, true);
+}
+
+static void pkm_sd_test_contended_ticket_wrap(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, false, false, 3, false);
+}
+
+static void pkm_sd_test_contended_old_ticket(struct kunit *test)
+{
+	pkm_sd_test_contention(test, PKM_KACS_INODE_SD_VALID, false, false, 4, false);
+}
+
 static struct kunit_case pkm_sd_cache_cases[] = {
 	KUNIT_CASE(pkm_sd_test_resolve_chain),
 	KUNIT_CASE(pkm_sd_test_depth_bound),
@@ -1455,6 +1749,16 @@ static struct kunit_case pkm_sd_cache_cases[] = {
 	KUNIT_CASE(pkm_sd_test_empty_round_trip),
 	KUNIT_CASE(pkm_sd_test_stacked_xattr),
 	KUNIT_CASE(pkm_sd_test_stale_read_error),
+	KUNIT_CASE(pkm_sd_test_contended_valid),
+	KUNIT_CASE(pkm_sd_test_contended_reverse),
+	KUNIT_CASE(pkm_sd_test_contended_missing),
+	KUNIT_CASE(pkm_sd_test_contended_corrupt),
+	KUNIT_CASE(pkm_sd_test_contended_error),
+	KUNIT_CASE(pkm_sd_test_contended_invalidation),
+	KUNIT_CASE(pkm_sd_test_contended_generation),
+	KUNIT_CASE(pkm_sd_test_contended_later_missing),
+	KUNIT_CASE(pkm_sd_test_contended_ticket_wrap),
+	KUNIT_CASE(pkm_sd_test_contended_old_ticket),
 	{}
 };
 
