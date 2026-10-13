@@ -2043,6 +2043,127 @@ static void ntfe_test_guid_text(const u8 guid[16], char out[37])
 	snprintf(out, 37, "%pUl", guid);
 }
 
+static void ntfe_test_release_socket(void *ptr)
+{
+	sock_release(ptr);
+}
+
+/* Model a last put before NTFE takes its reference, without timing a race.
+ * The synthetic early-demux socket stays allocated throughout the RCU read;
+ * a real bound socket proves that a failed pin continues the tuple lookup.
+ */
+static void ntfe_test_early_receiver_pin(struct kunit *test, int family)
+{
+	struct net_device *dev = ntfe_test_dev(test, "eth0", false);
+	struct nf_hook_state state = { .in = dev, .net = &init_net };
+	struct peios_ntfe_snapshot snap = { .seat = PEIOS_NTFE_SEAT_LOCAL_IN };
+	struct sockaddr_storage address = { 0 };
+	struct peios_ntfe_identity id;
+	struct socket *receiver;
+	struct sock *early;
+	struct sk_buff *skb;
+	struct udphdr *uh;
+	int address_len, ret;
+
+	if (family == AF_INET6 && !IS_ENABLED(CONFIG_IPV6)) {
+		kunit_skip(test, "IPv6 is disabled");
+		return;
+	}
+	dev_net_set(dev, &init_net);
+	if (family == AF_INET6) {
+		((struct sockaddr_in6 *)&address)->sin6_family = family;
+		address_len = sizeof(struct sockaddr_in6);
+	} else {
+		((struct sockaddr_in *)&address)->sin_family = family;
+		address_len = sizeof(struct sockaddr_in);
+	}
+	KUNIT_ASSERT_EQ(test,
+			sock_create(family, SOCK_DGRAM, IPPROTO_UDP, &receiver), 0);
+	ret = kunit_add_action_or_reset(test, ntfe_test_release_socket, receiver);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	ret = kernel_bind(receiver, (struct sockaddr_unsized *)&address,
+			  address_len);
+	KUNIT_ASSERT_EQ(test, ret, 0);
+	early = kunit_kzalloc(test, sizeof(*early), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, early);
+	early->sk_state = TCP_CLOSE;
+	early->sk_family = family;
+	early->sk_protocol = IPPROTO_UDP;
+	refcount_set(&early->sk_refcnt, 1);
+	skb = alloc_skb(256, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	skb_reset_network_header(skb);
+	if (family == AF_INET6) {
+		struct ipv6hdr *iph = skb_put_zero(skb, sizeof(*iph));
+
+		iph->version = 6;
+		iph->nexthdr = IPPROTO_UDP;
+		iph->payload_len = htons(sizeof(*uh));
+		iph->saddr.s6_addr[15] = 1;
+		iph->daddr.s6_addr[15] = 2;
+		skb->protocol = htons(ETH_P_IPV6);
+	} else {
+		struct iphdr *iph = skb_put_zero(skb, sizeof(*iph));
+
+		iph->version = 4;
+		iph->ihl = 5;
+		iph->protocol = IPPROTO_UDP;
+		iph->tot_len = htons(sizeof(*iph) + sizeof(*uh));
+		iph->saddr = htonl(0x0a000007);
+		iph->daddr = htonl(0x0a000005);
+		skb->protocol = htons(ETH_P_IP);
+	}
+	skb_set_transport_header(skb, skb->len);
+	uh = skb_put_zero(skb, sizeof(*uh));
+	uh->source = htons(43210);
+	uh->dest = inet_sk(receiver->sk)->inet_sport;
+	uh->len = htons(sizeof(*uh));
+	skb->sk = early;
+
+	/* A live early result wins over the real receiver and is put once. */
+	rcu_read_lock();
+	peios_ntfe_identity_resolve(skb, &state, &snap, false, &id);
+	rcu_read_unlock();
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_KERNEL);
+	KUNIT_EXPECT_EQ(test, id.unresolved, 1);
+	KUNIT_EXPECT_EQ(test, refcount_read(&early->sk_refcnt), 1);
+	peios_ntfe_identity_release(&id);
+
+	/* A dead early result is neither resurrected nor treated as final. */
+	refcount_set(&early->sk_refcnt, 0);
+	rcu_read_lock();
+	peios_ntfe_identity_resolve(skb, &state, &snap, false, &id);
+	rcu_read_unlock();
+	KUNIT_EXPECT_EQ(test, refcount_read(&early->sk_refcnt), 0);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_PROGRAM);
+	KUNIT_EXPECT_EQ(test, id.unresolved, 0);
+	KUNIT_EXPECT_NOT_NULL(test, id.owner.token);
+	KUNIT_EXPECT_EQ(test, id.owner.pid, (s32)task_tgid_nr(current));
+	peios_ntfe_identity_release(&id);
+
+	/* No receiver after unbind: preserve the normal `none` result. */
+	kunit_release_action(test, ntfe_test_release_socket, receiver);
+	rcu_read_lock();
+	peios_ntfe_identity_resolve(skb, &state, &snap, false, &id);
+	rcu_read_unlock();
+	KUNIT_EXPECT_EQ(test, refcount_read(&early->sk_refcnt), 0);
+	KUNIT_EXPECT_EQ(test, id.kind, (u8)PEIOS_NTFE_LOCAL_NONE);
+	KUNIT_EXPECT_EQ(test, id.unresolved, 0);
+	peios_ntfe_identity_release(&id);
+	skb->sk = NULL;
+	kfree_skb(skb);
+}
+
+static void ntfe_kunit_early_receiver_pin_v4(struct kunit *test)
+{
+	ntfe_test_early_receiver_pin(test, AF_INET);
+}
+
+static void ntfe_kunit_early_receiver_pin_v6(struct kunit *test)
+{
+	ntfe_test_early_receiver_pin(test, AF_INET6);
+}
+
 /*
  * The identity facts (rung 3): the resolver classifies real sockets the
  * way the design says — a listening program, nobody, the stack, a kernel
@@ -3501,6 +3622,8 @@ static struct kunit_case ntfe_kunit_cases[] = {
 	KUNIT_CASE(ntfe_kunit_echo_on_wire),
 	KUNIT_CASE(ntfe_kunit_downward_tag_read_refused),
 	KUNIT_CASE(ntfe_kunit_identity_facts),
+	KUNIT_CASE(ntfe_kunit_early_receiver_pin_v4),
+	KUNIT_CASE(ntfe_kunit_early_receiver_pin_v6),
 	KUNIT_CASE(ntfe_kunit_network_context),
 	KUNIT_CASE(ntfe_kunit_ingest_progress),
 	KUNIT_CASE(ntfe_kunit_eval_failure_fails_closed),
