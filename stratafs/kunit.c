@@ -7,6 +7,158 @@
 
 #include "stratafs.h"
 
+struct stratafs_kunit_identity_fixture {
+	struct stratafs_sb_info sbi;
+	struct super_block sb;
+	struct file *files[2];
+};
+
+static void stratafs_kunit_identity_cleanup(void *data)
+{
+	struct stratafs_kunit_identity_fixture *fixture = data;
+	unsigned int i;
+
+	stratafs_free_identities(&fixture->sbi);
+	for (i = 0; i < ARRAY_SIZE(fixture->files); i++)
+		if (!IS_ERR_OR_NULL(fixture->files[i]))
+			fput(fixture->files[i]);
+}
+
+static struct stratafs_kunit_identity_fixture *
+stratafs_kunit_identity_fixture(struct kunit *test)
+{
+	struct stratafs_kunit_identity_fixture *fixture;
+	unsigned int i;
+
+	fixture = kunit_kzalloc(test, sizeof(*fixture), GFP_KERNEL);
+	if (!fixture)
+		return NULL;
+	stratafs_init_identities(&fixture->sbi);
+	fixture->sb.s_fs_info = &fixture->sbi;
+	if (kunit_add_action_or_reset(test, stratafs_kunit_identity_cleanup,
+				     fixture))
+		return NULL;
+	for (i = 0; i < ARRAY_SIZE(fixture->files); i++) {
+		fixture->files[i] = shmem_kernel_file_setup("stratafs-identity",
+							 0, EMPTY_VMA_FLAGS);
+		if (IS_ERR(fixture->files[i]))
+			return NULL;
+	}
+	return fixture;
+}
+
+static void stratafs_kunit_derived_identity_does_not_pin(struct kunit *test)
+{
+	struct stratafs_kunit_identity_fixture *fixture;
+	struct kstat stat = { .result_mask = STATX_INO, .dev = 7, .ino = 42 };
+	struct inode *provider;
+	unsigned long first, again, other;
+	int refs;
+
+	fixture = stratafs_kunit_identity_fixture(test);
+	KUNIT_ASSERT_NOT_NULL(test, fixture);
+	provider = file_inode(fixture->files[0]);
+	refs = atomic_read(&provider->i_count);
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
+						     &stat, &first), 0);
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
+						     &stat, &again), 0);
+	KUNIT_EXPECT_EQ(test, first, again);
+	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs);
+	KUNIT_EXPECT_TRUE(test, xa_empty(&fixture->sbi.identities));
+
+	/* A reloaded provider inode with the same on-disk identity agrees. */
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
+		file_inode(fixture->files[1]), &stat, &again), 0);
+	KUNIT_EXPECT_EQ(test, first, again);
+
+	/* Btrfs subvolumes can share i_sb and i_ino but report different devs. */
+	stat.dev++;
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
+		file_inode(fixture->files[1]), &stat, &other), 0);
+	KUNIT_EXPECT_NE(test, first, other);
+	KUNIT_EXPECT_TRUE(test, xa_empty(&fixture->sbi.identities));
+	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs);
+}
+
+static void stratafs_kunit_overflow_identity_pins_once(struct kunit *test)
+{
+	struct stratafs_kunit_identity_fixture *fixture;
+	struct kstat stat = { .result_mask = STATX_INO, .dev = 7, .ino = U64_MAX };
+	struct inode *provider;
+	unsigned long first, again, other, synthetic;
+	int refs;
+
+	fixture = stratafs_kunit_identity_fixture(test);
+	KUNIT_ASSERT_NOT_NULL(test, fixture);
+	provider = file_inode(fixture->files[0]);
+	refs = atomic_read(&provider->i_count);
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
+						     &stat, &first), 0);
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
+						     &stat, &again), 0);
+	KUNIT_EXPECT_EQ(test, first, again);
+	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs + 1);
+	KUNIT_EXPECT_TRUE(test, !!(first & (1UL << (BITS_PER_LONG - 1))));
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
+		file_inode(fixture->files[1]), &stat, &other), 0);
+	KUNIT_EXPECT_NE(test, first, other);
+	KUNIT_ASSERT_EQ(test, stratafs_alloc_ino(&fixture->sb, &synthetic), 0);
+	KUNIT_EXPECT_NE(test, first, synthetic);
+	KUNIT_EXPECT_NE(test, other, synthetic);
+
+	/* Freeing the fallback map really releases its provider reference. */
+	stratafs_free_identities(&fixture->sbi);
+	stratafs_init_identities(&fixture->sbi);
+	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs);
+}
+
+static void stratafs_kunit_missing_identity_and_exhaustion(struct kunit *test)
+{
+	struct stratafs_kunit_identity_fixture *fixture;
+	struct kstat stat = { .dev = 7, .ino = 42 };
+	unsigned long first, again, sentinel = 123;
+	const unsigned long high = 1UL << (BITS_PER_LONG - 1);
+
+	fixture = stratafs_kunit_identity_fixture(test);
+	KUNIT_ASSERT_NOT_NULL(test, fixture);
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
+		file_inode(fixture->files[0]), &stat, &first), 0);
+	KUNIT_EXPECT_TRUE(test, !!(first & high));
+	/* A previously assigned fallback must never change identity. */
+	stat.result_mask = STATX_INO;
+	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
+		file_inode(fixture->files[0]), &stat, &again), 0);
+	KUNIT_EXPECT_EQ(test, first, again);
+
+	atomic64_set(&fixture->sbi.next_ino, high - 2);
+	KUNIT_ASSERT_EQ(test, stratafs_alloc_ino(&fixture->sb, &again), 0);
+	KUNIT_EXPECT_EQ(test, again, ULONG_MAX);
+	KUNIT_EXPECT_EQ(test, stratafs_alloc_ino(&fixture->sb, &sentinel),
+			-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test, stratafs_alloc_ino(&fixture->sb, &sentinel),
+			-EOVERFLOW);
+	KUNIT_EXPECT_EQ(test, sentinel, 123UL);
+	KUNIT_EXPECT_EQ(test, (u64)atomic64_read(&fixture->sbi.next_ino),
+			(u64)high - 1);
+}
+
+static void stratafs_kunit_derived_identity_boundaries(struct kunit *test)
+{
+	const u64 limit = (1ULL << (BITS_PER_LONG - 2)) - 1;
+	unsigned long nested;
+
+	KUNIT_EXPECT_NE(test, stratafs_derive_ino(1, limit), 0UL);
+	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(1, limit + 1), 0UL);
+	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(1, U64_MAX), 0UL);
+	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(0, 42), 0UL);
+	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(1, 0), 0UL);
+	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(ULONG_MAX, 42), 0UL);
+	nested = stratafs_derive_ino(1, stratafs_derive_ino(1, 42));
+	KUNIT_EXPECT_NE(test, nested, 0UL);
+	KUNIT_EXPECT_NE(test, nested, stratafs_derive_ino(1, 43));
+}
+
 static void stratafs_kunit_free_parsed(struct stratafs_sb_info *sbi)
 {
 	unsigned int i;
@@ -259,164 +411,7 @@ static void stratafs_kunit_reserved_xattr_names(struct kunit *test)
 				       "%s must reach the provider", forwarded[i]);
 }
 
-
-struct stratafs_kunit_identity_fixture {
-	struct stratafs_sb_info sbi;
-	struct super_block sb;
-	struct file *files[2];
-};
-
-static void stratafs_kunit_identity_cleanup(void *data)
-{
-	struct stratafs_kunit_identity_fixture *fixture = data;
-	unsigned int i;
-
-	stratafs_free_identities(&fixture->sbi);
-	for (i = 0; i < ARRAY_SIZE(fixture->files); i++)
-		if (!IS_ERR_OR_NULL(fixture->files[i]))
-			fput(fixture->files[i]);
-}
-
-static struct stratafs_kunit_identity_fixture *
-stratafs_kunit_identity_fixture(struct kunit *test)
-{
-	struct stratafs_kunit_identity_fixture *fixture;
-	unsigned int i;
-
-	fixture = kunit_kzalloc(test, sizeof(*fixture), GFP_KERNEL);
-	if (!fixture)
-		return NULL;
-	stratafs_init_identities(&fixture->sbi);
-	fixture->sb.s_fs_info = &fixture->sbi;
-	if (kunit_add_action_or_reset(test, stratafs_kunit_identity_cleanup,
-				     fixture))
-		return NULL;
-	for (i = 0; i < ARRAY_SIZE(fixture->files); i++) {
-		fixture->files[i] = shmem_kernel_file_setup("stratafs-identity",
-							 0, EMPTY_VMA_FLAGS);
-		if (IS_ERR(fixture->files[i]))
-			return NULL;
-	}
-	return fixture;
-}
-
-static void stratafs_kunit_derived_identity_does_not_pin(struct kunit *test)
-{
-	struct stratafs_kunit_identity_fixture *fixture;
-	struct kstat stat = { .result_mask = STATX_INO, .dev = 7, .ino = 42 };
-	struct inode *provider;
-	unsigned long first, again, other;
-	int refs;
-
-	fixture = stratafs_kunit_identity_fixture(test);
-	KUNIT_ASSERT_NOT_NULL(test, fixture);
-	provider = file_inode(fixture->files[0]);
-	refs = atomic_read(&provider->i_count);
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
-						     &stat, &first), 0);
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
-						     &stat, &again), 0);
-	KUNIT_EXPECT_EQ(test, first, again);
-	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs);
-	KUNIT_EXPECT_TRUE(test, xa_empty(&fixture->sbi.identities));
-
-	/* A reloaded provider inode with the same on-disk identity agrees. */
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
-		file_inode(fixture->files[1]), &stat, &again), 0);
-	KUNIT_EXPECT_EQ(test, first, again);
-
-	/* Btrfs subvolumes can share i_sb and i_ino but report different devs. */
-	stat.dev++;
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
-		file_inode(fixture->files[1]), &stat, &other), 0);
-	KUNIT_EXPECT_NE(test, first, other);
-	KUNIT_EXPECT_TRUE(test, xa_empty(&fixture->sbi.identities));
-	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs);
-}
-
-static void stratafs_kunit_overflow_identity_pins_once(struct kunit *test)
-{
-	struct stratafs_kunit_identity_fixture *fixture;
-	struct kstat stat = { .result_mask = STATX_INO, .dev = 7, .ino = U64_MAX };
-	struct inode *provider;
-	unsigned long first, again, other, synthetic;
-	int refs;
-
-	fixture = stratafs_kunit_identity_fixture(test);
-	KUNIT_ASSERT_NOT_NULL(test, fixture);
-	provider = file_inode(fixture->files[0]);
-	refs = atomic_read(&provider->i_count);
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
-						     &stat, &first), 0);
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb, provider,
-						     &stat, &again), 0);
-	KUNIT_EXPECT_EQ(test, first, again);
-	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs + 1);
-	KUNIT_EXPECT_TRUE(test, !!(first & (1UL << (BITS_PER_LONG - 1))));
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
-		file_inode(fixture->files[1]), &stat, &other), 0);
-	KUNIT_EXPECT_NE(test, first, other);
-	KUNIT_ASSERT_EQ(test, stratafs_alloc_ino(&fixture->sb, &synthetic), 0);
-	KUNIT_EXPECT_NE(test, first, synthetic);
-	KUNIT_EXPECT_NE(test, other, synthetic);
-
-	/* Freeing the fallback map really releases its provider reference. */
-	stratafs_free_identities(&fixture->sbi);
-	stratafs_init_identities(&fixture->sbi);
-	KUNIT_EXPECT_EQ(test, atomic_read(&provider->i_count), refs);
-}
-
-static void stratafs_kunit_missing_identity_and_exhaustion(struct kunit *test)
-{
-	struct stratafs_kunit_identity_fixture *fixture;
-	struct kstat stat = { .dev = 7, .ino = 42 };
-	unsigned long first, again, sentinel = 123;
-	const unsigned long high = 1UL << (BITS_PER_LONG - 1);
-
-	fixture = stratafs_kunit_identity_fixture(test);
-	KUNIT_ASSERT_NOT_NULL(test, fixture);
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
-		file_inode(fixture->files[0]), &stat, &first), 0);
-	KUNIT_EXPECT_TRUE(test, !!(first & high));
-	/* A previously assigned fallback must never change identity. */
-	stat.result_mask = STATX_INO;
-	KUNIT_ASSERT_EQ(test, stratafs_identity_number(&fixture->sb,
-		file_inode(fixture->files[0]), &stat, &again), 0);
-	KUNIT_EXPECT_EQ(test, first, again);
-
-	atomic64_set(&fixture->sbi.next_ino, high - 2);
-	KUNIT_ASSERT_EQ(test, stratafs_alloc_ino(&fixture->sb, &again), 0);
-	KUNIT_EXPECT_EQ(test, again, ULONG_MAX);
-	KUNIT_EXPECT_EQ(test, stratafs_alloc_ino(&fixture->sb, &sentinel),
-			-EOVERFLOW);
-	KUNIT_EXPECT_EQ(test, stratafs_alloc_ino(&fixture->sb, &sentinel),
-			-EOVERFLOW);
-	KUNIT_EXPECT_EQ(test, sentinel, 123UL);
-	KUNIT_EXPECT_EQ(test, (u64)atomic64_read(&fixture->sbi.next_ino),
-			(u64)high - 1);
-}
-
-static void stratafs_kunit_derived_identity_boundaries(struct kunit *test)
-{
-	const u64 limit = (1ULL << (BITS_PER_LONG - 2)) - 1;
-	unsigned long nested;
-
-	KUNIT_EXPECT_NE(test, stratafs_derive_ino(1, limit), 0UL);
-	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(1, limit + 1), 0UL);
-	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(1, U64_MAX), 0UL);
-	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(0, 42), 0UL);
-	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(1, 0), 0UL);
-	KUNIT_EXPECT_EQ(test, stratafs_derive_ino(ULONG_MAX, 42), 0UL);
-	nested = stratafs_derive_ino(1, stratafs_derive_ino(1, 42));
-	KUNIT_EXPECT_NE(test, nested, 0UL);
-	KUNIT_EXPECT_NE(test, nested, stratafs_derive_ino(1, 43));
-}
-
 static struct kunit_case stratafs_kunit_cases[] = {
-	KUNIT_CASE(stratafs_kunit_derived_identity_does_not_pin),
-	KUNIT_CASE(stratafs_kunit_overflow_identity_pins_once),
-	KUNIT_CASE(stratafs_kunit_missing_identity_and_exhaustion),
-	KUNIT_CASE(stratafs_kunit_derived_identity_boundaries),
 	KUNIT_CASE(stratafs_kunit_parse_valid),
 	KUNIT_CASE(stratafs_kunit_parse_escapes),
 	KUNIT_CASE(stratafs_kunit_mount_table_round_trip),
@@ -425,6 +420,10 @@ static struct kunit_case stratafs_kunit_cases[] = {
 	KUNIT_CASE(stratafs_kunit_routing),
 	KUNIT_CASE(stratafs_kunit_live_mount_cookie),
 	KUNIT_CASE(stratafs_kunit_reserved_xattr_names),
+	KUNIT_CASE(stratafs_kunit_derived_identity_does_not_pin),
+	KUNIT_CASE(stratafs_kunit_overflow_identity_pins_once),
+	KUNIT_CASE(stratafs_kunit_missing_identity_and_exhaustion),
+	KUNIT_CASE(stratafs_kunit_derived_identity_boundaries),
 	{}
 };
 
