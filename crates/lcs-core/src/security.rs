@@ -40,6 +40,12 @@ const SACL_CONTROL_MASK: u16 = SE_SACL_PRESENT
     | SE_SACL_AUTO_INHERIT_REQ
     | SE_SACL_AUTO_INHERITED
     | SE_SACL_PROTECTED;
+const COMPONENT_CONTROL_MASKS: [(u32, u16); 4] = [
+    (OWNER_SECURITY_INFORMATION, OWNER_CONTROL_MASK),
+    (GROUP_SECURITY_INFORMATION, GROUP_CONTROL_MASK),
+    (DACL_SECURITY_INFORMATION, DACL_CONTROL_MASK),
+    (SACL_SECURITY_INFORMATION, SACL_CONTROL_MASK),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SecurityDescriptorComponent<'a> {
@@ -125,16 +131,10 @@ pub fn plan_registry_get_security(
             bytes: bytes.as_slice(),
             control: existing.control() & SACL_CONTROL_MASK,
         });
-    let label_control = if security_info & LABEL_SECURITY_INFORMATION != 0 {
-        existing.control() & SACL_CONTROL_MASK & !SE_SACL_PRESENT
-    } else {
-        0
-    };
-
     let output_sd = build_security_descriptor(
         "reg_get_security.output_sd",
         existing.resource_manager_control(),
-        retained_rm_control(existing.control()) | label_control,
+        projected_security_control(existing.control(), security_info),
         selected_sid_component(
             existing.owner(),
             existing.control(),
@@ -245,11 +245,7 @@ pub fn plan_registry_set_security(
     let merged_sd = build_security_descriptor(
         "reg_set_security.merged_sd",
         existing.resource_manager_control(),
-        if security_info & LABEL_SECURITY_INFORMATION != 0 {
-            label_merge_base_control(existing.control(), security_info)
-        } else {
-            retained_rm_control(existing.control())
-        },
+        merged_security_control(existing.control(), input.control(), security_info),
         Some(owner),
         group,
         sacl,
@@ -383,20 +379,30 @@ fn selected_required_owner_component<'a>(
     Ok(owner)
 }
 
-fn label_merge_base_control(mut control: u16, security_info: u32) -> u16 {
-    // LABEL changes ACEs, not SACL inheritance/protection flags. In particular,
-    // preserve unselected NULL-ACL flags even though there is no ACL component.
-    control &= !(SE_SACL_PRESENT | SE_DACL_PRESENT);
-    if security_info & OWNER_SECURITY_INFORMATION != 0 {
-        control &= !OWNER_CONTROL_MASK;
+fn projected_security_control(control: u16, security_info: u32) -> u16 {
+    let mut selected = SE_RM_CONTROL_VALID;
+    for (flag, mask) in COMPONENT_CONTROL_MASKS {
+        if security_info & flag != 0 {
+            selected |= mask;
+        }
     }
-    if security_info & GROUP_SECURITY_INFORMATION != 0 {
-        control &= !GROUP_CONTROL_MASK;
+    if security_info & LABEL_SECURITY_INFORMATION != 0 {
+        selected |= SACL_CONTROL_MASK;
     }
-    if security_info & DACL_SECURITY_INFORMATION != 0 {
-        control &= !DACL_CONTROL_MASK;
+    // The builder derives PRESENT from actual output ACLs. A NULL ACL or
+    // absent label still carries its selected inheritance/protection flags.
+    control & selected & !(SE_SACL_PRESENT | SE_DACL_PRESENT)
+}
+
+fn merged_security_control(mut existing: u16, input: u16, security_info: u32) -> u16 {
+    for (flag, mask) in COMPONENT_CONTROL_MASKS {
+        if security_info & flag != 0 {
+            existing = (existing & !mask) | (input & mask);
+        }
     }
-    control
+    // LABEL replaces ACEs only, so it deliberately has no entry in the table.
+    // Flags on all unselected components survive even without component bytes.
+    existing & !(SE_SACL_PRESENT | SE_DACL_PRESENT)
 }
 
 fn select_label_sacl(sacl: Option<Acl<'_>>) -> LcsResult<Option<PkmVec<u8>>> {
@@ -554,10 +560,6 @@ fn acl_component<'a>(
         bytes: acl.bytes(),
         control: control & control_mask,
     })
-}
-
-fn retained_rm_control(control: u16) -> u16 {
-    control & SE_RM_CONTROL_VALID
 }
 
 fn build_security_descriptor(
