@@ -10,6 +10,7 @@
 
 #include <linux/magic.h>
 #include <linux/namei.h>
+#include <linux/debug_locks.h>
 
 /* Internal VFS constructor exported for stackable-filesystem users. */
 extern struct file *alloc_empty_backing_file(int flags,
@@ -4899,6 +4900,33 @@ static void pkm_kunit_file_open_sysfs_write_uses_live_gate(struct kunit *test)
 	kacs_rust_token_drop(local_token);
 }
 
+
+static void pkm_kunit_cold_open_and_set_sd_lock_order(
+	struct kunit *test, bool native)
+{
+	const void *subject_token = pkm_kacs_current_effective_token_ptr();
+	const u8 *sd;
+	size_t sd_len = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, subject_token);
+	sd = pkm_kunit_create_default_file_sd(subject_token, &sd_len);
+	KUNIT_ASSERT_NOT_NULL(test, sd);
+	KUNIT_EXPECT_EQ(test, pkm_kacs_kunit_cold_open_then_set_sd(
+				subject_token, sd, sd_len, native), 0L);
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))
+		KUNIT_EXPECT_TRUE(test, debug_locks);
+	pkm_kacs_free((void *)sd);
+}
+
+static void pkm_kunit_native_cold_open_and_set_sd_lock_order(struct kunit *test)
+{
+	pkm_kunit_cold_open_and_set_sd_lock_order(test, true);
+}
+
+static void pkm_kunit_legacy_cold_open_and_set_sd_lock_order(struct kunit *test)
+{
+	pkm_kunit_cold_open_and_set_sd_lock_order(test, false);
+}
 
 static void pkm_kunit_native_open_read_success(struct kunit *test)
 {
@@ -11237,6 +11265,8 @@ static struct kunit_case pkm_kunit_file_cases[] = {
 	KUNIT_CASE(pkm_kunit_file_open_directory_write_fails_closed),
 	KUNIT_CASE(pkm_kunit_file_open_unmanaged_mount_leaves_no_grant),
 	KUNIT_CASE(pkm_kunit_file_open_sysfs_write_uses_live_gate),
+	KUNIT_CASE(pkm_kunit_native_cold_open_and_set_sd_lock_order),
+	KUNIT_CASE(pkm_kunit_legacy_cold_open_and_set_sd_lock_order),
 	KUNIT_CASE(pkm_kunit_native_open_read_success),
 	KUNIT_CASE(pkm_kunit_native_open_append_only_sets_write_mode),
 	KUNIT_CASE(pkm_kunit_native_open_caches_exact_requested_mask),

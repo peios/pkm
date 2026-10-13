@@ -2922,6 +2922,47 @@ out_free:
 	return ret;
 }
 
+long pkm_kacs_kunit_cold_open_then_set_sd(
+	const void *subject_token, const u8 *sd, size_t sd_len, bool native)
+{
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_security *sec;
+	long ret;
+
+	state = kzalloc_obj(*state, GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(
+		state, EXT4_SUPER_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
+		NULL, 0, S_IFREG, true);
+	if (ret)
+		goto out_free;
+
+	/* Supply an on-disk SD, but leave the inode cache empty for open. */
+	sec = pkm_kacs_inode(&state->inode);
+	ret = pkm_kacs_kunit_fake_setxattr_locked(sec, sd, sd_len);
+	if (ret)
+		goto out_cleanup;
+	if (native)
+		ret = pkm_kacs_stamp_native_file_granted_access_for_subject(
+			subject_token, &state->file, KACS_FILE_READ_DATA, 0);
+	else
+		ret = pkm_kacs_stamp_file_granted_access_for_subject(
+			subject_token, &state->file);
+	if (ret)
+		goto out_cleanup;
+
+	/* Exercise the opposite order through the real live set-SD path. */
+	state->file.f_mode = FMODE_PATH;
+	ret = pkm_kacs_set_file_sd_core(subject_token, &state->file,
+					KACS_SECINFO_DACL, sd, sd_len);
+out_cleanup:
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
 long pkm_kacs_kunit_corrupt_file_sd_population_twice(
 	const u8 *sd_ptr, size_t sd_len, long *first_ret_out,
 	long *second_ret_out)

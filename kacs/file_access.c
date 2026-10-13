@@ -1235,13 +1235,13 @@ long pkm_kacs_stamp_native_file_granted_access_for_subject(
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
 	if (ret)
 		return ret;
-	ret = pkm_kacs_caap_cache_lock(&caap_cache);
-	if (ret)
-		return ret;
-
+	/* Set-security takes inode_sec->lock before CAAP, never the reverse. */
 	inode_sec = pkm_kacs_inode(inode);
 	ret = pkm_kacs_inode_ensure_effective_cache(file, inode_sec);
 	if (!ret) {
+		ret = pkm_kacs_caap_cache_lock(&caap_cache);
+		if (ret)
+			return ret;
 		cache = pkm_kacs_inode_sd_cache_get_current(inode, inode_sec);
 		if (!cache) {
 			ret = -EACCES;
@@ -1276,9 +1276,9 @@ long pkm_kacs_stamp_native_file_granted_access_for_subject(
 			}
 		}
 		pkm_kacs_inode_sd_cache_free(cache);
-	}
 out_unlock_caap:
-	pkm_kacs_caap_cache_unlock();
+		pkm_kacs_caap_cache_unlock();
+	}
 	return ret;
 }
 
@@ -1327,13 +1327,13 @@ long pkm_kacs_stamp_file_granted_access_for_subject(
 	ret = pkm_kacs_current_pip_context(&pip_type, &pip_trust);
 	if (ret)
 		return ret;
-	ret = pkm_kacs_caap_cache_lock(&caap_cache);
-	if (ret)
-		return ret;
-
+	/* Set-security takes inode_sec->lock before CAAP, never the reverse. */
 	inode_sec = pkm_kacs_inode(inode);
 	ret = pkm_kacs_inode_ensure_effective_cache(file, inode_sec);
 	if (!ret) {
+		ret = pkm_kacs_caap_cache_lock(&caap_cache);
+		if (ret)
+			return ret;
 		cache = pkm_kacs_inode_sd_cache_get_current(inode, inode_sec);
 		if (!cache) {
 			ret = -EACCES;
@@ -1359,9 +1359,9 @@ long pkm_kacs_stamp_file_granted_access_for_subject(
 			}
 		}
 		pkm_kacs_inode_sd_cache_free(cache);
-	}
 out_unlock_caap:
-	pkm_kacs_caap_cache_unlock();
+		pkm_kacs_caap_cache_unlock();
+	}
 	return ret;
 }
 

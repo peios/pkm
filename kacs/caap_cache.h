@@ -13,6 +13,11 @@ void pkm_kacs_caap_cache_destroy(void);
  */
 int pkm_kacs_set_caap_internal(const void *policy_sid, u32 policy_sid_len,
 			       const void *spec, u32 spec_len);
+/*
+ * Inode security locks may precede this mutex (set-security). Callers must
+ * finish inode cache resolution before taking it; refcounted RCU reads of an
+ * already-resolved descriptor are safe while it is held.
+ */
 int pkm_kacs_caap_cache_lock(const void **cache);
 void pkm_kacs_caap_cache_unlock(void);
 size_t pkm_kacs_caap_cache_len(void);
