@@ -2140,6 +2140,13 @@ bool pkm_kacs_copy_up_allows_listxattr(const struct dentry *dentry)
 }
 
 #ifdef CONFIG_SECURITY_PKM_KUNIT
+static void pkm_kacs_kunit_init_copy_up_inode_ref(struct inode *inode)
+{
+	/* igrab/iput use i_lock even for these otherwise synthetic inodes. */
+	spin_lock_init(&inode->i_lock);
+	atomic_set(&inode->i_count, 1);
+}
+
 static void pkm_kacs_kunit_init_copy_up_dentry(
 	struct dentry *dentry, struct inode *inode, struct dentry *parent,
 	const char *name)
@@ -2462,7 +2469,7 @@ static void pkm_kunit_copy_up_exact_sd_is_installed_and_cached(
 			      sizeof(struct pkm_kacs_inode_security), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, inode_blob);
 	created_inode.i_security = inode_blob;
-	atomic_set(&created_inode.i_count, 1);
+	pkm_kacs_kunit_init_copy_up_inode_ref(&created_inode);
 	KUNIT_ASSERT_EQ(test,
 		pkm_kacs_inode_alloc_security(&created_inode), 0);
 
@@ -2586,8 +2593,8 @@ static void pkm_kunit_copy_up_stacked_tmpfile_binds_outer_inode(
 			      sizeof(struct pkm_kacs_inode_security), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, real_inode_blob);
 	real_inode.i_security = real_inode_blob;
-	atomic_set(&real_inode.i_count, 1);
-	atomic_set(&outer_inode.i_count, 1);
+	pkm_kacs_kunit_init_copy_up_inode_ref(&real_inode);
+	pkm_kacs_kunit_init_copy_up_inode_ref(&outer_inode);
 	KUNIT_ASSERT_EQ(test, pkm_kacs_inode_alloc_security(&real_inode), 0);
 
 	pkm_kacs_kunit_init_copy_up_dentry(&provider, &provider_inode, NULL,
@@ -2975,7 +2982,7 @@ static void pkm_kunit_overlay_copy_up_sd_is_installed_and_cached(
 			      sizeof(struct pkm_kacs_inode_security), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, inode_blob);
 	created_inode.i_security = inode_blob;
-	atomic_set(&created_inode.i_count, 1);
+	pkm_kacs_kunit_init_copy_up_inode_ref(&created_inode);
 	KUNIT_ASSERT_EQ(test,
 		pkm_kacs_inode_alloc_security(&created_inode), 0);
 

@@ -829,6 +829,7 @@ long pkm_kacs_kunit_check_signal_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_authorize_process_access_core(
 		args->subject_token, &target_state, args->caller_pip_type,
@@ -865,6 +866,7 @@ long pkm_kacs_kunit_check_signal_for_current(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_authorize_process_access_core(
 		subject_token, &target_state,
@@ -894,6 +896,7 @@ long pkm_kacs_kunit_check_ptrace_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_authorize_process_access_core(
 		args->subject_token, &target_state, args->caller_pip_type,
@@ -915,6 +918,7 @@ long pkm_kacs_kunit_check_ptrace_traceme_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_authorize_process_access_core(
 		args->subject_token, &target_state, args->caller_pip_type,
@@ -941,6 +945,7 @@ long pkm_kacs_kunit_check_process_setinfo_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_check_process_setinfo_core(args->subject_token,
 						   &caller_state,
@@ -967,6 +972,7 @@ long pkm_kacs_kunit_check_process_affinity_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_check_process_affinity_core(args->subject_token,
 						    &caller_state,
@@ -997,6 +1003,7 @@ long pkm_kacs_kunit_check_prlimit_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_authorize_process_access_core(
 		args->subject_token, &target_state, args->caller_pip_type,
@@ -1024,6 +1031,7 @@ long pkm_kacs_kunit_check_process_attribute_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_check_process_attribute_core(
 		args->subject_token, &caller_state, &target_state,
@@ -1048,6 +1056,7 @@ long pkm_kacs_kunit_check_perf_event_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_check_process_perf_core(args->subject_token,
 						&caller_state,

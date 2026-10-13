@@ -476,6 +476,7 @@ long pkm_kacs_kunit_open_process_token_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_open_process_token_core(
 		args->subject_token, &target_state, args->target_token,
@@ -501,6 +502,7 @@ long pkm_kacs_kunit_open_process_token_inspection_for_subject(
 	target_state.pip_type = args->target_pip_type;
 	target_state.pip_trust = args->target_pip_trust;
 	target_state.process_sd = &process_sd;
+	spin_lock_init(&target_state.mitigation_lock);
 
 	return pkm_kacs_open_process_token_inspection_core(
 		args->subject_token, &caller_state, &target_state,
