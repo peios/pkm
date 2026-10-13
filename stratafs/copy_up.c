@@ -485,6 +485,48 @@ out_relative:
 	return ret;
 }
 
+bool stratafs_kacs_deferred_target_gone(const struct file *file)
+{
+	struct dentry *outer;
+	struct path provider;
+	struct path resolved;
+	unsigned int index;
+	char *relative;
+	bool gone = false;
+	int ret;
+
+	if (!file || !file_inode(file) ||
+	    file_inode(file)->i_sb->s_magic != STRATAFS_MAGIC ||
+	    !S_ISREG(file_inode(file)->i_mode))
+		return false;
+	outer = file_dentry(file);
+	if (!outer)
+		return false;
+	relative = stratafs_inode_relative(file_inode(file));
+	if (IS_ERR(relative))
+		return false;
+	ret = stratafs_get_provider(outer, &provider, &index);
+	if (ret)
+		goto out_relative;
+	if (!d_really_is_positive(provider.dentry))
+		goto out_provider;
+	/* Do not resolve the merged name: another stratum may mask a target
+	 * which still exists in the stratum this descriptor promised to remove.
+	 */
+	ret = stratafs_resolve_one(outer->d_sb, index, relative, false, &resolved);
+	if (ret == -ENOENT || ret == -ENOTDIR) {
+		gone = true;
+	} else if (!ret) {
+		gone = d_inode(resolved.dentry) != d_inode(provider.dentry);
+		path_put(&resolved);
+	}
+out_provider:
+	path_put(&provider);
+out_relative:
+	kfree(relative);
+	return gone;
+}
+
 int stratafs_kacs_removal_parent(const struct path *outer_target,
 				  struct path *security_parent)
 {

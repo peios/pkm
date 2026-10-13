@@ -510,8 +510,18 @@ long pkm_kacs_unlink_delete_on_close_file(struct file *file)
 	 * arm and close -- would otherwise leave no record at all (PEI-588).
 	 */
 	if (ret && inode->i_sb->s_magic == STRATAFS_SUPER_MAGIC &&
-	    !task_sec->delete_on_close_stratafs_entered)
-		stratafs_kacs_audit_deferred_refusal(dentry, (int)ret);
+	    !task_sec->delete_on_close_stratafs_entered) {
+		/* The merged parent can disappear before ->unlink reaches
+		 * StrataFS's already-gone checks. Classify that as a no-op only
+		 * after confirming the descriptor's original backing name is
+		 * gone; a merged ancestor masking a live target remains a failure.
+		 */
+		if ((ret == -ENOENT || ret == -ENOTDIR) &&
+		    stratafs_kacs_deferred_target_gone(file))
+			ret = 0;
+		if (ret)
+			stratafs_kacs_audit_deferred_refusal(dentry, (int)ret);
+	}
 #endif
 	task_sec->delete_on_close_inode = NULL;
 	task_sec->delete_on_close_dentry = NULL;
