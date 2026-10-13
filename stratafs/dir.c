@@ -11,6 +11,9 @@
 #include <linux/namei.h>
 #include <linux/pagemap.h>
 #include <pkm/file.h>
+#ifdef CONFIG_STRATAFS_KUNIT_TEST
+#include <kunit/test.h>
+#endif
 
 #include "stratafs.h"
 #include "dir_cache.h"
@@ -1269,7 +1272,7 @@ static int stratafs_supersede_rename(struct dentry *old_dentry,
 	struct qstr new_q = new_dentry->d_name;
 	struct dentry *remove_target;
 	unsigned int target_index;
-	bool removed = false;
+	bool published = false;
 	bool target_write_held = false;
 	bool create_write_held = false;
 	char *new_drelative = NULL;
@@ -1325,7 +1328,7 @@ static int stratafs_supersede_rename(struct dentry *old_dentry,
 		goto out_target;
 	}
 
-	/* A target outside the create stratum is the removal half. */
+	/* Prepare the removal half without changing the original name. */
 	if (target_index != source_index) {
 		ret = stratafs_resolve_one(new_dentry->d_sb, target_index,
 					   new_parent_info->relative, true,
@@ -1335,43 +1338,17 @@ static int stratafs_supersede_rename(struct dentry *old_dentry,
 		ret = mnt_want_write(target_parent.mnt);
 		if (ret)
 			goto out_target_parent;
-		target_write_held = true;
-		new_q.hash = full_name_hash(target_parent.dentry, new_q.name,
-					    new_q.len);
-		remove_target = start_removing(mnt_idmap(target_parent.mnt),
-					       target_parent.dentry, &new_q);
-		if (IS_ERR(remove_target)) {
-			ret = PTR_ERR(remove_target);
-			goto out_target_parent;
-		}
-		if (d_inode(remove_target) != d_inode(target.dentry)) {
-			ret = -ESTALE;
-			goto out_remove;
-		}
-		ret = pkm_kacs_stratafs_begin_supersede_unlink(
-			d_inode(target_parent.dentry), remove_target);
-		if (!ret)
-			ret = vfs_unlink(mnt_idmap(target_parent.mnt),
-					 d_inode(target_parent.dentry),
-					 remove_target, NULL);
-		pkm_kacs_stratafs_end_supersede_phase();
-		if (!ret)
-			removed = true;
-out_remove:
-		end_removing(remove_target);
-		if (ret)
-			goto out_target_parent;
+		/* Probe for an early EROFS, but do not nest freeze protection
+		 * across providers: both mounts may share one superblock.
+		 */
 		mnt_drop_write(target_parent.mnt);
-		target_write_held = false;
-		path_put(&target_parent);
-		memset(&target_parent, 0, sizeof(target_parent));
 	}
 
 	ret = stratafs_resolve_one(old_dentry->d_sb, source_index,
 				   old_parent_info->relative, true,
 				   &create_parent);
 	if (ret)
-		goto out_after_remove;
+		goto out_after_publish;
 	if (!d_is_dir(create_parent.dentry) ||
 	    create_parent.mnt != source->mnt) {
 		ret = -EXDEV;
@@ -1398,13 +1375,68 @@ out_remove:
 		ret = -ESTALE;
 		goto out_rename;
 	}
+	ret = stratafs_test_hook(STRATAFS_HOOK_SUPERSEDE_PUBLISH);
+	if (ret)
+		goto out_rename;
 	ret = pkm_kacs_stratafs_begin_supersede_rename(
 		d_inode(rd.old_parent), rd.old_dentry,
 		d_inode(rd.new_parent), rd.new_dentry);
 	if (!ret)
 		ret = vfs_rename(&rd);
 	pkm_kacs_stratafs_end_supersede_phase();
-	if (!ret) {
+	published = !ret;
+out_rename:
+	end_renaming(&rd);
+out_create_parent:
+	if (create_write_held)
+		mnt_drop_write(create_parent.mnt);
+	path_put(&create_parent);
+	if (!ret && target_index != source_index) {
+		/* Never hold two provider directory locks at once. The new name
+		 * exists before the old provider is removed; either may win in
+		 * the merged view while both exist, according to stratum order.
+		 */
+		ret = stratafs_test_hook(STRATAFS_HOOK_SUPERSEDE_REMOVE);
+		if (ret)
+			goto out_after_publish;
+		ret = mnt_want_write(target_parent.mnt);
+		if (ret)
+			goto out_after_publish;
+		target_write_held = true;
+		new_q.hash = full_name_hash(target_parent.dentry, new_q.name,
+					    new_q.len);
+		remove_target = start_removing(mnt_idmap(target_parent.mnt),
+					       target_parent.dentry, &new_q);
+		if (IS_ERR(remove_target)) {
+			ret = PTR_ERR(remove_target);
+			goto out_after_publish;
+		}
+		if (d_inode(remove_target) != d_inode(target.dentry)) {
+			ret = -ESTALE;
+			goto out_remove;
+		}
+		ret = pkm_kacs_stratafs_begin_supersede_unlink(
+			d_inode(target_parent.dentry), remove_target);
+		if (!ret)
+			ret = vfs_unlink(mnt_idmap(target_parent.mnt),
+					 d_inode(target_parent.dentry),
+					 remove_target, NULL);
+		pkm_kacs_stratafs_end_supersede_phase();
+out_remove:
+		end_removing(remove_target);
+	}
+out_after_publish:
+	if (ret && published) {
+		stratafs_audit_refusal(new_dentry, "supersede-removal",
+					 target_index, ret, false);
+		pr_warn_ratelimited(
+			"stratafs: supersede published replacement but could not remove provider: %d\n",
+			ret);
+	}
+	/* On a later removal error, native-open cleanup must follow the
+	 * published object, not try to remove its now-absent temporary name.
+	 */
+	if (published) {
 		char *old_drelative;
 		char *old_irelative;
 
@@ -1425,21 +1457,6 @@ out_remove:
 					  &outer_irelative);
 		d_move(old_dentry, new_dentry);
 	}
-out_rename:
-	end_renaming(&rd);
-out_create_parent:
-	if (create_write_held)
-		mnt_drop_write(create_parent.mnt);
-	path_put(&create_parent);
-out_after_remove:
-	/* A lower-filesystem publication failure after removal is reported. */
-	if (ret && removed) {
-		stratafs_audit_refusal(new_dentry, "supersede-publication",
-					 target_index, ret, false);
-		pr_warn_ratelimited(
-			"stratafs: supersede removed provider but could not publish replacement: %d\n",
-			ret);
-	}
 out_target_parent:
 	if (target_write_held)
 		mnt_drop_write(target_parent.mnt);
@@ -1452,11 +1469,96 @@ out_relative:
 	kfree(new_irelative);
 	kfree(outer_drelative);
 	kfree(outer_irelative);
-	if (stratafs_arrangement_error(ret) && !removed)
+	if (stratafs_arrangement_error(ret) && !published)
 		stratafs_audit_refusal(new_dentry, "supersede",
 					 source_index, ret, false);
 	return ret;
 }
+
+#ifdef CONFIG_STRATAFS_KUNIT_TEST
+/* Native open constructs a same-parent create-stratum source itself. Drive
+ * the internal rename entry directly to check its defensive boundary too.
+ */
+static void stratafs_kunit_supersede_source_and_parent_guards(struct kunit *test)
+{
+	struct supersede_fixture {
+		struct super_block merged_sb;
+		struct super_block backing_sb;
+		struct stratafs_sb_info sbi;
+		struct inode parent_inode[2];
+		struct stratafs_inode_info parent_info[2];
+		struct dentry parent[2];
+		struct inode outer_inode;
+		struct stratafs_inode_info outer_info;
+		struct inode backing_inode;
+		struct dentry old;
+		struct dentry new;
+		struct dentry backing;
+		struct stratafs_dentry_info old_info;
+		struct stratafs_dentry_info new_info;
+		struct vfsmount mnt;
+		struct path source;
+	} *f;
+	unsigned int i;
+
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->merged_sb.s_fs_info = &f->sbi;
+	f->sbi.count = 2;
+	f->sbi.create_index = 1;
+	f->sbi.strata[0].path = "/original";
+	f->sbi.strata[1].path = "/create";
+	f->sbi.strata[1].flags = STRATAFS_F_CREATE;
+	for (i = 0; i < ARRAY_SIZE(f->parent); i++) {
+		f->parent_inode[i].i_private = &f->parent_info[i];
+		f->parent[i].d_inode = &f->parent_inode[i];
+		f->parent[i].d_sb = &f->merged_sb;
+	}
+	f->outer_inode.i_private = &f->outer_info;
+	f->old.d_inode = &f->outer_inode;
+	f->old.d_parent = &f->parent[0];
+	f->new.d_parent = &f->parent[0];
+	f->old.d_sb = &f->merged_sb;
+	f->new.d_sb = &f->merged_sb;
+	f->old.d_fsdata = &f->old_info;
+	f->new.d_fsdata = &f->new_info;
+	f->old_info.relative = "dir/stage";
+	f->new_info.relative = "dir/f";
+	spin_lock_init(&f->new.d_lock);
+	f->backing.d_inode = &f->backing_inode;
+	f->mnt.mnt_sb = &f->backing_sb;
+	f->source.mnt = &f->mnt;
+	f->source.dentry = &f->backing;
+
+	KUNIT_EXPECT_EQ(test, stratafs_supersede_rename(
+		&f->old, &f->new, &f->source, 0), -EROFS);
+	f->sbi.strata[1].flags |= STRATAFS_F_RO;
+	KUNIT_EXPECT_EQ(test, stratafs_supersede_rename(
+		&f->old, &f->new, &f->source, 1), -EROFS);
+	f->sbi.strata[1].flags &= ~STRATAFS_F_RO;
+	f->new.d_parent = &f->parent[1];
+	KUNIT_EXPECT_EQ(test, stratafs_supersede_rename(
+		&f->old, &f->new, &f->source, 1), -EXDEV);
+	f->new.d_parent = &f->parent[0];
+	/* Valid arrangement reaches the next, independent requirement: an
+	 * active native-open supersede context. Nothing can mutate here.
+	 */
+	KUNIT_EXPECT_EQ(test, stratafs_supersede_rename(
+		&f->old, &f->new, &f->source, 1), -EACCES);
+}
+
+static struct kunit_case stratafs_supersede_cases[] = {
+	KUNIT_CASE(stratafs_kunit_supersede_source_and_parent_guards),
+	{}
+};
+
+static struct kunit_suite stratafs_supersede_suite = {
+	.name = "stratafs_supersede",
+	.test_cases = stratafs_supersede_cases,
+};
+
+kunit_test_suite(stratafs_supersede_suite);
+#endif
 
 static int stratafs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 			   struct dentry *old_dentry, struct inode *new_dir,
@@ -1556,7 +1658,11 @@ static int stratafs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	ret = mnt_want_write(old_parent.mnt);
 	if (ret)
 		goto out_new_parent;
-	write_held = true;
+	/* Preserve the early read-only refusal, then release freeze
+	 * protection before merged_empty can recover an orphan in the
+	 * create stratum (possibly on this same backing superblock).
+	 */
+	mnt_drop_write(old_parent.mnt);
 	if (d_is_dir(old_dentry)) {
 		ret = stratafs_directory_provider_only(old_dentry, provider_index);
 		if (ret)
@@ -1608,6 +1714,10 @@ static int stratafs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 		}
 	}
 
+	ret = mnt_want_write(old_parent.mnt);
+	if (ret)
+		goto out_new_parent;
+	write_held = true;
 	old_q.hash = full_name_hash(old_parent.dentry, old_q.name, old_q.len);
 	new_q.hash = full_name_hash(new_parent.dentry, new_q.name, new_q.len);
 	rd.mnt_idmap = mnt_idmap(old_parent.mnt);

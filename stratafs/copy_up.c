@@ -90,6 +90,9 @@ static void stratafs_recover_one(struct super_block *sb,
 	    stratafs_stage_owner_live(le64_to_cpu(marker.boot_cookie),
 				      le64_to_cpu(marker.mount_cookie)))
 		goto out_victim;
+	ret = stratafs_test_hook(STRATAFS_HOOK_STAGING_RECOVER);
+	if (ret)
+		goto out_victim;
 	ret = mnt_want_write(parent->mnt);
 	if (ret)
 		goto out_victim;
