@@ -2707,6 +2707,7 @@ int pkm_kacs_kunit_file_sd_cache_cas_loser(
 	}
 
 	sec = pkm_kacs_inode(&state.inode);
+	mutex_lock(&sec->lock);
 	first_installed =
 		pkm_kacs_inode_try_publish_sd_cache(sec, NULL, first_cache);
 	if (first_installed)
@@ -2724,6 +2725,7 @@ int pkm_kacs_kunit_file_sd_cache_cas_loser(
 	*first_installed_out = first_installed ? 1U : 0U;
 	*second_installed_out = second_installed ? 1U : 0U;
 	*live_len_out = live_cache ? live_cache->len : 0;
+	mutex_unlock(&sec->lock);
 	ret = 0;
 
 out:
@@ -2810,6 +2812,10 @@ static int pkm_kacs_kunit_init_file_mount_state_ex(
 	if (ret)
 		goto out_err;
 
+	/* Retain one fixture reference; synthesis takes temporary parent refs. */
+	spin_lock_init(&state->dentry.d_lock);
+	seqcount_spinlock_init(&state->dentry.d_seq, &state->dentry.d_lock);
+	state->dentry.d_lockref.count = 1;
 	state->dentry.d_inode = &state->inode;
 	state->dentry.d_parent = &state->dentry;
 	if (S_ISDIR(mode))

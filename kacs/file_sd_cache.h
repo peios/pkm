@@ -26,6 +26,7 @@ bool pkm_kacs_inode_try_publish_sd_cache(
 long pkm_kacs_missing_file_sd_policy_result(
 	const struct super_block *sb,
 	struct pkm_kacs_inode_sd_cache **cache_out);
+/* May drop and reacquire sec->lock; returns with it held and cache protected. */
 long pkm_kacs_inode_resolve_effective_cache_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
 	struct pkm_kacs_inode_sd_cache **cache_out, unsigned int depth);
