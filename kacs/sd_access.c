@@ -926,8 +926,10 @@ long pkm_kacs_query_file_sd_core(const void *subject_token,
 			const void *caap_cache = NULL;
 
 			ret = pkm_kacs_caap_cache_lock(&caap_cache);
-			if (ret)
+			if (ret) {
+				pkm_kacs_inode_sd_cache_free(cache);
 				return ret;
+			}
 			ret = pkm_kacs_query_file_sd_bytes_core(subject_token,
 								cache,
 								security_info,
