@@ -25,6 +25,7 @@
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/overflow.h>
+#include <linux/pagemap.h>
 #include <linux/plist.h>
 #include <linux/preempt.h>
 #include <linux/refcount.h>
@@ -2532,18 +2533,50 @@ static int pkm_kmes_map_vmalloc_page_range(struct vm_area_struct *vma,
 	return pkm_kmes_map_page_range(vma, addr, page, prot);
 }
 
-static unsigned long pkm_kmes_fd_mmap_locked_flags(unsigned long flags)
+/* vm_pgoff follows the original mapping through VMA splits and moves. */
+static bool pkm_kmes_consumer_range(unsigned long pgoff,
+				    unsigned long start, unsigned long end)
 {
-	return flags & ~(VM_WRITE | VM_MAYWRITE);
+	unsigned long consumer;
+
+	if (pgoff > 1 || start >= end)
+		return false;
+	consumer = (1 - pgoff) << PAGE_SHIFT;
+	return start >= consumer && end <= consumer + PAGE_SIZE;
 }
 
-static void pkm_kmes_fd_mmap_lock_read_only_regions(struct vm_area_struct *vma)
+static int pkm_kmes_fd_mprotect(struct vm_area_struct *vma,
+			       unsigned long start, unsigned long end,
+			       unsigned long newflags)
 {
-	unsigned long locked_flags =
-		pkm_kmes_fd_mmap_locked_flags(vma->vm_flags);
-
-	vm_flags_clear(vma, vma->vm_flags & ~locked_flags);
+	if (!(newflags & VM_WRITE))
+		return 0;
+	return pkm_kmes_consumer_range(vma->vm_pgoff, start - vma->vm_start,
+				       end - vma->vm_start) ? 0 : -EACCES;
 }
+
+/* Keeping VM_WRITE for the consumer also permits write faults elsewhere in
+ * this mixed VMA. Reject those faults before MM can upgrade a protected PTE.
+ */
+static vm_fault_t pkm_kmes_fd_page_mkwrite(struct vm_fault *vmf)
+{
+	if (vmf->pgoff != 1)
+		return VM_FAULT_SIGBUS;
+	lock_page(vmf->page);
+	return VM_FAULT_LOCKED;
+}
+
+static vm_fault_t pkm_kmes_fd_pfn_mkwrite(struct vm_fault *vmf)
+{
+	/* Every KMES page is inserted as a normal, refcounted struct page. */
+	return VM_FAULT_SIGBUS;
+}
+
+static const struct vm_operations_struct pkm_kmes_vm_ops = {
+	.mprotect = pkm_kmes_fd_mprotect,
+	.page_mkwrite = pkm_kmes_fd_page_mkwrite,
+	.pfn_mkwrite = pkm_kmes_fd_pfn_mkwrite,
+};
 
 static int pkm_kmes_fd_mmap(struct file *file, struct vm_area_struct *vma)
 {
@@ -2571,7 +2604,7 @@ static int pkm_kmes_fd_mmap(struct file *file, struct vm_area_struct *vma)
 	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP | VM_MIXEDMAP);
 	rw_prot = vma->vm_page_prot;
 	ro_prot = vm_get_page_prot(vma->vm_flags & ~VM_WRITE);
-	pkm_kmes_fd_mmap_lock_read_only_regions(vma);
+	vma->vm_ops = &pkm_kmes_vm_ops;
 
 	addr = vma->vm_start;
 	ret = pkm_kmes_map_page_range(vma, addr, cpu->producer_meta_page,
@@ -3854,9 +3887,10 @@ long pkm_kmes_kunit_emit_batch_for_token(const void *token,
 					 emitted_out, false);
 }
 
-unsigned long pkm_kmes_kunit_mmap_locked_flags(unsigned long initial_flags)
+bool pkm_kmes_kunit_consumer_range(unsigned long pgoff,
+				  unsigned long start, unsigned long end)
 {
-	return pkm_kmes_fd_mmap_locked_flags(initial_flags);
+	return pkm_kmes_consumer_range(pgoff, start, end);
 }
 
 int pkm_kmes_kunit_runtime_config_snapshot(

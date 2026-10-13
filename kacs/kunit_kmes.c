@@ -433,20 +433,25 @@ static void pkm_kunit_kmes_attach_repeated_same_cpu_shares_consumer_metadata(
 }
 
 
-static void pkm_kunit_kmes_mmap_clears_write_upgrade(struct kunit *test)
+static void pkm_kunit_kmes_mmap_consumer_range_survives_splits(struct kunit *test)
 {
-	unsigned long initial_flags = VM_SHARED | VM_READ | VM_WRITE |
-				      VM_MAYREAD | VM_MAYWRITE;
-	unsigned long locked_flags =
-		pkm_kmes_kunit_mmap_locked_flags(initial_flags);
-
-	KUNIT_EXPECT_FALSE(test, locked_flags & VM_WRITE);
-	KUNIT_EXPECT_FALSE(test, locked_flags & VM_MAYWRITE);
-	KUNIT_EXPECT_TRUE(test, locked_flags & VM_SHARED);
-	KUNIT_EXPECT_TRUE(test, locked_flags & VM_READ);
-	KUNIT_EXPECT_TRUE(test, locked_flags & VM_MAYREAD);
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kmes_kunit_consumer_range(0, PAGE_SIZE, 2 * PAGE_SIZE));
+	KUNIT_EXPECT_TRUE(test,
+		pkm_kmes_kunit_consumer_range(1, 0, PAGE_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kmes_kunit_consumer_range(0, 0, PAGE_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kmes_kunit_consumer_range(0, 0, 2 * PAGE_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kmes_kunit_consumer_range(0, PAGE_SIZE, 3 * PAGE_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kmes_kunit_consumer_range(1, PAGE_SIZE, 2 * PAGE_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kmes_kunit_consumer_range(2, 0, PAGE_SIZE));
+	KUNIT_EXPECT_FALSE(test,
+		pkm_kmes_kunit_consumer_range(ULONG_MAX, 0, PAGE_SIZE));
 }
-
 
 static void pkm_kunit_kmes_attach_einval_on_out_of_range_cpu(
 	struct kunit *test)
@@ -2356,7 +2361,7 @@ static struct kunit_case pkm_kunit_kmes_cases[] = {
 	KUNIT_CASE(pkm_kunit_kmes_direct_invalid_type_drops_structurally),
 	KUNIT_CASE(pkm_kunit_kmes_attach_success_returns_cpu_fds),
 	KUNIT_CASE(pkm_kunit_kmes_attach_repeated_same_cpu_shares_consumer_metadata),
-	KUNIT_CASE(pkm_kunit_kmes_mmap_clears_write_upgrade),
+	KUNIT_CASE(pkm_kunit_kmes_mmap_consumer_range_survives_splits),
 	KUNIT_CASE(pkm_kunit_kmes_attach_einval_on_out_of_range_cpu),
 	KUNIT_CASE(pkm_kunit_kmes_slot_count_query_reports_the_array_size),
 	KUNIT_CASE(pkm_kunit_kmes_slot_count_query_denies_without_security),
