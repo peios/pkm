@@ -167,6 +167,8 @@ struct pkm_lcs_kunit_walk_source_script {
 
 
 struct pkm_lcs_kunit_read_key_source_script {
+	/* Optional entry handshake for scripts expected to receive no request. */
+	struct completion *started;
 	struct file *file;
 	const u8 *expected_guid;
 	const char *name;
