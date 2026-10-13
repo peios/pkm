@@ -8,6 +8,16 @@
 #include <linux/random.h>
 #include <linux/xattr.h>
 
+#ifdef CONFIG_STRATAFS_KUNIT_TEST
+#include <kunit/test.h>
+#include <linux/completion.h>
+#include <linux/debug_locks.h>
+#include <linux/delay.h>
+#include <linux/fs/super.h>
+#include <linux/kthread.h>
+#include <linux/shmem_fs.h>
+#endif
+
 #include "../internal.h"
 #include "stratafs.h"
 
@@ -971,6 +981,26 @@ static int stratafs_copy_regular_contents(
 	return ret;
 }
 
+/* Content I/O performs its own checks and acquires its own freeze protection. */
+static int
+stratafs_populate_regular_stage(struct pkm_kacs_stratafs_copy_up *context,
+				const struct path *source, const struct path *stage,
+				struct file *source_file, bool *write_held)
+{
+	int ret;
+
+	/* rw_verify_area's pre-content notification must also run unfrozen. */
+	mnt_drop_write(stage->mnt);
+	*write_held = false;
+	ret = stratafs_copy_regular_contents(context, source, stage, source_file);
+	if (ret)
+		return ret;
+	ret = mnt_want_write(stage->mnt);
+	if (!ret)
+		*write_held = true;
+	return ret;
+}
+
 static int stratafs_copy_one_xattr(
 	struct super_block *sb, struct pkm_kacs_stratafs_copy_up *context,
 	const struct path *source, const struct path *stage, const char *name)
@@ -1709,8 +1739,8 @@ static int stratafs_copy_up_regular(
 	ret = pkm_kacs_stratafs_copy_up_bind_staging(context, &stage);
 	if (ret)
 		goto out_stage;
-	ret = stratafs_copy_regular_contents(context, &source, &stage,
-					      source_file);
+	ret = stratafs_populate_regular_stage(context, &source, &stage,
+					      source_file, &write_held);
 	if (ret)
 		goto out_stage;
 	ret = stratafs_copy_xattrs(dentry->d_sb, context, &source, &stage);
@@ -1872,3 +1902,241 @@ out_audit:
 	kfree(relative);
 	return ret;
 }
+
+#ifdef CONFIG_STRATAFS_KUNIT_TEST
+struct stratafs_copy_fixture {
+	struct vfsmount *mnt;
+	struct file *source;
+	struct file *stage;
+	struct pkm_kacs_stratafs_copy_up *context;
+	bool write_held;
+};
+
+static const char stratafs_copy_test_data[] = "copy-up source bytes";
+
+static void stratafs_copy_fixture_release(struct stratafs_copy_fixture *f)
+{
+	if (f->write_held) {
+		mnt_drop_write(f->mnt);
+		f->write_held = false;
+	}
+	if (!IS_ERR_OR_NULL(f->context)) {
+		stratafs_copy_context_finish(f->context);
+		f->context = NULL;
+	}
+}
+
+static void stratafs_copy_fixture_cleanup(void *data)
+{
+	struct stratafs_copy_fixture *f = data;
+
+	stratafs_copy_fixture_release(f);
+	if (!IS_ERR_OR_NULL(f->stage))
+		fput(f->stage);
+	if (!IS_ERR_OR_NULL(f->source))
+		fput(f->source);
+	if (!IS_ERR_OR_NULL(f->mnt))
+		kern_unmount(f->mnt);
+}
+
+static struct stratafs_copy_fixture *stratafs_copy_fixture(struct kunit *test)
+{
+	/* SYSTEM owner, NULL DACL, confined to this private test filesystem. */
+	static const u8 sd[] = {
+		1, 0, 0, 128, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0,
+	};
+	struct stratafs_copy_fixture *f;
+	struct file_system_type *type;
+	struct path parent;
+	struct inode *inode;
+	loff_t position = 0;
+	ssize_t written;
+	int ret;
+
+	f = kunit_kzalloc(test, sizeof(*f), GFP_KERNEL);
+	if (!f)
+		return NULL;
+	if (kunit_add_action_or_reset(test, stratafs_copy_fixture_cleanup, f))
+		return NULL;
+	type = get_fs_type("tmpfs");
+	if (!type)
+		return NULL;
+	f->mnt = vfs_kern_mount(type, 0, "tmpfs", NULL);
+	put_filesystem(type);
+	if (IS_ERR(f->mnt))
+		return ERR_CAST(f->mnt);
+	f->source = shmem_file_setup_with_mnt(f->mnt, "copy-up-source", 0,
+					      EMPTY_VMA_FLAGS);
+	if (IS_ERR(f->source))
+		return ERR_CAST(f->source);
+	/* Provision the descriptor before any descriptor cache can be filled. */
+	inode = file_inode(f->source);
+	inode_lock(inode);
+	ret = __vfs_setxattr(mnt_idmap(f->mnt), f->source->f_path.dentry,
+			     inode, "security.peios.sd", sd, sizeof(sd), 0);
+	inode_unlock(inode);
+	if (ret)
+		return ERR_PTR(ret);
+	written = kernel_write(f->source, stratafs_copy_test_data,
+			       sizeof(stratafs_copy_test_data), &position);
+	if (written != sizeof(stratafs_copy_test_data))
+		return NULL;
+	f->context = pkm_kacs_stratafs_copy_up_begin(&f->source->f_path);
+	if (IS_ERR(f->context))
+		return ERR_CAST(f->context);
+	ret = mnt_want_write(f->mnt);
+	if (ret)
+		return ERR_PTR(ret);
+	f->write_held = true;
+	parent.mnt = f->mnt;
+	parent.dentry = f->mnt->mnt_root;
+	ret = pkm_kacs_stratafs_copy_up_begin_anonymous_create(f->context,
+							       &f->source->f_path, &parent,
+							       S_IFREG | 0600);
+	if (ret)
+		goto out_release;
+	f->stage = kernel_tmpfile_open(mnt_idmap(f->mnt), &parent,
+				       S_IFREG | 0600, O_RDWR | O_LARGEFILE, current_cred());
+	pkm_kacs_stratafs_copy_up_end_phase(f->context);
+	if (IS_ERR(f->stage)) {
+		ret = PTR_ERR(f->stage);
+		goto out_release;
+	}
+	ret = pkm_kacs_stratafs_copy_up_bind_staging(f->context, &f->stage->f_path);
+	if (ret)
+		goto out_release;
+	mnt_drop_write(f->mnt);
+	f->write_held = false;
+	return f;
+
+out_release:
+	stratafs_copy_fixture_release(f);
+	return ERR_PTR(ret);
+}
+
+static void stratafs_copy_expect_contents(struct kunit *test,
+					  struct stratafs_copy_fixture *f)
+{
+	char result[sizeof(stratafs_copy_test_data)] = {};
+	loff_t position = 0;
+	ssize_t ret;
+
+	/* Inspect the internal staging file, whose copy-up phase is now over. */
+	ret = __kernel_read(f->stage, result, sizeof(result), &position);
+	KUNIT_EXPECT_EQ(test, ret, (ssize_t)sizeof(result));
+	KUNIT_EXPECT_MEMEQ(test, result, stratafs_copy_test_data, sizeof(result));
+}
+
+static void stratafs_kunit_copy_contents_releases_writer(struct kunit *test)
+{
+	struct stratafs_copy_fixture *f;
+	int ret;
+
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))
+		KUNIT_ASSERT_TRUE(test, debug_locks);
+	f = stratafs_copy_fixture(test);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, f);
+	KUNIT_ASSERT_EQ(test, mnt_want_write(f->mnt), 0);
+	f->write_held = true;
+	ret = stratafs_populate_regular_stage(f->context, &f->source->f_path,
+					      &f->stage->f_path, f->source, &f->write_held);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_TRUE(test, f->write_held);
+	/* KUnit's managed cleanup runs after the test thread exits. */
+	stratafs_copy_fixture_release(f);
+	stratafs_copy_expect_contents(test, f);
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))
+		KUNIT_EXPECT_TRUE(test, debug_locks);
+}
+
+struct stratafs_copy_freezer {
+	struct super_block *sb;
+	struct completion done;
+	int frozen;
+	int thawed;
+};
+
+static int stratafs_copy_freeze_thread(void *data)
+{
+	struct stratafs_copy_freezer *f = data;
+
+	f->frozen = freeze_super(f->sb, FREEZE_HOLDER_KERNEL, NULL);
+	if (!f->frozen)
+		f->thawed = thaw_super(f->sb, FREEZE_HOLDER_KERNEL, NULL);
+	complete(&f->done);
+	/* Keep the task alive until its owner joins it with kthread_stop(). */
+	while (!kthread_should_stop())
+		schedule_timeout_interruptible(HZ);
+	return 0;
+}
+
+static void stratafs_kunit_copy_contents_with_pending_freezer(struct kunit *test)
+{
+	struct stratafs_copy_fixture *f;
+	struct stratafs_copy_freezer freezer = {};
+	struct task_struct *thread;
+	struct percpu_rw_semaphore *writers;
+	unsigned long deadline;
+	bool pending;
+	int ret = -EAGAIN;
+
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))
+		KUNIT_ASSERT_TRUE(test, debug_locks);
+	f = stratafs_copy_fixture(test);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, f);
+	freezer.sb = f->mnt->mnt_sb;
+	init_completion(&freezer.done);
+	writers = &freezer.sb->s_writers.rw_sem[SB_FREEZE_WRITE - 1];
+	KUNIT_ASSERT_EQ(test, mnt_want_write(f->mnt), 0);
+	f->write_held = true;
+	thread = kthread_run(stratafs_copy_freeze_thread, &freezer,
+			     "stratafs-freeze");
+	if (IS_ERR(thread)) {
+		stratafs_copy_fixture_release(f);
+		KUNIT_FAIL(test, "cannot start freezer: %ld", PTR_ERR(thread));
+		return;
+	}
+	/* Observe the actual writer barrier, not an arbitrary scheduling delay. */
+	deadline = jiffies + 5 * HZ;
+	while (!atomic_read(&writers->block) && time_before(jiffies, deadline))
+		usleep_range(1000, 2000);
+	pending = atomic_read(&writers->block) != 0;
+	KUNIT_EXPECT_TRUE(test, pending);
+	if (pending) {
+		KUNIT_EXPECT_FALSE(test, completion_done(&freezer.done));
+		ret = stratafs_populate_regular_stage(f->context,
+						      &f->source->f_path,
+						      &f->stage->f_path, f->source,
+						      &f->write_held);
+	}
+	if (f->write_held) {
+		mnt_drop_write(f->mnt);
+		f->write_held = false;
+	}
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_NE(test, wait_for_completion_timeout(&freezer.done, 5 * HZ),
+			0UL);
+	kthread_stop(thread);
+	stratafs_copy_fixture_release(f);
+	KUNIT_EXPECT_EQ(test, freezer.frozen, 0);
+	KUNIT_EXPECT_EQ(test, freezer.thawed, 0);
+	KUNIT_EXPECT_EQ(test, freezer.sb->s_writers.frozen, SB_UNFROZEN);
+	stratafs_copy_expect_contents(test, f);
+	if (IS_ENABLED(CONFIG_PROVE_LOCKING))
+		KUNIT_EXPECT_TRUE(test, debug_locks);
+}
+
+static struct kunit_case stratafs_copy_contents_cases[] = {
+	KUNIT_CASE(stratafs_kunit_copy_contents_releases_writer),
+	KUNIT_CASE(stratafs_kunit_copy_contents_with_pending_freezer),
+	{}
+};
+
+static struct kunit_suite stratafs_copy_contents_suite = {
+	.name = "stratafs_copy_contents",
+	.test_cases = stratafs_copy_contents_cases,
+};
+
+kunit_test_suite(stratafs_copy_contents_suite);
+#endif
