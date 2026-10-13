@@ -1936,6 +1936,8 @@ static long pkm_kacs_kunit_create_live_file(const void *subject_token,
 		goto out_end_create;
 	}
 
+	/* The open file pins its path; kernel_write takes its own writer. */
+	end_creating_path(&parent_path, dentry);
 	written = kernel_write(file, payload, sizeof(payload) - 1, &pos);
 	if (written != sizeof(payload) - 1) {
 		ret = written < 0 ? written : -EIO;
@@ -1953,14 +1955,16 @@ static long pkm_kacs_kunit_create_live_file(const void *subject_token,
 		*size_out = (u64)i_size_read(inode);
 	*file_out = file;
 	ret = 0;
-	goto out_end_create;
+	goto out_free_sd;
 
 out_file:
 	fput(file);
 	flush_delayed_fput();
+	goto out_free_sd;
 out_end_create:
 	pkm_kacs_clear_current_native_create_request();
 	end_creating_path(&parent_path, dentry);
+out_free_sd:
 	if (created_sd)
 		pkm_kacs_free((void *)created_sd);
 	return ret;
