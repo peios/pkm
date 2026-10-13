@@ -3,6 +3,7 @@
 #include "kunit_common.h"
 
 #include <kunit/resource.h>
+#include <linux/debug_locks.h>
 
 
 static void pkm_lcs_kunit_transaction_watch_burst_over_limit_overflows_once(
@@ -235,6 +236,9 @@ static void pkm_lcs_kunit_transaction_timeout_marks_timed_out(
 	struct pkm_lcs_transaction_fd_snapshot snapshot = { };
 	long fd;
 
+#ifdef CONFIG_PROVE_LOCKING
+	KUNIT_ASSERT_TRUE(test, debug_locks);
+#endif
 	fd = pkm_lcs_transaction_fd_publish(1);
 	KUNIT_ASSERT_TRUE(test, fd >= 0);
 
@@ -247,6 +251,9 @@ static void pkm_lcs_kunit_transaction_timeout_marks_timed_out(
 	KUNIT_EXPECT_FALSE(test, snapshot.timer_pending);
 
 	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+#ifdef CONFIG_PROVE_LOCKING
+	KUNIT_EXPECT_TRUE(test, debug_locks);
+#endif
 }
 
 
