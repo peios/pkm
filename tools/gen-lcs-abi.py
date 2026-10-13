@@ -20,13 +20,13 @@ import tempfile
 import pathlib
 import textwrap
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-UAPI = ROOT / "pkm" / "uapi"
+from appendix_paths import PKM, LEARN, learn_is_absent
+UAPI = PKM / "uapi"
 HDR = UAPI / "pkm" / "lcs.h"
 TRACE_H = UAPI / "pkm" / "trace.h"
 SYSCALL_H = UAPI / "pkm" / "syscall.h"
-LCS_SRC = ROOT / "pkm" / "lcs"
-OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
+LCS_SRC = PKM / "lcs"
+OUT = (LEARN / "peios.product/3--advanced-peios.antho/300--trms.shelf"
        / "100--peios-kernel.book/5--lcs/a1--lcs-abi.md")
 
 # The page's own identity, not prose about the ABI. learn CI fails a deploy
@@ -474,17 +474,6 @@ def build():
     text = "\n".join(o).rstrip() + "\n"
     return re.sub(r"\n{3,}", "\n\n", text)
 
-
-
-def learn_is_absent():
-    """True when there is no learn/ checkout beside pkm/ to write into.
-
-    The appendices live in a sibling repository. A pkm checkout on its own
-    is a legitimate state, and so is a build container that mounts only
-    pkm/ -- neither is drift, and reporting it as drift is a false alarm
-    that trains people to ignore the gate.
-    """
-    return not OUT.parent.exists()
 
 
 def main():

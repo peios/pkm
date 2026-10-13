@@ -437,6 +437,23 @@ git config core.hooksPath .githooks
 Bypass deliberately with `git push --no-verify`. This is local fast-feedback —
 the authoritative gates are `pekit verify uapi` and `pekit test uapi` in CI.
 
+The hook also checks the four generated TRM appendices when their source
+inputs change. The generators always read this checkout's kernel sources;
+its directory need not be named `pkm`. Documentation defaults to a sibling
+`learn/` checkout. For a differently named companion worktree, set
+`PKM_LEARN_ROOT` for the generator or push:
+
+```sh
+PKM_LEARN_ROOT=/path/to/docs-worktree python3 tools/gen-kacs-abi.py --check
+PKM_LEARN_ROOT=/path/to/docs-worktree git push
+```
+
+The same setting applies to `gen-lcs-abi.py`, `gen-ntfe-abi.py` and
+`gen-stratafs-constants.py`. An invalid explicit path fails the check. A
+standalone checkout with no sibling `learn/` and no override skips these
+documentation checks, while a missing or stale appendix in a selected
+learn checkout fails `--check`.
+
 ---
 
 ## Known limitations & roadmap
