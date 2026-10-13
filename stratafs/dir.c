@@ -13,21 +13,12 @@
 #include <pkm/file.h>
 
 #include "stratafs.h"
-
-struct stratafs_dir_entry {
-	struct list_head list;
-	char *name;
-	unsigned int len;
-	unsigned int type;
-	unsigned int participant_index;
-	unsigned long ino;
-};
+#include "dir_cache.h"
 
 struct stratafs_dir_file {
 	struct stratafs_paths participants;
-	struct list_head entries;
+	struct stratafs_dir_cache cache;
 	char *relative;
-	unsigned int count;
 };
 
 struct stratafs_capture_context {
@@ -98,17 +89,6 @@ static void stratafs_replace_relative(struct dentry *dentry,
 	kfree(old_irelative);
 }
 
-static struct stratafs_dir_entry *
-stratafs_find_entry(struct stratafs_dir_file *dir, const char *name, int len)
-{
-	struct stratafs_dir_entry *entry;
-
-	list_for_each_entry(entry, &dir->entries, list)
-		if (entry->len == len && !memcmp(entry->name, name, len))
-			return entry;
-	return NULL;
-}
-
 static bool stratafs_entry_is_staging(struct super_block *sb,
 				      unsigned int participant_index,
 				      const char *parent_relative,
@@ -137,12 +117,11 @@ static bool stratafs_capture_actor(struct dir_context *ctx, const char *name,
 {
 	struct stratafs_capture_context *capture =
 		container_of(ctx, struct stratafs_capture_context, ctx);
-	struct stratafs_dir_entry *entry;
 
 	if ((len == 1 && name[0] == '.') ||
 	    (len == 2 && name[0] == '.' && name[1] == '.'))
 		return true;
-	if (stratafs_find_entry(capture->dir, name, len))
+	if (stratafs_dir_cache_contains(&capture->dir->cache, name, len))
 		return true;
 	if (stratafs_entry_is_staging(file_inode(capture->outer)->i_sb,
 				      capture->participant_index,
@@ -152,23 +131,9 @@ static bool stratafs_capture_actor(struct dir_context *ctx, const char *name,
 	if (capture->error)
 		return false;
 
-	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
-	if (!entry) {
-		capture->error = -ENOMEM;
-		return false;
-	}
-	entry->name = kmemdup_nul(name, len, GFP_KERNEL);
-	if (!entry->name) {
-		kfree(entry);
-		capture->error = -ENOMEM;
-		return false;
-	}
-	entry->len = len;
-	entry->type = type;
-	entry->participant_index = capture->participant_index;
-	list_add_tail(&entry->list, &capture->dir->entries);
-	capture->dir->count++;
-	return true;
+	capture->error = stratafs_dir_cache_add(&capture->dir->cache, name, len,
+					       type, capture->participant_index);
+	return !capture->error;
 }
 
 static int
@@ -176,7 +141,7 @@ stratafs_resolve_captured_entries(struct stratafs_capture_context *capture)
 {
 	struct stratafs_dir_entry *entry, *next;
 
-	list_for_each_entry_safe(entry, next, &capture->dir->entries, list) {
+	list_for_each_entry_safe(entry, next, &capture->dir->cache.entries, list) {
 		struct path child;
 		int ret;
 
@@ -190,10 +155,7 @@ stratafs_resolve_captured_entries(struct stratafs_capture_context *capture)
 			if (ret != -ENOENT && ret != -ENOTDIR)
 				return ret;
 			/* A concurrent removal is ordinary provider behaviour. */
-			list_del(&entry->list);
-			kfree(entry->name);
-			kfree(entry);
-			capture->dir->count--;
+			stratafs_dir_cache_remove(&capture->dir->cache, entry);
 			continue;
 		}
 		entry->ino = stratafs_provider_ino(
@@ -203,18 +165,6 @@ stratafs_resolve_captured_entries(struct stratafs_capture_context *capture)
 			return -ENOMEM;
 	}
 	return 0;
-}
-
-static void stratafs_free_entries(struct stratafs_dir_file *dir)
-{
-	struct stratafs_dir_entry *entry, *next;
-
-	list_for_each_entry_safe(entry, next, &dir->entries, list) {
-		list_del(&entry->list);
-		kfree(entry->name);
-		kfree(entry);
-	}
-	dir->count = 0;
 }
 
 static int stratafs_capture_entries(struct file *file,
@@ -270,8 +220,10 @@ static int stratafs_capture_entries(struct file *file,
 		if (ret)
 			break;
 	}
+	if (!ret)
+		ret = stratafs_dir_cache_seal(&dir->cache);
 	if (ret) {
-		stratafs_free_entries(dir);
+		stratafs_dir_cache_destroy(&dir->cache);
 		return ret;
 	}
 	return 0;
@@ -286,7 +238,7 @@ static int stratafs_dir_open(struct inode *inode, struct file *file)
 	dir = kzalloc_obj(*dir, GFP_KERNEL);
 	if (!dir)
 		return -ENOMEM;
-	INIT_LIST_HEAD(&dir->entries);
+	stratafs_dir_cache_init(&dir->cache);
 	dir->relative = stratafs_inode_relative(inode);
 	if (IS_ERR(dir->relative)) {
 		ret = PTR_ERR(dir->relative);
@@ -347,7 +299,7 @@ static int stratafs_dir_open(struct inode *inode, struct file *file)
 	return 0;
 
 fail_entries:
-	stratafs_free_entries(dir);
+	stratafs_dir_cache_destroy(&dir->cache);
 fail_paths:
 	stratafs_put_paths(&dir->participants, STRATAFS_SB(inode->i_sb)->count);
 fail:
@@ -362,7 +314,7 @@ static int stratafs_dir_release(struct inode *inode, struct file *file)
 
 	if (!dir)
 		return 0;
-	stratafs_free_entries(dir);
+	stratafs_dir_cache_destroy(&dir->cache);
 	stratafs_put_paths(&dir->participants, STRATAFS_SB(inode->i_sb)->count);
 	kfree(dir->relative);
 	kfree(dir);
@@ -373,17 +325,14 @@ static int stratafs_iterate(struct file *file, struct dir_context *ctx)
 {
 	struct stratafs_dir_file *dir = file->private_data;
 	struct stratafs_dir_entry *entry;
-	loff_t position = 2;
 
 	if (!dir_emit_dots(file, ctx))
 		return 0;
-	list_for_each_entry(entry, &dir->entries, list) {
-		if (position++ < ctx->pos)
-			continue;
+	while ((entry = stratafs_dir_cache_at(&dir->cache, ctx->pos))) {
 		if (!dir_emit(ctx, entry->name, entry->len, entry->ino,
 			      entry->type))
 			break;
-		ctx->pos = position;
+		ctx->pos++;
 	}
 	return 0;
 }

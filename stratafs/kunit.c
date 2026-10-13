@@ -4,6 +4,7 @@
 #include <linux/seq_file.h>
 
 #include "stratafs.h"
+#include "dir_cache.h"
 
 static void stratafs_kunit_free_parsed(struct stratafs_sb_info *sbi)
 {
@@ -257,7 +258,93 @@ static void stratafs_kunit_reserved_xattr_names(struct kunit *test)
 				       "%s must reach the provider", forwarded[i]);
 }
 
+static void stratafs_kunit_cache_cleanup(void *data)
+{
+	stratafs_dir_cache_destroy(data);
+}
+
+static struct stratafs_dir_cache *stratafs_kunit_cache(struct kunit *test)
+{
+	struct stratafs_dir_cache *cache;
+
+	cache = kunit_kzalloc(test, sizeof(*cache), GFP_KERNEL);
+	if (!cache)
+		return NULL;
+	stratafs_dir_cache_init(cache);
+	if (kunit_add_action_or_reset(test, stratafs_kunit_cache_cleanup, cache))
+		return NULL;
+	return cache;
+}
+
+static void stratafs_kunit_directory_empty(struct kunit *test)
+{
+	struct stratafs_dir_cache *cache = stratafs_kunit_cache(test);
+
+	KUNIT_ASSERT_NOT_NULL(test, cache);
+	KUNIT_EXPECT_FALSE(test, stratafs_dir_cache_contains(cache, "absent", 6));
+	KUNIT_ASSERT_EQ(test, stratafs_dir_cache_seal(cache), 0);
+	KUNIT_EXPECT_PTR_EQ(test, stratafs_dir_cache_at(cache, 2), NULL);
+}
+
+/* Exercise every resize, removal after rehash, and lower-provider fallback. */
+static void stratafs_kunit_directory_index(struct kunit *test)
+{
+	struct stratafs_dir_cache *cache = stratafs_kunit_cache(test);
+	struct stratafs_dir_entry *entry;
+	char name[32];
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, cache);
+	for (i = 0; i < 4096; i++) {
+		int len = snprintf(name, sizeof(name), "entry-%u", i);
+
+		KUNIT_EXPECT_FALSE(test, stratafs_dir_cache_contains(cache, name, len));
+		KUNIT_ASSERT_EQ(test, stratafs_dir_cache_add(cache, name, len,
+							    DT_REG, 0), 0);
+	}
+	for (i = 0; i < 4096; i++) {
+		int len = snprintf(name, sizeof(name), "entry-%u", i);
+
+		KUNIT_EXPECT_TRUE(test, stratafs_dir_cache_contains(cache, name, len));
+	}
+	/* Prefixes and extra bytes are distinct even with an identical prefix. */
+	KUNIT_EXPECT_FALSE(test, stratafs_dir_cache_contains(cache, "entry-", 6));
+	KUNIT_EXPECT_FALSE(test, stratafs_dir_cache_contains(cache, "entry-0x", 8));
+	entry = list_first_entry(&cache->entries, struct stratafs_dir_entry, list);
+	stratafs_dir_cache_remove(cache, entry);
+	KUNIT_EXPECT_FALSE(test, stratafs_dir_cache_contains(cache, "entry-0", 7));
+	KUNIT_ASSERT_EQ(test, stratafs_dir_cache_add(cache, "entry-0", 7,
+						    DT_DIR, 1), 0);
+	KUNIT_ASSERT_EQ(test, stratafs_dir_cache_seal(cache), 0);
+	KUNIT_EXPECT_PTR_EQ(test, cache->buckets, NULL);
+	KUNIT_EXPECT_EQ(test, cache->count, 4096U);
+	/* A later provider's recovered name is last; all others keep their order. */
+	for (i = 0; i < 4095; i++) {
+		snprintf(name, sizeof(name), "entry-%u", i + 1);
+		entry = stratafs_dir_cache_at(cache, i + 2);
+		KUNIT_ASSERT_NOT_NULL(test, entry);
+		KUNIT_EXPECT_STREQ(test, entry->name, name);
+		KUNIT_EXPECT_EQ(test, entry->participant_index, 0U);
+		KUNIT_EXPECT_EQ(test, entry->type, (unsigned int)DT_REG);
+	}
+	entry = stratafs_dir_cache_at(cache, 4097);
+	KUNIT_ASSERT_NOT_NULL(test, entry);
+	KUNIT_EXPECT_STREQ(test, entry->name, "entry-0");
+	KUNIT_EXPECT_EQ(test, entry->participant_index, 1U);
+	KUNIT_EXPECT_EQ(test, entry->type, (unsigned int)DT_DIR);
+	/* Resume, rewind and very large seek positions never wrap to an entry. */
+	KUNIT_EXPECT_STREQ(test, stratafs_dir_cache_at(cache, 2)->name, "entry-1");
+	KUNIT_EXPECT_PTR_EQ(test, stratafs_dir_cache_at(cache, -1), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, stratafs_dir_cache_at(cache, 0), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, stratafs_dir_cache_at(cache, 1), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, stratafs_dir_cache_at(cache, 4098), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, stratafs_dir_cache_at(cache, (1LL << 32) + 2), NULL);
+	KUNIT_EXPECT_PTR_EQ(test, stratafs_dir_cache_at(cache, LLONG_MAX), NULL);
+}
+
 static struct kunit_case stratafs_kunit_cases[] = {
+	KUNIT_CASE(stratafs_kunit_directory_empty),
+	KUNIT_CASE(stratafs_kunit_directory_index),
 	KUNIT_CASE(stratafs_kunit_parse_valid),
 	KUNIT_CASE(stratafs_kunit_parse_escapes),
 	KUNIT_CASE(stratafs_kunit_mount_table_round_trip),

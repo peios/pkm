@@ -370,6 +370,14 @@ hand-edited.
 - **`pekit test cores`** — runs the Rust cores' Cargo suites offline
   (`cargo test --workspace --locked --offline`, default features). It is a
   package gate and needs no build stage.
+- **`build/test-stratafs-dir-bench.sh <bzImage>`** — boots a disposable 4-GiB
+  QEMU guest and checks directory listings while timing opens and 64/32768-byte
+  `getdents64` reads. It covers 1,000, 10,000 and 100,000 distinct names, one or
+  four duplicate-heavy providers, and four simultaneously open snapshots.
+  Compare the same fixture on baseline and candidate kernels; timings are
+  measurements, not pass/fail limits. The log defaults beside the kernel;
+  `PKM_STRATAFS_DIR_BENCH_LOG` selects another path and
+  `PKM_STRATAFS_DIR_BENCH_TIMEOUT` overrides the 1,200-second timeout.
 
 ---
 
