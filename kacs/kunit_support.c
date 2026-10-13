@@ -2932,6 +2932,108 @@ out_free:
 	return ret;
 }
 
+struct pkm_kacs_kunit_open_snapshot_context {
+	const struct pkm_kacs_kunit_open_snapshot_args *args;
+	struct pkm_kacs_inode_sd_cache *observed;
+	u32 calls;
+	long ret;
+};
+
+static void pkm_kacs_kunit_change_sd_before_open_stamp(struct file *file, void *context)
+{
+	struct pkm_kacs_kunit_open_snapshot_context *race = context;
+	const struct pkm_kacs_kunit_open_snapshot_args *args = race->args;
+	struct pkm_kacs_inode_security *sec = pkm_kacs_inode(file_inode(file));
+
+	sec->kunit_open_cache_selected = NULL;
+	race->calls++;
+	/* An independent observer pin lets the fixture check for leaked pins. */
+	race->observed = pkm_kacs_inode_sd_cache_get_current(file_inode(file), sec);
+	if (!race->observed) {
+		race->ret = -ENOENT;
+		return;
+	}
+	mutex_lock(&sec->lock);
+	race->ret = pkm_kacs_kunit_fake_setxattr_locked(sec, args->replacement_sd,
+							args->replacement_sd_len);
+	mutex_unlock(&sec->lock);
+	if (race->ret)
+		return;
+	/* Run the actual post-write invalidation, after selection but before CAAP. */
+	pkm_kacs_inode_post_setxattr(file->f_path.dentry, "security.peios.sd", NULL, 0, 0);
+	if (args->replace_slot)
+		race->ret = pkm_kacs_inode_ensure_effective_cache(file, sec);
+}
+
+static long pkm_kacs_kunit_stamp_snapshot(struct file *file,
+					  const struct pkm_kacs_kunit_open_snapshot_args *args)
+{
+	const void *subject = args->subject_token;
+
+	if (args->native)
+		return pkm_kacs_stamp_native_file_granted_access_for_subject(subject, file,
+									     KACS_FILE_READ_DATA,
+									     0);
+	return pkm_kacs_stamp_file_granted_access_for_subject(args->subject_token, file);
+}
+
+long pkm_kacs_kunit_open_snapshot_race(const struct pkm_kacs_kunit_open_snapshot_args *args,
+				       struct pkm_kacs_kunit_open_snapshot_result *out)
+{
+	struct pkm_kacs_kunit_open_snapshot_context race = { .args = args };
+	struct pkm_kacs_kunit_file_mount_state *state;
+	struct pkm_kacs_inode_security *sec;
+	long ret;
+
+	if (!args || !out || !args->subject_token || !args->replacement_sd)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	state = kzalloc_obj(*state, GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+	ret = pkm_kacs_kunit_init_file_mount_state_ex(state, EXT4_SUPER_MAGIC, NULL,
+						      KACS_MOUNT_POLICY_DENY_MISSING, NULL, 0,
+						      S_IFREG, true);
+	if (ret)
+		goto out_free;
+	sec = pkm_kacs_inode(&state->inode);
+	if (args->selected_sd) {
+		mutex_lock(&sec->lock);
+		ret = pkm_kacs_kunit_fake_setxattr_locked(sec, args->selected_sd,
+							  args->selected_sd_len);
+		mutex_unlock(&sec->lock);
+		if (ret)
+			goto out_cleanup;
+	}
+	if (args->warm) {
+		ret = pkm_kacs_inode_ensure_effective_cache(&state->file, sec);
+		if (ret)
+			goto out_cleanup;
+	}
+	sec->kunit_open_cache_context = &race;
+	sec->kunit_open_cache_selected = pkm_kacs_kunit_change_sd_before_open_stamp;
+	out->first_ret = pkm_kacs_kunit_stamp_snapshot(&state->file, args);
+	sec->kunit_open_cache_selected = NULL;
+	out->first_managed = pkm_kacs_file(&state->file)->managed;
+	out->hook_calls = race.calls;
+	ret = race.ret;
+	if (ret)
+		goto out_cleanup;
+	/* Drain the replaced slot's reference: only our observer may remain. */
+	rcu_barrier();
+	if (race.observed)
+		out->retained_refs = refcount_read(&race.observed->refs);
+	state->file.f_mode = FMODE_READ;
+	out->next_ret = pkm_kacs_kunit_stamp_snapshot(&state->file, args);
+	out->next_managed = pkm_kacs_file(&state->file)->managed;
+out_cleanup:
+	pkm_kacs_inode_sd_cache_free(race.observed);
+	pkm_kacs_kunit_cleanup_file_mount_state(state);
+out_free:
+	kfree(state);
+	return ret;
+}
+
 long pkm_kacs_kunit_cold_open_then_set_sd(
 	const void *subject_token, const u8 *sd, size_t sd_len, bool native)
 {

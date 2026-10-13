@@ -209,6 +209,9 @@ struct pkm_kacs_inode_security {
 	/* How often a deferred SD persist was offered for this inode. */
 	u32 kunit_persist_queue_calls;
 	u32 kunit_unlink_calls;
+	/* Fixture-local rendezvous after selection and before the CAAP wait. */
+	void (*kunit_open_cache_selected)(struct file *file, void *context);
+	void *kunit_open_cache_context;
 #endif
 };
 
