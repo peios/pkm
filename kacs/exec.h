@@ -21,7 +21,8 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 					bool require_file_for_npm,
 					bool stage_exec_pip,
 					bool usermodehelper,
-					unsigned int bprm_unsafe);
+					unsigned int bprm_unsafe,
+					bool project_primary_ids);
 bool pkm_kacs_exec_pip_cap_for_unsafe(unsigned int bprm_unsafe,
 				      u32 current_pip_type,
 				      u32 current_pip_trust,

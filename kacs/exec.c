@@ -206,7 +206,8 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 					bool require_file_for_npm,
 					bool stage_exec_pip,
 					bool usermodehelper,
-					unsigned int bprm_unsafe)
+					unsigned int bprm_unsafe,
+					bool project_primary_ids)
 {
 	bool uid_changed;
 	bool gid_changed;
@@ -307,6 +308,28 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 	uid_changed = !uid_eq(new->euid, old->euid);
 	gid_changed = !gid_eq(new->egid, old->egid);
 
+	/*
+	 * An exec that lags an install derives from the pending primary token,
+	 * so the new cred carries that token's Linux identity, as servicing the
+	 * install would have given it, rather than the replaced token's. The
+	 * deltas above are the binary's setuid/setgid against the bprm baseline;
+	 * they are applied on top of the projection, and the projection supplies
+	 * fsuid, fsgid, the supplementary groups and the user below.
+	 */
+	if (project_primary_ids) {
+		kuid_t exec_euid = new->euid;
+		kgid_t exec_egid = new->egid;
+
+		ret = pkm_kacs_project_linux_cred_from_token(new,
+							     primary_token);
+		if (ret)
+			return ret;
+		if (uid_changed)
+			new->euid = exec_euid;
+		if (gid_changed)
+			new->egid = exec_egid;
+	}
+
 	if ((uid_changed || gid_changed) && !subject_token) {
 		trace_kacs_exec(uid_changed, gid_changed, exec_pip_type,
 				exec_pip_trust, KACS_EXEC_ID_CHANGE_NO_TOKEN,
@@ -328,19 +351,22 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 	if (uid_changed) {
 		new->uid = new->euid;
 		new->suid = new->euid;
-		new->fsuid = old->fsuid;
+		if (!project_primary_ids) {
+			new->fsuid = old->fsuid;
 
-		if (new->user != old->user) {
-			old_user = get_uid(old->user);
-			free_uid(new->user);
-			new->user = old_user;
+			if (new->user != old->user) {
+				old_user = get_uid(old->user);
+				free_uid(new->user);
+				new->user = old_user;
+			}
 		}
 	}
 
 	if (gid_changed) {
 		new->gid = new->egid;
 		new->sgid = new->egid;
-		new->fsgid = old->fsgid;
+		if (!project_primary_ids)
+			new->fsgid = old->fsgid;
 	}
 
 	ret = pkm_kacs_apply_exec_primary_token(primary_token, file, new,
@@ -378,21 +404,29 @@ bool pkm_kacs_exec_pip_cap_for_unsafe(unsigned int bprm_unsafe,
 int pkm_kacs_bprm_creds_from_file(struct linux_binprm *bprm,
 				  const struct file *file)
 {
+	const void *subject_token = pkm_kacs_current_effective_token_ptr();
 	const void *primary_token;
+	bool pending;
 	int ret;
 
 	if (!bprm || !bprm->cred)
 		return -EACCES;
 
 	/* A sibling can enter exec before servicing a successful install. */
-	primary_token = pkm_kacs_primary_token_for_exec();
+	primary_token = pkm_kacs_primary_token_for_exec(&pending);
 	if (!primary_token)
 		return -EACCES;
-	ret = pkm_kacs_bprm_creds_from_file_core(pkm_kacs_current_effective_token_ptr(),
+	/*
+	 * Unless impersonating, the thread's subject is its primary token, so a
+	 * lagging exec is gated by the pending token it is about to run as.
+	 */
+	if (pending && current_cred() == current_real_cred())
+		subject_token = primary_token;
+	ret = pkm_kacs_bprm_creds_from_file_core(subject_token,
 						 primary_token, file, bprm->cred,
 						 current_cred(), true, true,
 						 pkm_kacs_current_is_usermodehelper(),
-						 bprm->unsafe);
+						 bprm->unsafe, pending);
 	kacs_rust_token_drop(primary_token);
 	return ret;
 }

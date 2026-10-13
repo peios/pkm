@@ -361,21 +361,28 @@ void pkm_kacs_primary_thread_enroll(struct task_struct *task)
 	WARN_ON_ONCE(task_work_add(task, &sec->primary_enroll_work, TWA_SIGNAL));
 }
 
-/* Exec holds cred_guard_mutex until after committed_creds. */
-const void *pkm_kacs_primary_token_for_exec(void)
+/*
+ * Exec holds cred_guard_mutex until after committed_creds. @pending reports
+ * that the selected token is an install this thread has not yet serviced, so
+ * exec must also give the new cred that token's Linux identity.
+ */
+const void *pkm_kacs_primary_token_for_exec(bool *pending)
 {
 	struct pkm_kacs_process_state *state = pkm_kacs_current_process_state();
 	const void *token;
 
+	*pending = false;
 	if (!state || !current->signal)
 		return NULL;
 	lockdep_assert_held(&current->signal->cred_guard_mutex);
 	mutex_lock(&state->primary_lock);
 	if (state->desired_primary_token &&
-	    pkm_kacs_task(current)->primary_epoch < state->primary_epoch)
+	    pkm_kacs_task(current)->primary_epoch < state->primary_epoch) {
 		token = state->desired_primary_token;
-	else
+		*pending = true;
+	} else {
 		token = pkm_kacs_current_primary_token_ptr();
+	}
 	token = kacs_rust_token_clone(token);
 	mutex_unlock(&state->primary_lock);
 	return token;
@@ -688,7 +695,9 @@ SYSCALL_DEFINE0(kacs_revert)
 #include <linux/debug_locks.h>
 #include <linux/delay.h>
 #include <linux/kthread.h>
+#include <linux/sched/user.h>
 
+#include "exec.h"
 #include "kunit_common.h"
 
 struct pkm_kacs_primary_epoch_fixture {
@@ -958,15 +967,125 @@ static void pkm_kacs_primary_exec_selects_pending_install(struct kunit *test)
 {
 	struct pkm_kacs_primary_epoch_fixture *f = test->priv;
 	const void *selected;
+	bool pending;
+
+	mutex_lock(&current->signal->cred_guard_mutex);
+	selected = pkm_kacs_primary_token_for_exec(&pending);
+	mutex_unlock(&current->signal->cred_guard_mutex);
+	KUNIT_EXPECT_PTR_EQ(test, selected, f->original);
+	KUNIT_EXPECT_FALSE(test, pending);
+	kacs_rust_token_drop(selected);
 
 	KUNIT_ASSERT_EQ(test, pkm_kacs_install_current_primary_token(f->b), 0);
 	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_epoch_lag(test), 0L);
 	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_current_primary_token_ptr(), f->original);
 	mutex_lock(&current->signal->cred_guard_mutex);
-	selected = pkm_kacs_primary_token_for_exec();
+	selected = pkm_kacs_primary_token_for_exec(&pending);
 	mutex_unlock(&current->signal->cred_guard_mutex);
 	KUNIT_EXPECT_PTR_EQ(test, selected, f->b);
+	KUNIT_EXPECT_TRUE(test, pending);
 	kacs_rust_token_drop(selected);
+	KUNIT_EXPECT_TRUE(test, debug_locks);
+}
+
+/*
+ * Derive exec credentials from the current cred as bprm would, with a
+ * supplementary group the pending token does not project and, when @setuid
+ * is nonzero, the effective uid a setuid binary would have given it.
+ */
+static long pkm_kacs_primary_exec_derive(const void *subject,
+					 const void *primary, bool project,
+					 u32 setuid, struct cred **out)
+{
+	struct group_info *groups;
+	struct cred *new;
+	long ret;
+
+	new = prepare_creds();
+	if (!new)
+		return -ENOMEM;
+	groups = groups_alloc(1);
+	if (!groups) {
+		abort_creds(new);
+		return -ENOMEM;
+	}
+	groups->gid[0] = KGIDT_INIT(4321);
+	set_groups(new, groups);
+	put_group_info(groups);
+	if (setuid)
+		new->euid = KUIDT_INIT(setuid);
+	ret = pkm_kacs_bprm_creds_from_file_core(subject, primary, NULL, new,
+						 current_cred(), false, false,
+						 false, 0, project);
+	if (ret) {
+		abort_creds(new);
+		return ret;
+	}
+	*out = new;
+	return 0;
+}
+
+static void pkm_kacs_primary_exec_pending_install_projects_ids(struct kunit *test)
+{
+	struct pkm_kacs_primary_epoch_fixture *f = test->priv;
+	const void *installed;
+	const void *selected;
+	struct cred *new;
+	u32 replaced_uid;
+	bool pending;
+
+	installed =
+		kacs_rust_kunit_create_impersonation_variant_token(PKM_KUNIT_USER_KIND_LOCAL_SERVICE,
+								   KACS_TOKEN_TYPE_PRIMARY,
+								   KACS_IMLEVEL_DELEGATION,
+								   PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, installed);
+	/* The fixture owns the replacement through all assertion exits. */
+	kacs_rust_token_drop(f->b);
+	f->b = installed;
+	KUNIT_ASSERT_EQ(test, kacs_rust_token_projected_uid(installed), 65534U);
+	KUNIT_ASSERT_EQ(test, kacs_rust_token_projected_gid(installed), 65534U);
+	KUNIT_ASSERT_EQ(test, pkm_kacs_install_current_primary_token(installed), 0);
+	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_epoch_lag(test), 0L);
+	replaced_uid = __kuid_val(current_real_cred()->uid);
+	KUNIT_ASSERT_NE(test, replaced_uid, 65534U);
+
+	mutex_lock(&current->signal->cred_guard_mutex);
+	selected = pkm_kacs_primary_token_for_exec(&pending);
+	mutex_unlock(&current->signal->cred_guard_mutex);
+	KUNIT_EXPECT_TRUE(test, pending);
+	KUNIT_EXPECT_PTR_EQ(test, selected, installed);
+	kacs_rust_token_drop(selected);
+
+	/* Control: without projection the replaced token's identity survives. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_exec_derive(installed, installed,
+							   false, 0U, &new), 0L);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->uid), replaced_uid);
+	KUNIT_EXPECT_EQ(test, new->group_info->ngroups, 1);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_cred(new)->token, installed);
+	abort_creds(new);
+
+	/* A lagging exec runs as the pending token's projection. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_exec_derive(installed, installed,
+							   true, 0U, &new), 0L);
+	pkm_kunit_expect_linux_cred_projection(test, new, 65534U, 65534U);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->user->uid), 65534U);
+	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_cred(new)->token, installed);
+	abort_creds(new);
+
+	/* A setuid binary's uid applies on top; the rest stays projected. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_exec_derive(installed, installed,
+							   true, 4242U, &new), 0L);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->uid), 4242U);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->euid), 4242U);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->suid), 4242U);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->fsuid), 65534U);
+	KUNIT_EXPECT_EQ(test, __kgid_val(new->gid), 65534U);
+	KUNIT_EXPECT_EQ(test, __kgid_val(new->egid), 65534U);
+	KUNIT_EXPECT_EQ(test, __kgid_val(new->fsgid), 65534U);
+	KUNIT_EXPECT_EQ(test, new->group_info->ngroups, 0);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->user->uid), 65534U);
+	abort_creds(new);
 	KUNIT_EXPECT_TRUE(test, debug_locks);
 }
 
@@ -980,6 +1099,7 @@ static void pkm_kacs_primary_exec_pending_install_keeps_npm(struct kunit *test)
 	const u8 *file_sd;
 	size_t file_sd_len = 0;
 	u32 changed = 0;
+	bool pending;
 	long ret;
 
 	installed =
@@ -1000,7 +1120,7 @@ static void pkm_kacs_primary_exec_pending_install_keeps_npm(struct kunit *test)
 							 &file_sd_len);
 	KUNIT_ASSERT_NOT_NULL(test, file_sd);
 	mutex_lock(&current->signal->cred_guard_mutex);
-	selected = pkm_kacs_primary_token_for_exec();
+	selected = pkm_kacs_primary_token_for_exec(&pending);
 	args.subject_token = f->original;
 	args.primary_token = selected;
 	args.target_file_sd_ptr = file_sd;
@@ -1009,6 +1129,7 @@ static void pkm_kacs_primary_exec_pending_install_keeps_npm(struct kunit *test)
 	ret = pkm_kacs_kunit_check_exec_new_process_min(&args, &after, &changed);
 	mutex_unlock(&current->signal->cred_guard_mutex);
 	KUNIT_EXPECT_PTR_EQ(test, selected, installed);
+	KUNIT_EXPECT_TRUE(test, pending);
 	kacs_rust_token_drop(selected);
 	pkm_kacs_free((void *)file_sd);
 	KUNIT_ASSERT_EQ(test, ret, 0L);
@@ -1031,6 +1152,7 @@ static struct kunit_case pkm_kacs_primary_epoch_cases[] = {
 	KUNIT_CASE(pkm_kacs_primary_install_error_releases_exec_guard),
 	KUNIT_CASE(pkm_kacs_primary_exec_selects_pending_install),
 	KUNIT_CASE(pkm_kacs_primary_exec_pending_install_keeps_npm),
+	KUNIT_CASE(pkm_kacs_primary_exec_pending_install_projects_ids),
 	{ }
 };
 
