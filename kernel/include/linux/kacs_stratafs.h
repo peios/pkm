@@ -26,7 +26,9 @@ void stratafs_kacs_audit_deferred_refusal(const struct dentry *outer,
 					  int result);
 #endif
 
-/* Fixed by PSD-011; shared with KACS so its mount policy is immutable. */
+/* Kernel TRM sections 3.9.5 and 4.6.4: the KACS/StrataFS mount policy
+ * is shared and immutable. The filesystem magic is listed in section 4.A.
+ */
 #define STRATAFS_SUPER_MAGIC 0x53545241UL
 #define STRATAFS_STAGING_XATTR "security.peios.stratafs_staging"
 
