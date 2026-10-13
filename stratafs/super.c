@@ -463,9 +463,7 @@ static int stratafs_reconfigure(struct fs_context *fc)
 
 void stratafs_free_sbi(struct stratafs_sb_info *sbi)
 {
-	struct stratafs_identity *identity;
 	struct stratafs_staging *staging, *next_staging;
-	unsigned long index;
 	unsigned int i;
 
 	if (!sbi)
@@ -480,12 +478,7 @@ void stratafs_free_sbi(struct stratafs_sb_info *sbi)
 		kfree(staging);
 	}
 
-	xa_for_each(&sbi->identities, index, identity) {
-		xa_erase(&sbi->identities, index);
-		iput(identity->inode);
-		kfree(identity);
-	}
-	xa_destroy(&sbi->identities);
+	stratafs_free_identities(sbi);
 	path_put(&sbi->resolution_root);
 	put_cred(sbi->resolution_cred);
 	kfree(sbi);
@@ -524,9 +517,7 @@ static int stratafs_init_fs_context(struct fs_context *fc)
 
 	get_fs_root(current->fs, &sbi->resolution_root);
 	sbi->resolution_cred = get_cred(fc->cred);
-	mutex_init(&sbi->identity_lock);
-	xa_init(&sbi->identities);
-	atomic64_set(&sbi->next_ino, 1);
+	stratafs_init_identities(sbi);
 	mutex_init(&sbi->staging_lock);
 	INIT_LIST_HEAD(&sbi->staging);
 	atomic64_set(&sbi->next_stage, 0);

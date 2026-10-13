@@ -158,11 +158,11 @@ stratafs_resolve_captured_entries(struct stratafs_capture_context *capture)
 			stratafs_dir_cache_remove(&capture->dir->cache, entry);
 			continue;
 		}
-		entry->ino = stratafs_provider_ino(
-			file_inode(capture->outer)->i_sb, d_inode(child.dentry));
+		ret = stratafs_provider_ino(file_inode(capture->outer)->i_sb,
+					   &child, &entry->ino);
 		path_put(&child);
-		if (!entry->ino)
-			return -ENOMEM;
+		if (ret)
+			return ret;
 	}
 	return 0;
 }
