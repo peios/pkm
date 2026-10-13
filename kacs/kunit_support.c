@@ -4442,39 +4442,47 @@ int pkm_kacs_kunit_check_file_permission_write_intent(
 
 int pkm_kacs_kunit_check_file_permission_write_intent_mismatch(void)
 {
-	struct pkm_kacs_kunit_file_mount_state first = { };
-	struct pkm_kacs_kunit_file_mount_state second = { };
+	struct {
+		struct pkm_kacs_kunit_file_mount_state first, second;
+	} *fixture;
 	struct pkm_kacs_file_security *file_sec;
 	int ret;
 
+	/* Lockdep makes these multi-inode fixtures too large for the stack. */
+	fixture = kzalloc_obj(*fixture, GFP_KERNEL);
+	if (!fixture)
+		return -ENOMEM;
+
 	ret = pkm_kacs_kunit_init_file_mount_state_ex(
-		&first, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
+		&fixture->first, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
 		NULL, 0, S_IFREG, true);
 	if (ret)
-		return ret;
+		goto out_free;
 	ret = pkm_kacs_kunit_init_file_mount_state_ex(
-		&second, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
+		&fixture->second, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
 		NULL, 0, S_IFREG, true);
 	if (ret)
 		goto out_first;
 
-	file_sec = pkm_kacs_file(&first.file);
+	file_sec = pkm_kacs_file(&fixture->first.file);
 	file_sec->managed = 1;
 	file_sec->granted_access = KACS_FILE_APPEND_DATA;
-	file_sec = pkm_kacs_file(&second.file);
+	file_sec = pkm_kacs_file(&fixture->second.file);
 	file_sec->managed = 1;
 	file_sec->granted_access = KACS_FILE_APPEND_DATA;
 
-	ret = pkm_kacs_file_begin_write_intent(&first.file, 0, true);
+	ret = pkm_kacs_file_begin_write_intent(&fixture->first.file, 0, true);
 	if (!ret) {
-		ret = pkm_kacs_check_file_permission_snapshot(&second.file,
+		ret = pkm_kacs_check_file_permission_snapshot(&fixture->second.file,
 							      MAY_WRITE);
-		pkm_kacs_file_end_write_intent(&first.file);
+		pkm_kacs_file_end_write_intent(&fixture->first.file);
 	}
 
-	pkm_kacs_kunit_cleanup_file_mount_state(&second);
+	pkm_kacs_kunit_cleanup_file_mount_state(&fixture->second);
 out_first:
-	pkm_kacs_kunit_cleanup_file_mount_state(&first);
+	pkm_kacs_kunit_cleanup_file_mount_state(&fixture->first);
+out_free:
+	kfree(fixture);
 	return ret;
 }
 
@@ -4574,64 +4582,72 @@ static int pkm_kacs_kunit_begin_getattr_marker(
 
 int pkm_kacs_kunit_check_file_metadata_marker_clears(void)
 {
-	struct pkm_kacs_kunit_file_mount_state first = { };
-	struct pkm_kacs_kunit_file_mount_state second = { };
+	struct {
+		struct pkm_kacs_kunit_file_mount_state first, second;
+	} *fixture;
 	struct iattr attr = {
 		.ia_valid = ATTR_MODE,
 	};
 	struct path path;
 	int ret;
 
+	/* Lockdep makes these multi-inode fixtures too large for the stack. */
+	fixture = kzalloc_obj(*fixture, GFP_KERNEL);
+	if (!fixture)
+		return -ENOMEM;
+
 	ret = pkm_kacs_kunit_init_file_mount_state_ex(
-		&first, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
+		&fixture->first, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
 		NULL, 0, S_IFREG, true);
 	if (ret)
-		return ret;
+		goto out_free;
 	ret = pkm_kacs_kunit_init_file_mount_state_ex(
-		&second, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
+		&fixture->second, TMPFS_MAGIC, NULL, KACS_MOUNT_POLICY_DENY_MISSING,
 		NULL, 0, S_IFREG, true);
 	if (ret)
 		goto out_first;
 
-	path.mnt = &first.mnt;
-	path.dentry = &first.dentry;
-	ret = pkm_kacs_kunit_begin_getattr_marker(&first);
+	path.mnt = &fixture->first.mnt;
+	path.dentry = &fixture->first.dentry;
+	ret = pkm_kacs_kunit_begin_getattr_marker(&fixture->first);
 	if (ret)
 		goto out;
 	ret = pkm_kacs_inode_getattr(&path);
 	if (ret)
 		goto out;
-	ret = pkm_kacs_kunit_begin_getattr_marker(&first);
+	ret = pkm_kacs_kunit_begin_getattr_marker(&fixture->first);
 	if (ret)
 		goto out;
-	pkm_kacs_file_end_metadata(&first.file);
+	pkm_kacs_file_end_metadata(&fixture->first.file);
 
-	ret = pkm_kacs_kunit_begin_getattr_marker(&first);
+	ret = pkm_kacs_kunit_begin_getattr_marker(&fixture->first);
 	if (ret)
 		goto out;
-	(void)pkm_kacs_inode_setattr(&nop_mnt_idmap, &first.dentry,
+	(void)pkm_kacs_inode_setattr(&nop_mnt_idmap, &fixture->first.dentry,
 				      &attr);
-	ret = pkm_kacs_kunit_begin_getattr_marker(&first);
+	ret = pkm_kacs_kunit_begin_getattr_marker(&fixture->first);
 	if (ret)
 		goto out;
-	pkm_kacs_file_end_metadata(&first.file);
+	pkm_kacs_file_end_metadata(&fixture->first.file);
 
-	ret = pkm_kacs_kunit_begin_getattr_marker(&first);
+	ret = pkm_kacs_kunit_begin_getattr_marker(&fixture->first);
 	if (ret)
 		goto out;
-	path.mnt = &second.mnt;
-	path.dentry = &second.dentry;
+	path.mnt = &fixture->second.mnt;
+	path.dentry = &fixture->second.dentry;
 	(void)pkm_kacs_inode_getattr(&path);
-	ret = pkm_kacs_kunit_begin_getattr_marker(&first);
+	ret = pkm_kacs_kunit_begin_getattr_marker(&fixture->first);
 	if (!ret)
-		pkm_kacs_file_end_metadata(&first.file);
+		pkm_kacs_file_end_metadata(&fixture->first.file);
 
 out:
-	pkm_kacs_file_end_metadata(&first.file);
-	pkm_kacs_file_end_metadata(&second.file);
-	pkm_kacs_kunit_cleanup_file_mount_state(&second);
+	pkm_kacs_file_end_metadata(&fixture->first.file);
+	pkm_kacs_file_end_metadata(&fixture->second.file);
+	pkm_kacs_kunit_cleanup_file_mount_state(&fixture->second);
 out_first:
-	pkm_kacs_kunit_cleanup_file_mount_state(&first);
+	pkm_kacs_kunit_cleanup_file_mount_state(&fixture->first);
+out_free:
+	kfree(fixture);
 	return ret;
 }
 
@@ -5007,12 +5023,11 @@ int pkm_kacs_kunit_check_namespace_live(
 	const struct pkm_kacs_kunit_namespace_args *args,
 	const u8 **created_sd_out, size_t *created_sd_len_out)
 {
-	struct pkm_kacs_kunit_file_mount_state source = {};
-	struct pkm_kacs_kunit_file_mount_state old_parent = {};
-	struct pkm_kacs_kunit_file_mount_state new_parent = {};
-	struct pkm_kacs_kunit_file_mount_state target = {};
-	struct dentry negative = {};
-	struct dentry create_child = {};
+	struct {
+		struct pkm_kacs_kunit_file_mount_state source, old_parent;
+		struct pkm_kacs_kunit_file_mount_state new_parent, target;
+		struct dentry negative, create_child;
+	} *fixture;
 	struct dentry *new_dentry;
 	u32 policy;
 	u64 magic;
@@ -5032,6 +5047,11 @@ int pkm_kacs_kunit_check_namespace_live(
 	if (created_sd_len_out)
 		*created_sd_len_out = 0;
 
+	/* Lockdep makes these multi-inode fixtures too large for the stack. */
+	fixture = kzalloc_obj(*fixture, GFP_KERNEL);
+	if (!fixture)
+		return -ENOMEM;
+
 	magic = args->mount_magic ? args->mount_magic : TMPFS_MAGIC;
 	policy = args->mount_policy_override ?
 			 args->mount_policy_override :
@@ -5042,7 +5062,7 @@ int pkm_kacs_kunit_check_namespace_live(
 
 	if (args->old_parent_sd_state != 0) {
 		ret = pkm_kacs_kunit_init_namespace_state(
-			&old_parent, args->old_parent_sd_ptr,
+			&fixture->old_parent, args->old_parent_sd_ptr,
 			args->old_parent_sd_len, args->old_parent_sd_state,
 			magic, policy, S_IFDIR);
 		if (ret)
@@ -5051,7 +5071,7 @@ int pkm_kacs_kunit_check_namespace_live(
 	}
 	if (args->new_parent_sd_state != 0) {
 		ret = pkm_kacs_kunit_init_namespace_state(
-			&new_parent, args->new_parent_sd_ptr,
+			&fixture->new_parent, args->new_parent_sd_ptr,
 			args->new_parent_sd_len, args->new_parent_sd_state,
 			magic, policy, S_IFDIR);
 		if (ret)
@@ -5060,7 +5080,7 @@ int pkm_kacs_kunit_check_namespace_live(
 	}
 	if (args->source_sd_state != 0) {
 		ret = pkm_kacs_kunit_init_namespace_state(
-			&source, args->source_sd_ptr, args->source_sd_len,
+			&fixture->source, args->source_sd_ptr, args->source_sd_len,
 			args->source_sd_state, magic, policy, source_mode);
 		if (ret)
 			goto out;
@@ -5068,7 +5088,7 @@ int pkm_kacs_kunit_check_namespace_live(
 	}
 	if (args->target_sd_state != 0) {
 		ret = pkm_kacs_kunit_init_namespace_state(
-			&target, args->target_sd_ptr, args->target_sd_len,
+			&fixture->target, args->target_sd_ptr, args->target_sd_len,
 			args->target_sd_state, magic, policy, target_mode);
 		if (ret)
 			goto out;
@@ -5076,13 +5096,13 @@ int pkm_kacs_kunit_check_namespace_live(
 	}
 
 	if (source_ready && old_parent_ready)
-		source.dentry.d_parent = &old_parent.dentry;
+		fixture->source.dentry.d_parent = &fixture->old_parent.dentry;
 	if (target_ready && new_parent_ready)
-		target.dentry.d_parent = &new_parent.dentry;
+		fixture->target.dentry.d_parent = &fixture->new_parent.dentry;
 	if (old_parent_ready)
-		create_child.d_parent = &old_parent.dentry;
+		fixture->create_child.d_parent = &fixture->old_parent.dentry;
 	if (new_parent_ready)
-		negative.d_parent = &new_parent.dentry;
+		fixture->negative.d_parent = &fixture->new_parent.dentry;
 
 	switch (args->op) {
 	case PKM_KACS_KUNIT_NAMESPACE_CREATE_FILE:
@@ -5091,11 +5111,11 @@ int pkm_kacs_kunit_check_namespace_live(
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_namespace_create_for_subject(
-			args->subject_token, &old_parent.inode, &create_child,
-			false);
+			args->subject_token, &fixture->old_parent.inode,
+			&fixture->create_child, false);
 		if (!ret)
 			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
-				args, &old_parent, false, created_sd_out,
+				args, &fixture->old_parent, false, created_sd_out,
 				created_sd_len_out);
 		break;
 	case PKM_KACS_KUNIT_NAMESPACE_MKDIR:
@@ -5104,11 +5124,11 @@ int pkm_kacs_kunit_check_namespace_live(
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_namespace_create_for_subject(
-			args->subject_token, &old_parent.inode, &create_child,
-			true);
+			args->subject_token, &fixture->old_parent.inode,
+			&fixture->create_child, true);
 		if (!ret)
 			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
-				args, &old_parent, true, created_sd_out,
+				args, &fixture->old_parent, true, created_sd_out,
 				created_sd_len_out);
 		break;
 	case PKM_KACS_KUNIT_NAMESPACE_MKNOD:
@@ -5116,17 +5136,17 @@ int pkm_kacs_kunit_check_namespace_live(
 			ret = -EINVAL;
 			break;
 		}
-		if (!pkm_kacs_inode_on_unmanaged_mount(&old_parent.inode) &&
+		if (!pkm_kacs_inode_on_unmanaged_mount(&fixture->old_parent.inode) &&
 		    !pkm_kacs_special_node_mode_supported(mknod_mode)) {
 			ret = -EOPNOTSUPP;
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_namespace_create_for_subject(
-			args->subject_token, &old_parent.inode, &create_child,
-			false);
+			args->subject_token, &fixture->old_parent.inode,
+			&fixture->create_child, false);
 		if (!ret)
 			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
-				args, &old_parent, false, created_sd_out,
+				args, &fixture->old_parent, false, created_sd_out,
 				created_sd_len_out);
 		break;
 	case PKM_KACS_KUNIT_NAMESPACE_SYMLINK:
@@ -5135,10 +5155,11 @@ int pkm_kacs_kunit_check_namespace_live(
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_namespace_symlink_for_subject(
-			args->subject_token, &old_parent.inode, &create_child);
+			args->subject_token, &fixture->old_parent.inode,
+			&fixture->create_child);
 		if (!ret)
 			ret = pkm_kacs_kunit_namespace_maybe_build_created_sd(
-				args, &old_parent, false, created_sd_out,
+				args, &fixture->old_parent, false, created_sd_out,
 				created_sd_len_out);
 		break;
 	case PKM_KACS_KUNIT_NAMESPACE_LINK:
@@ -5147,8 +5168,8 @@ int pkm_kacs_kunit_check_namespace_live(
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_namespace_link_for_subject(
-			args->subject_token, &source.dentry, &new_parent.inode,
-			&negative);
+			args->subject_token, &fixture->source.dentry,
+			&fixture->new_parent.inode, &fixture->negative);
 		break;
 	case PKM_KACS_KUNIT_NAMESPACE_UNLINK:
 	case PKM_KACS_KUNIT_NAMESPACE_RMDIR:
@@ -5157,18 +5178,19 @@ int pkm_kacs_kunit_check_namespace_live(
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_namespace_delete_for_subject(
-			args->subject_token, &old_parent.inode,
-			&source.dentry);
+			args->subject_token, &fixture->old_parent.inode,
+			&fixture->source.dentry);
 		break;
 	case PKM_KACS_KUNIT_NAMESPACE_RENAME:
 		if (!source_ready || !old_parent_ready || !new_parent_ready) {
 			ret = -EINVAL;
 			break;
 		}
-		new_dentry = target_ready ? &target.dentry : &negative;
+		new_dentry = target_ready ? &fixture->target.dentry : &fixture->negative;
 		ret = (int)pkm_kacs_authorize_namespace_rename_for_subject(
-			args->subject_token, &old_parent.inode, &source.dentry,
-			&new_parent.inode, new_dentry);
+			args->subject_token, &fixture->old_parent.inode,
+			&fixture->source.dentry, &fixture->new_parent.inode,
+			new_dentry);
 		break;
 	case PKM_KACS_KUNIT_NAMESPACE_READLINK:
 		if (!source_ready) {
@@ -5176,8 +5198,8 @@ int pkm_kacs_kunit_check_namespace_live(
 			break;
 		}
 		ret = (int)pkm_kacs_authorize_inode_namespace_access_for_subject(
-			args->subject_token, &source.inode, &source.dentry,
-			KACS_FILE_READ_DATA);
+			args->subject_token, &fixture->source.inode,
+			&fixture->source.dentry, KACS_FILE_READ_DATA);
 		break;
 	default:
 		ret = -EINVAL;
@@ -5186,22 +5208,24 @@ int pkm_kacs_kunit_check_namespace_live(
 
 out:
 	if (target_ready)
-		pkm_kacs_kunit_cleanup_file_mount_state(&target);
+		pkm_kacs_kunit_cleanup_file_mount_state(&fixture->target);
 	if (source_ready)
-		pkm_kacs_kunit_cleanup_file_mount_state(&source);
+		pkm_kacs_kunit_cleanup_file_mount_state(&fixture->source);
 	if (new_parent_ready)
-		pkm_kacs_kunit_cleanup_file_mount_state(&new_parent);
+		pkm_kacs_kunit_cleanup_file_mount_state(&fixture->new_parent);
 	if (old_parent_ready)
-		pkm_kacs_kunit_cleanup_file_mount_state(&old_parent);
+		pkm_kacs_kunit_cleanup_file_mount_state(&fixture->old_parent);
+	kfree(fixture);
 	return ret;
 }
 
 int pkm_kacs_kunit_check_namespace_rename_flags(
 	const struct pkm_kacs_kunit_namespace_args *args, unsigned int flags)
 {
-	struct pkm_kacs_kunit_file_mount_state old_parent = {};
-	struct pkm_kacs_kunit_file_mount_state new_parent = {};
-	struct dentry source_dentry = {};
+	struct {
+		struct pkm_kacs_kunit_file_mount_state old_parent, new_parent;
+		struct dentry source_dentry;
+	} *fixture;
 	u32 policy;
 	u64 magic;
 	bool old_ready = false;
@@ -5211,20 +5235,25 @@ int pkm_kacs_kunit_check_namespace_rename_flags(
 	if (!args)
 		return -EINVAL;
 
+	/* Lockdep makes these multi-inode fixtures too large for the stack. */
+	fixture = kzalloc_obj(*fixture, GFP_KERNEL);
+	if (!fixture)
+		return -ENOMEM;
+
 	magic = args->mount_magic ? args->mount_magic : TMPFS_MAGIC;
 	policy = args->mount_policy_override ?
 			 args->mount_policy_override :
 			 KACS_MOUNT_POLICY_DENY_MISSING;
 
 	ret = pkm_kacs_kunit_init_namespace_state(
-		&old_parent, args->old_parent_sd_ptr,
+		&fixture->old_parent, args->old_parent_sd_ptr,
 		args->old_parent_sd_len, args->old_parent_sd_state, magic,
 		policy, S_IFDIR);
 	if (ret)
 		goto out;
 	old_ready = true;
 	ret = pkm_kacs_kunit_init_namespace_state(
-		&new_parent, args->new_parent_sd_ptr,
+		&fixture->new_parent, args->new_parent_sd_ptr,
 		args->new_parent_sd_len, args->new_parent_sd_state, magic,
 		policy, S_IFDIR);
 	if (ret)
@@ -5238,14 +5267,17 @@ int pkm_kacs_kunit_check_namespace_rename_flags(
 	 * name) and read its SD. Passing NULL would leave the access core with
 	 * no dentry alias to anchor on.
 	 */
-	source_dentry.d_parent = &old_parent.dentry;
-	ret = pkm_kacs_inode_rename_flags(&old_parent.inode, &source_dentry,
-					  &new_parent.inode, NULL, flags);
+	fixture->source_dentry.d_parent = &fixture->old_parent.dentry;
+	ret = pkm_kacs_inode_rename_flags(&fixture->old_parent.inode,
+					  &fixture->source_dentry,
+					  &fixture->new_parent.inode, NULL,
+					  flags);
 out:
 	if (new_ready)
-		pkm_kacs_kunit_cleanup_file_mount_state(&new_parent);
+		pkm_kacs_kunit_cleanup_file_mount_state(&fixture->new_parent);
 	if (old_ready)
-		pkm_kacs_kunit_cleanup_file_mount_state(&old_parent);
+		pkm_kacs_kunit_cleanup_file_mount_state(&fixture->old_parent);
+	kfree(fixture);
 	return ret;
 }
 
