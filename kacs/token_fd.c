@@ -1561,7 +1561,7 @@ bool pkm_kacs_kunit_fd_is_cloexec(int fd)
 	if (fd < 0)
 		return false;
 
-	return close_on_exec((unsigned int)fd, current->files);
+	return get_close_on_exec((unsigned int)fd);
 }
 
 long pkm_kacs_kunit_token_fd_restrict(
