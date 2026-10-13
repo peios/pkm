@@ -448,8 +448,8 @@ PKM_LEARN_ROOT=/path/to/docs-worktree python3 tools/gen-kacs-abi.py --check
 PKM_LEARN_ROOT=/path/to/docs-worktree git push
 ```
 
-The same setting applies to `gen-lcs-abi.py`, `gen-ntfe-abi.py` and
-`gen-stratafs-constants.py`. An invalid explicit path fails the check. A
+The same setting applies to `gen-lcs-abi.py`, `gen-ntfe-abi.py`,
+`gen-stratafs-constants.py`, and the separately run `gen-kmes-abi.py`. An invalid explicit path fails the check. A
 standalone checkout with no sibling `learn/` and no override skips these
 documentation checks, while a missing or stale appendix in a selected
 learn checkout fails `--check`.

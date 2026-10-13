@@ -17,6 +17,7 @@ from appendix_paths import PKM, LEARN
 
 BOOK = Path("peios.product/3--advanced-peios.antho/300--trms.shelf/100--peios-kernel.book")
 APPENDICES = {
+    "gen-kmes-abi": BOOK / "2--kmes/a1--kmes-abi.md",
     "gen-kacs-abi": BOOK / "3--kacs/a1--kacs-abi.md",
     "gen-lcs-abi": BOOK / "5--lcs/a1--lcs-abi.md",
     "gen-ntfe-abi": BOOK / "6--ntfe/a1--ntfe-abi.md",
@@ -38,7 +39,7 @@ class AppendixPathsTests(unittest.TestCase):
         (kernel / "tools").mkdir(parents=True)
         for script in ["appendix_paths", *APPENDICES]:
             shutil.copyfile(PKM / "tools" / (script + ".py"), kernel / "tools" / (script + ".py"))
-        for directory in ["uapi", "kacs", "lcs", "stratafs", "kernel", "crates"]:
+        for directory in ["uapi", "kacs", "kmes", "lcs", "stratafs", "kernel", "crates"]:
             (kernel / directory).symlink_to(PKM / directory, target_is_directory=True)
         return kernel
 
