@@ -71,6 +71,136 @@ fn append_optional_component(bytes: &mut Vec<u8>, component: Option<&[u8]>) -> u
     offset
 }
 
+// The existing KACS wire selector is also the registry LABEL selector.
+const LABEL_INFO: u32 = peios_uapi::KACS_SECINFO_LABEL;
+
+fn label_ace(level: u32) -> Vec<u8> {
+    basic_ace(
+        kacs_core::SYSTEM_MANDATORY_LABEL_ACE_TYPE,
+        1,
+        &sid(16, &[level]),
+    )
+}
+
+fn audit_ace() -> Vec<u8> {
+    let mut ace = basic_ace(kacs_core::SYSTEM_AUDIT_ACE_TYPE, KEY_READ, &sid(5, &[18]));
+    ace[1] = 0x40; // successful-access audit flag
+    ace
+}
+
+#[test]
+fn label_query_returns_only_the_effective_label() {
+    let owner = sid(5, &[18]);
+    let mut inherit_only = label_ace(0x1000);
+    inherit_only[1] = kacs_core::INHERIT_ONLY_ACE;
+    let label = label_ace(0x2000);
+    let sacl = acl(&[audit_ace(), inherit_only, label.clone()]);
+    let existing = sd(Some(&owner), None, Some(&sacl), None);
+    let plan = plan_registry_get_security(&existing, LABEL_INFO).expect("label query");
+    let output = SecurityDescriptor::parse(plan.output_sd.as_slice()).unwrap();
+    assert!(output.owner().is_none());
+    assert!(output.group().is_none());
+    assert!(output.dacl().is_none());
+    assert_eq!(output.sacl().unwrap().bytes(), acl(&[label]));
+}
+
+#[test]
+fn label_write_preserves_audit_aces_and_unselected_descriptor_state() {
+    let owner = sid(5, &[18]);
+    let group = sid(5, &[32, 544]);
+    let audit = audit_ace();
+    let old_sacl = acl(&[audit.clone(), label_ace(0x1000)]);
+    let new_label = label_ace(0x2000);
+    let input_sacl = acl(&[new_label.clone()]);
+    let mut existing = sd(Some(&owner), Some(&group), Some(&old_sacl), None);
+    let flags = kacs_core::SE_DACL_PROTECTED
+        | kacs_core::SE_DACL_AUTO_INHERITED
+        | kacs_core::SE_SACL_PROTECTED
+        | kacs_core::SE_SACL_AUTO_INHERIT_REQ;
+    let control = u16::from_le_bytes([existing[2], existing[3]]) | flags;
+    existing[2..4].copy_from_slice(&control.to_le_bytes());
+    let input = sd(None, None, Some(&input_sacl), None);
+    let plan = plan_registry_set_security(&existing, &input, LABEL_INFO).expect("label write");
+    let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+    assert_eq!(output.owner().unwrap().as_bytes(), owner);
+    assert_eq!(output.group().unwrap().as_bytes(), group);
+    assert!(output.dacl().is_none());
+    assert_eq!(output.control() & flags, flags);
+    assert_eq!(output.sacl().unwrap().bytes(), acl(&[new_label, audit]));
+}
+
+#[test]
+fn label_clear_removes_labels_but_keeps_audit_entries() {
+    let owner = sid(5, &[18]);
+    let audit = audit_ace();
+    let mut inherit_only = label_ace(0x1000);
+    inherit_only[1] = kacs_core::INHERIT_ONLY_ACE;
+    let old_sacl = acl(&[label_ace(0x2000), audit.clone(), inherit_only]);
+    let existing = sd(Some(&owner), None, Some(&old_sacl), None);
+    let input = sd(None, None, None, None);
+    let plan = plan_registry_set_security(&existing, &input, LABEL_INFO).expect("label clear");
+    let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+    assert_eq!(output.sacl().unwrap().bytes(), acl(&[audit]));
+}
+
+#[test]
+fn label_clear_preserves_sacl_flags_when_the_last_ace_is_removed() {
+    let owner = sid(5, &[18]);
+    let old_sacl = acl(&[label_ace(0x2000)]);
+    let mut existing = sd(Some(&owner), None, Some(&old_sacl), None);
+    let control = u16::from_le_bytes([existing[2], existing[3]]) | kacs_core::SE_SACL_PROTECTED;
+    existing[2..4].copy_from_slice(&control.to_le_bytes());
+    let input = sd(None, None, None, None);
+    let plan = plan_registry_set_security(&existing, &input, LABEL_INFO).expect("last label clear");
+    let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+    assert!(output.sacl().is_none());
+    assert_ne!(output.control() & kacs_core::SE_SACL_PROTECTED, 0);
+    assert_eq!(output.control() & SE_SACL_PRESENT, 0);
+}
+
+#[test]
+fn label_selector_rejects_audit_payloads_empty_acls_and_inherit_only_labels() {
+    let owner = sid(5, &[18]);
+    let existing = sd(Some(&owner), None, None, None);
+    let mut inherited = label_ace(0x2000);
+    inherited[1] = kacs_core::INHERIT_ONLY_ACE;
+    for sacl in [
+        acl(&[]),
+        acl(&[audit_ace()]),
+        acl(&[inherited]),
+        acl(&[label_ace(0x1000), label_ace(0x2000)]),
+    ] {
+        let input = sd(None, None, Some(&sacl), None);
+        assert!(plan_registry_set_security(&existing, &input, LABEL_INFO).is_err());
+    }
+}
+
+#[test]
+fn label_selector_uses_read_control_and_write_owner() {
+    use lcs_core::{RegistrySecurityOperation as Op, registry_security_info_required_access};
+    assert_eq!(
+        registry_security_info_required_access(Op::Get, LABEL_INFO).unwrap(),
+        lcs_core::READ_CONTROL
+    );
+    assert_eq!(
+        registry_security_info_required_access(Op::Set, LABEL_INFO).unwrap(),
+        lcs_core::WRITE_OWNER
+    );
+    assert_eq!(
+        registry_security_info_required_access(Op::Set, LABEL_INFO | DACL_SECURITY_INFORMATION)
+            .unwrap(),
+        lcs_core::WRITE_OWNER | lcs_core::WRITE_DAC
+    );
+    assert!(
+        registry_security_info_required_access(Op::Get, LABEL_INFO | SACL_SECURITY_INFORMATION)
+            .is_err()
+    );
+    assert!(
+        registry_security_info_required_access(Op::Set, LABEL_INFO | SACL_SECURITY_INFORMATION)
+            .is_err()
+    );
+}
+
 #[test]
 fn get_security_returns_only_requested_components() {
     let owner = sid(5, &[18]);

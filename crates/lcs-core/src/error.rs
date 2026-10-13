@@ -702,6 +702,11 @@ pub enum LcsError {
     UnknownRegistryIoctl(u8),
     /// A security descriptor component selector was zero.
     ZeroSecurityInfo,
+    /// SACL and LABEL select overlapping components and cannot be combined.
+    ConflictingSecurityInfoFlags {
+        /// Full selector value.
+        flags: u32,
+    },
     /// A security descriptor component selector contained bits PSD-005 does not define for LCS.
     UnknownSecurityInfoFlags {
         /// Full selector value.

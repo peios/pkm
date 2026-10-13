@@ -4861,7 +4861,8 @@ static void pkm_lcs_key_audit_set_sd(struct pkm_lcs_key_audit_ctx *audit,
 }
 
 static long pkm_lcs_key_fd_set_security_core(
-	struct pkm_lcs_key_fd *key_fd, const struct pkm_lcs_usercopy_ops *ops,
+	struct pkm_lcs_key_fd *key_fd, const void *token,
+	const struct pkm_lcs_usercopy_ops *ops,
 	const struct reg_set_security_args *args,
 	struct pkm_lcs_key_audit_ctx *audit)
 {
@@ -4915,6 +4916,14 @@ static long pkm_lcs_key_fd_set_security_core(
 						  &input_sd_len);
 	if (ret)
 		return ret;
+	/* LABEL uses WRITE_OWNER, but assigning above the current caller still
+	 * needs SeRelabel. A whole-SACL write must obey the same label rule.
+	 * Check before contacting or mutating the source, also for transactions.
+	 */
+	ret = kacs_rust_validate_sd_label_update(token, args->security_info,
+					       input_sd, input_sd_len);
+	if (ret)
+		goto out_input;
 	ret = pkm_lcs_key_fd_snapshot_limits_and_revalidate(key_fd, &limits);
 	if (ret)
 		goto out_input;
@@ -5042,7 +5051,7 @@ static long pkm_lcs_key_fd_set_security_from_args_for_token(
 	if (audit.armed)
 		audit.record.sd_components = args->security_info;
 
-	ret = pkm_lcs_key_fd_set_security_core(key_fd, ops, args, &audit);
+	ret = pkm_lcs_key_fd_set_security_core(key_fd, token, ops, args, &audit);
 	pkm_lcs_key_audit_finish(&audit, key_fd, token, ret);
 	return ret;
 }

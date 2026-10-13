@@ -5286,6 +5286,108 @@ static void pkm_lcs_kunit_set_security_merge_bridge_fails_closed(
 }
 
 
+static void pkm_lcs_kunit_label_update_checks_subject_before_source(
+	struct kunit *test)
+{
+	static const char * const path[] = { "Machine", "Labelled" };
+	static const u8 ancestors[2][PKM_LCS_GUID_BYTES] = { { 1 }, { 0x9a } };
+	static const u32 selectors[] = {
+		LABEL_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION,
+	};
+	struct pkm_lcs_kunit_usercopy_ctx ctx = { };
+	struct pkm_lcs_usercopy_ops ops = pkm_lcs_kunit_usercopy_ops(&ctx);
+	struct pkm_lcs_source_fd_snapshot snapshot = { };
+	struct pkm_lcs_set_security_merge_result expected = { };
+	struct pkm_lcs_kunit_set_security_source_script script = { };
+	struct reg_set_security_args args = { .txn_fd = -1 };
+	struct task_struct *task;
+	struct file file = { };
+	const void *source_token;
+	const void *subject;
+	const u8 *input;
+	size_t input_len = 0;
+	unsigned int i;
+	long fd;
+	long ret;
+	int thread_ret;
+
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	pkm_lcs_kunit_setup_registered_source(test, &file, &source_token);
+	input = kacs_rust_kunit_create_label_sd_subset(12288U, &input_len);
+	KUNIT_ASSERT_NOT_NULL(test, input);
+	args.sd_ptr = (u64)(unsigned long)input;
+	args.sd_len = input_len;
+
+	/* A medium-integrity caller cannot assign High, even when a cached
+	 * handle permits the selected operation. SeSecurity does not substitute
+	 * for SeRelabel when the label arrives in a whole-SACL write.
+	 */
+	for (i = 0; i < ARRAY_SIZE(selectors); i++) {
+		u32 right = i ? ACCESS_SYSTEM_SECURITY : WRITE_OWNER;
+		u64 privileges = i ? KACS_SE_SECURITY_PRIVILEGE : 0;
+
+		subject = kacs_rust_kunit_create_impersonation_variant_token(
+			0, KACS_TOKEN_TYPE_PRIMARY, KACS_IMLEVEL_DELEGATION,
+			8192U, 0, privileges);
+		KUNIT_ASSERT_NOT_NULL(test, subject);
+		fd = pkm_lcs_kunit_publish_key_fd_from_path(
+			1, right, path, ancestors, 2);
+		KUNIT_ASSERT_TRUE(test, fd >= 0);
+		args.security_info = selectors[i];
+		KUNIT_EXPECT_EQ(test,
+			pkm_lcs_kunit_key_fd_set_security_for_token(
+				(int)fd, subject, &ops, &args), (long)-EACCES);
+		pkm_lcs_kunit_source_fd_snapshot(&file, &snapshot);
+		KUNIT_EXPECT_EQ(test, snapshot.next_request_id, 0ULL);
+		KUNIT_EXPECT_EQ(test, snapshot.queued_request_count, 0U);
+		KUNIT_EXPECT_EQ(test, snapshot.in_flight_request_count, 0U);
+		KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+		kacs_rust_token_drop(subject);
+	}
+
+	/* Positive control: WRITE_OWNER and SeRelabel suffice without SACL
+	 * access or SeSecurity. Exercise the real source read/write exchange.
+	 * Pure semantic tests independently check the bytes of the merge.
+	 */
+	subject = kacs_rust_kunit_create_impersonation_variant_token(
+		0, KACS_TOKEN_TYPE_PRIMARY, KACS_IMLEVEL_DELEGATION,
+		8192U, 0, KACS_SE_RELABEL_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, subject);
+	args.security_info = LABEL_SECURITY_INFORMATION;
+	KUNIT_ASSERT_EQ(test, pkm_lcs_key_fd_plan_set_security_merge(
+		pkm_lcs_kunit_owner_only_sd, sizeof(pkm_lcs_kunit_owner_only_sd),
+		input, input_len, args.security_info, &expected), 0L);
+	script.file = &file;
+	script.expected_guid = ancestors[1];
+	script.existing_sd = pkm_lcs_kunit_owner_only_sd;
+	script.existing_sd_len = sizeof(pkm_lcs_kunit_owner_only_sd);
+	script.expected_merged_sd = expected.merged_sd;
+	script.expected_merged_sd_len = expected.merged_sd_len;
+	fd = pkm_lcs_kunit_publish_key_fd_from_path(
+		1, WRITE_OWNER, path, ancestors, 2);
+	KUNIT_ASSERT_TRUE(test, fd >= 0);
+	task = pkm_lcs_kunit_kthread_run(
+		pkm_lcs_kunit_set_security_source_thread, &script,
+		"pkm-lcs-kunit-set-label");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	ret = pkm_lcs_kunit_key_fd_set_security_for_token(
+		(int)fd, subject, &ops, &args);
+	thread_ret = pkm_lcs_kunit_kthread_stop(task);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	KUNIT_EXPECT_EQ(test, thread_ret, 0);
+	KUNIT_EXPECT_EQ(test, script.result, 0);
+	KUNIT_EXPECT_EQ(test, script.reads, 2U);
+	KUNIT_EXPECT_EQ(test, script.writes, 2U);
+	KUNIT_EXPECT_EQ(test, close_fd((unsigned int)fd), 0);
+	pkm_lcs_set_security_merge_result_destroy(&expected);
+	pkm_kacs_free((void *)input);
+	kacs_rust_token_drop(subject);
+	pkm_lcs_kunit_flush_deferred_key_fd_release();
+	KUNIT_EXPECT_EQ(test, pkm_lcs_source_device_release_file(&file), 0);
+	pkm_lcs_kunit_reset_source_table();
+	kacs_rust_token_drop(source_token);
+}
+
 static void pkm_lcs_kunit_key_fd_set_security_nontransactional_success(
 	struct kunit *test)
 {
@@ -17860,6 +17962,7 @@ static struct kunit_case pkm_lcs_kunit_key_cases[] = {
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_query_key_info_malformed_enum),
 	KUNIT_CASE(pkm_lcs_kunit_set_security_merge_bridge_preserves_components),
 	KUNIT_CASE(pkm_lcs_kunit_set_security_merge_bridge_fails_closed),
+	KUNIT_CASE(pkm_lcs_kunit_label_update_checks_subject_before_source),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_security_nontransactional_success),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_cached_grant_survives_sd_change),
 	KUNIT_CASE(pkm_lcs_kunit_key_fd_set_security_transactional_success),

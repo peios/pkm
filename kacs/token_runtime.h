@@ -1582,4 +1582,9 @@ int pkm_kacs_kunit_prepare_projected_cred_for_subject(
 	struct pkm_kacs_kunit_cred_projection_view *out);
 #endif
 
+/* Carrier-independent label assignment check; does not grant descriptor access. */
+int kacs_rust_validate_sd_label_update(const void *subject_token,
+				     u32 security_info,
+				     const u8 *input_sd, size_t input_sd_len);
+
 #endif /* _SECURITY_PKM_KACS_TOKEN_RUNTIME_H */

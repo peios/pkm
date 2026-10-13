@@ -11755,6 +11755,48 @@ pub extern "C" fn kacs_rust_query_token_sd_subset(
 }
 
 #[no_mangle]
+/// Applies the common integrity-label assignment rule to a descriptor update.
+/// The carrier still checks its own cached access mask and merges its own SD.
+pub extern "C" fn kacs_rust_validate_sd_label_update(
+    subject_token_ptr: *const c_void,
+    security_info: u32,
+    input_sd_ptr: *const u8,
+    input_sd_len: usize,
+) -> i32 {
+    if let Err(err) = validate_sd_security_info(security_info) {
+        return err;
+    }
+    if (security_info & (LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION)) == 0 {
+        return 0;
+    }
+    if input_sd_ptr.is_null() || input_sd_len == 0 {
+        return -EINVAL;
+    }
+    let input = unsafe { core::slice::from_raw_parts(input_sd_ptr, input_sd_len) };
+    let sd = match SecurityDescriptor::parse(input) {
+        Ok(sd) => sd,
+        Err(err) => return sd_parse_errno(err),
+    };
+    let label = if (security_info & LABEL_SECURITY_INFORMATION) != 0 {
+        parse_label_subset_ace_bytes(&sd)
+    } else {
+        find_explicit_label_ace_bytes(sd.sacl())
+    };
+    let label = match label {
+        Ok(Some(label)) => label,
+        Ok(None) => return 0,
+        Err(err) => return err,
+    };
+    let Some(subject) = (unsafe { PkmKacsBootToken::from_ptr(subject_token_ptr) }) else {
+        return -EACCES;
+    };
+    match validate_label_assignment(subject, Some(label.as_slice())) {
+        Ok(()) => 0,
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
 /// Merges one caller-supplied subset descriptor into the current live file SD
 /// using the generic set-security rules.
 pub extern "C" fn kacs_rust_merge_file_sd(
