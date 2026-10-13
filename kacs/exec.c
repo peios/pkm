@@ -438,6 +438,7 @@ void pkm_kacs_bprm_committed_creds(const struct linux_binprm *bprm)
 {
 	(void)bprm;
 
+	pkm_kacs_primary_exec_committed();
 	trace_kacs_exec(false, false, 0, 0, KACS_EXEC_PIP_COMMITTED, 0);
 	pkm_kacs_commit_pending_exec_pip();
 }

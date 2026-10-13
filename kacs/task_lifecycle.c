@@ -29,6 +29,8 @@ int pkm_kacs_task_alloc(struct task_struct *task, u64 clone_flags)
 
 	new_sec = pkm_kacs_task(task);
 	new_sec->process_state = NULL;
+	new_sec->primary_epoch = (clone_flags & CLONE_THREAD) ?
+		pkm_kacs_task(current)->primary_epoch : 0;
 	new_sec->copy_up_context = NULL;
 	new_sec->delete_on_close_file = NULL;
 	new_sec->delete_on_close_parent_inode = NULL;

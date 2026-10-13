@@ -121,6 +121,7 @@ struct pkm_kacs_process_state *pkm_kacs_process_state_alloc(
 	spin_lock_init(&state->mitigation_lock);
 	spin_lock_init(&state->priv_use_lock);
 	mutex_init(&state->sd_lock);
+	mutex_init(&state->primary_lock);
 	pkm_kacs_fill_uuid_v4(state->process_guid);
 	state->pip_type = pip_type;
 	state->pip_trust = pip_trust;
@@ -150,6 +151,7 @@ void pkm_kacs_process_state_put(struct pkm_kacs_process_state *state)
 	trace_kacs_process_state((u64)(uintptr_t)state,
 				 READ_ONCE(state->pip_type),
 				 READ_ONCE(state->pip_trust), KACS_PST_FREE, 0);
+	kacs_rust_token_drop(state->desired_primary_token);
 	pkm_kacs_process_sd_put(state->process_sd);
 	pkm_kmes_rate_bucket_put(state->kmes_rate_bucket);
 	kfree(state);
