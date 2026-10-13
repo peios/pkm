@@ -4,7 +4,7 @@ use crate::error::{KacsError, KacsResult};
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
-const INHERIT_ONLY_ACE: u8 = 0x08;
+const INHERIT_ONLY_ACE: u8 = peios_uapi::KACS_ACE_FLAG_INHERIT_ONLY as u8;
 
 /// Parsed process trust label extracted from a process-trust-label ACE.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

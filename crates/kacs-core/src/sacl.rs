@@ -5,7 +5,7 @@ use crate::pkm_alloc::{String, Vec};
 use crate::security_descriptor::SecurityDescriptor;
 use crate::sid::Sid;
 
-const INHERIT_ONLY_ACE: u8 = 0x08;
+const INHERIT_ONLY_ACE: u8 = peios_uapi::KACS_ACE_FLAG_INHERIT_ONLY as u8;
 
 /// Resource attributes and scoped policy IDs extracted from a descriptor SACL.
 #[cfg_attr(not(feature = "kernel"), derive(Clone))]

@@ -12,3 +12,4 @@ default = []
 kernel = []
 
 [dependencies]
+peios-uapi = { path = "../../uapi/generated/rust", default-features = false }

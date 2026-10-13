@@ -598,7 +598,11 @@ pub fn write_transaction_committed_audit_payload(
 }
 
 /// `KACS_SECINFO_*` bits `object.sd.components` may carry.
-const SD_COMPONENTS_VALID_MASK: u32 = 0x1f;
+const SD_COMPONENTS_VALID_MASK: u32 = peios_uapi::KACS_SECINFO_OWNER
+    | peios_uapi::KACS_SECINFO_GROUP
+    | peios_uapi::KACS_SECINFO_DACL
+    | peios_uapi::KACS_SECINFO_SACL
+    | peios_uapi::KACS_SECINFO_LABEL;
 
 fn malformed_key_audit(field: &'static str) -> LcsError {
     LcsError::MalformedKeyAuditRecord { field }

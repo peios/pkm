@@ -20,7 +20,7 @@ use crate::token::{
     SidAndAttributes, TokenView,
 };
 
-const INHERIT_ONLY_ACE: u8 = 0x08;
+const INHERIT_ONLY_ACE: u8 = peios_uapi::KACS_ACE_FLAG_INHERIT_ONLY as u8;
 const OWNER_RIGHTS_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
 const PRINCIPAL_SELF_SID_BYTES: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 5, 10, 0, 0, 0];
 

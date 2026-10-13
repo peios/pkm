@@ -31,6 +31,9 @@ version = "0.1.0"
 [[package]]
 name = "pnp-core"
 version = "0.1.0"
+dependencies = [
+ "peios-uapi",
+]
 
 [[package]]
 name = "stratafs-core"

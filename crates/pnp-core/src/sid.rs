@@ -14,7 +14,7 @@ use core::fmt;
 use crate::sha1::sha1;
 
 /// Most sub-authorities a SID may carry (PCDS).
-pub const MAX_SUB_AUTHORITIES: usize = 15;
+pub const MAX_SUB_AUTHORITIES: usize = peios_uapi::KACS_SID_MAX_SUB_AUTHORITIES as usize;
 /// Largest SID in bytes: header plus every sub-authority.
 pub const MAX_SID_BYTES: usize = 8 + 4 * MAX_SUB_AUTHORITIES;
 

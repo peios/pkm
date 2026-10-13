@@ -16,9 +16,9 @@ use crate::source::NIL_GUID;
 use crate::validate_abi_reserved_zero;
 use crate::value::validate_value_data_len;
 
-const DIRECT_WATCH_EVENT_HEADER_LEN: usize = 8;
-const SUBTREE_WATCH_EVENT_DEPTH_LEN: usize = 2;
-const WATCH_COMPONENT_LEN_FIELD: usize = 2;
+const DIRECT_WATCH_EVENT_HEADER_LEN: usize = peios_uapi::REG_WATCH_EVENT_MIN_SIZE as usize;
+const SUBTREE_WATCH_EVENT_DEPTH_LEN: usize = peios_uapi::REG_WATCH_SUBTREE_PATH_DEPTH_SIZE as usize;
+const WATCH_COMPONENT_LEN_FIELD: usize = peios_uapi::REG_WATCH_PATH_COMPONENT_LEN_SIZE as usize;
 
 /// Kernel watch state stored on a key fd before `REG_IOC_NOTIFY`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
