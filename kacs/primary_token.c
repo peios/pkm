@@ -991,11 +991,13 @@ static void pkm_kacs_primary_exec_selects_pending_install(struct kunit *test)
 /*
  * Derive exec credentials from the current cred as bprm would, with a
  * supplementary group the pending token does not project and, when @setuid
- * is nonzero, the effective uid a setuid binary would have given it.
+ * or @setgid is nonzero, the effective id a setuid or setgid binary would
+ * have given it.
  */
 static long pkm_kacs_primary_exec_derive(const void *subject,
 					 const void *primary, bool project,
-					 u32 setuid, struct cred **out)
+					 u32 setuid, u32 setgid,
+					 struct cred **out)
 {
 	struct group_info *groups;
 	struct cred *new;
@@ -1014,6 +1016,8 @@ static long pkm_kacs_primary_exec_derive(const void *subject,
 	put_group_info(groups);
 	if (setuid)
 		new->euid = KUIDT_INIT(setuid);
+	if (setgid)
+		new->egid = KGIDT_INIT(setgid);
 	ret = pkm_kacs_bprm_creds_from_file_core(subject, primary, NULL, new,
 						 current_cred(), false, false,
 						 false, 0, project);
@@ -1059,7 +1063,7 @@ static void pkm_kacs_primary_exec_pending_install_projects_ids(struct kunit *tes
 
 	/* Control: without projection the replaced token's identity survives. */
 	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_exec_derive(installed, installed,
-							   false, 0U, &new), 0L);
+							   false, 0U, 0U, &new), 0L);
 	KUNIT_EXPECT_EQ(test, __kuid_val(new->uid), replaced_uid);
 	KUNIT_EXPECT_EQ(test, new->group_info->ngroups, 1);
 	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_cred(new)->token, installed);
@@ -1067,7 +1071,7 @@ static void pkm_kacs_primary_exec_pending_install_projects_ids(struct kunit *tes
 
 	/* A lagging exec runs as the pending token's projection. */
 	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_exec_derive(installed, installed,
-							   true, 0U, &new), 0L);
+							   true, 0U, 0U, &new), 0L);
 	pkm_kunit_expect_linux_cred_projection(test, new, 65534U, 65534U);
 	KUNIT_EXPECT_EQ(test, __kuid_val(new->user->uid), 65534U);
 	KUNIT_EXPECT_PTR_EQ(test, pkm_kacs_cred(new)->token, installed);
@@ -1075,7 +1079,7 @@ static void pkm_kacs_primary_exec_pending_install_projects_ids(struct kunit *tes
 
 	/* A setuid binary's uid applies on top; the rest stays projected. */
 	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_exec_derive(installed, installed,
-							   true, 4242U, &new), 0L);
+							   true, 4242U, 0U, &new), 0L);
 	KUNIT_EXPECT_EQ(test, __kuid_val(new->uid), 4242U);
 	KUNIT_EXPECT_EQ(test, __kuid_val(new->euid), 4242U);
 	KUNIT_EXPECT_EQ(test, __kuid_val(new->suid), 4242U);
@@ -1086,6 +1090,65 @@ static void pkm_kacs_primary_exec_pending_install_projects_ids(struct kunit *tes
 	KUNIT_EXPECT_EQ(test, new->group_info->ngroups, 0);
 	KUNIT_EXPECT_EQ(test, __kuid_val(new->user->uid), 65534U);
 	abort_creds(new);
+
+	/* Likewise a setgid binary's gid. */
+	KUNIT_ASSERT_EQ(test, pkm_kacs_primary_exec_derive(installed, installed,
+							   true, 0U, 4343U, &new), 0L);
+	KUNIT_EXPECT_EQ(test, __kuid_val(new->uid), 65534U);
+	KUNIT_EXPECT_EQ(test, __kgid_val(new->gid), 4343U);
+	KUNIT_EXPECT_EQ(test, __kgid_val(new->egid), 4343U);
+	KUNIT_EXPECT_EQ(test, __kgid_val(new->sgid), 4343U);
+	KUNIT_EXPECT_EQ(test, __kgid_val(new->fsgid), 65534U);
+	KUNIT_EXPECT_EQ(test, new->group_info->ngroups, 0);
+	abort_creds(new);
+	KUNIT_EXPECT_TRUE(test, debug_locks);
+}
+
+/*
+ * The setuid gate runs only for a real change from the pending projection: a
+ * subject holding SeAssignPrimaryToken is refused a setuid to another uid but
+ * not one to the projected uid itself, which is no change.
+ */
+static void pkm_kacs_primary_exec_pending_install_projected_setuid_is_no_change(
+	struct kunit *test)
+{
+	struct pkm_kacs_primary_epoch_fixture *f = test->priv;
+	const void *installed;
+	const void *subject;
+	struct cred *new = NULL;
+	long ret;
+
+	installed =
+		kacs_rust_kunit_create_impersonation_variant_token(PKM_KUNIT_USER_KIND_LOCAL_SERVICE,
+								   KACS_TOKEN_TYPE_PRIMARY,
+								   KACS_IMLEVEL_DELEGATION,
+								   PKM_KUNIT_IL_SYSTEM, 0U, 0ULL);
+	KUNIT_ASSERT_NOT_NULL(test, installed);
+	/* The fixture owns the replacement through all assertion exits. */
+	kacs_rust_token_drop(f->b);
+	f->b = installed;
+	KUNIT_ASSERT_NE(test, __kuid_val(current_real_cred()->uid), 65534U);
+
+	subject = kacs_rust_kunit_create_impersonation_variant_token(
+		PKM_KUNIT_USER_KIND_LOCAL_SERVICE, KACS_TOKEN_TYPE_PRIMARY,
+		KACS_IMLEVEL_DELEGATION, PKM_KUNIT_IL_SYSTEM, 0U,
+		PKM_KUNIT_SE_ASSIGN_PRIMARY_PRIVILEGE);
+	KUNIT_ASSERT_NOT_NULL(test, subject);
+
+	ret = pkm_kacs_primary_exec_derive(subject, installed, true, 65534U, 0U,
+					   &new);
+	KUNIT_EXPECT_EQ(test, ret, 0L);
+	if (!ret) {
+		KUNIT_EXPECT_EQ(test, __kuid_val(new->uid), 65534U);
+		KUNIT_EXPECT_EQ(test, __kuid_val(new->euid), 65534U);
+		abort_creds(new);
+	}
+	ret = pkm_kacs_primary_exec_derive(subject, installed, true, 4242U, 0U,
+					   &new);
+	KUNIT_EXPECT_EQ(test, ret, (long)-EOPNOTSUPP);
+	if (!ret)
+		abort_creds(new);
+	kacs_rust_token_drop(subject);
 	KUNIT_EXPECT_TRUE(test, debug_locks);
 }
 
@@ -1153,6 +1216,7 @@ static struct kunit_case pkm_kacs_primary_epoch_cases[] = {
 	KUNIT_CASE(pkm_kacs_primary_exec_selects_pending_install),
 	KUNIT_CASE(pkm_kacs_primary_exec_pending_install_keeps_npm),
 	KUNIT_CASE(pkm_kacs_primary_exec_pending_install_projects_ids),
+	KUNIT_CASE(pkm_kacs_primary_exec_pending_install_projected_setuid_is_no_change),
 	{ }
 };
 

@@ -315,6 +315,12 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 	 * deltas above are the binary's setuid/setgid against the bprm baseline;
 	 * they are applied on top of the projection, and the projection supplies
 	 * fsuid, fsgid, the supplementary groups and the user below.
+	 *
+	 * A setuid/setgid id that equals the pending token's projection is no
+	 * change from the identity servicing would have given, so it neither
+	 * changes the id nor reaches the id-change gates. One case stays
+	 * ambiguous: an id equal to the replaced token's is indistinguishable
+	 * from no setuid/setgid at all, and runs as the pending projection.
 	 */
 	if (project_primary_ids) {
 		kuid_t exec_euid = new->euid;
@@ -324,6 +330,10 @@ long pkm_kacs_bprm_creds_from_file_core(const void *subject_token,
 							     primary_token);
 		if (ret)
 			return ret;
+		if (uid_changed && uid_eq(exec_euid, new->euid))
+			uid_changed = false;
+		if (gid_changed && gid_eq(exec_egid, new->egid))
+			gid_changed = false;
 		if (uid_changed)
 			new->euid = exec_euid;
 		if (gid_changed)
