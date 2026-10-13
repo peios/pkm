@@ -1918,11 +1918,15 @@ static void pkm_lcs_kunit_reg_open_key_uses_empty_private_credential_view(
 	struct reg_src_hive_entry private_hive;
 	struct reg_src_register_args private_args;
 	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	DECLARE_COMPLETION_ONSTACK(global_started);
+	DECLARE_COMPLETION_ONSTACK(private_started);
 	struct pkm_lcs_kunit_read_key_source_script global_script = {
+		.started = &global_started,
 		.expected_guid = global_root_guid,
 		.name = "Machine",
 	};
 	struct pkm_lcs_kunit_read_key_source_script private_script = {
+		.started = &private_started,
 		.expected_guid = private_root_guid,
 		.name = "Machine",
 	};
@@ -1985,6 +1989,14 @@ static void pkm_lcs_kunit_reg_open_key_uses_empty_private_credential_view(
 		"pkm-lcs-kunit-reg-open-private");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(private_task));
 
+	/*
+	 * The unselected source receives no request. Let both worker bodies
+	 * start before stopping either: kthread_stop() can otherwise return
+	 * -EINTR without calling the worker, leaving its result untouched.
+	 */
+	wait_for_completion(&global_started);
+	wait_for_completion(&private_started);
+
 	fd = pkm_lcs_reg_open_key_for_token(
 		token, &ops, -1, (const char __user *)path_src, KEY_READ, 0);
 	global_thread_ret = pkm_lcs_kunit_kthread_stop(global_task);
@@ -2035,11 +2047,15 @@ static void pkm_lcs_kunit_reg_open_key_uses_kacs_private_scope(
 	struct reg_src_hive_entry private_hive;
 	struct reg_src_register_args private_args;
 	struct pkm_lcs_key_fd_snapshot snapshot = { };
+	DECLARE_COMPLETION_ONSTACK(global_started);
+	DECLARE_COMPLETION_ONSTACK(private_started);
 	struct pkm_lcs_kunit_read_key_source_script global_script = {
+		.started = &global_started,
 		.expected_guid = global_root_guid,
 		.name = "Machine",
 	};
 	struct pkm_lcs_kunit_read_key_source_script private_script = {
+		.started = &private_started,
 		.expected_guid = private_root_guid,
 		.name = "Machine",
 	};
@@ -2105,6 +2121,14 @@ static void pkm_lcs_kunit_reg_open_key_uses_kacs_private_scope(
 		pkm_lcs_kunit_read_key_source_thread, &private_script,
 		"pkm-lcs-kunit-reg-open-private-hit");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(private_task));
+
+	/*
+	 * The unselected source receives no request. Let both worker bodies
+	 * start before stopping either: kthread_stop() can otherwise return
+	 * -EINTR without calling the worker, leaving its result untouched.
+	 */
+	wait_for_completion(&global_started);
+	wait_for_completion(&private_started);
 
 	fd = pkm_lcs_reg_open_key_for_token(caller_token, &ops, -1,
 					    (const char __user *)path_src,

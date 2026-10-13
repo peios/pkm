@@ -4801,6 +4801,9 @@ int pkm_lcs_kunit_read_key_source_thread(void *raw_script)
 		return -EINVAL;
 	}
 
+	if (script->started)
+		complete(script->started);
+
 	for (;;) {
 		count = pkm_lcs_kunit_source_device_read_file(
 			script->file, request, sizeof(request), true);
