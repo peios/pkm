@@ -348,7 +348,9 @@ struct kacs_get_linked_token_args {
 	_IOW(KACS_IOC_MAGIC, 9, struct kacs_adjust_default_args)
 #define KACS_IOC_ADJUST_INTERACTIVITY_SCOPE	_IOW(KACS_IOC_MAGIC, 10, __u32)
 
-/* Token information classes (kacs_query_args.token_class). */
+/* Token information classes (kacs_query_args.token_class).
+ * GUID returns 16 immutable raw bytes in the same order as KMES headers.
+ */
 #define KACS_TOKEN_CLASS_USER			0x01U
 #define KACS_TOKEN_CLASS_GROUPS			0x02U
 #define KACS_TOKEN_CLASS_PRIVILEGES		0x03U
@@ -373,6 +375,7 @@ struct kacs_get_linked_token_args {
 #define KACS_TOKEN_CLASS_USER_CLAIMS		0x16U
 #define KACS_TOKEN_CLASS_DEVICE_CLAIMS		0x17U
 #define KACS_TOKEN_CLASS_PROJECTED_SUPPLEMENTARY_GIDS 0x18U
+#define KACS_TOKEN_CLASS_GUID			0x19U
 
 /*
  * Privileges, as single-bit masks within a token's 64-bit privilege word

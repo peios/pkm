@@ -531,6 +531,7 @@ const (
 	KACS_TOKEN_CLASS_DEVICE_GROUPS                      = 14
 	KACS_TOKEN_CLASS_ELEVATION_TYPE                     = 13
 	KACS_TOKEN_CLASS_GROUPS                             = 2
+	KACS_TOKEN_CLASS_GUID                               = 25
 	KACS_TOKEN_CLASS_IMPERSONATION_LEVEL                = 21
 	KACS_TOKEN_CLASS_INTEGRITY_LEVEL                    = 5
 	KACS_TOKEN_CLASS_INTERACTIVITY_SCOPE                = 8
