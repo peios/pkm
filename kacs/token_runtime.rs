@@ -5886,17 +5886,11 @@ impl PkmKacsBootToken {
         // ceiling for everything captured from, conveyed by, or duplicated out
         // of the process that carries it (PEI-524).
         //
-        // Migration guard: a primary below Impersonation is a coherent shape
-        // ("peers may identify me but never act as me") but it is also what an
-        // un-migrated caller that still passes the old conventional Anonymous
-        // would mint — an identity nobody can ever impersonate. Refuse it until
-        // every minter passes a deliberate level.
-        if token_type == TokenType::Primary
-            && impersonation_level_abi(impersonation_level)
-                < IMPERSONATION_LEVEL_IMPERSONATION_ABI
-        {
-            return Err(-EINVAL);
-        }
+        // A privileged minter may deliberately choose Identification or
+        // Anonymous as a primary's derivation ceiling (PEI-526). This does not
+        // turn the process's own identity into an impersonation token; it
+        // constrains what peers may capture and act as. DuplicateToken keeps
+        // its separate floor for derived primary tokens.
         if write_restricted && !user_deny_only {
             return Err(-EINVAL);
         }
@@ -6513,11 +6507,11 @@ impl PkmKacsBootToken {
         {
             return Err(-EINVAL);
         }
-        // A primary needs a level at which it can act: Identification cannot
-        // pass AccessCheck and Anonymous is the singleton identity, so a
-        // process could never be either. This is also what stops an
-        // Identification-level client token becoming a process (Windows:
-        // ERROR_BAD_IMPERSONATION_LEVEL).
+        // Duplication is authority derivation, not privileged minting. A
+        // client's Identification/Anonymous token cannot become a process
+        // identity through this path. CreateToken may deliberately mint a
+        // primary with such a ceiling; duplication still refuses that result
+        // (Windows: ERROR_BAD_IMPERSONATION_LEVEL).
         if new_type == TokenType::Primary
             && impersonation_level_abi(requested_level) < IMPERSONATION_LEVEL_IMPERSONATION_ABI
         {
