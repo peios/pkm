@@ -15,10 +15,10 @@ disk differs from what would be generated, without writing.
 """
 import re, subprocess, sys, tempfile, pathlib, os, textwrap
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-UAPI = ROOT / "pkm" / "uapi"
+from appendix_paths import PKM, LEARN, learn_is_absent
+UAPI = PKM / "uapi"
 HDRS = UAPI / "pkm"
-OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
+OUT = (LEARN / "peios.product/3--advanced-peios.antho/300--trms.shelf"
        / "100--peios-kernel.book/3--kacs/a1--kacs-abi.md")
 
 # Headers making up the KACS ABI. kmes.h and lcs.h belong to their own
@@ -262,7 +262,7 @@ SYSDEF = re.compile(
 def syscall_signatures():
     """Map syscall name -> C signature, read from the SYSCALL_DEFINE sites."""
     sigs = {}
-    for c in sorted((ROOT / "pkm" / "kacs").glob("*.c")):
+    for c in sorted((PKM / "kacs").glob("*.c")):
         text = c.read_text()
         for m in SYSDEF.finditer(text):
             argc, name, rest = int(m.group(1)), m.group(2), m.group(3)
@@ -364,17 +364,6 @@ def fmt_value(name, raw, val):
     if val >= 1 << 20 and (val & (val - 1)) == 0:
         return f"`0x{val:X}` ({val})"
     return f"`{val}`"
-
-
-def learn_is_absent():
-    """True when there is no learn/ checkout beside pkm/ to write into.
-
-    The appendices live in a sibling repository. A pkm checkout on its own
-    is a legitimate state, and so is a build container that mounts only
-    pkm/ -- neither is drift, and reporting it as drift is a false alarm
-    that trains people to ignore the gate.
-    """
-    return not OUT.parent.exists()
 
 
 def main():
@@ -533,6 +522,7 @@ def main():
             return 1
         print("up to date")
         return 0
+    OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(text)
     print(f"wrote {OUT} ({len(text.splitlines())} lines)")
     return 0

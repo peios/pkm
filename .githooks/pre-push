@@ -46,7 +46,7 @@ paths=$(changed_paths || true)
 # uapi/ feeds the bindings and both ABI appendices; kacs/ supplies the syscall
 # signatures the KACS appendix scrapes; stratafs/ and the stratafs-core crate
 # feed the constants appendix.
-gated='^uapi/|^kacs/|^stratafs/|^crates/stratafs-core/|^kernel/include/linux/kacs_stratafs\.h$'
+gated='^uapi/|^kacs/|^stratafs/|^crates/stratafs-core/|^kernel/include/linux/kacs_stratafs\.h$|^tools/(appendix_paths\.py|gen-(kacs-abi|lcs-abi|ntfe-abi|stratafs-constants)\.py)$'
 if [ -n "$paths" ] && ! printf '%s\n' "$paths" | grep -qE "$gated"; then
 	exit 0
 fi

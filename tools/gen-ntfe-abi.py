@@ -20,10 +20,10 @@ import tempfile
 import pathlib
 import textwrap
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-UAPI = ROOT / "pkm" / "uapi"
+from appendix_paths import PKM, LEARN, learn_is_absent
+UAPI = PKM / "uapi"
 HDR = UAPI / "pkm" / "ntfe.h"
-OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
+OUT = (LEARN / "peios.product/3--advanced-peios.antho/300--trms.shelf"
        / "100--peios-kernel.book/6--ntfe/a1--ntfe-abi.md")
 
 DESCRIPTION = ("Every NTFE ioctl number, event and status structure layout, "
@@ -343,10 +343,6 @@ def build():
 
     text = "\n".join(o).rstrip() + "\n"
     return re.sub(r"\n{3,}", "\n\n", text)
-
-
-def learn_is_absent():
-    return not OUT.parent.parent.exists()
 
 
 def main():

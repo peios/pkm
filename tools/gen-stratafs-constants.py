@@ -19,14 +19,14 @@ import re
 import sys
 import pathlib
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-HDR = ROOT / "pkm/stratafs/stratafs.h"
-SHARED = ROOT / "pkm/kernel/include/linux/kacs_stratafs.h"
-COPY_UP = ROOT / "pkm/stratafs/copy_up.c"
-CORE = ROOT / "pkm/crates/stratafs-core/src/lib.rs"
-KCONFIG = ROOT / "pkm/stratafs/Kconfig"
-MAKEFILE = ROOT / "pkm/stratafs/Makefile"
-OUT = (ROOT / "learn/peios.product/3--advanced-peios.antho/300--trms.shelf"
+from appendix_paths import PKM, LEARN, learn_is_absent
+HDR = PKM / "stratafs/stratafs.h"
+SHARED = PKM / "kernel/include/linux/kacs_stratafs.h"
+COPY_UP = PKM / "stratafs/copy_up.c"
+CORE = PKM / "crates/stratafs-core/src/lib.rs"
+KCONFIG = PKM / "stratafs/Kconfig"
+MAKEFILE = PKM / "stratafs/Makefile"
+OUT = (LEARN / "peios.product/3--advanced-peios.antho/300--trms.shelf"
        / "100--peios-kernel.book/4--stratafs/a1--constants.md")
 
 # The page's own identity. learn CI fails a deploy on an article with no
@@ -314,17 +314,6 @@ def build():
     return "\n".join(parts).rstrip() + "\n"
 
 
-def learn_is_absent():
-    """True when there is no learn/ checkout beside pkm/ to write into.
-
-    The appendices live in a sibling repository. A pkm checkout on its own
-    is a legitimate state, and so is a build container that mounts only
-    pkm/ -- neither is drift, and reporting it as drift is a false alarm
-    that trains people to ignore the gate.
-    """
-    return not OUT.parent.exists()
-
-
 def main():
     if learn_is_absent():
         print(f"skipped: no learn/ checkout at {OUT.parent}", file=sys.stderr)
@@ -332,12 +321,12 @@ def main():
     text = build()
     if "--check" in sys.argv:
         if not OUT.exists() or OUT.read_text() != text:
-            print(f"stale: {OUT.relative_to(ROOT)}", file=sys.stderr)
+            print(f"stale: {OUT}", file=sys.stderr)
             return 1
         return 0
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(text)
-    print(f"wrote {OUT.relative_to(ROOT)} ({len(text.splitlines())} lines)")
+    print(f"wrote {OUT} ({len(text.splitlines())} lines)")
     return 0
 
 
