@@ -42,7 +42,7 @@ suite_marker='pkm: kunit scaffold smoke passed'
 # is pkm_lcs_kunit_scaffold. Require at least one passing PKM suite summary; the
 # fatal_re below independently fails the run on any suite reporting fail:[1-9].
 summary_re='# pkm(_lcs)?_kunit[a-z_]*: pass:[0-9]+ fail:0 skip:[0-9]+ total:[0-9]+'
-fatal_re='BUG:|Kernel panic|Oops:|INFO: task .* blocked for more than|EXPECTATION FAILED|ASSERTION FAILED|not ok [0-9]+|# .*fail:[1-9]'
+fatal_re='BUG:|WARNING:|Kernel panic|Oops:|INFO: task .* blocked for more than|INFO: trying to register non-static key|turning off the locking correctness validator|EXPECTATION FAILED|ASSERTION FAILED|not ok [0-9]+|# .*fail:[1-9]'
 
 # root= is there because an installed system always passes one, and upstream
 # then makes the rootfs a ramfs, which can hold no descriptor (PEI-1211). The
@@ -66,8 +66,18 @@ status=$?
 set -e
 
 fail=0
-grep -Fq  "$suite_marker" "$log" || { echo "  MISSING: KUnit smoke marker"; fail=1; }
-grep -Eq  "$summary_re"   "$log" || { echo "  MISSING: passing suite summary"; fail=1; }
+if [[ -z "${PKM_KUNIT_FILTER:-}" ]]; then
+	grep -Fq "$suite_marker" "$log" || { echo "  MISSING: KUnit smoke marker"; fail=1; }
+	grep -Eq "$summary_re" "$log" || { echo "  MISSING: passing suite summary"; fail=1; }
+else
+	# A filter may deliberately omit PKM's smoke test, or select an upstream
+	# single-case suite which emits no aggregate summary. Require actual
+	# selected case output as well as complete top-level accounting below.
+	grep -Eq '^\[[^]]+\] {2,}ok [0-9]+ ' "$log" || {
+		echo "  MISSING: selected KUnit case results"
+		fail=1
+	}
+fi
 grep -Eq  "$fatal_re"     "$log" && { echo "  FOUND: kernel/KUnit failure signature"; fail=1; }
 
 # A partial serial log can contain the early smoke marker and one passing suite
