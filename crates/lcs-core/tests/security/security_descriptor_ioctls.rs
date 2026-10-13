@@ -71,6 +71,162 @@ fn append_optional_component(bytes: &mut Vec<u8>, component: Option<&[u8]>) -> u
     offset
 }
 
+fn with_control(mut bytes: Vec<u8>, flags: u16) -> Vec<u8> {
+    let control = u16::from_le_bytes([bytes[2], bytes[3]]) | flags;
+    bytes[2..4].copy_from_slice(&control.to_le_bytes());
+    bytes
+}
+
+const NULL_DACL_FLAGS: u16 = kacs_core::SE_DACL_PROTECTED
+    | kacs_core::SE_DACL_AUTO_INHERITED
+    | kacs_core::SE_DACL_AUTO_INHERIT_REQ
+    | kacs_core::SE_DACL_DEFAULTED;
+const NULL_SACL_FLAGS: u16 = kacs_core::SE_SACL_PROTECTED
+    | kacs_core::SE_SACL_AUTO_INHERITED
+    | kacs_core::SE_SACL_AUTO_INHERIT_REQ
+    | kacs_core::SE_SACL_DEFAULTED;
+
+#[test]
+fn null_acl_queries_preserve_only_selected_control_flags() {
+    let owner = sid(5, &[18]);
+    let existing = with_control(
+        sd(Some(&owner), None, None, None),
+        NULL_DACL_FLAGS | NULL_SACL_FLAGS,
+    );
+    for (info, expected) in [
+        (DACL_SECURITY_INFORMATION, NULL_DACL_FLAGS),
+        (SACL_SECURITY_INFORMATION, NULL_SACL_FLAGS),
+        (
+            DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION,
+            NULL_DACL_FLAGS | NULL_SACL_FLAGS,
+        ),
+    ] {
+        let plan = plan_registry_get_security(&existing, info).unwrap();
+        let output = SecurityDescriptor::parse(plan.output_sd.as_slice()).unwrap();
+        assert_eq!(output.control(), SE_SELF_RELATIVE | expected);
+        assert!(output.dacl().is_none() && output.sacl().is_none());
+    }
+}
+
+#[test]
+fn null_acl_flags_survive_owner_and_group_updates() {
+    let owner = sid(5, &[18]);
+    let group = sid(5, &[32, 544]);
+    let existing = with_control(
+        sd(Some(&owner), None, None, None),
+        NULL_DACL_FLAGS | NULL_SACL_FLAGS,
+    );
+    for info in [OWNER_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION] {
+        let input = sd(Some(&owner), Some(&group), None, None);
+        let plan = plan_registry_set_security(&existing, &input, info).unwrap();
+        let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+        assert_eq!(
+            output.control(),
+            SE_SELF_RELATIVE | NULL_DACL_FLAGS | NULL_SACL_FLAGS
+        );
+        assert!(output.dacl().is_none() && output.sacl().is_none());
+    }
+}
+
+#[test]
+fn null_acl_replacement_uses_input_flags_and_preserves_the_other_acl() {
+    let owner = sid(5, &[18]);
+    let empty = acl(&[]);
+    let existing = with_control(
+        sd(Some(&owner), None, Some(&empty), Some(&empty)),
+        NULL_DACL_FLAGS | NULL_SACL_FLAGS,
+    );
+    for (info, retained, selected) in [
+        (
+            DACL_SECURITY_INFORMATION,
+            NULL_SACL_FLAGS | SE_SACL_PRESENT,
+            kacs_core::SE_DACL_PROTECTED,
+        ),
+        (
+            SACL_SECURITY_INFORMATION,
+            NULL_DACL_FLAGS | SE_DACL_PRESENT,
+            kacs_core::SE_SACL_PROTECTED,
+        ),
+    ] {
+        // NULL input has no bytes, but its selected flags still replace the
+        // corresponding old flags. Unselected input flags are ignored.
+        let input = with_control(sd(None, None, None, None), selected);
+        let plan = plan_registry_set_security(&existing, &input, info).unwrap();
+        let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+        assert_eq!(output.control(), SE_SELF_RELATIVE | retained | selected);
+        assert_eq!(output.dacl().is_none(), info == DACL_SECURITY_INFORMATION);
+        assert_eq!(output.sacl().is_none(), info == SACL_SECURITY_INFORMATION);
+    }
+}
+
+#[test]
+fn null_acl_flags_do_not_collapse_a_selected_empty_acl() {
+    let owner = sid(5, &[18]);
+    let empty = acl(&[]);
+    let existing = sd(Some(&owner), None, None, None);
+    let input = with_control(
+        sd(None, None, Some(&empty), Some(&empty)),
+        NULL_DACL_FLAGS | NULL_SACL_FLAGS,
+    );
+    let info = DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
+    let plan = plan_registry_set_security(&existing, &input, info).unwrap();
+    let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+    assert_eq!(
+        output.control(),
+        SE_SELF_RELATIVE | SE_DACL_PRESENT | SE_SACL_PRESENT | NULL_DACL_FLAGS | NULL_SACL_FLAGS
+    );
+    assert_eq!(output.dacl().unwrap().bytes(), empty);
+    assert_eq!(output.sacl().unwrap().bytes(), empty);
+    let query = plan_registry_get_security(plan.merged_sd.as_slice(), info).unwrap();
+    assert_eq!(
+        SecurityDescriptor::parse(query.output_sd.as_slice())
+            .unwrap()
+            .control(),
+        output.control()
+    );
+}
+
+#[test]
+fn null_acl_flags_with_label_and_dacl_selection_take_only_dacl_flags_from_input() {
+    let owner = sid(5, &[18]);
+    let existing = with_control(
+        sd(Some(&owner), None, None, None),
+        NULL_DACL_FLAGS | NULL_SACL_FLAGS,
+    );
+    let label = acl(&[label_ace(0x2000)]);
+    let input = with_control(
+        sd(None, None, Some(&label), None),
+        kacs_core::SE_DACL_PROTECTED,
+    );
+    let plan =
+        plan_registry_set_security(&existing, &input, LABEL_INFO | DACL_SECURITY_INFORMATION)
+            .unwrap();
+    let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+    assert_eq!(
+        output.control(),
+        SE_SELF_RELATIVE | SE_SACL_PRESENT | kacs_core::SE_DACL_PROTECTED | NULL_SACL_FLAGS
+    );
+    assert!(output.dacl().is_none());
+    assert_eq!(output.sacl().unwrap().bytes(), label);
+}
+
+#[test]
+fn null_acl_merge_also_preserves_defaulted_null_group_state() {
+    let owner = sid(5, &[18]);
+    let existing = with_control(
+        sd(Some(&owner), None, None, None),
+        kacs_core::SE_GROUP_DEFAULTED | NULL_DACL_FLAGS,
+    );
+    let input = sd(Some(&owner), None, None, None);
+    let plan = plan_registry_set_security(&existing, &input, OWNER_SECURITY_INFORMATION).unwrap();
+    let output = SecurityDescriptor::parse(plan.merged_sd.as_slice()).unwrap();
+    assert!(output.group().is_none());
+    assert_eq!(
+        output.control(),
+        SE_SELF_RELATIVE | kacs_core::SE_GROUP_DEFAULTED | NULL_DACL_FLAGS
+    );
+}
+
 // The existing KACS wire selector is also the registry LABEL selector.
 const LABEL_INFO: u32 = peios_uapi::KACS_SECINFO_LABEL;
 
