@@ -1765,7 +1765,7 @@ static long pkm_kacs_kunit_remove_path(const char *pathname, bool directory)
 	if (ret)
 		goto out_parent;
 
-	inode_lock(parent_inode);
+	inode_lock_nested(parent_inode, I_MUTEX_PARENT);
 	if (directory)
 		ret = vfs_rmdir(mnt_idmap(parent_path.mnt), parent_inode,
 				victim_path.dentry, NULL);
