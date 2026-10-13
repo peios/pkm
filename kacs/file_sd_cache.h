@@ -30,6 +30,13 @@ long pkm_kacs_missing_file_sd_policy_result(
 long pkm_kacs_inode_resolve_effective_cache_locked(
 	struct file *file, struct pkm_kacs_inode_security *sec,
 	struct pkm_kacs_inode_sd_cache **cache_out, unsigned int depth);
+/*
+ * Success returns one owned immutable snapshot, including MISSING/CORRUPT
+ * entries. The caller validates its state and drops it with sd_cache_free.
+ * Selection and pinning precede unlock; later invalidation cannot revoke it.
+ */
+long pkm_kacs_inode_get_effective_cache(struct file *file, struct pkm_kacs_inode_security *sec,
+					struct pkm_kacs_inode_sd_cache **cache_out);
 long pkm_kacs_inode_ensure_effective_cache(
 	struct file *file, struct pkm_kacs_inode_security *sec);
 long pkm_kacs_inode_ensure_effective_cache_by_inode(

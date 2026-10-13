@@ -1105,6 +1105,28 @@ long pkm_kacs_kunit_open_then_change_sd_for_subject(
 long pkm_kacs_kunit_open_file_for_subject(
 	const struct pkm_kacs_kunit_file_open_args *args,
 	u32 *granted_access_out);
+struct pkm_kacs_kunit_open_snapshot_args {
+	const void *subject_token;
+	const u8 *selected_sd;
+	size_t selected_sd_len;
+	const u8 *replacement_sd;
+	size_t replacement_sd_len;
+	bool native;
+	bool warm;
+	bool replace_slot;
+};
+
+struct pkm_kacs_kunit_open_snapshot_result {
+	long first_ret;
+	long next_ret;
+	u32 first_managed;
+	u32 next_managed;
+	u32 hook_calls;
+	u32 retained_refs;
+};
+
+long pkm_kacs_kunit_open_snapshot_race(const struct pkm_kacs_kunit_open_snapshot_args *args,
+				       struct pkm_kacs_kunit_open_snapshot_result *out);
 long pkm_kacs_kunit_cold_open_then_set_sd(
 	const void *subject_token, const u8 *sd, size_t sd_len, bool native);
 long pkm_kacs_kunit_open_file_for_subject_audit(
